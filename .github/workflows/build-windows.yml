@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build macOS and Windows Apps
 
 on:
   workflow_dispatch:
@@ -87,3 +87,62 @@ jobs:
             release/BlogHelper-Windows/BlogHelper.exe
             release/BlogHelper-Windows.zip
 
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-windows.txt
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements-windows.txt
+
+      - name: Verify macOS dependencies
+        run: |
+          python -m py_compile main.py
+          python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; print('dependency import passed')"
+
+      - name: Build BlogHelper.app
+        run: |
+          python -m PyInstaller --noconfirm --clean BlogHelperMac.spec
+          test -d "dist/BlogHelper.app"
+          codesign --force --deep --sign - "dist/BlogHelper.app"
+
+      - name: Create delivery ZIP
+        run: |
+          mkdir -p "release/BlogHelper-macOS"
+          cat > "release/BlogHelper-macOS/README.txt" <<'EOF'
+          Blog Helper Pro - macOS
+
+          1. BlogHelper-macOS.zip의 압축을 풀고 BlogHelper.app을 Applications 폴더로 옮기세요.
+          2. 최초 실행이 차단되면 앱을 Control-클릭한 뒤 '열기'를 선택하세요.
+          3. Google Chrome이 필요하며, 로그인 세션과 앱 설정은 사용자 Library 폴더에 저장됩니다.
+          4. 이 자동 빌드는 Intel Mac용이며 Apple Silicon Mac에서는 Rosetta로 실행됩니다.
+          EOF
+          ditto -c -k --sequesterRsrc --keepParent "dist/BlogHelper.app" "release/BlogHelper-macOS/BlogHelper-macOS.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlogHelper-macOS
+          path: |
+            release/BlogHelper-macOS/README.txt
+            release/BlogHelper-macOS/BlogHelper-macOS.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach files to tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/BlogHelper-macOS/BlogHelper-macOS.zip
