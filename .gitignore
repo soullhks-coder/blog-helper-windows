@@ -1,0 +1,31 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+.env
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+release/
+*.zip
+
+# Local account settings, secrets, browser sessions, and generated media
+app_state.json
+Blog Helper.app/
+Blog Helper 가상본/
+Blog Helper */
+BlogHelper-Windows-GitHub-Source/
+windows_package/
+windows_package 2/
+BlogHelper 프롬프트/
+playwright-profile*/
+naver-*-profile*/
+tistory-*-profile*/
+tistory-automation*.js
+*.png
+*.jpg
+*.jpeg
+*.webp
