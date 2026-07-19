@@ -10803,6 +10803,7 @@ class KeywordApp(ctk.CTk):
             self.shell_frame.configure(fg_color=palette["shell"])
             self.sidebar_frame.configure(fg_color=palette["sidebar"])
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
+            self.sidebar_version_label.configure(text_color=palette["muted"])
             self.sidebar_divider.configure(fg_color=palette["divider"])
             self._retint_widget_tree(self.sidebar_frame, palette)
             active_page = self._current_page_frame()
@@ -10811,6 +10812,7 @@ class KeywordApp(ctk.CTk):
             self.shell_frame.configure(fg_color=palette["shell"])
             self.sidebar_frame.configure(fg_color=palette["sidebar"])
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
+            self.sidebar_version_label.configure(text_color=palette["muted"])
             self.sidebar_divider.configure(fg_color=palette["divider"])
             scroll_names_by_page = {
                 "writing": ("writing_scroll", "keyword_choice_frame"),
@@ -11074,6 +11076,14 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._switch_page("settings"),
         )
         self.settings_nav_button.grid(row=7, column=0, padx=26, pady=(10, 0), sticky="ew")
+
+        self.sidebar_version_label = ctk.CTkLabel(
+            self.sidebar_frame,
+            text=f"현재 버전  v{APP_VERSION}",
+            text_color="#77869a",
+            font=ctk.CTkFont(size=11),
+        )
+        self.sidebar_version_label.place(relx=0.12, rely=0.975, anchor="sw")
 
         self.sidebar_divider = ctk.CTkFrame(self.sidebar_frame, fg_color="#6e7480", width=1, corner_radius=0)
         self.sidebar_divider.place(relx=0.995, rely=0.06, relheight=0.88, anchor="ne")
