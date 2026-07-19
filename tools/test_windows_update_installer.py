@@ -65,6 +65,9 @@ def main() -> None:
         if "새 프로그램 재실행 성공" not in log_path.read_text(encoding="utf-8-sig"):
             raise RuntimeError("업데이트 로그에서 재실행 성공을 확인하지 못했습니다.")
         print("Windows updater replacement and restart test passed.")
+        # The test command stays alive briefly so Start-BlogHelper can verify it.
+        # Let it release its working directory before TemporaryDirectory cleanup.
+        time.sleep(5)
 
 
 if __name__ == "__main__":
