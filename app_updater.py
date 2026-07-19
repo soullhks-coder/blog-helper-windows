@@ -644,14 +644,16 @@ def launch_update_installer(
             "CREATE_NEW_PROCESS_GROUP",
             0,
         )
-        subprocess.Popen(
-            command,
-            close_fds=True,
-            creationflags=creation_flags,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        helper_output_path = data_dir / "update-helper-output.log"
+        with helper_output_path.open("ab") as helper_output:
+            subprocess.Popen(
+                command,
+                close_fds=True,
+                creationflags=creation_flags,
+                stdin=subprocess.DEVNULL,
+                stdout=helper_output,
+                stderr=subprocess.STDOUT,
+            )
         return
 
     if sys.platform == "darwin":

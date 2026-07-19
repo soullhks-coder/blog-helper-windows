@@ -100,7 +100,16 @@ def main() -> None:
 
         if not marker.exists():
             log = log_path.read_text(encoding="utf-8-sig") if log_path.exists() else "로그 없음"
-            raise RuntimeError(f"업데이트 후 프로그램이 재실행되지 않았습니다.\n{log}")
+            helper_log_path = root / "update-helper-output.log"
+            helper_log = (
+                helper_log_path.read_text(encoding="utf-8-sig", errors="replace")
+                if helper_log_path.exists()
+                else "도우미 출력 로그 없음"
+            )
+            raise RuntimeError(
+                f"업데이트 후 프로그램이 재실행되지 않았습니다.\n\n[설치 로그]\n{log}"
+                f"\n\n[도우미 출력]\n{helper_log}"
+            )
         if sha256_file(target) != expected_hash:
             raise RuntimeError("업데이트 후 대상 프로그램의 파일 검증에 실패했습니다.")
         if "새 프로그램 재실행 성공" not in log_path.read_text(encoding="utf-8-sig"):
