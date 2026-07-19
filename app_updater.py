@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - full update fallback
     bsdiff4 = None
 
 
-DEFAULT_APP_VERSION = "1.0.4"
+DEFAULT_APP_VERSION = "1.0.5"
 DEFAULT_UPDATE_REPOSITORY = "soullhks-coder/blog-helper-releases"
 SCRIPT_DIR = Path(__file__).resolve().parent
 

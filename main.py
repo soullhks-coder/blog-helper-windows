@@ -10113,6 +10113,9 @@ class KeywordApp(ctk.CTk):
         self.writing_section_cards: dict[str, ctk.CTkFrame] = {}
         self.writing_section_bodies: dict[str, ctk.CTkFrame] = {}
         self.writing_section_toggle_buttons: dict[str, ctk.CTkButton] = {}
+        self.writing_section_title_labels: dict[str, ctk.CTkLabel] = {}
+        self.writing_section_titles: dict[str, str] = {}
+        self.writing_completed_sections: set[str] = set()
         self.active_writing_section = "topic"
         self.thumbnail_auto_title_var = tk.BooleanVar(value=True)
         self.thumbnail_background_mode_var = tk.StringVar(value="단색 배경")
@@ -10875,6 +10878,7 @@ class KeywordApp(ctk.CTk):
             if getattr(self, "current_page", "") == "settings" and category_frame is not None:
                 self._paint_scrollable_background(category_frame, palette["input"])
             self._apply_white_contrast_overrides()
+            self._refresh_writing_section_completion_styles()
         except Exception:
             pass
 
@@ -10941,6 +10945,8 @@ class KeywordApp(ctk.CTk):
         self.writing_section_cards = {}
         self.writing_section_bodies = {}
         self.writing_section_toggle_buttons = {}
+        self.writing_section_title_labels = {}
+        self.writing_section_titles = {}
         self.category_vars = {}
         self.link_rows = []
         self.thumbnail_canvas_image = None
@@ -13261,7 +13267,8 @@ class KeywordApp(ctk.CTk):
         self._select_naver_kin_prompt_for_writing()
         self._save_ui_state()
         self._switch_page("writing")
-        self._open_writing_section("keyword")
+        self._reset_writing_section_completion()
+        self._open_writing_section("keyword", complete_previous=True)
         self.keyword_status_label.configure(text="N지식인 질문을 글쓰기 재료로 넣었습니다.")
         self.article_progress_label.configure(
             text="질문 내용을 기준으로 참고내용을 보강한 뒤 글 작성을 진행하면 됩니다."
@@ -14082,7 +14089,8 @@ class KeywordApp(ctk.CTk):
         self._render_keyword_choices(self.current_insights)
         self._render_results(self.current_insights)
         self._switch_page("writing")
-        self._open_writing_section("keyword")
+        self._reset_writing_section_completion()
+        self._open_writing_section("keyword", complete_previous=True)
         self.keyword_status_label.configure(text="공공데이터 행사정보를 블로그글쓰기에 반영했습니다.")
         self._save_ui_state()
 
@@ -17290,6 +17298,9 @@ class KeywordApp(ctk.CTk):
         self.writing_section_cards[section_key] = card
         self.writing_section_bodies[section_key] = body
         self.writing_section_toggle_buttons[section_key] = toggle_button
+        self.writing_section_title_labels[section_key] = title_label
+        self.writing_section_titles[section_key] = title
+        self._refresh_writing_section_completion_styles()
 
         if opened:
             self.active_writing_section = section_key
@@ -17306,11 +17317,66 @@ class KeywordApp(ctk.CTk):
 
         self._open_writing_section(section_key)
 
-    def _open_writing_section(self, section_key: str) -> None:
+    def _open_writing_section(self, section_key: str, complete_previous: bool = False) -> None:
+        if complete_previous:
+            self._mark_writing_sections_before(section_key)
         for key in self.writing_section_bodies:
             self._set_writing_section_open(key, key == section_key)
         self.active_writing_section = section_key
         self.after(80, lambda key=section_key: self._scroll_writing_section_into_view(key))
+
+    def _mark_writing_sections_before(self, section_key: str) -> None:
+        section_order = ("topic", "keyword", "article", "publish", "results")
+        try:
+            section_index = section_order.index(section_key)
+        except ValueError:
+            return
+        self.writing_completed_sections.update(section_order[:section_index])
+        self._refresh_writing_section_completion_styles()
+
+    def _set_writing_section_completed(self, section_key: str, completed: bool = True) -> None:
+        if completed:
+            self.writing_completed_sections.add(section_key)
+        else:
+            self.writing_completed_sections.discard(section_key)
+        self._refresh_writing_section_completion_styles()
+
+    def _reset_writing_section_completion(self) -> None:
+        self.writing_completed_sections.clear()
+        self._refresh_writing_section_completion_styles()
+
+    def _refresh_writing_section_completion_styles(self) -> None:
+        if not hasattr(self, "writing_completed_sections"):
+            return
+        palette = self._theme_palette()
+        is_white_theme = self._normalize_app_theme(self.wordpress_settings.app_theme) == "화이트테마"
+        completed_card = "#e4f7eb" if is_white_theme else "#173b2b"
+        completed_border = "#39a963" if is_white_theme else "#48d980"
+        completed_title = "#187a40" if is_white_theme else "#66e39a"
+        for key, card in self.writing_section_cards.items():
+            completed = key in self.writing_completed_sections
+            title = self.writing_section_titles.get(key, "")
+            title_label = self.writing_section_title_labels.get(key)
+            toggle_button = self.writing_section_toggle_buttons.get(key)
+            try:
+                card.configure(
+                    fg_color=completed_card if completed else palette["card"],
+                    border_color=completed_border if completed else palette["border"],
+                    border_width=2 if completed else 1,
+                )
+                if title_label is not None:
+                    title_label.configure(
+                        text=f"{title}  ✓ 완료" if completed else title,
+                        text_color=completed_title if completed else palette["text"],
+                    )
+                if toggle_button is not None:
+                    toggle_button.configure(
+                        fg_color="#1faa55" if completed else palette["button"],
+                        hover_color="#168f48" if completed else palette["button_hover"],
+                        text_color="#ffffff" if completed else palette["text"],
+                    )
+            except Exception:
+                continue
 
     def _scroll_writing_section_into_view(self, section_key: str) -> None:
         card = self.writing_section_cards.get(section_key)
@@ -17347,7 +17413,7 @@ class KeywordApp(ctk.CTk):
                 text=f"썸네일 미리보기 갱신은 건너뛰었습니다: {str(exc)[:80]}",
                 text_color="#ffb86b",
             )
-        self._open_writing_section("publish")
+        self._open_writing_section("publish", complete_previous=True)
 
     def _set_writing_section_open(self, section_key: str, opened: bool) -> None:
         body = self.writing_section_bodies.get(section_key)
@@ -20565,6 +20631,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "현재 키워드 분석이 진행 중입니다.")
             return
 
+        self._reset_writing_section_completion()
         self.current_keyword = keyword
         self.current_insights = []
         self.daum_reference_map = {}
@@ -20623,6 +20690,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
 
+        self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
@@ -20654,6 +20722,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
 
+        self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
@@ -20685,6 +20754,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "시그널 실시간 검색어를 가져오는 중입니다.")
             return
 
+        self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
@@ -20720,6 +20790,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showwarning("URL 필요", "벤치마킹할 블로그 글 URL을 입력해 주세요.")
             return
 
+        self._reset_writing_section_completion()
         self.current_keyword = "다른사람글 벤치마킹"
         self.current_insights = []
         self.selected_keyword_var.set("")
@@ -20971,6 +21042,7 @@ class KeywordApp(ctk.CTk):
         )
         self.publish_progress_bar.configure(mode="determinate")
         self.publish_progress_bar.set(1)
+        self._set_writing_section_completed("publish")
         messagebox.showinfo("대기열 추가 완료", "블로그자동화 작업목록에 담았습니다.")
 
     def _automation_interval_hours(self) -> int:
@@ -21983,7 +22055,7 @@ class KeywordApp(ctk.CTk):
                     self.current_insights = payload
                     self._render_keyword_choices(payload)
                     self._render_results(payload)
-                    self._open_writing_section("keyword")
+                    self._open_writing_section("keyword", complete_previous=True)
                 elif event_type == "analysis_error":
                     self.progress_bar.set(0)
                     self.keyword_status_label.configure(text="분석 오류")
@@ -22015,7 +22087,7 @@ class KeywordApp(ctk.CTk):
                         self.reference_textbox.insert("1.0", self.daum_reference_map.get(first_keyword, ""))
                         self._update_reference_count()
                         self.after(180, lambda keyword=first_keyword: self._auto_collect_reference_for_keyword(keyword))
-                    self._open_writing_section("keyword")
+                    self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
                 elif event_type == "daum_error":
                     self.progress_bar.stop()
@@ -22048,7 +22120,7 @@ class KeywordApp(ctk.CTk):
                         self.reference_textbox.delete("1.0", "end")
                         self.reference_textbox.insert("1.0", self.signal_reference_map.get(first_keyword, ""))
                         self._update_reference_count()
-                    self._open_writing_section("keyword")
+                    self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
                 elif event_type == "signal_error":
                     self.progress_bar.stop()
@@ -22081,7 +22153,7 @@ class KeywordApp(ctk.CTk):
                         self.reference_textbox.delete("1.0", "end")
                         self.reference_textbox.insert("1.0", self.newneek_reference_map.get(first_keyword, ""))
                         self._update_reference_count()
-                    self._open_writing_section("keyword")
+                    self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
                 elif event_type == "newneek_error":
                     self.progress_bar.stop()
@@ -22202,7 +22274,7 @@ class KeywordApp(ctk.CTk):
                     self._update_reference_count()
                     self.keyword_status_label.configure(text="벤치마킹 내용 추출 완료 - AI 재편집을 시작합니다.")
                     self.article_progress_label.configure(text="원문 표현은 복사하지 않고 새로운 다정한 말투로 재작성합니다.")
-                    self._open_writing_section("keyword")
+                    self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
                     self._start_article_generation(
                         "다른사람글 벤치마킹",
@@ -22575,7 +22647,7 @@ class KeywordApp(ctk.CTk):
             text="아래 초안이 생성되었습니다. 제목과 본문을 다듬고, 다음 단계에서 썸네일을 직접 제작할 수 있습니다."
         )
         self._render_generated_article_preview()
-        self._open_writing_section("article")
+        self._open_writing_section("article", complete_previous=True)
 
     def _render_generated_article_preview(self) -> None:
         if not self.generated_article_html.strip():
@@ -22672,7 +22744,8 @@ class KeywordApp(ctk.CTk):
             if deleted_count:
                 message.append(f"임시 이미지 자동 삭제: {deleted_count}개")
         self._update_quick_status("업로드 파이프라인 완료", "\n".join(message), "#48d980")
-        self._open_writing_section("publish")
+        self._set_writing_section_completed("publish")
+        self._open_writing_section("publish", complete_previous=True)
 
     def _handle_automation_publish_success(self, payload: dict) -> None:
         completed_item_id = self.active_automation_upload_item_id
