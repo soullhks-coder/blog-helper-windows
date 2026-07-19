@@ -37,7 +37,7 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile main.py
-          python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; print('dependency import passed')"
+          python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; from PIL import Image; print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
             "${env:PROGRAMFILES(X86)}\Google\Chrome\Application\chrome.exe",
@@ -68,14 +68,13 @@ jobs:
           "@ | Set-Content -Encoding UTF8 "release\BlogHelper-Windows\README.txt"
           Compress-Archive -Path "release\BlogHelper-Windows\*" -DestinationPath "release\BlogHelper-Windows.zip" -Force
 
-      - name: Upload EXE artifact
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: BlogHelper-Windows
           path: |
             release/BlogHelper-Windows/BlogHelper.exe
             release/BlogHelper-Windows/README.txt
-            release/BlogHelper-Windows.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -110,7 +109,7 @@ jobs:
       - name: Verify macOS dependencies
         run: |
           python -m py_compile main.py
-          python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; print('dependency import passed')"
+          python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; from PIL import Image; print('dependency import passed')"
 
       - name: Build BlogHelper.app
         run: |
@@ -127,7 +126,7 @@ jobs:
           1. BlogHelper-macOS.zip의 압축을 풀고 BlogHelper.app을 Applications 폴더로 옮기세요.
           2. 최초 실행이 차단되면 앱을 Control-클릭한 뒤 '열기'를 선택하세요.
           3. Google Chrome이 필요하며, 로그인 세션과 앱 설정은 사용자 Library 폴더에 저장됩니다.
-          4. 이 자동 빌드는 Intel Mac용이며 Apple Silicon Mac에서는 Rosetta로 실행됩니다.
+          4. 이 자동 빌드는 Apple Silicon Mac용입니다.
           EOF
           ditto -c -k --sequesterRsrc --keepParent "dist/BlogHelper.app" "release/BlogHelper-macOS/BlogHelper-macOS.zip"
 

@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+import weakref
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -33,6 +34,13 @@ import certifi
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog
+
+try:
+    from PIL import Image, ImageOps, ImageTk
+except ImportError:  # pragma: no cover - 기존 Tk 이미지 처리로 대체
+    Image = None
+    ImageOps = None
+    ImageTk = None
 
 try:
     from yt_dlp import YoutubeDL
@@ -1656,8 +1664,8 @@ class AppStateStore:
         payload["threads_access_token_fallback"] = settings.threads_access_token if save_secrets else (previous_payload.get("threads_access_token_fallback", "") or settings.threads_access_token)
         if save_secrets and settings.app_password:
             KeychainStore.save_secret(
-            f"{KEYCHAIN_WP_PREFIX}{settings.username}",
-            settings.app_password,
+                f"{KEYCHAIN_WP_PREFIX}{settings.username}",
+                settings.app_password,
             )
         if save_secrets and settings.gpt_api_key:
             KeychainStore.save_secret(KEYCHAIN_GPT_ACCOUNT, settings.gpt_api_key)
@@ -1677,6 +1685,29 @@ class AppStateStore:
             KeychainStore.save_secret(KEYCHAIN_THREADS_APP_SECRET, settings.threads_app_secret)
         if save_secrets and settings.threads_access_token:
             KeychainStore.save_secret(KEYCHAIN_THREADS_ACCESS_TOKEN, settings.threads_access_token)
+        if payload == previous_payload:
+            return
+        temporary_state_file = STATE_FILE.with_suffix(".json.tmp")
+        temporary_state_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_state_file.replace(STATE_FILE)
+
+    @staticmethod
+    def update_fields(**values) -> None:
+        """키체인과 전체 설정 객체를 다시 읽지 않고 소수 필드만 저장합니다."""
+        try:
+            payload = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        changed = False
+        for key, value in values.items():
+            if payload.get(key) != value:
+                payload[key] = value
+                changed = True
+        if not changed:
+            return
         temporary_state_file = STATE_FILE.with_suffix(".json.tmp")
         temporary_state_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -10093,6 +10124,16 @@ class KeywordApp(ctk.CTk):
         self._reference_count_job = None
         self._prompt_feedback_job = None
         self._cardnews_text_preview_job = None
+        self._thumbnail_slider_preview_job = None
+        self._cardnews_slider_preview_job = None
+        self._theme_paint_refresh_job = None
+        self._theme_paint_last_run = 0.0
+        self._theme_painted_widgets = weakref.WeakSet()
+        self._automation_queue_render_signature = None
+        self._thumbnail_background_cache = None
+        self._cardnews_background_cache = None
+        self._source_image_cache: dict[str, tuple[int, object]] = {}
+        self._thumbnail_measure_fonts: dict[int, tkfont.Font] = {}
         self._scroll_exclusion_bindings: list[tuple[ctk.CTkScrollableFrame, ctk.CTkScrollableFrame]] = []
 
         self._build_layout()
@@ -10175,9 +10216,7 @@ class KeywordApp(ctk.CTk):
         if re.match(r"^\d+x\d+$", geometry):
             safe_geometry = self._safe_window_geometry(geometry)
             self.wordpress_settings.window_geometry = safe_geometry
-            persisted_settings = AppStateStore.load()
-            persisted_settings.window_geometry = safe_geometry
-            AppStateStore.save(persisted_settings, save_secrets=False)
+            AppStateStore.update_fields(window_geometry=safe_geometry)
 
     def _on_app_close(self) -> None:
         if self._geometry_save_job is not None:
@@ -10196,6 +10235,9 @@ class KeywordApp(ctk.CTk):
             "_reference_count_job",
             "_prompt_feedback_job",
             "_cardnews_text_preview_job",
+            "_thumbnail_slider_preview_job",
+            "_cardnews_slider_preview_job",
+            "_theme_paint_refresh_job",
         ):
             job_id = getattr(self, job_attr, None)
             if job_id is not None:
@@ -10400,6 +10442,9 @@ class KeywordApp(ctk.CTk):
 
     def _retint_widget_tree(self, widget, palette: dict[str, str]) -> None:
         for child in widget.winfo_children():
+            if child in self._theme_painted_widgets:
+                self._retint_widget_tree(child, palette)
+                continue
             configure_values = {}
             for option in (
                 "fg_color",
@@ -10513,15 +10558,36 @@ class KeywordApp(ctk.CTk):
                     child.configure(bg=palette["shell"], troughcolor=palette["card"], activebackground=palette["divider"])
                 except Exception:
                     pass
+            self._theme_painted_widgets.add(child)
             self._retint_widget_tree(child, palette)
 
-    def _finish_theme_paint(self) -> None:
+    def _run_deferred_theme_paint(self) -> None:
+        self._theme_paint_refresh_job = None
+        self._finish_theme_paint(force=True)
+
+    def _finish_theme_paint(self, force: bool = False) -> None:
         if not hasattr(self, "shell_frame"):
             return
         if self._normalize_app_theme(self.wordpress_settings.app_theme) != "화이트테마":
             return
         if self._defer_while_text_composing("_theme_paint_defer_job", self._finish_theme_paint, 1.2):
             return
+        now = time.monotonic()
+        remaining = 0.10 - (now - self._theme_paint_last_run)
+        if not force and remaining > 0:
+            if self._theme_paint_refresh_job is None:
+                self._theme_paint_refresh_job = self.after(
+                    max(20, int(remaining * 1000)),
+                    self._run_deferred_theme_paint,
+                )
+            return
+        if self._theme_paint_refresh_job is not None:
+            try:
+                self.after_cancel(self._theme_paint_refresh_job)
+            except Exception:
+                pass
+            self._theme_paint_refresh_job = None
+        self._theme_paint_last_run = now
         palette = self._theme_palette()
         try:
             self.configure(fg_color=palette["shell"])
@@ -10538,14 +10604,14 @@ class KeywordApp(ctk.CTk):
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
             self.sidebar_divider.configure(fg_color=palette["divider"])
             scroll_names_by_page = {
-            "writing": ("writing_scroll", "keyword_choice_frame"),
-            "automation": ("automation_scroll", "automation_list"),
-            "naver_blog": ("naver_blog_scroll",),
-            "naver_kin": ("naver_kin_scroll", "naver_kin_question_frame"),
-            "public_data": ("public_data_scroll", "public_data_result_frame"),
-            "prompts": ("prompts_scroll",),
-            "settings": ("settings_scroll", "theme_scroll", "basic_scroll"),
-        }
+                "writing": ("writing_scroll", "keyword_choice_frame"),
+                "automation": ("automation_scroll", "automation_list"),
+                "naver_blog": ("naver_blog_scroll",),
+                "naver_kin": ("naver_kin_scroll", "naver_kin_question_frame"),
+                "public_data": ("public_data_scroll", "public_data_result_frame"),
+                "prompts": ("prompts_scroll",),
+                "settings": ("settings_scroll", "theme_scroll", "basic_scroll"),
+            }
             for scroll_name in scroll_names_by_page.get(getattr(self, "current_page", "writing"), ()):
                 scroll_frame = getattr(self, scroll_name, None)
                 if scroll_frame is not None:
@@ -10607,6 +10673,11 @@ class KeywordApp(ctk.CTk):
                 frame.grid_remove()
 
     def _reset_widget_state_for_rebuild(self) -> None:
+        self._theme_painted_widgets = weakref.WeakSet()
+        self._automation_queue_render_signature = None
+        self._thumbnail_background_cache = None
+        self._cardnews_background_cache = None
+        self._source_image_cache = {}
         self.source_vars = {}
         self.target_platform_vars = {}
         self.automation_source_vars = {}
@@ -13184,9 +13255,6 @@ class KeywordApp(ctk.CTk):
                 self.automation_selection_vars.pop(item_id, None)
             self.wordpress_settings.automation_queue = list(self.automation_queue)
             AppStateStore.save(self.wordpress_settings, save_secrets=False)
-        for child in self.automation_list.winfo_children():
-            child.destroy()
-
         queue_items = list(self.automation_queue)
         queue_ids = {str(item.get("id") or "") for item in queue_items}
         self.automation_selection_vars = {
@@ -13198,10 +13266,35 @@ class KeywordApp(ctk.CTk):
             self.automation_count_label.configure(text=f"대기열 {len(queue_items)}개")
         if hasattr(self, "automation_select_all_var"):
             all_selected = bool(queue_items) and all(
-                self.automation_selection_vars.get(str(item.get("id") or ""), tk.BooleanVar(value=False)).get()
+                (
+                    self.automation_selection_vars.get(str(item.get("id") or "")) is not None
+                    and self.automation_selection_vars[str(item.get("id") or "")].get()
+                )
                 for item in queue_items
             )
             self.automation_select_all_var.set(all_selected)
+
+        render_signature = tuple(
+            (
+                str(item.get("id") or ""),
+                str(item.get("title") or ""),
+                str(item.get("status") or ""),
+                str(item.get("scheduled_at") or ""),
+                tuple(item.get("target_platforms") or []),
+                str(item.get("thumbnail_path") or ""),
+                len(item.get("cardnews_image_paths") or item.get("cardnews_paths") or []),
+            )
+            for item in queue_items
+        )
+        if (
+            render_signature == self._automation_queue_render_signature
+            and self.automation_list.winfo_children()
+        ):
+            self._finish_theme_paint()
+            return
+        self._automation_queue_render_signature = render_signature
+        for child in self.automation_list.winfo_children():
+            child.destroy()
 
         if not queue_items:
             empty_card = ctk.CTkFrame(self.automation_list, fg_color="#1d2635", corner_radius=18)
@@ -17124,6 +17217,20 @@ class KeywordApp(ctk.CTk):
             return
         self._on_thumbnail_control_changed()
 
+    def _schedule_live_preview(self, job_attr: str, callback: Callable, delay_ms: int = 70) -> None:
+        existing_job = getattr(self, job_attr, None)
+        if existing_job is not None:
+            try:
+                self.after_cancel(existing_job)
+            except Exception:
+                pass
+
+        def run_preview() -> None:
+            setattr(self, job_attr, None)
+            callback()
+
+        setattr(self, job_attr, self.after(delay_ms, run_preview))
+
     def _on_thumbnail_image_adjust_changed(self, *_args) -> None:
         scale = round(float(self.thumbnail_image_scale_var.get()))
         opacity = round(float(self.thumbnail_image_opacity_var.get()))
@@ -17131,7 +17238,11 @@ class KeywordApp(ctk.CTk):
             self.thumbnail_image_scale_value_label.configure(text=f"{scale}%")
         if hasattr(self, "thumbnail_image_opacity_value_label"):
             self.thumbnail_image_opacity_value_label.configure(text=f"{opacity}%")
-        self._on_thumbnail_control_changed()
+        self._schedule_live_preview(
+            "_thumbnail_slider_preview_job",
+            self._on_thumbnail_control_changed,
+            delay_ms=70 if Image is not None else 140,
+        )
 
     def _on_thumbnail_background_mode_changed(self, _value: str) -> None:
         self._on_thumbnail_control_changed()
@@ -17176,7 +17287,11 @@ class KeywordApp(ctk.CTk):
             self.cardnews_image_scale_value_label.configure(text=f"{scale}%")
         if hasattr(self, "cardnews_image_opacity_value_label"):
             self.cardnews_image_opacity_value_label.configure(text=f"{opacity}%")
-        self._on_cardnews_control_changed()
+        self._schedule_live_preview(
+            "_cardnews_slider_preview_job",
+            self._on_cardnews_control_changed,
+            delay_ms=70 if Image is not None else 140,
+        )
 
     def _on_cardnews_ratio_changed(self, ratio_name: str) -> None:
         width = self._safe_int(self.cardnews_width_entry.get(), 1024)
@@ -17355,7 +17470,14 @@ class KeywordApp(ctk.CTk):
 
     def _thumbnail_text_lines(self, text: str, width: int, font_size: int) -> list[str]:
         max_width = max(80, width - 90)
-        font = tkfont.Font(family="Apple SD Gothic Neo", size=font_size, weight="bold")
+        font = self._thumbnail_measure_fonts.get(font_size)
+        if font is None:
+            font = tkfont.Font(family="Apple SD Gothic Neo", size=font_size, weight="bold")
+            self._thumbnail_measure_fonts[font_size] = font
+            if len(self._thumbnail_measure_fonts) > 12:
+                oldest_size = next(iter(self._thumbnail_measure_fonts))
+                if oldest_size != font_size:
+                    self._thumbnail_measure_fonts.pop(oldest_size, None)
         raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not raw_lines:
             raw_lines = ["썸네일", "미리보기"]
@@ -17413,6 +17535,44 @@ class KeywordApp(ctk.CTk):
     def _load_resized_background_image(self, width: int, height: int, bg_color: str) -> tuple[tk.PhotoImage, float, float] | None:
         if not self.thumbnail_background_image_path:
             return None
+        if Image is not None and ImageTk is not None:
+            try:
+                source, modified_ns = self._load_pillow_source_image(self.thumbnail_background_image_path)
+                source_width, source_height = source.size
+                target_width, target_height, x, y = self._thumbnail_image_geometry(
+                    width,
+                    height,
+                    source_width,
+                    source_height,
+                )
+                opacity = round(float(self.thumbnail_image_opacity_var.get()))
+                grayscale = bool(self.thumbnail_image_grayscale_var.get())
+                cache_key = (
+                    self.thumbnail_background_image_path,
+                    modified_ns,
+                    target_width,
+                    target_height,
+                    round(x, 2),
+                    round(y, 2),
+                    bg_color,
+                    opacity,
+                    grayscale,
+                )
+                if self._thumbnail_background_cache and self._thumbnail_background_cache[0] == cache_key:
+                    return self._thumbnail_background_cache[1]
+                photo = self._pillow_resized_photo(
+                    source,
+                    target_width,
+                    target_height,
+                    bg_color,
+                    opacity,
+                    grayscale,
+                )
+                result = (photo, x, y)
+                self._thumbnail_background_cache = (cache_key, result)
+                return result
+            except (OSError, ValueError, tk.TclError):
+                pass
         try:
             original = tk.PhotoImage(file=self.thumbnail_background_image_path)
         except tk.TclError:
@@ -17424,12 +17584,69 @@ class KeywordApp(ctk.CTk):
         source_width = max(1, original.width())
         source_height = max(1, original.height())
         target_width, target_height, x, y = self._thumbnail_image_geometry(width, height, source_width, source_height)
+        try:
+            modified_ns = Path(self.thumbnail_background_image_path).stat().st_mtime_ns
+        except OSError:
+            modified_ns = 0
+        cache_key = (
+            self.thumbnail_background_image_path,
+            modified_ns,
+            target_width,
+            target_height,
+            round(x, 2),
+            round(y, 2),
+            bg_color,
+            round(float(self.thumbnail_image_opacity_var.get())),
+            bool(self.thumbnail_image_grayscale_var.get()),
+        )
+        if self._thumbnail_background_cache and self._thumbnail_background_cache[0] == cache_key:
+            return self._thumbnail_background_cache[1]
         resized = self._resize_photo_nearest(original, target_width, target_height, bg_color)
-        return resized, x, y
+        result = (resized, x, y)
+        self._thumbnail_background_cache = (cache_key, result)
+        return result
 
     def _load_resized_cardnews_background_image(self, width: int, height: int, bg_color: str) -> tuple[tk.PhotoImage, float, float] | None:
         if not self.cardnews_background_image_path:
             return None
+        if Image is not None and ImageTk is not None:
+            try:
+                source, modified_ns = self._load_pillow_source_image(self.cardnews_background_image_path)
+                source_width, source_height = source.size
+                target_width, target_height, x, y = self._cardnews_image_geometry(
+                    width,
+                    height,
+                    source_width,
+                    source_height,
+                )
+                opacity = round(float(self.cardnews_image_opacity_var.get()))
+                grayscale = bool(self.cardnews_image_grayscale_var.get())
+                cache_key = (
+                    self.cardnews_background_image_path,
+                    modified_ns,
+                    target_width,
+                    target_height,
+                    round(x, 2),
+                    round(y, 2),
+                    bg_color,
+                    opacity,
+                    grayscale,
+                )
+                if self._cardnews_background_cache and self._cardnews_background_cache[0] == cache_key:
+                    return self._cardnews_background_cache[1]
+                photo = self._pillow_resized_photo(
+                    source,
+                    target_width,
+                    target_height,
+                    bg_color,
+                    opacity,
+                    grayscale,
+                )
+                result = (photo, x, y)
+                self._cardnews_background_cache = (cache_key, result)
+                return result
+            except (OSError, ValueError, tk.TclError):
+                pass
         try:
             original = tk.PhotoImage(file=self.cardnews_background_image_path)
         except tk.TclError:
@@ -17441,6 +17658,23 @@ class KeywordApp(ctk.CTk):
         source_width = max(1, original.width())
         source_height = max(1, original.height())
         target_width, target_height, x, y = self._cardnews_image_geometry(width, height, source_width, source_height)
+        try:
+            modified_ns = Path(self.cardnews_background_image_path).stat().st_mtime_ns
+        except OSError:
+            modified_ns = 0
+        cache_key = (
+            self.cardnews_background_image_path,
+            modified_ns,
+            target_width,
+            target_height,
+            round(x, 2),
+            round(y, 2),
+            bg_color,
+            round(float(self.cardnews_image_opacity_var.get())),
+            bool(self.cardnews_image_grayscale_var.get()),
+        )
+        if self._cardnews_background_cache and self._cardnews_background_cache[0] == cache_key:
+            return self._cardnews_background_cache[1]
         resized = self._resize_photo_nearest(
             original,
             target_width,
@@ -17449,7 +17683,46 @@ class KeywordApp(ctk.CTk):
             opacity_value=round(float(self.cardnews_image_opacity_var.get())),
             grayscale=self.cardnews_image_grayscale_var.get(),
         )
-        return resized, x, y
+        result = (resized, x, y)
+        self._cardnews_background_cache = (cache_key, result)
+        return result
+
+    def _load_pillow_source_image(self, image_path: str):
+        path = Path(image_path).expanduser()
+        modified_ns = path.stat().st_mtime_ns
+        cached = self._source_image_cache.get(str(path))
+        if cached and cached[0] == modified_ns:
+            return cached[1], modified_ns
+        with Image.open(path) as opened:
+            source = opened.convert("RGBA").copy()
+        self._source_image_cache[str(path)] = (modified_ns, source)
+        if len(self._source_image_cache) > 4:
+            oldest_key = next(iter(self._source_image_cache))
+            if oldest_key != str(path):
+                self._source_image_cache.pop(oldest_key, None)
+        return source, modified_ns
+
+    def _pillow_resized_photo(
+        self,
+        source,
+        target_width: int,
+        target_height: int,
+        bg_color: str,
+        opacity_value: int,
+        grayscale: bool,
+    ):
+        resampling = getattr(Image, "Resampling", Image)
+        resized = source.resize((target_width, target_height), resampling.LANCZOS)
+        if grayscale and ImageOps is not None:
+            alpha = resized.getchannel("A")
+            resized = ImageOps.grayscale(resized).convert("RGBA")
+            resized.putalpha(alpha)
+        background = Image.new("RGBA", resized.size, (*self._hex_to_rgb(bg_color), 255))
+        opacity = max(0, min(100, int(opacity_value))) / 100
+        alpha = resized.getchannel("A").point(lambda value: round(value * opacity))
+        resized.putalpha(alpha)
+        background.alpha_composite(resized)
+        return ImageTk.PhotoImage(background)
 
     def _thumbnail_image_geometry(
         self,
@@ -18664,8 +18937,6 @@ class KeywordApp(ctk.CTk):
         self._show_only_page_frame(page_name)
         if hasattr(self, "shell_frame"):
             self._finish_theme_paint()
-            if self._normalize_app_theme(self.wordpress_settings.app_theme) == "화이트테마":
-                self.after(120, self._finish_theme_paint)
 
     def _switch_settings_section(self, section_name: str) -> None:
         self.settings_section = section_name if section_name in {"basic", "theme", "ai"} else "ai"
@@ -21411,9 +21682,11 @@ class KeywordApp(ctk.CTk):
             raise RuntimeError("워드프레스 비밀번호 또는 Application Password를 입력해 주세요.")
 
     def _poll_queue(self) -> None:
+        processed_events = 0
         try:
-            while True:
+            while processed_events < 40:
                 event_type, payload = self.result_queue.get_nowait()
+                processed_events += 1
                 if event_type == "progress":
                     progress, message = payload
                     self.progress_bar.configure(mode="determinate")
@@ -21870,7 +22143,8 @@ class KeywordApp(ctk.CTk):
         except queue.Empty:
             pass
         finally:
-            self.after(180, self._poll_queue)
+            next_delay = 70 if not self.result_queue.empty() else 260
+            self.after(next_delay, self._poll_queue)
 
     def _handle_wordpress_test_success(self, payload: dict) -> None:
         self.wp_test_button.configure(state="normal", text="검사")
