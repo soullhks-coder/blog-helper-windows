@@ -8,7 +8,7 @@ hiddenimports = []
 
 datas += [("version.json", ".")]
 
-for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL"):
+for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "bsdiff4"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries

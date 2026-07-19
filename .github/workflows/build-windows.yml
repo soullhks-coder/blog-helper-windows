@@ -146,6 +146,8 @@ jobs:
     steps:
       - name: Checkout version metadata
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Verify tag matches app version
         run: |
@@ -167,6 +169,45 @@ jobs:
           name: BlogHelper-macOS
           path: release-assets/macos
 
+      - name: Build small incremental update patches
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          RELEASE_REPOSITORY: soullhks-coder/blog-helper-releases
+        run: |
+          APP_VERSION="$(python -c 'import json; print(json.load(open("version.json", encoding="utf-8"))["version"])')"
+          PREVIOUS_TAG="$(git tag --sort=-version:refname | grep -Fxv "${GITHUB_REF_NAME}" | head -n 1)"
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous release tag; skipping incremental patches."
+            exit 0
+          fi
+          PREVIOUS_VERSION="${PREVIOUS_TAG#v}"
+          mkdir -p release-assets/previous release-assets/patches
+          gh release download "$PREVIOUS_TAG" \
+            --repo "$RELEASE_REPOSITORY" \
+            --dir release-assets/previous \
+            --pattern 'BlogHelper.exe' \
+            --pattern 'BlogHelper-macOS.zip' \
+            --clobber
+          python -m pip install 'bsdiff4>=1.2.6,<2'
+
+          WINDOWS_EXE="$(find release-assets/windows -type f -name 'BlogHelper.exe' -print -quit)"
+          MACOS_ZIP="$(find release-assets/macos -type f -name 'BlogHelper-macOS.zip' -print -quit)"
+          python tools/build_delta_patch.py \
+            --platform windows \
+            --previous release-assets/previous/BlogHelper.exe \
+            --current "$WINDOWS_EXE" \
+            --from-version "$PREVIOUS_VERSION" \
+            --to-version "$APP_VERSION" \
+            --output "release-assets/patches/BlogHelper-Windows-v${PREVIOUS_VERSION}-to-v${APP_VERSION}.patch.zip"
+          python tools/build_delta_patch.py \
+            --platform macos \
+            --previous release-assets/previous/BlogHelper-macOS.zip \
+            --current "$MACOS_ZIP" \
+            --from-version "$PREVIOUS_VERSION" \
+            --to-version "$APP_VERSION" \
+            --output "release-assets/patches/BlogHelper-macOS-v${PREVIOUS_VERSION}-to-v${APP_VERSION}.patch.zip"
+          ls -lh release-assets/patches
+
       - name: Publish public binary release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
@@ -179,18 +220,23 @@ jobs:
           test -n "$WINDOWS_ZIP" && test -f "$WINDOWS_ZIP"
           test -n "$MACOS_ZIP" && test -f "$MACOS_ZIP"
 
-          RELEASE_NOTES="Blog Helper Pro ${GITHUB_REF_NAME}\n\n프로그램 시작 시 새 버전을 자동으로 확인하고, 진행률을 표시한 뒤 자동으로 설치합니다."
+          ASSETS=(
+            "$WINDOWS_EXE#BlogHelper.exe"
+            "$WINDOWS_ZIP#BlogHelper-Windows.zip"
+            "$MACOS_ZIP#BlogHelper-macOS.zip"
+          )
+          while IFS= read -r PATCH_FILE; do
+            ASSETS+=("$PATCH_FILE#$(basename "$PATCH_FILE")")
+          done < <(find release-assets/patches -type f -name '*.patch.zip' -print 2>/dev/null | sort)
+
+          RELEASE_NOTES="Blog Helper Pro ${GITHUB_REF_NAME}\n\n프로그램 시작 시 변경된 부분만 빠르게 내려받습니다. 패치를 적용할 수 없는 경우에만 전체 파일로 안전하게 전환합니다."
           if gh release view "$GITHUB_REF_NAME" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" \
-              "$WINDOWS_EXE#BlogHelper.exe" \
-              "$WINDOWS_ZIP#BlogHelper-Windows.zip" \
-              "$MACOS_ZIP#BlogHelper-macOS.zip" \
+              "${ASSETS[@]}" \
               --repo "$RELEASE_REPOSITORY" --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
-              "$WINDOWS_EXE#BlogHelper.exe" \
-              "$WINDOWS_ZIP#BlogHelper-Windows.zip" \
-              "$MACOS_ZIP#BlogHelper-macOS.zip" \
+              "${ASSETS[@]}" \
               --repo "$RELEASE_REPOSITORY" \
               --title "Blog Helper Pro ${GITHUB_REF_NAME}" \
               --notes "$RELEASE_NOTES"

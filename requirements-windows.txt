@@ -4,4 +4,5 @@ certifi==2026.2.25
 playwright==1.60.0
 keyring>=25.6,<26
 Pillow>=10.4,<13
+bsdiff4>=1.2.6,<2
 pyinstaller>=6.14,<7

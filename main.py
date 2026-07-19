@@ -56,6 +56,7 @@ from app_updater import (
     is_frozen_app,
     launch_update_installer,
     platform_asset_name,
+    prepare_delta_update,
 )
 
 
@@ -10266,6 +10267,8 @@ class KeywordApp(ctk.CTk):
             return
         self.pending_update_payload = dict(payload)
         self._show_update_dialog(payload)
+        if payload.get("update_kind") == "delta" and self.update_status_label:
+            self.update_status_label.configure(text="변경된 부분만 빠르게 받고 있습니다. 0%")
         update_dir = DATA_DIR / "updates"
         cleanup_old_downloads(update_dir)
         self.update_download_worker = UpdateDownloadWorker(self.result_queue, payload, update_dir)
@@ -10286,7 +10289,8 @@ class KeywordApp(ctk.CTk):
                 self.update_progress_bar.configure(mode="indeterminate")
                 self.update_progress_bar.start()
         if self.update_status_label:
-            self.update_status_label.configure(text=f"새 버전을 받고 있습니다. {percent}%" if total else "새 버전을 받고 있습니다...")
+            action = "변경된 부분만 받고 있습니다" if payload.get("update_kind") == "delta" else "새 버전을 받고 있습니다"
+            self.update_status_label.configure(text=f"{action}. {percent}%" if total else f"{action}...")
         if self.update_detail_label:
             downloaded_mb = downloaded / (1024 * 1024)
             if total:
@@ -10300,14 +10304,37 @@ class KeywordApp(ctk.CTk):
             self.update_progress_bar.configure(mode="determinate")
             self.update_progress_bar.set(1.0)
         if self.update_status_label:
-            self.update_status_label.configure(text="다운로드 완료. 새 버전으로 다시 시작합니다. 100%")
+            status = "빠른 패치 확인 중입니다. 100%" if payload.get("update_kind") == "delta" else "다운로드 완료. 새 버전으로 다시 시작합니다. 100%"
+            self.update_status_label.configure(text=status)
         if self.update_detail_label:
             self.update_detail_label.configure(text="잠시만 기다려 주세요. 기존 설정과 로그인 정보는 그대로 유지됩니다.")
         self.after(800, lambda current_payload=dict(payload): self._install_downloaded_update(current_payload))
 
     def _install_downloaded_update(self, payload: dict) -> None:
+        if payload.get("update_kind") == "delta":
+            threading.Thread(
+                target=self._prepare_delta_update_worker,
+                args=(dict(payload),),
+                daemon=True,
+            ).start()
+            return
+        self._launch_prepared_update(payload, Path(str(payload["local_path"])))
+
+    def _prepare_delta_update_worker(self, payload: dict) -> None:
         try:
-            launch_update_installer(Path(str(payload["local_path"])), DATA_DIR / "updates")
+            prepared_path = prepare_delta_update(
+                Path(str(payload["local_path"])),
+                DATA_DIR / "updates",
+            )
+            prepared_payload = dict(payload)
+            prepared_payload["prepared_path"] = str(prepared_path)
+            self.result_queue.put(("update_delta_prepared", prepared_payload))
+        except Exception as exc:
+            self.result_queue.put(("update_delta_error", str(exc)))
+
+    def _launch_prepared_update(self, payload: dict, prepared_path: Path) -> None:
+        try:
+            launch_update_installer(prepared_path, DATA_DIR / "updates")
         except Exception as exc:
             self._handle_update_error(f"새 버전을 설치하지 못했습니다.\n{exc}")
             return
@@ -10317,6 +10344,23 @@ class KeywordApp(ctk.CTk):
             except tk.TclError:
                 pass
         self.after(250, self._on_app_close)
+
+    def _handle_delta_prepare_error(self, message: str) -> None:
+        fallback = dict((self.pending_update_payload or {}).get("full_asset") or {})
+        if not fallback:
+            self._handle_update_error(f"빠른 업데이트를 적용하지 못했습니다.\n{message}")
+            return
+        self.pending_update_payload = fallback
+        if self.update_progress_bar:
+            self.update_progress_bar.configure(mode="determinate")
+            self.update_progress_bar.set(0)
+        if self.update_status_label:
+            self.update_status_label.configure(text="빠른 패치 대신 전체 업데이트로 안전하게 전환합니다. 0%")
+        if self.update_detail_label:
+            self.update_detail_label.configure(text="기존 파일과 패치 기준이 달라 전체 파일을 한 번만 받습니다.")
+        update_dir = DATA_DIR / "updates"
+        self.update_download_worker = UpdateDownloadWorker(self.result_queue, fallback, update_dir)
+        self.update_download_worker.start()
 
     def _handle_update_error(self, message: str) -> None:
         if not self.update_dialog or not self.update_dialog.winfo_exists():
@@ -21912,6 +21956,10 @@ class KeywordApp(ctk.CTk):
                     self._handle_update_progress(payload)
                 elif event_type == "update_downloaded":
                     self._handle_update_downloaded(payload)
+                elif event_type == "update_delta_prepared":
+                    self._launch_prepared_update(payload, Path(str(payload["prepared_path"])))
+                elif event_type == "update_delta_error":
+                    self._handle_delta_prepare_error(str(payload))
                 elif event_type == "update_download_error":
                     self._handle_update_error(str(payload))
                 elif event_type == "update_check_error":
