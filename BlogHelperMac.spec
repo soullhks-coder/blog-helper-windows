@@ -1,10 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+import json
+
 from PyInstaller.utils.hooks import collect_all
 
 
 datas = []
 binaries = []
 hiddenimports = []
+
+datas += [("version.json", ".")]
+with open("version.json", "r", encoding="utf-8") as version_file:
+    app_version = str(json.load(version_file).get("version") or "1.0.0")
 
 for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
@@ -68,6 +74,8 @@ app = BUNDLE(
     bundle_identifier="kr.soullhk.bloghelper",
     info_plist={
         "CFBundleDisplayName": "Blog Helper Pro",
+        "CFBundleShortVersionString": app_version,
+        "CFBundleVersion": app_version,
         "LSMinimumSystemVersion": "11.0",
         "NSHighResolutionCapable": True,
     },

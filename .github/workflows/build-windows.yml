@@ -37,6 +37,7 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile main.py
+          python -m py_compile app_updater.py
           python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; from PIL import Image; print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -75,16 +76,9 @@ jobs:
           path: |
             release/BlogHelper-Windows/BlogHelper.exe
             release/BlogHelper-Windows/README.txt
+            release/BlogHelper-Windows.zip
           if-no-files-found: error
           retention-days: 30
-
-      - name: Attach files to tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/BlogHelper-Windows/BlogHelper.exe
-            release/BlogHelper-Windows.zip
 
   build-macos:
     runs-on: macos-14
@@ -109,6 +103,7 @@ jobs:
       - name: Verify macOS dependencies
         run: |
           python -m py_compile main.py
+          python -m py_compile app_updater.py
           python -c "import customtkinter, certifi, keyring, playwright, yt_dlp; from PIL import Image; print('dependency import passed')"
 
       - name: Build BlogHelper.app
@@ -140,8 +135,63 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach files to tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout version metadata
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches app version
+        run: |
+          APP_VERSION="$(python -c 'import json; print(json.load(open("version.json", encoding="utf-8"))["version"])')"
+          if [ "${GITHUB_REF_NAME}" != "v${APP_VERSION}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match version.json (${APP_VERSION})."
+            exit 1
+          fi
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
         with:
-          files: release/BlogHelper-macOS/BlogHelper-macOS.zip
+          name: BlogHelper-Windows
+          path: release-assets/windows
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: BlogHelper-macOS
+          path: release-assets/macos
+
+      - name: Publish public binary release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          RELEASE_REPOSITORY: soullhks-coder/blog-helper-releases
+        run: |
+          WINDOWS_EXE="$(find release-assets/windows -type f -name 'BlogHelper.exe' -print -quit)"
+          WINDOWS_ZIP="$(find release-assets/windows -type f -name 'BlogHelper-Windows.zip' -print -quit)"
+          MACOS_ZIP="$(find release-assets/macos -type f -name 'BlogHelper-macOS.zip' -print -quit)"
+          test -n "$WINDOWS_EXE" && test -f "$WINDOWS_EXE"
+          test -n "$WINDOWS_ZIP" && test -f "$WINDOWS_ZIP"
+          test -n "$MACOS_ZIP" && test -f "$MACOS_ZIP"
+
+          RELEASE_NOTES="Blog Helper Pro ${GITHUB_REF_NAME}\n\n프로그램 시작 시 새 버전을 자동으로 확인하고, 진행률을 표시한 뒤 자동으로 설치합니다."
+          if gh release view "$GITHUB_REF_NAME" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              "$WINDOWS_EXE#BlogHelper.exe" \
+              "$WINDOWS_ZIP#BlogHelper-Windows.zip" \
+              "$MACOS_ZIP#BlogHelper-macOS.zip" \
+              --repo "$RELEASE_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "$WINDOWS_EXE#BlogHelper.exe" \
+              "$WINDOWS_ZIP#BlogHelper-Windows.zip" \
+              "$MACOS_ZIP#BlogHelper-macOS.zip" \
+              --repo "$RELEASE_REPOSITORY" \
+              --title "Blog Helper Pro ${GITHUB_REF_NAME}" \
+              --notes "$RELEASE_NOTES"
+          fi

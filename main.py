@@ -47,6 +47,17 @@ try:
 except ImportError:  # pragma: no cover - runtime handling
     YoutubeDL = None
 
+from app_updater import (
+    APP_VERSION,
+    UPDATE_REPOSITORY,
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+    cleanup_old_downloads,
+    is_frozen_app,
+    launch_update_installer,
+    platform_asset_name,
+)
+
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -10018,7 +10029,7 @@ def build_wordpress_post(seed_keyword: str, insight: KeywordInsight) -> tuple[st
 class KeywordApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Blog Helper Pro")
+        self.title(f"Blog Helper Pro v{APP_VERSION}")
         self.wordpress_settings = AppStateStore.load()
         ctk.set_appearance_mode("light" if self.wordpress_settings.app_theme == "화이트테마" else "dark")
         self.geometry(self._safe_window_geometry(self.wordpress_settings.window_geometry))
@@ -10039,6 +10050,15 @@ class KeywordApp(ctk.CTk):
         self.active_automation_upload_item_id = ""
         self.active_automation_tistory_pending = False
         self.pending_upload_cleanup_paths: list[str] = []
+
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_download_worker: UpdateDownloadWorker | None = None
+        self.update_dialog: ctk.CTkToplevel | None = None
+        self.update_progress_bar: ctk.CTkProgressBar | None = None
+        self.update_status_label: ctk.CTkLabel | None = None
+        self.update_detail_label: ctk.CTkLabel | None = None
+        self.update_close_button: ctk.CTkButton | None = None
+        self.pending_update_payload: dict | None = None
 
         self.result_queue: queue.Queue = queue.Queue()
         self.analysis_worker: AnalysisWorker | None = None
@@ -10144,6 +10164,195 @@ class KeywordApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.after(180, self._poll_queue)
         self.after(1200, self._automation_publish_scheduler_tick)
+        self.after(2200, self._start_update_check)
+
+    def _start_update_check(self) -> None:
+        if os.environ.get("BLOG_HELPER_DISABLE_UPDATES", "").strip() == "1":
+            return
+        if not is_frozen_app() or not platform_asset_name():
+            return
+        if self.update_check_worker and self.update_check_worker.is_alive():
+            return
+        self.update_check_worker = UpdateCheckWorker(
+            result_queue=self.result_queue,
+            repository=UPDATE_REPOSITORY,
+            current_version=APP_VERSION,
+        )
+        self.update_check_worker.start()
+
+    def _show_update_dialog(self, payload: dict) -> None:
+        if self.update_dialog and self.update_dialog.winfo_exists():
+            return
+
+        palette = self._theme_palette()
+        dialog = ctk.CTkToplevel(self)
+        self.update_dialog = dialog
+        dialog.title("새 버전 자동 업데이트")
+        dialog.geometry("620x330")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.configure(fg_color=palette["shell"])
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        dialog.attributes("-topmost", True)
+
+        card = ctk.CTkFrame(
+            dialog,
+            corner_radius=24,
+            fg_color=palette["card"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        card.pack(fill="both", expand=True, padx=22, pady=22)
+
+        ctk.CTkLabel(
+            card,
+            text="새 버전을 자동으로 준비하고 있습니다",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=24, weight="bold"),
+        ).pack(padx=24, pady=(28, 8))
+        ctk.CTkLabel(
+            card,
+            text=f"현재 v{APP_VERSION}  →  새 버전 v{payload.get('version', '')}",
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=17, weight="bold"),
+        ).pack(padx=24, pady=(0, 18))
+
+        self.update_progress_bar = ctk.CTkProgressBar(
+            card,
+            height=18,
+            corner_radius=9,
+            mode="determinate",
+            progress_color="#2f6df6",
+            fg_color=palette["divider"],
+        )
+        self.update_progress_bar.pack(fill="x", padx=38)
+        self.update_progress_bar.set(0)
+
+        self.update_status_label = ctk.CTkLabel(
+            card,
+            text="업데이트 다운로드를 시작합니다. 0%",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        self.update_status_label.pack(padx=24, pady=(14, 4))
+        self.update_detail_label = ctk.CTkLabel(
+            card,
+            text="프로그램을 끄지 마세요. 완료되면 자동으로 다시 시작됩니다.",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14),
+        )
+        self.update_detail_label.pack(padx=24, pady=(0, 10))
+
+        self.update_close_button = ctk.CTkButton(
+            card,
+            text="확인",
+            width=150,
+            height=42,
+            corner_radius=14,
+            command=self._close_update_dialog,
+        )
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+
+    def _handle_update_available(self, payload: dict) -> None:
+        if self.update_download_worker and self.update_download_worker.is_alive():
+            return
+        self.pending_update_payload = dict(payload)
+        self._show_update_dialog(payload)
+        update_dir = DATA_DIR / "updates"
+        cleanup_old_downloads(update_dir)
+        self.update_download_worker = UpdateDownloadWorker(self.result_queue, payload, update_dir)
+        self.update_download_worker.start()
+
+    def _handle_update_progress(self, payload: dict) -> None:
+        if not self.update_dialog or not self.update_dialog.winfo_exists():
+            return
+        downloaded = int(payload.get("downloaded") or 0)
+        total = int(payload.get("total") or 0)
+        ratio = min(1.0, downloaded / total) if total else 0.0
+        percent = int(ratio * 100)
+        if self.update_progress_bar:
+            if total:
+                self.update_progress_bar.configure(mode="determinate")
+                self.update_progress_bar.set(ratio)
+            else:
+                self.update_progress_bar.configure(mode="indeterminate")
+                self.update_progress_bar.start()
+        if self.update_status_label:
+            self.update_status_label.configure(text=f"새 버전을 받고 있습니다. {percent}%" if total else "새 버전을 받고 있습니다...")
+        if self.update_detail_label:
+            downloaded_mb = downloaded / (1024 * 1024)
+            if total:
+                self.update_detail_label.configure(
+                    text=f"{downloaded_mb:.1f}MB / {total / (1024 * 1024):.1f}MB  ·  완료 후 자동 재시작"
+                )
+
+    def _handle_update_downloaded(self, payload: dict) -> None:
+        if self.update_progress_bar:
+            self.update_progress_bar.stop()
+            self.update_progress_bar.configure(mode="determinate")
+            self.update_progress_bar.set(1.0)
+        if self.update_status_label:
+            self.update_status_label.configure(text="다운로드 완료. 새 버전으로 다시 시작합니다. 100%")
+        if self.update_detail_label:
+            self.update_detail_label.configure(text="잠시만 기다려 주세요. 기존 설정과 로그인 정보는 그대로 유지됩니다.")
+        self.after(800, lambda current_payload=dict(payload): self._install_downloaded_update(current_payload))
+
+    def _install_downloaded_update(self, payload: dict) -> None:
+        try:
+            launch_update_installer(Path(str(payload["local_path"])), DATA_DIR / "updates")
+        except Exception as exc:
+            self._handle_update_error(f"새 버전을 설치하지 못했습니다.\n{exc}")
+            return
+        if self.update_dialog and self.update_dialog.winfo_exists():
+            try:
+                self.update_dialog.grab_release()
+            except tk.TclError:
+                pass
+        self.after(250, self._on_app_close)
+
+    def _handle_update_error(self, message: str) -> None:
+        if not self.update_dialog or not self.update_dialog.winfo_exists():
+            self._show_update_dialog(self.pending_update_payload or {"version": ""})
+        if self.update_progress_bar:
+            self.update_progress_bar.stop()
+            self.update_progress_bar.configure(mode="determinate", progress_color="#e05252")
+            self.update_progress_bar.set(0)
+        if self.update_status_label:
+            self.update_status_label.configure(text="업데이트를 완료하지 못했습니다.", text_color="#e05252")
+        if self.update_detail_label:
+            self.update_detail_label.configure(
+                text="기존 프로그램은 그대로 사용할 수 있습니다. 인터넷 연결 후 다음 실행 때 다시 시도합니다."
+            )
+        if self.update_close_button:
+            self.update_close_button.pack(padx=24, pady=(4, 14))
+        if self.update_dialog:
+            self.update_dialog.protocol("WM_DELETE_WINDOW", self._close_update_dialog)
+        try:
+            with (DATA_DIR / "update-check.log").open("a", encoding="utf-8") as log_file:
+                log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+        except OSError:
+            pass
+
+    def _close_update_dialog(self) -> None:
+        if self.update_dialog and self.update_dialog.winfo_exists():
+            try:
+                self.update_dialog.grab_release()
+            except tk.TclError:
+                pass
+            self.update_dialog.destroy()
+        self.update_dialog = None
+        self.update_progress_bar = None
+        self.update_status_label = None
+        self.update_detail_label = None
+        self.update_close_button = None
 
     def _safe_window_geometry(self, geometry: str) -> str:
         match = re.match(r"^(\d+)x(\d+)", geometry or "")
@@ -21687,7 +21896,23 @@ class KeywordApp(ctk.CTk):
             while processed_events < 40:
                 event_type, payload = self.result_queue.get_nowait()
                 processed_events += 1
-                if event_type == "progress":
+                if event_type == "update_available":
+                    self._handle_update_available(payload)
+                elif event_type == "update_progress":
+                    self._handle_update_progress(payload)
+                elif event_type == "update_downloaded":
+                    self._handle_update_downloaded(payload)
+                elif event_type == "update_download_error":
+                    self._handle_update_error(str(payload))
+                elif event_type == "update_check_error":
+                    try:
+                        with (DATA_DIR / "update-check.log").open("a", encoding="utf-8") as log_file:
+                            log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {payload}\n")
+                    except OSError:
+                        pass
+                elif event_type == "update_none":
+                    pass
+                elif event_type == "progress":
                     progress, message = payload
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(progress)
