@@ -155,6 +155,7 @@ class AppUpdaterTests(unittest.TestCase):
             self.assertIn("-LiteralPath $Source", windows_contents)
             self.assertIn("Wait-ForParentExit", windows_contents)
             self.assertIn("Move-WithRetry", windows_contents)
+            self.assertIn("function Get-SHA256", windows_contents)
             self.assertIn("-WorkingDirectory $TargetDirectory", windows_contents)
             self.assertIn("-WindowStyle Normal", windows_contents)
             self.assertIn("새 프로그램 재실행 성공", windows_contents)

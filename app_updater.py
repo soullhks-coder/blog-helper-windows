@@ -365,6 +365,19 @@ $ErrorActionPreference = "Stop"
 function Write-UpdateLog([string]$Message) {
     Add-Content -Path $LogFile -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message) -Encoding UTF8
 }
+function Get-SHA256([string]$Path) {
+    $Stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $Hasher = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return (($Hasher.ComputeHash($Stream) | ForEach-Object { $_.ToString("x2") }) -join "")
+        } finally {
+            $Hasher.Dispose()
+        }
+    } finally {
+        $Stream.Dispose()
+    }
+}
 $TargetDirectory = Split-Path -Parent $Target
 $Backup = "$Target.update-backup"
 $Pending = "$Target.update-new"
@@ -425,8 +438,8 @@ try {
     Remove-Item -LiteralPath $Pending -Force -ErrorAction SilentlyContinue
 
     Copy-Item -LiteralPath $Source -Destination $Pending -Force -ErrorAction Stop
-    $SourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
-    $PendingHash = (Get-FileHash -LiteralPath $Pending -Algorithm SHA256).Hash
+    $SourceHash = Get-SHA256 $Source
+    $PendingHash = Get-SHA256 $Pending
     if ($SourceHash -ne $PendingHash) {
         throw "새 프로그램 파일 검증에 실패했습니다."
     }
