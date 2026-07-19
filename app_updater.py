@@ -637,9 +637,10 @@ def launch_update_installer(
             "-RequireVisibleWindow",
             "1" if require_visible_window else "0",
         ]
-        # Do not use CREATE_NO_WINDOW or PowerShell's Hidden window style here.
-        # Both can leak a hidden startup state into the relaunched GUI process.
-        creation_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+        # A new process group survives the GUI parent closing. CREATE_NO_WINDOW
+        # hides only the PowerShell helper; Start-BlogHelper explicitly restores
+        # and foregrounds the new GUI window after it creates a window handle.
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
             subprocess,
             "CREATE_NEW_PROCESS_GROUP",
             0,
