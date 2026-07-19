@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - full update fallback
     bsdiff4 = None
 
 
-DEFAULT_APP_VERSION = "1.0.3"
+DEFAULT_APP_VERSION = "1.0.4"
 DEFAULT_UPDATE_REPOSITORY = "soullhks-coder/blog-helper-releases"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -412,13 +412,19 @@ function Move-WithRetry([string]$From, [string]$To) {
 }
 
 function Start-BlogHelper {
-    $Process = Start-Process `
-        -FilePath $Target `
-        -WorkingDirectory $TargetDirectory `
-        -WindowStyle Normal `
-        -PassThru `
-        -ErrorAction Stop
+    # UseShellExecute matches an Explorer double-click and prevents the new GUI
+    # from inheriting the hidden PowerShell updater window state.
+    $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $StartInfo.FileName = $Target
+    $StartInfo.WorkingDirectory = $TargetDirectory
+    $StartInfo.UseShellExecute = $true
+    $StartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+    $Process = [System.Diagnostics.Process]::Start($StartInfo)
+    if ($null -eq $Process) {
+        throw "Windows 셸에서 새 프로그램을 시작하지 못했습니다."
+    }
     Start-Sleep -Seconds 4
+    $Process.Refresh()
     if ($Process.HasExited) {
         throw "새 프로그램이 실행 직후 종료되었습니다. 종료 코드: $($Process.ExitCode)"
     }

@@ -58,6 +58,10 @@ jobs:
           python -m PyInstaller --noconfirm --clean BlogHelper.spec
           if (-not (Test-Path "dist\BlogHelper.exe")) { throw "BlogHelper.exe was not created." }
 
+      - name: Test actual BlogHelper.exe replacement and restart
+        shell: pwsh
+        run: python tools/test_windows_update_installer.py --executable dist\BlogHelper.exe
+
       - name: Create delivery ZIP
         shell: pwsh
         run: |

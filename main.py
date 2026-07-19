@@ -22867,5 +22867,14 @@ class KeywordApp(ctk.CTk):
 
 
 if __name__ == "__main__":
-    app = KeywordApp()
-    app.mainloop()
+    restart_test_marker = os.environ.get("BLOG_HELPER_RESTART_TEST_MARKER", "").strip()
+    if restart_test_marker:
+        # GitHub Actions verifies the actual frozen EXE can be relaunched by the
+        # updater. Keep the process alive long enough for its watchdog check.
+        marker_path = Path(restart_test_marker)
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(f"restarted pid={os.getpid()}\n", encoding="utf-8")
+        time.sleep(8)
+    else:
+        app = KeywordApp()
+        app.mainloop()
