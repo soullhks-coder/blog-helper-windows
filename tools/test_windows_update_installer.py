@@ -41,7 +41,12 @@ def main() -> None:
         return
 
     args = parse_args()
-    with tempfile.TemporaryDirectory(prefix="Blog Helper updater test ") as temp_dir:
+    # Windows can retain the launched process working directory for a few
+    # seconds after exit. That delayed cleanup must not mask a passed restart.
+    with tempfile.TemporaryDirectory(
+        prefix="Blog Helper updater test ",
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
         root = Path(temp_dir)
         marker = root / "restart-success.txt"
         log_path = root / "update-install.log"
