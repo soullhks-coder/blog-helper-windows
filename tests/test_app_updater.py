@@ -151,7 +151,13 @@ class AppUpdaterTests(unittest.TestCase):
             mac_script = base / "apply update.zsh"
             _write_windows_update_script(windows_script)
             _write_macos_update_script(mac_script)
-            self.assertIn("-LiteralPath $Source", windows_script.read_text(encoding="utf-8-sig"))
+            windows_contents = windows_script.read_text(encoding="utf-8-sig")
+            self.assertIn("-LiteralPath $Source", windows_contents)
+            self.assertIn("Wait-ForParentExit", windows_contents)
+            self.assertIn("Move-WithRetry", windows_contents)
+            self.assertIn("-WorkingDirectory $TargetDirectory", windows_contents)
+            self.assertIn("-WindowStyle Normal", windows_contents)
+            self.assertIn("새 프로그램 재실행 성공", windows_contents)
             self.assertIn('"$TARGET_APP"', mac_script.read_text(encoding="utf-8"))
             self.assertTrue(mac_script.stat().st_mode & 0o100)
 

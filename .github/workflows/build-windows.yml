@@ -48,6 +48,10 @@ jobs:
           if (-not $chrome) { throw "Google Chrome was not found on the Windows runner." }
           Write-Host "Chrome detected: $chrome"
 
+      - name: Test Windows updater replacement and restart
+        shell: pwsh
+        run: python tools/test_windows_update_installer.py
+
       - name: Build BlogHelper.exe
         shell: pwsh
         run: |

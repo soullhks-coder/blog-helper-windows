@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - full update fallback
     bsdiff4 = None
 
 
-DEFAULT_APP_VERSION = "1.0.2"
+DEFAULT_APP_VERSION = "1.0.3"
 DEFAULT_UPDATE_REPOSITORY = "soullhks-coder/blog-helper-releases"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -365,27 +365,98 @@ $ErrorActionPreference = "Stop"
 function Write-UpdateLog([string]$Message) {
     Add-Content -Path $LogFile -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message) -Encoding UTF8
 }
-try {
-    Write-UpdateLog "기존 프로그램 종료 대기"
-    for ($i = 0; $i -lt 120; $i++) {
-        if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
+$TargetDirectory = Split-Path -Parent $Target
+$Backup = "$Target.update-backup"
+$Pending = "$Target.update-new"
+
+function Wait-ForParentExit {
+    for ($i = 0; $i -lt 60; $i++) {
+        if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { return }
         Start-Sleep -Milliseconds 500
     }
-    $Backup = "$Target.update-backup"
+    if (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
+        Write-UpdateLog "정상 종료가 지연되어 기존 프로그램을 종료합니다."
+        Stop-Process -Id $ParentProcessId -Force -ErrorAction SilentlyContinue
+        for ($i = 0; $i -lt 20; $i++) {
+            if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { return }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+function Move-WithRetry([string]$From, [string]$To) {
+    $LastError = $null
+    for ($i = 0; $i -lt 40; $i++) {
+        try {
+            Move-Item -LiteralPath $From -Destination $To -Force -ErrorAction Stop
+            return
+        } catch {
+            $LastError = $_.Exception
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    throw $LastError
+}
+
+function Start-BlogHelper {
+    $Process = Start-Process `
+        -FilePath $Target `
+        -WorkingDirectory $TargetDirectory `
+        -WindowStyle Normal `
+        -PassThru `
+        -ErrorAction Stop
+    Start-Sleep -Seconds 4
+    if ($Process.HasExited) {
+        throw "새 프로그램이 실행 직후 종료되었습니다. 종료 코드: $($Process.ExitCode)"
+    }
+    Write-UpdateLog ("새 프로그램 재실행 성공 (PID: {0})" -f $Process.Id)
+    return $Process
+}
+
+try {
+    Write-UpdateLog "기존 프로그램 종료 대기"
+    Wait-ForParentExit
+    if (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
+        throw "기존 프로그램을 종료하지 못했습니다."
+    }
+
+    New-Item -ItemType Directory -Force -Path $TargetDirectory | Out-Null
     Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $Target) { Copy-Item -LiteralPath $Target -Destination $Backup -Force }
-    Copy-Item -LiteralPath $Source -Destination $Target -Force
+    Remove-Item -LiteralPath $Pending -Force -ErrorAction SilentlyContinue
+
+    Copy-Item -LiteralPath $Source -Destination $Pending -Force -ErrorAction Stop
+    $SourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    $PendingHash = (Get-FileHash -LiteralPath $Pending -Algorithm SHA256).Hash
+    if ($SourceHash -ne $PendingHash) {
+        throw "새 프로그램 파일 검증에 실패했습니다."
+    }
+
+    if (Test-Path -LiteralPath $Target) {
+        Move-WithRetry $Target $Backup
+    }
+    Move-WithRetry $Pending $Target
+    Unblock-File -LiteralPath $Target -ErrorAction SilentlyContinue
     Write-UpdateLog "새 버전 설치 완료"
-    Start-Process -FilePath $Target
-    Start-Sleep -Seconds 2
+    $RestartedProcess = Start-BlogHelper
+
     Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
 } catch {
     Write-UpdateLog ("업데이트 실패: " + $_.Exception.Message)
+    Remove-Item -LiteralPath $Pending -Force -ErrorAction SilentlyContinue
     if ($Backup -and (Test-Path -LiteralPath $Backup)) {
-        Copy-Item -LiteralPath $Backup -Destination $Target -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $Backup -Destination $Target -Force -ErrorAction SilentlyContinue
+        Write-UpdateLog "기존 버전 복구 완료"
     }
-    if (Test-Path -LiteralPath $Target) { Start-Process -FilePath $Target }
+    if (Test-Path -LiteralPath $Target) {
+        try {
+            $RecoveredProcess = Start-BlogHelper
+            Write-UpdateLog "기존 버전 재실행 완료"
+        } catch {
+            Write-UpdateLog ("기존 버전 재실행 실패: " + $_.Exception.Message)
+        }
+    }
 }
 ''',
         encoding="utf-8-sig",
