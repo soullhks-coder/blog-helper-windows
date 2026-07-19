@@ -10346,7 +10346,15 @@ class KeywordApp(ctk.CTk):
                 self.update_dialog.grab_release()
             except tk.TclError:
                 pass
-        self.after(250, self._on_app_close)
+        self.after(250, self._exit_for_windows_update if os.name == "nt" else self._on_app_close)
+
+    def _exit_for_windows_update(self) -> None:
+        try:
+            self._on_app_close()
+        finally:
+            # PyInstaller's one-file parent cannot release BlogHelper.exe until
+            # the embedded Python child exits completely.
+            os._exit(0)
 
     def _handle_delta_prepare_error(self, message: str) -> None:
         fallback = dict((self.pending_update_payload or {}).get("full_asset") or {})
@@ -22942,12 +22950,21 @@ class KeywordApp(ctk.CTk):
 if __name__ == "__main__":
     restart_test_marker = os.environ.get("BLOG_HELPER_RESTART_TEST_MARKER", "").strip()
     if restart_test_marker:
-        # GitHub Actions verifies the actual frozen EXE can be relaunched by the
-        # updater. Keep the process alive long enough for its watchdog check.
         marker_path = Path(restart_test_marker)
         marker_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_path.write_text(f"restarted pid={os.getpid()}\n", encoding="utf-8")
-        time.sleep(8)
+        if os.environ.get("BLOG_HELPER_RESTART_TEST_WINDOW", "").strip() == "1":
+            # The Windows release test must prove a visible GUI window was
+            # created, not merely that a hidden process stayed alive.
+            restart_test_app = ctk.CTk()
+            restart_test_app.title("BlogHelper updater restart test")
+            restart_test_app.geometry("420x180")
+            ctk.CTkLabel(restart_test_app, text="Windows 재실행 확인").pack(expand=True)
+            marker_path.write_text(f"restarted pid={os.getpid()} window=1\n", encoding="utf-8")
+            restart_test_app.after(10_000, restart_test_app.destroy)
+            restart_test_app.mainloop()
+        else:
+            marker_path.write_text(f"restarted pid={os.getpid()}\n", encoding="utf-8")
+            time.sleep(8)
     else:
         app = KeywordApp()
         app.mainloop()

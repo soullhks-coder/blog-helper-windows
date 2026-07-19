@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - full update fallback
     bsdiff4 = None
 
 
-DEFAULT_APP_VERSION = "1.0.5"
+DEFAULT_APP_VERSION = "1.0.6"
 DEFAULT_UPDATE_REPOSITORY = "soullhks-coder/blog-helper-releases"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -359,9 +359,11 @@ def _write_windows_update_script(path: Path) -> None:
     [int]$ParentProcessId,
     [string]$Source,
     [string]$Target,
-    [string]$LogFile
+    [string]$LogFile,
+    [int]$RequireVisibleWindow = 1
 )
 $ErrorActionPreference = "Stop"
+$LaunchedProcessIds = @()
 function Write-UpdateLog([string]$Message) {
     Add-Content -Path $LogFile -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message) -Encoding UTF8
 }
@@ -412,8 +414,11 @@ function Move-WithRetry([string]$From, [string]$To) {
 }
 
 function Start-BlogHelper {
-    # UseShellExecute matches an Explorer double-click and prevents the new GUI
-    # from inheriting the hidden PowerShell updater window state.
+    $ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($Target)
+    $KnownProcessIds = @(
+        Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Id }
+    )
     $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
     $StartInfo.FileName = $Target
     $StartInfo.WorkingDirectory = $TargetDirectory
@@ -423,13 +428,61 @@ function Start-BlogHelper {
     if ($null -eq $Process) {
         throw "Windows 셸에서 새 프로그램을 시작하지 못했습니다."
     }
-    Start-Sleep -Seconds 4
-    $Process.Refresh()
-    if ($Process.HasExited) {
-        throw "새 프로그램이 실행 직후 종료되었습니다. 종료 코드: $($Process.ExitCode)"
+    $script:LaunchedProcessIds = @($Process.Id)
+    Write-UpdateLog ("새 프로그램 실행 요청 (최초 PID: {0}, 창 확인: {1})" -f $Process.Id, $RequireVisibleWindow)
+
+    if ($RequireVisibleWindow -eq 1) {
+        if (-not ("BlogHelperWindowControl" -as [type])) {
+            Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BlogHelperWindowControl {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+"@
+        }
     }
-    Write-UpdateLog ("새 프로그램 재실행 성공 (PID: {0})" -f $Process.Id)
-    return $Process
+
+    # PyInstaller one-file apps can create a second process. Track every new
+    # BlogHelper process and wait until the real GUI window is available.
+    for ($i = 0; $i -lt 120; $i++) {
+        if ($RequireVisibleWindow -eq 0) {
+            try {
+                $Process.Refresh()
+                if (-not $Process.HasExited) {
+                    Write-UpdateLog ("새 프로그램 재실행 성공 (PID: {0}, 테스트 모드)" -f $Process.Id)
+                    return $Process
+                }
+            } catch { }
+        }
+        $Candidates = @(
+            Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+                Where-Object { $KnownProcessIds -notcontains $_.Id }
+        )
+        foreach ($Candidate in $Candidates) {
+            if ($script:LaunchedProcessIds -notcontains $Candidate.Id) {
+                $script:LaunchedProcessIds += $Candidate.Id
+            }
+            try { $Candidate.Refresh() } catch { continue }
+            if ($Candidate.HasExited) { continue }
+            if ($RequireVisibleWindow -eq 0) {
+                Write-UpdateLog ("새 프로그램 재실행 성공 (PID: {0}, 테스트 모드)" -f $Candidate.Id)
+                return $Candidate
+            }
+            if ($Candidate.MainWindowHandle -ne [IntPtr]::Zero) {
+                [BlogHelperWindowControl]::ShowWindowAsync($Candidate.MainWindowHandle, 9) | Out-Null
+                [BlogHelperWindowControl]::ShowWindowAsync($Candidate.MainWindowHandle, 5) | Out-Null
+                [BlogHelperWindowControl]::SetForegroundWindow($Candidate.MainWindowHandle) | Out-Null
+                Write-UpdateLog ("새 프로그램 재실행 성공 (PID: {0}, 창 표시 완료)" -f $Candidate.Id)
+                return $Candidate
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "새 프로그램 프로세스는 시작했지만 화면을 표시하지 못했습니다."
 }
 
 try {
@@ -462,6 +515,10 @@ try {
     Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
 } catch {
     Write-UpdateLog ("업데이트 실패: " + $_.Exception.Message)
+    foreach ($ProcessId in $LaunchedProcessIds) {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
     Remove-Item -LiteralPath $Pending -Force -ErrorAction SilentlyContinue
     if ($Backup -and (Test-Path -LiteralPath $Backup)) {
         Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
@@ -540,36 +597,61 @@ exit 1
     path.chmod(0o700)
 
 
-def launch_update_installer(downloaded_file: Path, data_dir: Path) -> None:
+def launch_update_installer(
+    downloaded_file: Path,
+    data_dir: Path,
+    *,
+    target_executable: Path | None = None,
+    parent_process_id: int | None = None,
+    require_visible_window: bool = True,
+) -> None:
     downloaded_file = Path(downloaded_file).resolve()
     data_dir = Path(data_dir).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
     log_path = data_dir / "update-install.log"
 
     if os.name == "nt":
-        target = Path(sys.executable).resolve()
+        target = Path(target_executable or sys.executable).resolve()
         script_path = data_dir / "apply-update.ps1"
         _write_windows_update_script(script_path)
+        try:
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write("\nWindows 업데이트 도우미 실행 요청\n")
+        except OSError:
+            pass
         command = [
             "powershell.exe",
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-WindowStyle",
-            "Hidden",
             "-File",
             str(script_path),
             "-ParentProcessId",
-            str(os.getpid()),
+            str(parent_process_id or os.getpid()),
             "-Source",
             str(downloaded_file),
             "-Target",
             str(target),
             "-LogFile",
             str(log_path),
+            "-RequireVisibleWindow",
+            "1" if require_visible_window else "0",
         ]
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        subprocess.Popen(command, close_fds=True, creationflags=creation_flags)
+        # Do not use CREATE_NO_WINDOW or PowerShell's Hidden window style here.
+        # Both can leak a hidden startup state into the relaunched GUI process.
+        creation_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
+        )
+        subprocess.Popen(
+            command,
+            close_fds=True,
+            creationflags=creation_flags,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         return
 
     if sys.platform == "darwin":

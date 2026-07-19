@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -14,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app_updater import _write_windows_update_script
+from app_updater import launch_update_installer
 
 
 def sha256_file(path: Path) -> str:
@@ -50,8 +49,6 @@ def main() -> None:
         root = Path(temp_dir)
         marker = root / "restart-success.txt"
         log_path = root / "update-install.log"
-        script_path = root / "apply-update.ps1"
-
         if args.executable:
             executable = args.executable.resolve()
             if not executable.is_file():
@@ -72,37 +69,33 @@ def main() -> None:
             timeout = 20
 
         expected_hash = sha256_file(source)
-        _write_windows_update_script(script_path)
 
         environment = dict(os.environ)
         if args.executable:
             environment["BLOG_HELPER_RESTART_TEST_MARKER"] = str(marker)
+            environment["BLOG_HELPER_RESTART_TEST_WINDOW"] = "1"
             environment["BLOG_HELPER_DISABLE_UPDATES"] = "1"
 
-        subprocess.run(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script_path),
-                "-ParentProcessId",
-                "2147483000",
-                "-Source",
-                str(source),
-                "-Target",
-                str(target),
-                "-LogFile",
-                str(log_path),
-            ],
-            check=True,
-            timeout=timeout,
-            env=environment,
-        )
+        original_environment = dict(os.environ)
+        os.environ.update(environment)
+        try:
+            launch_update_installer(
+                source,
+                root,
+                target_executable=target,
+                parent_process_id=2147483000,
+                require_visible_window=bool(args.executable),
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(original_environment)
 
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and not marker.exists():
+        while time.monotonic() < deadline:
+            if marker.exists() and log_path.exists() and "재실행 성공" in log_path.read_text(
+                encoding="utf-8-sig"
+            ):
+                break
             time.sleep(0.2)
 
         if not marker.exists():
