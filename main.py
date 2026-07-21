@@ -6394,6 +6394,11 @@ def collect_tistory_hosted_image_urls(page) -> list[str]:
   for (const entry of performance.getEntriesByType('resource')) {
     add(entry.name);
   }
+  const editorContent = String(window.tinymce?.activeEditor?.getContent?.() || '');
+  const imageMarker = /\[##_Image\|kage@([^|]+)\|/g;
+  for (const match of editorContent.matchAll(imageMarker)) {
+    add(`https://blog.kakaocdn.net/dna/${match[1].replace(/&amp;/g, '&')}`);
+  }
   return urls;
 }
 """
@@ -6429,6 +6434,19 @@ def choose_fresh_tistory_image_url(before_urls: set[str], observed_urls: Iterabl
     return (preferred or fresh_urls)[-1] if fresh_urls else ""
 
 
+def extract_tistory_attachment_url(payload: object) -> str:
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            match = re.search(r'"url"\s*:\s*"([^"]+)"', payload)
+            return match.group(1).replace("\\/", "/") if match else ""
+    if not isinstance(payload, dict):
+        return ""
+    url = str(payload.get("url") or "").strip()
+    return url if is_tistory_uploaded_image_url(url) else ""
+
+
 def upload_tistory_image_file(
     page,
     image_path: str,
@@ -6448,21 +6466,48 @@ def upload_tistory_image_file(
             response_url = str(response.url or "").strip()
         except Exception:
             return
+        if re.search(r"/manage/post/attach\.json(?:\?|$)", response_url, flags=re.I):
+            try:
+                uploaded_url = extract_tistory_attachment_url(response.text())
+            except Exception:
+                uploaded_url = ""
+            if uploaded_url and uploaded_url not in response_urls:
+                response_urls.append(uploaded_url)
         if is_tistory_uploaded_image_url(response_url) and response_url not in response_urls:
             response_urls.append(response_url)
 
     page.on("response", capture_image_response)
     file_input = None
-    inputs = page.locator('input[type="file"]')
-    for index in range(inputs.count() - 1, -1, -1):
-        candidate = inputs.nth(index)
+
+    try:
+        attach_button = page.locator("#mceu_0-open:visible").last
+        if attach_button.count():
+            attach_button.click(force=True)
+            photo_item = page.locator("#attach-image:visible").last
+            with page.expect_file_chooser(timeout=5000) as chooser_info:
+                photo_item.click(force=True)
+            response_urls.clear()
+            chooser_info.value.set_files(str(path))
+            file_input = True
+    except Exception:
+        file_input = None
+
+    if file_input is None:
         try:
-            accept = (candidate.get_attribute("accept") or "").lower()
-            if not accept or "image" in accept or any(ext in accept for ext in ("png", "jpg", "jpeg", "webp")):
-                file_input = candidate
-                break
+            page.keyboard.press("Escape")
         except Exception:
-            continue
+            pass
+    inputs = page.locator('input[type="file"]')
+    if file_input is None:
+        for index in range(inputs.count() - 1, -1, -1):
+            candidate = inputs.nth(index)
+            try:
+                accept = (candidate.get_attribute("accept") or "").lower()
+                if not accept or "image" in accept or any(ext in accept for ext in ("png", "jpg", "jpeg", "webp")):
+                    file_input = candidate
+                    break
+            except Exception:
+                continue
 
     if file_input is None:
         toolbar_selectors = [

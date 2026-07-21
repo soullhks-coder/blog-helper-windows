@@ -29,6 +29,13 @@ class TistoryNativeImageTests(unittest.TestCase):
             new_url,
         )
 
+    def test_attachment_response_json_returns_uploaded_url(self) -> None:
+        uploaded_url = "https://blog.kakaocdn.net/dna/new-key/image/img.png?credential=test"
+        response = '{"name":"card.png","url":"' + uploaded_url + '","size":123}'
+
+        self.assertEqual(main.extract_tistory_attachment_url(response), uploaded_url)
+        self.assertEqual(main.extract_tistory_attachment_url({"url": uploaded_url}), uploaded_url)
+
     def test_local_cardnews_placeholder_becomes_native_upload_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "body-cardnews-test.png"
