@@ -6,6 +6,29 @@ import main
 
 
 class TistoryNativeImageTests(unittest.TestCase):
+    def test_thumbnail_filename_uses_title_and_underscores(self) -> None:
+        self.assertEqual(
+            main.build_thumbnail_filename("심규덕 변호사 핵심 정보"),
+            "심규덕_변호사_핵심_정보.png",
+        )
+        self.assertEqual(
+            main.build_thumbnail_filename('제목: 테스트/확인?'),
+            "제목_테스트확인.png",
+        )
+
+    def test_fresh_upload_url_never_reuses_previous_image(self) -> None:
+        old_url = "https://blog.kakaocdn.net/dna/old/image/img.png?x=1"
+        new_url = "https://blog.kakaocdn.net/dna/new/image/img.png?x=2"
+
+        self.assertEqual(
+            main.choose_fresh_tistory_image_url({old_url}, [old_url]),
+            "",
+        )
+        self.assertEqual(
+            main.choose_fresh_tistory_image_url({old_url}, [old_url, new_url]),
+            new_url,
+        )
+
     def test_local_cardnews_placeholder_becomes_native_upload_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "body-cardnews-test.png"

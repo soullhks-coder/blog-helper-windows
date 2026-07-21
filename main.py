@@ -73,6 +73,7 @@ else:
     DEFAULT_DATA_DIR = Path.home() / "Library" / "Application Support" / "Blog Helper"
 DATA_DIR = Path(os.environ.get("BLOG_HELPER_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+GENERATED_UPLOAD_DIR = DATA_DIR / "Generated Uploads"
 STATE_FILE = DATA_DIR / "app_state.json"
 DESKTOP_DIR = Path.home() / "Desktop"
 PROMPT_DIR = DESKTOP_DIR / "BlogHelper 프롬프트"
@@ -1101,6 +1102,22 @@ def slugify_korean_text(text: str) -> str:
     cleaned = re.sub(r"[^\w\s-]", "", text.strip().lower())
     cleaned = re.sub(r"[-\s]+", "-", cleaned).strip("-")
     return cleaned or "blog-post"
+
+
+def build_thumbnail_filename(title: str) -> str:
+    """Create a readable cross-platform PNG filename from an article title."""
+    normalized = re.sub(r"\s+", "_", (title or "").strip())
+    normalized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", normalized)
+    normalized = normalized.strip(" ._")
+    if not normalized:
+        normalized = "thumbnail"
+    if normalized.upper() in {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }:
+        normalized = f"_{normalized}"
+    return f"{normalized[:120]}.png"
 
 
 def build_meta_description(topic: str, keyword: str) -> str:
@@ -2961,6 +2978,7 @@ def cleanup_generated_upload_images(paths: list[str | Path]) -> int:
         CARDNEWS_IMAGE_PREFIX,
     )
     data_dir = DATA_DIR.resolve()
+    generated_upload_dir = GENERATED_UPLOAD_DIR.resolve()
     for raw_path in paths:
         if not raw_path:
             continue
@@ -2978,7 +2996,9 @@ def cleanup_generated_upload_images(paths: list[str | Path]) -> int:
             is_in_data_dir = False
         if not is_in_data_dir:
             continue
-        if not image_path.name.startswith(safe_prefixes):
+        is_named_generated_file = image_path.name.startswith(safe_prefixes)
+        is_generated_upload = image_path.parent == generated_upload_dir
+        if not (is_named_generated_file or is_generated_upload):
             continue
         try:
             image_path.unlink()
@@ -6359,10 +6379,20 @@ def collect_tistory_hosted_image_urls(page) -> list[str]:
       add(image.getAttribute('data-url'));
       add(image.getAttribute('data-origin-url'));
       add(image.getAttribute('data-source'));
+      add(image.getAttribute('data-image-src'));
+      add(image.getAttribute('data-file-url'));
+      add(image.getAttribute('data-ke-src'));
+      add(image.getAttribute('original'));
+    }
+    for (const node of Array.from(doc.querySelectorAll('[data-url], [data-origin-url], [data-file-url], [data-ke-src]'))) {
+      add(node.getAttribute('data-url'));
+      add(node.getAttribute('data-origin-url'));
+      add(node.getAttribute('data-file-url'));
+      add(node.getAttribute('data-ke-src'));
     }
   }
   for (const entry of performance.getEntriesByType('resource')) {
-    if (/\.(?:png|jpe?g|webp)(?:\?|$)/i.test(String(entry.name || ''))) add(entry.name);
+    add(entry.name);
   }
   return urls;
 }
@@ -6374,12 +6404,54 @@ def collect_tistory_hosted_image_urls(page) -> list[str]:
     return [str(value) for value in (values or []) if str(value).strip()]
 
 
-def upload_tistory_image_file(page, image_path: str, result_queue: queue.Queue) -> str:
+def is_tistory_uploaded_image_url(value: str) -> bool:
+    url = str(value or "").strip()
+    if not re.match(r"^https?://", url, flags=re.I):
+        return False
+    if not re.search(r"(?:blog\.kakaocdn\.net|tistory\d*\.daumcdn\.net|tistory\.com)", url, flags=re.I):
+        return False
+    if re.search(r"(?:tistory_admin|/static/|favicon|spinner|loading|/icon|/logo)", url, flags=re.I):
+        return False
+    return bool(
+        re.search(r"(?:/attach/|/dna/|/image/|/img\.|\.(?:png|jpe?g|webp)(?:\?|$))", url, flags=re.I)
+    )
+
+
+def choose_fresh_tistory_image_url(before_urls: set[str], observed_urls: Iterable[str]) -> str:
+    fresh_urls: list[str] = []
+    for value in observed_urls:
+        url = str(value or "").strip()
+        if not url or url in before_urls or not is_tistory_uploaded_image_url(url):
+            continue
+        if url not in fresh_urls:
+            fresh_urls.append(url)
+    preferred = [url for url in fresh_urls if re.search(r"\.(?:png|jpe?g|webp)(?:\?|$)", url, flags=re.I)]
+    return (preferred or fresh_urls)[-1] if fresh_urls else ""
+
+
+def upload_tistory_image_file(
+    page,
+    image_path: str,
+    result_queue: queue.Queue,
+    excluded_urls: set[str] | None = None,
+) -> str:
     path = Path(image_path).expanduser().resolve()
     if not path.exists() or not path.is_file():
         raise RuntimeError(f"티스토리에 첨부할 이미지 파일을 찾지 못했습니다: {path.name}")
 
     before_urls = set(collect_tistory_hosted_image_urls(page))
+    before_urls.update(excluded_urls or set())
+    response_urls: list[str] = []
+
+    def capture_image_response(response) -> None:
+        try:
+            response_url = str(response.url or "").strip()
+        except Exception:
+            return
+        if is_tistory_uploaded_image_url(response_url) and response_url not in response_urls:
+            response_urls.append(response_url)
+
+    page.on("response", capture_image_response)
     file_input = None
     inputs = page.locator('input[type="file"]')
     for index in range(inputs.count() - 1, -1, -1):
@@ -6415,6 +6487,7 @@ def upload_tistory_image_file(page, image_path: str, result_queue: queue.Queue) 
                     continue
                 with page.expect_file_chooser(timeout=2500) as chooser_info:
                     button.click(force=True)
+                response_urls.clear()
                 chooser_info.value.set_files(str(path))
                 file_input = True
                 break
@@ -6436,35 +6509,46 @@ def upload_tistory_image_file(page, image_path: str, result_queue: queue.Queue) 
                 photo_button = page.get_by_text(re.compile(r"^(사진|이미지)$"), exact=True).first
                 with page.expect_file_chooser(timeout=2500) as chooser_info:
                     photo_button.click(force=True)
+                response_urls.clear()
                 chooser_info.value.set_files(str(path))
                 file_input = True
             except Exception:
                 pass
 
     if file_input is None:
+        try:
+            page.remove_listener("response", capture_image_response)
+        except Exception:
+            pass
         raise RuntimeError(
             "티스토리 사진 첨부 입력창을 찾지 못했습니다. 편집기 상단의 사진 버튼 구조가 변경되었는지 확인해 주세요."
         )
-    if file_input is not True:
-        file_input.set_input_files(str(path))
+    try:
+        if file_input is not True:
+            try:
+                file_input.set_input_files([])
+            except Exception:
+                pass
+            response_urls.clear()
+            file_input.set_input_files(str(path))
 
-    result_queue.put(("tistory_progress", f"'{path.name}' 파일을 티스토리에 첨부하고 있습니다..."))
-    deadline = time.time() + 35
-    latest_urls: list[str] = []
-    while time.time() < deadline:
-        page.wait_for_timeout(500)
-        latest_urls = collect_tistory_hosted_image_urls(page)
-        new_urls = [url for url in latest_urls if url not in before_urls]
-        preferred = [url for url in new_urls if re.search(r"\.(?:png|jpe?g|webp)(?:\?|$)", url, flags=re.I)]
-        if preferred:
-            return preferred[-1]
-        if new_urls:
-            return new_urls[-1]
-
-    hosted_urls = [url for url in latest_urls if re.search(r"kakaocdn|daumcdn", url, flags=re.I)]
-    if hosted_urls:
-        return hosted_urls[-1]
-    raise RuntimeError(f"'{path.name}' 파일은 선택했지만 티스토리 업로드 주소를 확인하지 못했습니다.")
+        result_queue.put(("tistory_progress", f"'{path.name}' 파일을 티스토리에 첨부하고 있습니다..."))
+        deadline = time.time() + 40
+        while time.time() < deadline:
+            page.wait_for_timeout(500)
+            observed_urls = [*response_urls, *collect_tistory_hosted_image_urls(page)]
+            uploaded_url = choose_fresh_tistory_image_url(before_urls, observed_urls)
+            if uploaded_url:
+                return uploaded_url
+        raise RuntimeError(
+            f"'{path.name}' 파일은 선택했지만 새 티스토리 업로드 주소를 확인하지 못했습니다. "
+            "이전 이미지 주소를 재사용하지 않고 업로드를 중단했습니다."
+        )
+    finally:
+        try:
+            page.remove_listener("response", capture_image_response)
+        except Exception:
+            pass
 
 
 def upload_tistory_native_images(
@@ -6473,10 +6557,23 @@ def upload_tistory_native_images(
     result_queue: queue.Queue,
 ) -> dict[str, str]:
     uploaded_urls: dict[str, str] = {}
+    used_urls: set[str] = set()
     total = len(native_image_files)
     for index, (token, image_path) in enumerate(native_image_files.items(), start=1):
         result_queue.put(("tistory_progress", f"티스토리 이미지 파일 첨부 중 ({index}/{total})..."))
-        uploaded_urls[token] = upload_tistory_image_file(page, image_path, result_queue)
+        uploaded_url = upload_tistory_image_file(
+            page,
+            image_path,
+            result_queue,
+            excluded_urls=used_urls,
+        )
+        if uploaded_url in used_urls:
+            raise RuntimeError(
+                f"'{Path(image_path).name}' 업로드 주소가 앞 이미지와 같습니다. "
+                "중복 이미지를 본문에 넣지 않고 업로드를 중단했습니다."
+            )
+        uploaded_urls[token] = uploaded_url
+        used_urls.add(uploaded_url)
     return uploaded_urls
 
 
@@ -18699,9 +18796,11 @@ class KeywordApp(ctk.CTk):
 
     def _save_thumbnail_image(self) -> None:
         self._generate_thumbnail_preview()
+        title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
         save_path = filedialog.asksaveasfilename(
             title="썸네일 저장",
             defaultextension=".png",
+            initialfile=build_thumbnail_filename(title),
             filetypes=[("PNG 파일", "*.png")],
         )
         if not save_path:
@@ -18735,6 +18834,11 @@ class KeywordApp(ctk.CTk):
             max(width, height),
             "썸네일",
         )
+
+    def _generated_thumbnail_export_path(self, title: str = "") -> Path:
+        article_title = title or self.article_title_entry.get().strip() or self.generated_article_title
+        GENERATED_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        return GENERATED_UPLOAD_DIR / build_thumbnail_filename(article_title)
 
     def _generate_body_cardnews_images(self) -> None:
         article_html = self.article_editor.get("1.0", "end").strip()
@@ -22050,7 +22154,8 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings = settings
         AppStateStore.save(settings)
         try:
-            thumbnail_path = self._export_thumbnail_png(THUMBNAIL_EXPORT_FILE)
+            title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
+            thumbnail_path = self._export_thumbnail_png(self._generated_thumbnail_export_path(title))
         except Exception as exc:
             messagebox.showerror("썸네일 준비 실패", str(exc))
             return
@@ -22111,7 +22216,7 @@ class KeywordApp(ctk.CTk):
             return
 
         try:
-            thumbnail_path = self._export_thumbnail_png(THUMBNAIL_EXPORT_FILE)
+            thumbnail_path = self._export_thumbnail_png(self._generated_thumbnail_export_path(title))
         except Exception as exc:
             messagebox.showerror("썸네일 준비 실패", str(exc))
             return
