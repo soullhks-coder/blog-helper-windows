@@ -10060,6 +10060,7 @@ class KeywordApp(ctk.CTk):
         self.update_detail_label: ctk.CTkLabel | None = None
         self.update_close_button: ctk.CTkButton | None = None
         self.pending_update_payload: dict | None = None
+        self.writing_complete_dialog: ctk.CTkToplevel | None = None
 
         self.result_queue: queue.Queue = queue.Queue()
         self.analysis_worker: AnalysisWorker | None = None
@@ -10408,6 +10409,90 @@ class KeywordApp(ctk.CTk):
         self.update_status_label = None
         self.update_detail_label = None
         self.update_close_button = None
+
+    def _show_writing_complete_dialog(self) -> None:
+        if self.writing_complete_dialog and self.writing_complete_dialog.winfo_exists():
+            try:
+                self.writing_complete_dialog.lift()
+                self.writing_complete_dialog.focus_force()
+            except tk.TclError:
+                pass
+            return
+
+        palette = self._theme_palette()
+        dialog = ctk.CTkToplevel(self)
+        self.writing_complete_dialog = dialog
+        dialog.title("글작성 완료")
+        dialog.geometry("540x300")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.configure(fg_color=palette["shell"])
+        dialog.attributes("-topmost", True)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_writing_complete_dialog_and_reset)
+
+        card = ctk.CTkFrame(
+            dialog,
+            corner_radius=24,
+            fg_color=palette["card"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        card.pack(fill="both", expand=True, padx=22, pady=22)
+
+        ctk.CTkLabel(
+            card,
+            text="✓",
+            text_color="#48d980",
+            font=ctk.CTkFont(size=40, weight="bold"),
+        ).pack(padx=24, pady=(24, 4))
+        ctk.CTkLabel(
+            card,
+            text="글작성이 완료되었습니다.",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=24, weight="bold"),
+        ).pack(padx=24, pady=(0, 8))
+        ctk.CTkLabel(
+            card,
+            text="확인을 누르면 작성 단계를 처음부터 다시 시작할 수 있습니다.",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14),
+        ).pack(padx=24, pady=(0, 18))
+
+        confirm_button = ctk.CTkButton(
+            card,
+            text="확인",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#2f6df6",
+            hover_color="#255dcc",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._close_writing_complete_dialog_and_reset,
+        )
+        confirm_button.pack(padx=24, pady=(0, 18))
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.bind("<Return>", lambda _event: self._close_writing_complete_dialog_and_reset())
+        try:
+            dialog.grab_set()
+            dialog.lift()
+            confirm_button.focus_set()
+        except tk.TclError:
+            pass
+
+    def _close_writing_complete_dialog_and_reset(self) -> None:
+        dialog = self.writing_complete_dialog
+        self.writing_complete_dialog = None
+        if dialog and dialog.winfo_exists():
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+        self._reset_writing_accordion_state()
 
     def _safe_window_geometry(self, geometry: str) -> str:
         match = re.match(r"^(\d+)x(\d+)", geometry or "")
@@ -17353,6 +17438,13 @@ class KeywordApp(ctk.CTk):
         self.writing_completed_sections.clear()
         self._refresh_writing_section_completion_styles()
 
+    def _reset_writing_accordion_state(self) -> None:
+        self._reset_writing_section_completion()
+        for key in self.writing_section_bodies:
+            self._set_writing_section_open(key, key == "topic")
+        self.active_writing_section = "topic"
+        self.after(80, lambda: self._scroll_writing_section_into_view("topic"))
+
     def _refresh_writing_section_completion_styles(self) -> None:
         if not hasattr(self, "writing_completed_sections"):
             return
@@ -22365,6 +22457,8 @@ class KeywordApp(ctk.CTk):
                             self.pending_upload_cleanup_paths = []
                         self.tistory_automation_worker = None
                         cleanup_tistory_automation_files()
+                        self._set_writing_section_completed("publish")
+                        self._show_writing_complete_dialog()
                 elif event_type == "tistory_automation_error":
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
@@ -22754,6 +22848,8 @@ class KeywordApp(ctk.CTk):
         self._update_quick_status("업로드 파이프라인 완료", "\n".join(message), "#48d980")
         self._set_writing_section_completed("publish")
         self._open_writing_section("publish", complete_previous=True)
+        if not tistory_worker_started:
+            self._show_writing_complete_dialog()
 
     def _handle_automation_publish_success(self, payload: dict) -> None:
         completed_item_id = self.active_automation_upload_item_id
