@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - full update fallback
     bsdiff4 = None
 
 
-DEFAULT_APP_VERSION = "1.0.7"
+DEFAULT_APP_VERSION = "1.0.8"
 DEFAULT_UPDATE_REPOSITORY = "soullhks-coder/blog-helper-releases"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -38,6 +38,15 @@ def load_release_config() -> tuple[str, str]:
 
 
 APP_VERSION, UPDATE_REPOSITORY = load_release_config()
+
+
+def _windows_restart_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    environment = dict(source if source is not None else os.environ)
+    for variable_name in tuple(environment):
+        if variable_name.startswith("_PYI_") or variable_name == "_MEIPASS2":
+            environment.pop(variable_name, None)
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
 
 
 def version_key(value: str) -> tuple[int, ...]:
@@ -413,6 +422,19 @@ function Move-WithRetry([string]$From, [string]$To) {
     throw $LastError
 }
 
+function Reset-PyInstallerRestartEnvironment {
+    # A restarted PyInstaller one-file app must unpack into a fresh _MEI
+    # directory. Reusing the old process environment makes python312.dll
+    # disappear as soon as the previous instance finishes cleanup.
+    Get-ChildItem Env: | Where-Object {
+        $_.Name -like "_PYI_*" -or $_.Name -eq "_MEIPASS2"
+    } | ForEach-Object {
+        Remove-Item ("Env:" + $_.Name) -ErrorAction SilentlyContinue
+    }
+    $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
+    Write-UpdateLog "PyInstaller 독립 재실행 환경 준비 완료"
+}
+
 function Start-BlogHelper {
     $ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($Target)
     $KnownProcessIds = @(
@@ -424,6 +446,7 @@ function Start-BlogHelper {
     $StartInfo.WorkingDirectory = $TargetDirectory
     $StartInfo.UseShellExecute = $true
     $StartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+    Reset-PyInstallerRestartEnvironment
     $Process = [System.Diagnostics.Process]::Start($StartInfo)
     if ($null -eq $Process) {
         throw "Windows 셸에서 새 프로그램을 시작하지 못했습니다."
@@ -646,6 +669,10 @@ def launch_update_installer(
             0,
         )
         helper_output_path = data_dir / "update-helper-output.log"
+        # The PowerShell helper must not inherit the one-file bootloader's
+        # private _PYI environment. Its child BlogHelper.exe is a new app
+        # instance, not a worker that may reuse the current _MEI directory.
+        helper_environment = _windows_restart_environment()
         with helper_output_path.open("ab") as helper_output:
             subprocess.Popen(
                 command,
@@ -654,6 +681,7 @@ def launch_update_installer(
                 stdin=subprocess.DEVNULL,
                 stdout=helper_output,
                 stderr=subprocess.STDOUT,
+                env=helper_environment,
             )
         return
 

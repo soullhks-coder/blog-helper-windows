@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -70,15 +71,22 @@ def main() -> None:
 
         expected_hash = sha256_file(source)
 
-        environment = dict(os.environ)
         if args.executable:
+            environment = dict(os.environ)
             environment["BLOG_HELPER_RESTART_TEST_MARKER"] = str(marker)
             environment["BLOG_HELPER_RESTART_TEST_WINDOW"] = "1"
             environment["BLOG_HELPER_DISABLE_UPDATES"] = "1"
-
-        original_environment = dict(os.environ)
-        os.environ.update(environment)
-        try:
+            environment["BLOG_HELPER_SELF_UPDATE_TEST_SOURCE"] = str(source)
+            environment["BLOG_HELPER_SELF_UPDATE_TEST_DATA_DIR"] = str(root)
+            subprocess.Popen(
+                [str(target)],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
             launch_update_installer(
                 source,
                 root,
@@ -86,9 +94,6 @@ def main() -> None:
                 parent_process_id=2147483000,
                 require_visible_window=bool(args.executable),
             )
-        finally:
-            os.environ.clear()
-            os.environ.update(original_environment)
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

@@ -14,6 +14,7 @@ from app_updater import (
     APP_VERSION,
     UpdateCheckWorker,
     UpdateDownloadWorker,
+    _windows_restart_environment,
     _write_macos_update_script,
     _write_windows_update_script,
     delta_asset_name,
@@ -159,12 +160,30 @@ class AppUpdaterTests(unittest.TestCase):
             self.assertIn("$StartInfo.WorkingDirectory = $TargetDirectory", windows_contents)
             self.assertIn("$StartInfo.UseShellExecute = $true", windows_contents)
             self.assertIn("ProcessWindowStyle]::Normal", windows_contents)
+            self.assertIn("Reset-PyInstallerRestartEnvironment", windows_contents)
+            self.assertIn('PYINSTALLER_RESET_ENVIRONMENT = "1"', windows_contents)
+            self.assertIn('$_' + '.Name -like "_PYI_*"', windows_contents)
             self.assertIn("BlogHelperWindowControl", windows_contents)
             self.assertIn("ShowWindowAsync", windows_contents)
             self.assertIn("MainWindowHandle", windows_contents)
             self.assertIn("새 프로그램 재실행 성공", windows_contents)
             self.assertIn('"$TARGET_APP"', mac_script.read_text(encoding="utf-8"))
             self.assertTrue(mac_script.stat().st_mode & 0o100)
+
+    def test_windows_restart_environment_forces_fresh_onefile_unpack(self):
+        environment = _windows_restart_environment(
+            {
+                "PATH": "C:\\Windows",
+                "_PYI_APPLICATION_HOME_DIR": r"C:\\Temp\\_MEI12345",
+                "_PYI_ARCHIVE_FILE": r"C:\\BlogHelper.exe",
+                "_MEIPASS2": r"C:\\Temp\\_MEI12345",
+            }
+        )
+        self.assertEqual(environment["PATH"], "C:\\Windows")
+        self.assertEqual(environment["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", environment)
+        self.assertNotIn("_PYI_ARCHIVE_FILE", environment)
+        self.assertNotIn("_MEIPASS2", environment)
 
     def test_check_prefers_matching_delta_asset(self):
         binary = b"full update" * 1000

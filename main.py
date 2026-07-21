@@ -23044,6 +23044,21 @@ class KeywordApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    self_update_test_source = os.environ.pop("BLOG_HELPER_SELF_UPDATE_TEST_SOURCE", "").strip()
+    self_update_test_data_dir = os.environ.pop("BLOG_HELPER_SELF_UPDATE_TEST_DATA_DIR", "").strip()
+    if self_update_test_source and os.name == "nt" and is_frozen_app():
+        # Windows CI enters through the frozen EXE so the updater is tested
+        # with the same inherited PyInstaller environment as real users.
+        test_data_dir = Path(self_update_test_data_dir or tempfile.mkdtemp(prefix="BlogHelper-update-test-"))
+        launch_update_installer(
+            Path(self_update_test_source),
+            test_data_dir,
+            target_executable=Path(sys.executable),
+            parent_process_id=os.getpid(),
+            require_visible_window=True,
+        )
+        os._exit(0)
+
     restart_test_marker = os.environ.get("BLOG_HELPER_RESTART_TEST_MARKER", "").strip()
     if restart_test_marker:
         marker_path = Path(restart_test_marker)
