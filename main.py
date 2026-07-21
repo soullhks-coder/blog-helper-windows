@@ -2909,6 +2909,44 @@ def extract_inline_image_paths(article_html: str) -> list[str]:
     return paths
 
 
+def prepare_tistory_native_attachment_html(
+    article_html: str,
+    title: str = "",
+) -> tuple[str, dict[str, str]]:
+    """Replace local image placeholders with tokens resolved after Tistory uploads."""
+    pattern = re.compile(
+        r"<figure\b(?=[^>]*blog-helper-inline-image)(?=[^>]*data-blog-helper-inline-image-path=['\"]([^'\"]+)['\"])[^>]*>.*?</figure>",
+        flags=re.I | re.S,
+    )
+    native_files: dict[str, str] = {}
+    counter = 0
+
+    def replace_match(match: re.Match) -> str:
+        nonlocal counter
+        raw_path = unescape(match.group(1) or "").strip()
+        image_path = Path(raw_path).expanduser()
+        if not image_path.exists() or not image_path.is_file():
+            return match.group(0)
+        counter += 1
+        token = f"__BLOG_HELPER_TISTORY_NATIVE_IMAGE_{counter}__"
+        native_files[token] = str(image_path)
+        is_cardnews = "blog-helper-cardnews-image" in match.group(0)
+        label = f"{title or '본문'} {'카드뉴스' if is_cardnews else '본문 이미지'} {counter}"
+        class_names = "blog-helper-inline-image"
+        if is_cardnews:
+            class_names += " blog-helper-cardnews-image"
+        return (
+            f"\n<figure class='{class_names} imageblock alignCenter' "
+            "data-ke-mobilestyle='widthOrigin'>"
+            f"<img src='{token}' alt='{escape(label)}' "
+            "style='max-width:100%;height:auto;display:block;margin:0 auto;' />"
+            f"<figcaption>{escape(label)}</figcaption>"
+            "</figure>\n"
+        )
+
+    return pattern.sub(replace_match, article_html or ""), native_files
+
+
 def cleanup_generated_upload_images(paths: list[str | Path]) -> int:
     deleted_count = 0
     safe_prefixes = (
@@ -3412,6 +3450,7 @@ def build_tistory_editor_automation_script(
     article_html: str,
     mode_only: bool = False,
     thumbnail_data_url: str = "",
+    thumbnail_content_url: str = "",
     collage_images: list[dict[str, str]] | None = None,
     automation_actions: list[str] | None = None,
     tag_names: list[str] | None = None,
@@ -3423,6 +3462,7 @@ def build_tistory_editor_automation_script(
     html_json = json.dumps(article_html, ensure_ascii=False)
     mode_only_json = json.dumps(mode_only)
     thumbnail_data_url_json = json.dumps(thumbnail_data_url)
+    thumbnail_content_url_json = json.dumps(thumbnail_content_url)
     collage_images_json = json.dumps(collage_images or [], ensure_ascii=False)
     actions = list(automation_actions or parse_tistory_automation_prompt(DEFAULT_TISTORY_AUTOMATION_PROMPT))
     if publish_after_input:
@@ -3445,12 +3485,13 @@ def build_tistory_editor_automation_script(
   const html = {html_json};
   const modeOnly = {mode_only_json};
   const thumbnailDataUrl = {thumbnail_data_url_json};
+  const thumbnailContentUrl = {thumbnail_content_url_json};
   const collageImages = {collage_images_json};
   const automationActions = {automation_actions_json};
   const tagNames = {tag_names_json};
   const thumbnailFileName = {thumbnail_file_name_json};
-  const thumbnailHtml = thumbnailDataUrl
-    ? `<p><img src="${{thumbnailDataUrl}}" alt="${{title.replace(/"/g, '&quot;')}} 썸네일" style="max-width:100%;height:auto;display:block;margin:0 auto 24px;" /></p>`
+  const thumbnailHtml = thumbnailContentUrl
+    ? `<p><img src="${{thumbnailContentUrl}}" alt="${{title.replace(/"/g, '&quot;')}} 썸네일" style="max-width:100%;height:auto;display:block;margin:0 auto 24px;" /></p>`
     : '';
   const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
   const collageHtml = Array.isArray(collageImages) && collageImages.length
@@ -3973,7 +4014,7 @@ def build_tistory_editor_automation_script(
     publishNowOk: false,
     publicPublishOk: false,
     closeTabOk: false,
-    thumbnailPrepared: Boolean(thumbnailDataUrl),
+    thumbnailPrepared: Boolean(thumbnailContentUrl || thumbnailDataUrl),
     modeOnly
   }};
   const runAction = async (action) => {{
@@ -3987,7 +4028,7 @@ def build_tistory_editor_automation_script(
       return await clickDialogButton(['확인', 'OK', '예'], 16);
     }}
     if (action === 'paste_thumbnail') {{
-      results.thumbnailPrepared = Boolean(thumbnailDataUrl);
+      results.thumbnailPrepared = Boolean(thumbnailContentUrl || thumbnailDataUrl);
       return results.thumbnailPrepared;
     }}
     if (action === 'switch_html') {{
@@ -6294,12 +6335,158 @@ def run_naver_kin_answer_playwright(
             context.close()
 
 
+def collect_tistory_hosted_image_urls(page) -> list[str]:
+    script = r"""
+() => {
+  const documents = [document];
+  for (const frame of Array.from(document.querySelectorAll('iframe'))) {
+    try {
+      if (frame.contentDocument) documents.push(frame.contentDocument);
+    } catch (_error) {}
+  }
+  const urls = [];
+  const add = (value) => {
+    const url = String(value || '').trim();
+    if (!url || !/^https?:\/\//i.test(url)) return;
+    if (!/(kakaocdn|daumcdn|tistory|kakao)/i.test(url)) return;
+    if (/(tistory_admin|\/static\/|favicon|spinner|loading|\/icon|\/logo)/i.test(url)) return;
+    if (!urls.includes(url)) urls.push(url);
+  };
+  for (const doc of documents) {
+    for (const image of Array.from(doc.querySelectorAll('img'))) {
+      add(image.currentSrc);
+      add(image.src);
+      add(image.getAttribute('data-url'));
+      add(image.getAttribute('data-origin-url'));
+      add(image.getAttribute('data-source'));
+    }
+  }
+  for (const entry of performance.getEntriesByType('resource')) {
+    if (/\.(?:png|jpe?g|webp)(?:\?|$)/i.test(String(entry.name || ''))) add(entry.name);
+  }
+  return urls;
+}
+"""
+    try:
+        values = page.evaluate(script)
+    except Exception:
+        return []
+    return [str(value) for value in (values or []) if str(value).strip()]
+
+
+def upload_tistory_image_file(page, image_path: str, result_queue: queue.Queue) -> str:
+    path = Path(image_path).expanduser().resolve()
+    if not path.exists() or not path.is_file():
+        raise RuntimeError(f"티스토리에 첨부할 이미지 파일을 찾지 못했습니다: {path.name}")
+
+    before_urls = set(collect_tistory_hosted_image_urls(page))
+    file_input = None
+    inputs = page.locator('input[type="file"]')
+    for index in range(inputs.count() - 1, -1, -1):
+        candidate = inputs.nth(index)
+        try:
+            accept = (candidate.get_attribute("accept") or "").lower()
+            if not accept or "image" in accept or any(ext in accept for ext in ("png", "jpg", "jpeg", "webp")):
+                file_input = candidate
+                break
+        except Exception:
+            continue
+
+    if file_input is None:
+        toolbar_selectors = [
+            'button[aria-label*="사진"]',
+            'button[aria-label*="이미지"]',
+            'button[title*="사진"]',
+            'button[title*="이미지"]',
+            'button[id*="image"]',
+            'button[class*="image"]',
+            '[role="button"][class*="image"]',
+            '[data-tooltip*="사진"]',
+            '[data-tooltip*="이미지"]',
+            '[data-name="image"]',
+            '[data-command="image"]',
+            '#mceu_0-open',
+            '.mce-i-image',
+        ]
+        for selector in toolbar_selectors:
+            button = page.locator(selector).first
+            try:
+                if not button.count():
+                    continue
+                with page.expect_file_chooser(timeout=2500) as chooser_info:
+                    button.click(force=True)
+                chooser_info.value.set_files(str(path))
+                file_input = True
+                break
+            except Exception:
+                continue
+        if file_input is None:
+            inputs = page.locator('input[type="file"]')
+            for index in range(inputs.count() - 1, -1, -1):
+                candidate = inputs.nth(index)
+                try:
+                    accept = (candidate.get_attribute("accept") or "").lower()
+                    if not accept or "image" in accept or any(ext in accept for ext in ("png", "jpg", "jpeg", "webp")):
+                        file_input = candidate
+                        break
+                except Exception:
+                    continue
+        if file_input is None:
+            try:
+                photo_button = page.get_by_text(re.compile(r"^(사진|이미지)$"), exact=True).first
+                with page.expect_file_chooser(timeout=2500) as chooser_info:
+                    photo_button.click(force=True)
+                chooser_info.value.set_files(str(path))
+                file_input = True
+            except Exception:
+                pass
+
+    if file_input is None:
+        raise RuntimeError(
+            "티스토리 사진 첨부 입력창을 찾지 못했습니다. 편집기 상단의 사진 버튼 구조가 변경되었는지 확인해 주세요."
+        )
+    if file_input is not True:
+        file_input.set_input_files(str(path))
+
+    result_queue.put(("tistory_progress", f"'{path.name}' 파일을 티스토리에 첨부하고 있습니다..."))
+    deadline = time.time() + 35
+    latest_urls: list[str] = []
+    while time.time() < deadline:
+        page.wait_for_timeout(500)
+        latest_urls = collect_tistory_hosted_image_urls(page)
+        new_urls = [url for url in latest_urls if url not in before_urls]
+        preferred = [url for url in new_urls if re.search(r"\.(?:png|jpe?g|webp)(?:\?|$)", url, flags=re.I)]
+        if preferred:
+            return preferred[-1]
+        if new_urls:
+            return new_urls[-1]
+
+    hosted_urls = [url for url in latest_urls if re.search(r"kakaocdn|daumcdn", url, flags=re.I)]
+    if hosted_urls:
+        return hosted_urls[-1]
+    raise RuntimeError(f"'{path.name}' 파일은 선택했지만 티스토리 업로드 주소를 확인하지 못했습니다.")
+
+
+def upload_tistory_native_images(
+    page,
+    native_image_files: dict[str, str],
+    result_queue: queue.Queue,
+) -> dict[str, str]:
+    uploaded_urls: dict[str, str] = {}
+    total = len(native_image_files)
+    for index, (token, image_path) in enumerate(native_image_files.items(), start=1):
+        result_queue.put(("tistory_progress", f"티스토리 이미지 파일 첨부 중 ({index}/{total})..."))
+        uploaded_urls[token] = upload_tistory_image_file(page, image_path, result_queue)
+    return uploaded_urls
+
+
 def run_tistory_playwright_automation(
     write_url: str,
     script: str,
     result_queue: queue.Queue,
     publish_after_input: bool = False,
     login_timeout_seconds: int = 300,
+    native_image_files: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -6386,6 +6573,11 @@ def run_tistory_playwright_automation(
             result_queue.put(("tistory_progress", "로그인 확인 완료. 프롬프트 순서에 따라 제목·본문·이미지를 자동 입력하고 있습니다..."))
             page.wait_for_timeout(1800)
             page.evaluate("window.onbeforeunload = null")
+            if native_image_files:
+                uploaded_urls = upload_tistory_native_images(page, native_image_files, result_queue)
+                for token, uploaded_url in uploaded_urls.items():
+                    script = script.replace(token, uploaded_url)
+                result_queue.put(("tistory_progress", f"이미지 {len(uploaded_urls)}장을 티스토리 파일로 첨부했습니다."))
             result = page.evaluate(script)
             page.wait_for_timeout(1600)
             result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
@@ -9564,9 +9756,18 @@ class TistoryAutomationWorker(threading.Thread):
     def run(self) -> None:
         try:
             thumbnail_data_url = ""
+            thumbnail_content_url = ""
+            native_image_files: dict[str, str] = {}
             if self.thumbnail_path:
-                self.result_queue.put(("tistory_progress", "썸네일 이미지를 본문 삽입 데이터로 준비 중입니다..."))
+                self.result_queue.put(("tistory_progress", "썸네일 이미지를 티스토리 파일 첨부용으로 준비 중입니다..."))
                 thumbnail_data_url = image_file_to_data_url(self.thumbnail_path)
+                thumbnail_content_url = "__BLOG_HELPER_TISTORY_NATIVE_THUMBNAIL__"
+                native_image_files[thumbnail_content_url] = self.thumbnail_path
+            prepared_article_html, article_native_files = prepare_tistory_native_attachment_html(
+                self.article_html,
+                self.title,
+            )
+            native_image_files.update(article_native_files)
             collage_images: list[dict[str, str]] = []
             if GOOGLE_IMAGE_COLLAGE_ENABLED and self.publish_after_input:
                 self.result_queue.put(("tistory_progress", "Google 이미지 검색에서 본문 콜라주용 참고 이미지 2장을 찾는 중입니다..."))
@@ -9578,9 +9779,10 @@ class TistoryAutomationWorker(threading.Thread):
                     self.result_queue.put(("tistory_progress", "주제와 직접 관련 있는 안전한 콜라주 이미지를 찾지 못해 이미지 삽입은 생략합니다."))
             script = build_tistory_editor_automation_script(
                 self.title,
-                self.article_html,
+                prepared_article_html,
                 mode_only=self.mode_only,
                 thumbnail_data_url=thumbnail_data_url,
+                thumbnail_content_url=thumbnail_content_url,
                 collage_images=collage_images,
                 automation_actions=parse_tistory_automation_prompt(self.automation_prompt),
                 tag_names=self.tag_names,
@@ -9593,6 +9795,7 @@ class TistoryAutomationWorker(threading.Thread):
                 script,
                 self.result_queue,
                 publish_after_input=self.publish_after_input,
+                native_image_files=native_image_files,
             )
             if success:
                 self.result_queue.put(("tistory_automation_done", message))
@@ -17243,35 +17446,6 @@ class KeywordApp(ctk.CTk):
         self.publish_progress_bar.set(0)
         self._generate_thumbnail_preview()
 
-        result_card = self._create_writing_section(
-            parent=parent,
-            section_key="results",
-            title="5. 추천 키워드 결과",
-            row=4,
-            opened=True,
-        )
-
-        self.result_summary = ctk.CTkLabel(
-            result_card,
-            text="분석을 실행하면 여기에서 출처 확인과 워드프레스 업로드를 바로 진행할 수 있습니다.",
-            anchor="w",
-            justify="left",
-            wraplength=960,
-            text_color="#c4cede",
-            font=ctk.CTkFont(size=14),
-        )
-        self.result_summary.grid(row=0, column=0, padx=24, pady=(18, 12), sticky="ew")
-
-        self.result_scroll = ctk.CTkScrollableFrame(
-            result_card,
-            fg_color="#111826",
-            corner_radius=18,
-            height=260,
-        )
-        self.result_scroll.grid(row=1, column=0, padx=24, pady=(0, 22), sticky="ew")
-        self.result_scroll.grid_columnconfigure(0, weight=1)
-        self._contain_child_scroll(self.writing_scroll, self.result_scroll)
-
     def _build_analysis_card(self, parent: ctk.CTkFrame) -> None:
         title = ctk.CTkLabel(
             parent,
@@ -17419,7 +17593,7 @@ class KeywordApp(ctk.CTk):
         self.after(80, lambda key=section_key: self._scroll_writing_section_into_view(key))
 
     def _mark_writing_sections_before(self, section_key: str) -> None:
-        section_order = ("topic", "keyword", "article", "publish", "results")
+        section_order = ("topic", "keyword", "article", "publish")
         try:
             section_index = section_order.index(section_key)
         except ValueError:
@@ -20767,7 +20941,6 @@ class KeywordApp(ctk.CTk):
         self._on_thumbnail_image_adjust_changed()
         self.thumbnail_saved_path = ""
         self._generate_thumbnail_preview()
-        self.result_summary.configure(text="키워드를 선택한 뒤 다음 단계에서 글을 생성합니다.")
         self._open_writing_section("topic")
         self.progress_bar.configure(mode="determinate")
         self.progress_bar.set(0.03)
@@ -22162,7 +22335,6 @@ class KeywordApp(ctk.CTk):
                     self.find_keywords_button.configure(state="normal", text="키워드 찾기")
                     self._set_trend_keyword_buttons_state("normal")
                     messagebox.showerror("분석 실패", payload)
-                    self.result_summary.configure(text=payload)
                 elif event_type == "daum_progress":
                     self.keyword_status_label.configure(text=payload)
                 elif event_type == "daum_done":
@@ -22177,16 +22349,14 @@ class KeywordApp(ctk.CTk):
                     self.newneek_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
-                    self.keyword_status_label.configure(text="다음 실시간 검색어 10개를 불러왔습니다.")
-                    if self.current_insights:
-                        first_keyword = self.current_insights[0].keyword
-                        self.selected_keyword_var.set(first_keyword)
-                        if hasattr(self, "manual_keyword_entry"):
-                            self.manual_keyword_entry.delete(0, "end")
-                        self.reference_textbox.delete("1.0", "end")
-                        self.reference_textbox.insert("1.0", self.daum_reference_map.get(first_keyword, ""))
-                        self._update_reference_count()
-                        self.after(180, lambda keyword=first_keyword: self._auto_collect_reference_for_keyword(keyword))
+                    self.selected_keyword_var.set("")
+                    if hasattr(self, "manual_keyword_entry"):
+                        self.manual_keyword_entry.delete(0, "end")
+                    self.reference_textbox.delete("1.0", "end")
+                    self._update_reference_count()
+                    self.keyword_status_label.configure(
+                        text="다음 실시간 검색어 10개를 불러왔습니다. 원하는 키워드를 직접 선택하면 참고내용을 수집합니다."
+                    )
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
                 elif event_type == "daum_error":
@@ -22745,9 +22915,6 @@ class KeywordApp(ctk.CTk):
         self.keyword_status_label.configure(
             text=f"글 생성 완료 - {payload.get('provider', 'AI')}로 작성되었습니다. 썸네일 테두리는 {random_border_color}으로 랜덤 적용되었습니다."
         )
-        self.result_summary.configure(
-            text="아래 초안이 생성되었습니다. 제목과 본문을 다듬고, 다음 단계에서 썸네일을 직접 제작할 수 있습니다."
-        )
         self._render_generated_article_preview()
         self._open_writing_section("article", complete_previous=True)
 
@@ -22941,6 +23108,8 @@ class KeywordApp(ctk.CTk):
         self._schedule_next_automation_publish()
 
     def _render_results(self, insights: list[KeywordInsight]) -> None:
+        # 추천 키워드는 2단계에서 바로 선택하므로 별도 5단계 결과 카드는 표시하지 않습니다.
+        return
         self._clear_result_cards()
         self.result_summary.configure(
             text=(
@@ -23016,6 +23185,8 @@ class KeywordApp(ctk.CTk):
             upload_button.grid(row=0, column=0, sticky="w")
 
     def _clear_result_cards(self) -> None:
+        if not hasattr(self, "result_scroll"):
+            return
         for widget in self.result_scroll.winfo_children():
             widget.destroy()
 
