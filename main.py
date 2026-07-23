@@ -9,6 +9,7 @@ import random
 import re
 import shlex
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -107,6 +108,9 @@ REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
 GOOGLE_IMAGE_COLLAGE_ENABLED = True
+RUNTIME_LOG_FILE = DATA_DIR / "blog-helper-runtime.log"
+AI_GENERATION_TIMEOUT_SECONDS = 180
+AI_GENERATION_MAX_ATTEMPTS = 2
 CUSTOM_LINK_BUTTON_MARKER = "blog-helper-custom-link"
 CARDNEWS_BORDER_COLOR_PALETTE = [
     "빨간색",
@@ -2352,6 +2356,69 @@ class ThreadsClient:
         return (parse_qs(parsed.query).get("code") or [""])[0]
 
 
+def append_runtime_log(scope: str, message: str) -> None:
+    try:
+        RUNTIME_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with RUNTIME_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"[{timestamp}] [{scope}] {message.strip()}\n")
+    except OSError:
+        pass
+
+
+def is_network_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, URLError):
+        reason = exc.reason
+        if reason is exc:
+            return "timed out" in str(exc).lower()
+        if isinstance(reason, BaseException):
+            return is_network_timeout(reason)
+    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+
+
+def request_json_with_timeout_retry(
+    request: Request,
+    ssl_context: ssl.SSLContext,
+    *,
+    operation_name: str,
+    timeout_seconds: int = AI_GENERATION_TIMEOUT_SECONDS,
+    max_attempts: int = AI_GENERATION_MAX_ATTEMPTS,
+    on_retry: Callable[[str], None] | None = None,
+) -> dict:
+    attempts = max(1, int(max_attempts))
+    timeout = max(30, int(timeout_seconds))
+    for attempt in range(1, attempts + 1):
+        try:
+            with urlopen(request, timeout=timeout, context=ssl_context) as response:
+                response_text = response.read().decode("utf-8", errors="ignore")
+                return json.loads(response_text) if response_text else {}
+        except HTTPError:
+            raise
+        except (URLError, TimeoutError, socket.timeout) as exc:
+            if not is_network_timeout(exc):
+                raise
+            append_runtime_log(
+                "AI",
+                f"{operation_name} 읽기 시간 초과 ({attempt}/{attempts}, 제한 {timeout}초)",
+            )
+            if attempt >= attempts:
+                raise RuntimeError(
+                    f"{operation_name} 응답이 지연되어 {attempts}회 시도 후 중단했습니다. "
+                    "잠시 후 다시 글 작성을 눌러 주세요."
+                ) from exc
+            retry_message = (
+                f"{operation_name} 응답이 늦어 자동으로 다시 시도합니다. "
+                f"({attempt + 1}/{attempts})"
+            )
+            if on_retry is not None:
+                on_retry(retry_message)
+            time.sleep(1.5)
+
+    raise RuntimeError(f"{operation_name} 응답을 받지 못했습니다.")
+
+
 class OpenAIClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key.strip()
@@ -2389,7 +2456,12 @@ class OpenAIClient:
             "model_count": len(models),
         }
 
-    def generate_article(self, model_name: str, prompt: str) -> str:
+    def generate_article(
+        self,
+        model_name: str,
+        prompt: str,
+        on_retry: Callable[[str], None] | None = None,
+    ) -> str:
         request = Request(
             "https://api.openai.com/v1/chat/completions",
             data=json.dumps(
@@ -2407,8 +2479,12 @@ class OpenAIClient:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=60, context=self.ssl_context) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+            payload = request_json_with_timeout_retry(
+                request,
+                self.ssl_context,
+                operation_name="OpenAI 글 생성",
+                on_retry=on_retry,
+            )
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"OpenAI 글 생성 실패 ({exc.code}): {detail[:240]}") from exc
@@ -2426,7 +2502,12 @@ class GeminiClient:
         self.api_key = api_key.strip()
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-    def generate_article(self, model_name: str, prompt: str) -> str:
+    def generate_article(
+        self,
+        model_name: str,
+        prompt: str,
+        on_retry: Callable[[str], None] | None = None,
+    ) -> str:
         if not self.api_key:
             raise RuntimeError("제미나이 API 키를 입력해 주세요.")
 
@@ -2446,8 +2527,12 @@ class GeminiClient:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=60, context=self.ssl_context) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+            payload = request_json_with_timeout_retry(
+                request,
+                self.ssl_context,
+                operation_name="제미나이 글 생성",
+                on_retry=on_retry,
+            )
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"제미나이 글 생성 실패 ({exc.code}): {detail[:240]}") from exc
@@ -9993,7 +10078,7 @@ class ArticleGenerationWorker(threading.Thread):
                 + reference_block
             )
             self.result_queue.put(("article_progress", (0.25, "AI 모델에 제목 생성을 요청하고 있습니다...")))
-            raw_title, provider_name = self._generate_with_provider(title_prompt)
+            raw_title, provider_name = self._generate_with_provider(title_prompt, progress=0.25)
             generated_title = clean_generated_title(raw_title, self.keyword)
 
             managed_prompt = render_prompt_template(
@@ -10019,7 +10104,7 @@ class ArticleGenerationWorker(threading.Thread):
                 + reference_block
             )
             self.result_queue.put(("article_progress", (0.45, "AI 모델에 본문 생성을 요청하고 있습니다...")))
-            article_html, provider_name = self._generate_with_provider(prompt)
+            article_html, provider_name = self._generate_with_provider(prompt, progress=0.45)
 
             self.result_queue.put(("article_progress", (0.8, "생성된 글을 정리하고 있습니다...")))
             article_html = normalize_generated_article_html(article_html)
@@ -10045,16 +10130,33 @@ class ArticleGenerationWorker(threading.Thread):
                 )
             )
         except Exception as exc:  # pragma: no cover - runtime handling
-            self.result_queue.put(("article_error", str(exc)))
+            error_message = str(exc).strip() or exc.__class__.__name__
+            if is_network_timeout(exc):
+                error_message = (
+                    "AI 글 생성 응답 시간이 초과되었습니다. 잠시 후 다시 글 작성을 눌러 주세요."
+                )
+            append_runtime_log("ARTICLE", f"글 생성 실패: {error_message}")
+            self.result_queue.put(("article_error", error_message))
 
-    def _generate_with_provider(self, prompt: str) -> tuple[str, str]:
+    def _generate_with_provider(self, prompt: str, progress: float = 0.45) -> tuple[str, str]:
+        def report_retry(message: str) -> None:
+            self.result_queue.put(("article_progress", (progress, message)))
+
         if self.settings.preferred_ai_provider == "gemini":
             return (
-                GeminiClient(self.settings.gemini_api_key).generate_article(self.settings.gemini_model, prompt),
+                GeminiClient(self.settings.gemini_api_key).generate_article(
+                    self.settings.gemini_model,
+                    prompt,
+                    on_retry=report_retry,
+                ),
                 "Gemini",
             )
         return (
-            OpenAIClient(self.settings.gpt_api_key).generate_article(self.settings.gpt_model, prompt),
+            OpenAIClient(self.settings.gpt_api_key).generate_article(
+                self.settings.gpt_model,
+                prompt,
+                on_retry=report_retry,
+            ),
             "GPT",
         )
 
@@ -22724,10 +22826,11 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "article_done":
                     self._handle_article_generation_success(payload)
                 elif event_type == "article_error":
+                    self.article_worker = None
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
                     self.article_progress_bar.set(0)
-                    self.article_progress_label.configure(text="글 생성에 실패했습니다. API 설정과 네트워크를 확인해 주세요.")
+                    self.article_progress_label.configure(text=str(payload))
                     self.generate_article_button.configure(state="normal", text="다음: 글 작성")
                     self.keyword_status_label.configure(text="글 생성 실패")
                     messagebox.showerror("글 생성 오류", payload)
@@ -23051,6 +23154,7 @@ class KeywordApp(ctk.CTk):
         )
 
     def _handle_article_generation_success(self, payload: dict) -> None:
+        self.article_worker = None
         self.generated_article_title = payload.get("title", self._selected_or_manual_keyword())
         self.generated_article_html = compact_inline_image_sources_for_editor(
             payload.get("html", ""),
