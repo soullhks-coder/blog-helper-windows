@@ -6724,19 +6724,9 @@ def collect_tistory_representative_preview_signatures(page) -> list[str]:
     const style = window.getComputedStyle(node);
     return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
   };
-  const panelCandidates = Array.from(document.querySelectorAll('section, article, form, div'))
-    .filter((node) => {
-      if (!visible(node)) return false;
-      const text = String(node.innerText || '').replace(/\s+/g, ' ').trim();
-      return text.includes('발행일') && /공개\s*발행/.test(text);
-    })
-    .sort((a, b) => {
-      const ar = a.getBoundingClientRect();
-      const br = b.getBoundingClientRect();
-      return (ar.width * ar.height) - (br.width * br.height);
-    });
-  const panel = panelCandidates[0];
-  if (!panel) return [];
+  const modal = document.querySelector('.ReactModal__Content--after-open, .editor_layer');
+  const panel = modal?.querySelector('.box_thumb');
+  if (!panel || !visible(panel)) return [];
   const signatures = [];
   for (const image of Array.from(panel.querySelectorAll('img'))) {
     if (!visible(image)) continue;
@@ -6766,64 +6756,35 @@ def collect_tistory_representative_preview_signatures(page) -> list[str]:
 
 
 def remove_tistory_existing_representative_image(page) -> bool:
-    script = r"""
-() => {
-  const visible = (node) => {
-    if (!node) return false;
-    const rect = node.getBoundingClientRect();
-    const style = window.getComputedStyle(node);
-    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-  };
-  const panels = Array.from(document.querySelectorAll('section, article, form, div'))
-    .filter((node) => {
-      if (!visible(node)) return false;
-      const text = String(node.innerText || '').replace(/\s+/g, ' ').trim();
-      return text.includes('발행일') && /공개\s*발행/.test(text);
-    })
-    .sort((a, b) => {
-      const ar = a.getBoundingClientRect();
-      const br = b.getBoundingClientRect();
-      return (ar.width * ar.height) - (br.width * br.height);
-    });
-  const panel = panels[0];
-  if (!panel) return false;
-  const images = Array.from(panel.querySelectorAll('img'))
-    .filter((image) => {
-      if (!visible(image)) return false;
-      const rect = image.getBoundingClientRect();
-      return rect.width >= 40 && rect.height >= 40 && rect.width <= 420 && rect.height <= 420;
-    })
-    .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
-  for (const image of images) {
-    const imageRect = image.getBoundingClientRect();
-    let container = image.parentElement;
-    for (let depth = 0; container && depth < 6; depth += 1, container = container.parentElement) {
-      const controls = Array.from(container.querySelectorAll('button, [role="button"], a')).filter(visible);
-      const removeButton = controls.find((node) => {
-        const rect = node.getBoundingClientRect();
-        const text = String(
-          node.innerText || node.textContent || node.getAttribute('aria-label') || node.getAttribute('title') || ''
-        ).replace(/\s+/g, ' ').trim();
-        const namedRemove = /^(?:-|−|×|x)$|삭제|제거|초기화/.test(text);
-        const smallOverlay = rect.width <= 44
-          && rect.height <= 44
-          && rect.left >= imageRect.right - 54
-          && rect.top <= imageRect.top + 54;
-        return namedRemove || smallOverlay;
-      });
-      if (removeButton) {
-        removeButton.click();
-        return true;
-      }
-    }
-  }
-  return false;
-}
-"""
     try:
-        return bool(page.evaluate(script))
+        remove_buttons = page.locator(
+            ".ReactModal__Content--after-open .box_thumb .ico_delete, "
+            ".ReactModal__Content--after-open .box_thumb button"
+        )
+        for index in range(remove_buttons.count()):
+            candidate = remove_buttons.nth(index)
+            if candidate.is_visible():
+                candidate.click(force=True)
+                return True
     except Exception:
-        return False
+        pass
+    return False
+
+
+def wait_for_tistory_publish_panel(page, timeout_ms: int = 20_000) -> bool:
+    deadline = time.time() + max(1, timeout_ms) / 1000
+    while time.time() < deadline:
+        try:
+            modal = page.locator(".ReactModal__Content--after-open")
+            thumb_box = modal.locator(".box_thumb")
+            publish_button = modal.locator("#publish-btn")
+            if modal.count() and thumb_box.count() and publish_button.count():
+                if modal.first.is_visible() and publish_button.first.is_visible():
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+    return False
 
 
 def attach_tistory_representative_image_file(
@@ -6831,74 +6792,49 @@ def attach_tistory_representative_image_file(
     image_path: str,
     result_queue: queue.Queue,
 ) -> bool:
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-
     path = Path(image_path).expanduser().resolve()
     if not path.exists() or not path.is_file():
         raise RuntimeError(f"현재 글의 대표이미지 파일을 찾지 못했습니다: {path.name}")
 
-    label_pattern = re.compile(r"^대표\s*이미지\s*추가$")
+    if not wait_for_tistory_publish_panel(page):
+        raise RuntimeError(
+            "티스토리 발행 설정창이 열리지 않았습니다. "
+            "완료 버튼 처리 후 발행창이 표시되는지 확인해 주세요."
+        )
 
-    def visible_add_button():
-        candidates = page.get_by_text(label_pattern, exact=True)
-        for index in range(candidates.count() - 1, -1, -1):
-            candidate = candidates.nth(index)
-            try:
-                if candidate.is_visible():
-                    return candidate
-            except Exception:
-                continue
-        return None
-
-    add_button = visible_add_button()
     before_signatures = collect_tistory_representative_preview_signatures(page)
 
-    if add_button is None:
-        if before_signatures:
-            result_queue.put(("tistory_progress", "이전 대표이미지 선택을 지우고 현재 글의 썸네일로 교체합니다..."))
-            remove_tistory_existing_representative_image(page)
-            page.wait_for_timeout(800)
-        add_button = visible_add_button()
+    if before_signatures:
+        result_queue.put(("tistory_progress", "이전 대표이미지 선택을 지우고 현재 글의 썸네일로 교체합니다..."))
+        if not remove_tistory_existing_representative_image(page):
+            raise RuntimeError(
+                "티스토리 발행창의 이전 대표이미지를 지우지 못했습니다. "
+                "잘못된 이미지를 발행하지 않도록 작업을 중단했습니다."
+            )
+        page.wait_for_timeout(800)
 
-    if add_button is None:
+    representative_inputs = page.locator(
+        '.ReactModal__Content--after-open .box_thumb input[type="file"]'
+    )
+    if not representative_inputs.count():
         raise RuntimeError(
-            "티스토리 발행창의 '대표이미지 추가' 버튼을 찾지 못했습니다. "
-            "이전 대표이미지를 그대로 사용하지 않고 발행을 중단했습니다."
+            "티스토리 발행창의 대표이미지 파일 입력칸을 찾지 못했습니다. "
+            "티스토리 화면 구조가 바뀌었는지 확인해 주세요."
         )
 
     result_queue.put(("tistory_progress", f"현재 글 대표이미지 '{path.name}' 파일을 직접 선택하고 있습니다..."))
     selected_exact_file = False
-    try:
-        with page.expect_file_chooser(timeout=10_000) as chooser_info:
-            add_button.click(force=True)
-        chooser_info.value.set_files(str(path))
-        selected_exact_file = True
-    except PlaywrightTimeoutError:
-        page.wait_for_timeout(500)
-        inputs = page.locator('input[type="file"]')
-        for index in range(inputs.count() - 1, -1, -1):
-            candidate = inputs.nth(index)
-            try:
-                nearby_text = candidate.evaluate(
-                    r"""node => {
-                      let cursor = node;
-                      for (let depth = 0; cursor && depth < 7; depth += 1, cursor = cursor.parentElement) {
-                        const text = String(cursor.innerText || '').replace(/\s+/g, ' ').trim();
-                        if (text.includes('대표이미지') || text.includes('대표 이미지')) return text;
-                      }
-                      return '';
-                    }"""
-                )
-                if not nearby_text:
-                    continue
-                candidate.set_input_files([])
-                candidate.set_input_files(str(path))
-                selected_name = candidate.evaluate("node => node.files?.[0]?.name || ''")
-                selected_exact_file = selected_name == path.name
-                if selected_exact_file:
-                    break
-            except Exception:
-                continue
+    for index in range(representative_inputs.count() - 1, -1, -1):
+        candidate = representative_inputs.nth(index)
+        try:
+            candidate.set_input_files([])
+            candidate.set_input_files(str(path))
+            selected_name = candidate.evaluate("node => node.files?.[0]?.name || ''")
+            selected_exact_file = selected_name == path.name
+            if selected_exact_file:
+                break
+        except Exception:
+            continue
 
     if not selected_exact_file:
         raise RuntimeError(

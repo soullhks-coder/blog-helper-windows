@@ -1,11 +1,72 @@
+import queue
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import main
 
 
 class TistoryNativeImageTests(unittest.TestCase):
+    def test_representative_image_replaces_old_preview_through_thumb_box_input(self) -> None:
+        class FakeInput:
+            selected_path = ""
+
+            def set_input_files(self, value) -> None:
+                if value:
+                    self.selected_path = str(value)
+
+            def evaluate(self, _script: str) -> str:
+                return Path(self.selected_path).name
+
+        class FakeLocator:
+            def __init__(self, candidate: FakeInput) -> None:
+                self.candidate = candidate
+
+            def count(self) -> int:
+                return 1
+
+            def nth(self, _index: int) -> FakeInput:
+                return self.candidate
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.input = FakeInput()
+                self.selector = ""
+
+            def locator(self, selector: str) -> FakeLocator:
+                self.selector = selector
+                return FakeLocator(self.input)
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "현재_글_썸네일.png"
+            image_path.write_bytes(b"current-thumbnail")
+            page = FakePage()
+            events: queue.Queue = queue.Queue()
+
+            with (
+                patch.object(main, "wait_for_tistory_publish_panel", return_value=True),
+                patch.object(
+                    main,
+                    "collect_tistory_representative_preview_signatures",
+                    side_effect=[["old-preview"], ["new-preview"]],
+                ),
+                patch.object(main, "remove_tistory_existing_representative_image", return_value=True) as remove,
+            ):
+                attached = main.attach_tistory_representative_image_file(
+                    page,
+                    str(image_path),
+                    events,
+                )
+
+            self.assertTrue(attached)
+            remove.assert_called_once_with(page)
+            self.assertIn(".box_thumb", page.selector)
+            self.assertEqual(Path(page.input.selected_path), image_path.resolve())
+
     def test_thumbnail_filename_uses_title_and_underscores(self) -> None:
         self.assertEqual(
             main.build_thumbnail_filename("심규덕 변호사 핵심 정보"),
