@@ -3573,9 +3573,14 @@ def build_tistory_editor_automation_script(
     if publish_after_input:
         # 발행일/공개발행은 React UI가 synthetic JS click을 무시할 수 있어
         # run_tistory_playwright_automation()에서 Playwright 네이티브 클릭으로 처리합니다.
-        actions = [action for action in actions if action not in {"set_publish_now", "click_public_publish"}]
+        # 대표이미지도 기존 편집기 파일 입력칸과 혼동하지 않도록 Playwright 파일 선택기로 처리합니다.
+        actions = [
+            action
+            for action in actions
+            if action not in {"attach_representative_image", "set_publish_now", "click_public_publish"}
+        ]
         # 태그 입력은 사용자가 프롬프트에서 제거하면 실행하지 않아야 하므로 강제 추가하지 않습니다.
-        for required_action in ("click_complete", "attach_representative_image"):
+        for required_action in ("click_complete",):
             if required_action not in actions:
                 actions.append(required_action)
     if close_after_publish:
@@ -6707,6 +6712,211 @@ def upload_tistory_native_images(
     return uploaded_urls
 
 
+def collect_tistory_representative_preview_signatures(page) -> list[str]:
+    script = r"""
+() => {
+  const visible = (node) => {
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  };
+  const panelCandidates = Array.from(document.querySelectorAll('section, article, form, div'))
+    .filter((node) => {
+      if (!visible(node)) return false;
+      const text = String(node.innerText || '').replace(/\s+/g, ' ').trim();
+      return text.includes('발행일') && /공개\s*발행/.test(text);
+    })
+    .sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return (ar.width * ar.height) - (br.width * br.height);
+    });
+  const panel = panelCandidates[0];
+  if (!panel) return [];
+  const signatures = [];
+  for (const image of Array.from(panel.querySelectorAll('img'))) {
+    if (!visible(image)) continue;
+    const rect = image.getBoundingClientRect();
+    if (rect.width < 40 || rect.height < 40) continue;
+    const src = String(image.currentSrc || image.src || image.getAttribute('src') || '');
+    const signature = `${src}|${Math.round(rect.width)}x${Math.round(rect.height)}`;
+    if (!signatures.includes(signature)) signatures.push(signature);
+  }
+  for (const node of Array.from(panel.querySelectorAll('*'))) {
+    if (!visible(node)) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 40 || rect.height < 40) continue;
+    const background = String(window.getComputedStyle(node).backgroundImage || '');
+    if (!background || background === 'none') continue;
+    const signature = `${background}|${Math.round(rect.width)}x${Math.round(rect.height)}`;
+    if (!signatures.includes(signature)) signatures.push(signature);
+  }
+  return signatures;
+}
+"""
+    try:
+        values = page.evaluate(script)
+    except Exception:
+        return []
+    return [str(value) for value in (values or []) if str(value).strip()]
+
+
+def remove_tistory_existing_representative_image(page) -> bool:
+    script = r"""
+() => {
+  const visible = (node) => {
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  };
+  const panels = Array.from(document.querySelectorAll('section, article, form, div'))
+    .filter((node) => {
+      if (!visible(node)) return false;
+      const text = String(node.innerText || '').replace(/\s+/g, ' ').trim();
+      return text.includes('발행일') && /공개\s*발행/.test(text);
+    })
+    .sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return (ar.width * ar.height) - (br.width * br.height);
+    });
+  const panel = panels[0];
+  if (!panel) return false;
+  const images = Array.from(panel.querySelectorAll('img'))
+    .filter((image) => {
+      if (!visible(image)) return false;
+      const rect = image.getBoundingClientRect();
+      return rect.width >= 40 && rect.height >= 40 && rect.width <= 420 && rect.height <= 420;
+    })
+    .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+  for (const image of images) {
+    const imageRect = image.getBoundingClientRect();
+    let container = image.parentElement;
+    for (let depth = 0; container && depth < 6; depth += 1, container = container.parentElement) {
+      const controls = Array.from(container.querySelectorAll('button, [role="button"], a')).filter(visible);
+      const removeButton = controls.find((node) => {
+        const rect = node.getBoundingClientRect();
+        const text = String(
+          node.innerText || node.textContent || node.getAttribute('aria-label') || node.getAttribute('title') || ''
+        ).replace(/\s+/g, ' ').trim();
+        const namedRemove = /^(?:-|−|×|x)$|삭제|제거|초기화/.test(text);
+        const smallOverlay = rect.width <= 44
+          && rect.height <= 44
+          && rect.left >= imageRect.right - 54
+          && rect.top <= imageRect.top + 54;
+        return namedRemove || smallOverlay;
+      });
+      if (removeButton) {
+        removeButton.click();
+        return true;
+      }
+    }
+  }
+  return false;
+}
+"""
+    try:
+        return bool(page.evaluate(script))
+    except Exception:
+        return False
+
+
+def attach_tistory_representative_image_file(
+    page,
+    image_path: str,
+    result_queue: queue.Queue,
+) -> bool:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    path = Path(image_path).expanduser().resolve()
+    if not path.exists() or not path.is_file():
+        raise RuntimeError(f"현재 글의 대표이미지 파일을 찾지 못했습니다: {path.name}")
+
+    label_pattern = re.compile(r"^대표\s*이미지\s*추가$")
+
+    def visible_add_button():
+        candidates = page.get_by_text(label_pattern, exact=True)
+        for index in range(candidates.count() - 1, -1, -1):
+            candidate = candidates.nth(index)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    add_button = visible_add_button()
+    before_signatures = collect_tistory_representative_preview_signatures(page)
+
+    if add_button is None:
+        if before_signatures:
+            result_queue.put(("tistory_progress", "이전 대표이미지 선택을 지우고 현재 글의 썸네일로 교체합니다..."))
+            remove_tistory_existing_representative_image(page)
+            page.wait_for_timeout(800)
+        add_button = visible_add_button()
+
+    if add_button is None:
+        raise RuntimeError(
+            "티스토리 발행창의 '대표이미지 추가' 버튼을 찾지 못했습니다. "
+            "이전 대표이미지를 그대로 사용하지 않고 발행을 중단했습니다."
+        )
+
+    result_queue.put(("tistory_progress", f"현재 글 대표이미지 '{path.name}' 파일을 직접 선택하고 있습니다..."))
+    selected_exact_file = False
+    try:
+        with page.expect_file_chooser(timeout=10_000) as chooser_info:
+            add_button.click(force=True)
+        chooser_info.value.set_files(str(path))
+        selected_exact_file = True
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(500)
+        inputs = page.locator('input[type="file"]')
+        for index in range(inputs.count() - 1, -1, -1):
+            candidate = inputs.nth(index)
+            try:
+                nearby_text = candidate.evaluate(
+                    r"""node => {
+                      let cursor = node;
+                      for (let depth = 0; cursor && depth < 7; depth += 1, cursor = cursor.parentElement) {
+                        const text = String(cursor.innerText || '').replace(/\s+/g, ' ').trim();
+                        if (text.includes('대표이미지') || text.includes('대표 이미지')) return text;
+                      }
+                      return '';
+                    }"""
+                )
+                if not nearby_text:
+                    continue
+                candidate.set_input_files([])
+                candidate.set_input_files(str(path))
+                selected_name = candidate.evaluate("node => node.files?.[0]?.name || ''")
+                selected_exact_file = selected_name == path.name
+                if selected_exact_file:
+                    break
+            except Exception:
+                continue
+
+    if not selected_exact_file:
+        raise RuntimeError(
+            f"현재 글의 대표이미지 '{path.name}' 파일을 티스토리 대표이미지 입력칸에 넣지 못했습니다. "
+            "이전 이미지를 재사용하지 않고 발행을 중단했습니다."
+        )
+
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        page.wait_for_timeout(500)
+        after_signatures = collect_tistory_representative_preview_signatures(page)
+        if after_signatures and after_signatures != before_signatures:
+            result_queue.put(("tistory_progress", f"대표이미지를 현재 글 파일로 교체했습니다: {path.name}"))
+            return True
+
+    raise RuntimeError(
+        f"'{path.name}' 파일은 선택했지만 대표이미지 미리보기가 새 이미지로 바뀐 것을 확인하지 못했습니다. "
+        "이전 대표이미지로 잘못 발행하지 않도록 공개발행을 중단했습니다."
+    )
+
+
 def run_tistory_playwright_automation(
     write_url: str,
     script: str,
@@ -6714,6 +6924,7 @@ def run_tistory_playwright_automation(
     publish_after_input: bool = False,
     login_timeout_seconds: int = 300,
     native_image_files: dict[str, str] | None = None,
+    representative_image_path: str = "",
 ) -> tuple[bool, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -6817,6 +7028,12 @@ def run_tistory_playwright_automation(
             if not (result_payload.get("bodyOk") or result_payload.get("richBodyOk")) and not result_payload.get("modeOnly"):
                 raise RuntimeError("티스토리 본문 입력 요소를 찾지 못했습니다.")
             if publish_after_input:
+                if representative_image_path:
+                    attach_tistory_representative_image_file(
+                        page,
+                        representative_image_path,
+                        result_queue,
+                    )
                 published = click_tistory_public_publish_native(page, result_queue)
                 if not published:
                     raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
@@ -10023,6 +10240,7 @@ class TistoryAutomationWorker(threading.Thread):
                 self.result_queue,
                 publish_after_input=self.publish_after_input,
                 native_image_files=native_image_files,
+                representative_image_path=self.thumbnail_path if self.publish_after_input else "",
             )
             if success:
                 self.result_queue.put(("tistory_automation_done", message))

@@ -62,6 +62,29 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertIn("const thumbnailHtml = thumbnailContentUrl", script)
         self.assertNotIn("const thumbnailHtml = thumbnailDataUrl", script)
 
+    def test_publish_script_leaves_representative_image_to_playwright_file_chooser(self) -> None:
+        script = main.build_tistory_editor_automation_script(
+            "테스트 제목",
+            "<p>본문</p>",
+            thumbnail_data_url="data:image/png;base64,AA==",
+            thumbnail_content_url="https://blog.kakaocdn.net/current-thumbnail.png",
+            automation_actions=[
+                "set_title",
+                "set_body",
+                "click_complete",
+                "attach_representative_image",
+                "click_public_publish",
+            ],
+            publish_after_input=True,
+        )
+
+        actions_start = script.index("const automationActions = ")
+        actions_end = script.index(";", actions_start)
+        actions_line = script[actions_start:actions_end]
+        self.assertIn("click_complete", actions_line)
+        self.assertNotIn("attach_representative_image", actions_line)
+        self.assertNotIn("click_public_publish", actions_line)
+
 
 if __name__ == "__main__":
     unittest.main()
