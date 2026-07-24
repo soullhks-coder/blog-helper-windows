@@ -428,7 +428,8 @@ def create_default_cardnews_png(
         )
     elements.append(
         f'<text x="{width / 2}" y="{height * 0.9}" text-anchor="middle" font-family="Apple SD Gothic Neo, Noto Sans CJK KR, sans-serif" '
-        f'font-size="{max(20, min(width, height) * 0.029)}" font-weight="800" fill="{border_color}">BLOG HELPER CARD NEWS</text>'
+        f'font-size="{max(20, min(width, height) * 0.029)}" font-weight="800" fill="{border_color}">'
+        f'{escape(settings.cardnews_signature)}</text>'
     )
     elements.append("</svg>")
     return render_svg_to_png("\n".join(elements), destination, max(width, height), "기본 카드뉴스")
@@ -1271,6 +1272,7 @@ class WordPressSettings:
     cardnews_text_stroke_color: str = "없음"
     cardnews_font_size: int = 78
     cardnews_shadow: str = "없음"
+    cardnews_signature: str = "BLOG HELPER CARD NEWS"
     cardnews_slide_styles: list[dict] = field(default_factory=list)
     automation_queue: list[dict] = field(default_factory=list)
     automation_interval_hours: int = 1
@@ -1639,6 +1641,7 @@ class AppStateStore:
             cardnews_text_stroke_color=payload.get("cardnews_text_stroke_color", "없음"),
             cardnews_font_size=payload.get("cardnews_font_size", 78),
             cardnews_shadow=payload.get("cardnews_shadow", "없음"),
+            cardnews_signature=payload.get("cardnews_signature", "BLOG HELPER CARD NEWS"),
             cardnews_slide_styles=payload.get("cardnews_slide_styles", []),
             automation_queue=payload.get("automation_queue", []),
             automation_interval_hours=payload.get("automation_interval_hours", 1),
@@ -17627,7 +17630,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         self.cardnews_heading_entry.grid(row=1, column=0, padx=14, pady=(0, 8), sticky="ew")
-        self.cardnews_heading_entry.bind("<KeyRelease>", lambda _event: self._on_cardnews_slide_text_changed())
+        self.cardnews_heading_entry.bind("<KeyRelease>", self._on_cardnews_slide_text_changed)
 
         ctk.CTkLabel(
             cardnews_edit_grid,
@@ -17646,7 +17649,27 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         self.cardnews_summary_entry.grid(row=3, column=0, padx=14, pady=(0, 14), sticky="ew")
-        self.cardnews_summary_entry.bind("<KeyRelease>", lambda _event: self._on_cardnews_slide_text_changed())
+        self.cardnews_summary_entry.bind("<KeyRelease>", self._on_cardnews_slide_text_changed)
+
+        ctk.CTkLabel(
+            cardnews_edit_grid,
+            text="하단 시그니처 문구",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).grid(row=4, column=0, padx=14, pady=(0, 6), sticky="w")
+        self.cardnews_signature_entry = ctk.CTkEntry(
+            cardnews_edit_grid,
+            height=38,
+            corner_radius=12,
+            fg_color="#0b1220",
+            border_width=1,
+            border_color="#304158",
+            placeholder_text="예: 나만의 블로그 시그니처",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.cardnews_signature_entry.grid(row=5, column=0, padx=14, pady=(0, 14), sticky="ew")
+        self.cardnews_signature_entry.insert(0, "BLOG HELPER CARD NEWS")
+        self.cardnews_signature_entry.bind("<KeyRelease>", self._on_cardnews_slide_text_changed)
 
         cardnews_design_panel = ctk.CTkFrame(cardnews_right_panel, fg_color="#0b1220", corner_radius=16)
         cardnews_design_panel.grid(row=1, column=0, pady=(0, 10), sticky="ew")
@@ -18985,11 +19008,13 @@ class KeywordApp(ctk.CTk):
             spec = self.cardnews_specs[index]
             heading = spec.get("heading", "").strip() or "핵심 정보"
             summary = spec.get("summary", "").strip() or "핵심 내용을 한눈에 보기 쉽게 정리했습니다."
+            signature = self.cardnews_signature_entry.get().strip()
             total = len(self.cardnews_specs)
         else:
             index = 0
             heading = "카드뉴스 미리보기"
             summary = "글이 완성되면 본문 H2가 카드뉴스 슬라이드로 자동 준비됩니다."
+            signature = self.cardnews_signature_entry.get().strip() or "BLOG HELPER CARD NEWS"
             total = 1
 
         heading_lines = self._wrap_text_for_svg(heading, width - 72, font_size, 3)
@@ -19061,14 +19086,17 @@ class KeywordApp(ctk.CTk):
             justify="center",
             width=width - 86,
         )
-        canvas.create_text(
-            width - 34,
-            height - max(18, height * 0.06),
-            text="blog helper",
-            fill="#6b7280",
-            font=("Apple SD Gothic Neo", 10, "bold"),
-            anchor="e",
-        )
+        if signature:
+            canvas.create_text(
+                width / 2,
+                height * 0.9,
+                text=signature,
+                fill=border_color,
+                font=("Apple SD Gothic Neo", max(10, round(min(width, height) * 0.029)), "bold"),
+                anchor="center",
+                width=width - 72,
+                justify="center",
+            )
 
     def _draw_thumbnail_on_canvas(
         self,
@@ -19314,6 +19342,7 @@ class KeywordApp(ctk.CTk):
             "text_stroke_color": self.wordpress_settings.cardnews_text_stroke_color,
             "font_size": self.wordpress_settings.cardnews_font_size,
             "shadow": self.wordpress_settings.cardnews_shadow,
+            "signature": self.wordpress_settings.cardnews_signature,
         }
 
     def _current_cardnews_style(self) -> dict:
@@ -19335,6 +19364,7 @@ class KeywordApp(ctk.CTk):
             "text_stroke_color": self.cardnews_text_stroke_menu.get(),
             "font_size": self._safe_int(self.cardnews_font_size_entry.get(), 78),
             "shadow": self.cardnews_shadow_menu.get(),
+            "signature": self.cardnews_signature_entry.get().strip(),
         }
 
     def _apply_cardnews_style(self, style: dict | None, refresh_preview: bool = True) -> None:
@@ -19358,6 +19388,8 @@ class KeywordApp(ctk.CTk):
             self.cardnews_font_size_entry.delete(0, "end")
             self.cardnews_font_size_entry.insert(0, str(merged.get("font_size", 78)))
             self.cardnews_shadow_menu.set(str(merged.get("shadow", "없음")))
+            self.cardnews_signature_entry.delete(0, "end")
+            self.cardnews_signature_entry.insert(0, str(merged.get("signature", "BLOG HELPER CARD NEWS")))
             self.cardnews_background_image_path = str(merged.get("background_image_path", "") or "")
             self.cardnews_selected_image_label_text.set(
                 Path(self.cardnews_background_image_path).name if self.cardnews_background_image_path else "선택된 파일 없음"
@@ -19388,10 +19420,15 @@ class KeywordApp(ctk.CTk):
     def _merge_saved_cardnews_styles(self) -> None:
         saved_styles = list(self.wordpress_settings.cardnews_slide_styles or [])
         for index, spec in enumerate(self.cardnews_specs):
-            if isinstance(spec.get("style"), dict):
-                continue
+            generated_style = spec.get("style") if isinstance(spec.get("style"), dict) else {}
             if index < len(saved_styles) and isinstance(saved_styles[index], dict):
-                spec["style"] = dict(saved_styles[index])
+                saved_style = dict(saved_styles[index])
+                # 카드 테두리는 글마다 새 색상을 사용하고, 나머지 슬라이드별 설정은 복원합니다.
+                if generated_style.get("border_color"):
+                    saved_style["border_color"] = generated_style["border_color"]
+                spec["style"] = saved_style
+            elif generated_style:
+                spec["style"] = dict(generated_style)
             else:
                 spec["style"] = self._current_cardnews_style() if hasattr(self, "cardnews_width_entry") else self._default_cardnews_style()
 
@@ -19406,7 +19443,8 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "cardnews_width_entry") and not getattr(self, "_loading_cardnews_slide_style", False):
             self.cardnews_specs[index]["style"] = self._current_cardnews_style()
 
-    def _on_cardnews_slide_text_changed(self) -> None:
+    def _on_cardnews_slide_text_changed(self, event=None) -> None:
+        self._mark_text_input_activity(event)
         if self._cardnews_text_preview_job is not None:
             self.after_cancel(self._cardnews_text_preview_job)
         self._cardnews_text_preview_job = self.after(900, self._run_cardnews_slide_text_update)
@@ -19417,13 +19455,23 @@ class KeywordApp(ctk.CTk):
             return
         self._save_active_cardnews_slide()
         self._show_cardnews_preview()
+        signature = self.cardnews_signature_entry.get().strip()
+        slide_styles = self._current_cardnews_slide_styles()
+        self.wordpress_settings.cardnews_signature = signature
+        self.wordpress_settings.cardnews_slide_styles = slide_styles
+        AppStateStore.update_fields(
+            cardnews_signature=signature,
+            cardnews_slide_styles=slide_styles,
+        )
 
     def _render_active_cardnews_slide(self) -> None:
         if not hasattr(self, "cardnews_heading_entry"):
             return
         self.cardnews_heading_entry.delete(0, "end")
         self.cardnews_summary_entry.delete(0, "end")
+        self.cardnews_signature_entry.delete(0, "end")
         if not self.cardnews_specs:
+            self.cardnews_signature_entry.insert(0, self.wordpress_settings.cardnews_signature)
             self.cardnews_slide_label.configure(text="슬라이드 없음")
             self._show_cardnews_preview()
             return
@@ -19546,6 +19594,7 @@ class KeywordApp(ctk.CTk):
         text_color = self._thumbnail_color_value(self.cardnews_text_color_menu.get()) or "#111111"
         stroke_color = self._thumbnail_color_value(self.cardnews_text_stroke_menu.get())
         shadow_mode = self.cardnews_shadow_menu.get()
+        signature = self.cardnews_signature_entry.get().strip()
         heading_font_size = max(28, self._safe_int(self.cardnews_font_size_entry.get(), 78))
         summary_font_size = max(20, round(heading_font_size * 0.44))
         heading_lines = self._wrap_text_for_svg(heading, width - 190, heading_font_size, 3)
@@ -19604,10 +19653,11 @@ class KeywordApp(ctk.CTk):
                 f'<text x="{width / 2}" y="{summary_y + ((line_index - ((len(summary_lines) - 1) / 2)) * summary_line_gap)}" text-anchor="middle" dominant-baseline="middle" '
                 f'font-family="Apple SD Gothic Neo, Noto Sans CJK KR, sans-serif" font-size="{summary_font_size}" font-weight="700" fill="#303845">{escape(line)}</text>'
             )
-        elements.append(
-            f'<text x="{width / 2}" y="{height * 0.9}" text-anchor="middle" font-family="Apple SD Gothic Neo, Noto Sans CJK KR, sans-serif" '
-            f'font-size="{max(18, min(width, height) * 0.029)}" font-weight="800" fill="{border_color}">BLOG HELPER CARD NEWS</text>'
-        )
+        if signature:
+            elements.append(
+                f'<text x="{width / 2}" y="{height * 0.9}" text-anchor="middle" font-family="Apple SD Gothic Neo, Noto Sans CJK KR, sans-serif" '
+                f'font-size="{max(18, min(width, height) * 0.029)}" font-weight="800" fill="{border_color}">{escape(signature)}</text>'
+            )
         elements.append("</svg>")
         return "\n".join(elements)
 
@@ -19964,6 +20014,8 @@ class KeywordApp(ctk.CTk):
             self.cardnews_font_size_entry.delete(0, "end")
             self.cardnews_font_size_entry.insert(0, str(self.wordpress_settings.cardnews_font_size))
             self.cardnews_shadow_menu.set(self.wordpress_settings.cardnews_shadow)
+            self.cardnews_signature_entry.delete(0, "end")
+            self.cardnews_signature_entry.insert(0, self.wordpress_settings.cardnews_signature)
             self.cardnews_background_image_path = self.wordpress_settings.cardnews_background_image_path
             self.cardnews_selected_image_label_text.set(
                 Path(self.cardnews_background_image_path).name if self.cardnews_background_image_path else "선택된 파일 없음"
@@ -20718,6 +20770,7 @@ class KeywordApp(ctk.CTk):
             cardnews_text_stroke_color=self.cardnews_text_stroke_menu.get() if hasattr(self, "cardnews_text_stroke_menu") else self.wordpress_settings.cardnews_text_stroke_color,
             cardnews_font_size=self._safe_int(self.cardnews_font_size_entry.get(), 78) if hasattr(self, "cardnews_font_size_entry") else self.wordpress_settings.cardnews_font_size,
             cardnews_shadow=self.cardnews_shadow_menu.get() if hasattr(self, "cardnews_shadow_menu") else self.wordpress_settings.cardnews_shadow,
+            cardnews_signature=self.cardnews_signature_entry.get().strip() if hasattr(self, "cardnews_signature_entry") else self.wordpress_settings.cardnews_signature,
             cardnews_slide_styles=self._current_cardnews_slide_styles() if hasattr(self, "cardnews_width_entry") else list(self.wordpress_settings.cardnews_slide_styles or []),
             automation_queue=list(self.automation_queue),
             automation_interval_hours=self._automation_interval_hours(),
