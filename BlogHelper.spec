@@ -6,7 +6,10 @@ datas = []
 binaries = []
 hiddenimports = []
 
-datas += [("version.json", ".")]
+datas += [
+    ("version.json", "."),
+    ("assets/blog_helper_icon.png", "assets"),
+]
 
 for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "bsdiff4", "websocket"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
@@ -53,4 +56,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="assets/blog_helper_icon.ico",
 )

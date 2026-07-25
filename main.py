@@ -73,6 +73,8 @@ ctk.set_window_scaling(0.82)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
+APP_ICON_PATH = RESOURCE_DIR / "assets" / "blog_helper_icon.png"
 if os.name == "nt":
     DEFAULT_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Blog Helper"
 else:
@@ -10722,8 +10724,20 @@ def build_wordpress_post(seed_keyword: str, insight: KeywordInsight) -> tuple[st
 
 class KeywordApp(ctk.CTk):
     def __init__(self) -> None:
+        if os.name == "nt":
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("kr.soullhk.bloghelper")
+            except (AttributeError, OSError):
+                pass
         super().__init__()
         self.title(f"Blog Helper Pro v{APP_VERSION}")
+        self._window_icon_image: tk.PhotoImage | None = None
+        try:
+            if APP_ICON_PATH.exists():
+                self._window_icon_image = tk.PhotoImage(file=str(APP_ICON_PATH))
+                self.iconphoto(True, self._window_icon_image)
+        except tk.TclError:
+            self._window_icon_image = None
         self.wordpress_settings = AppStateStore.load()
         ctk.set_appearance_mode("light" if self.wordpress_settings.app_theme == "화이트테마" else "dark")
         self.geometry(self._safe_window_geometry(self.wordpress_settings.window_geometry))

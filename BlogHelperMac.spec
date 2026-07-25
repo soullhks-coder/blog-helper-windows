@@ -8,7 +8,10 @@ datas = []
 binaries = []
 hiddenimports = []
 
-datas += [("version.json", ".")]
+datas += [
+    ("version.json", "."),
+    ("assets/blog_helper_icon.png", "assets"),
+]
 with open("version.json", "r", encoding="utf-8") as version_file:
     app_version = str(json.load(version_file).get("version") or "1.0.4")
 
@@ -70,7 +73,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="BlogHelper.app",
-    icon=None,
+    icon="assets/blog_helper_icon.icns",
     bundle_identifier="kr.soullhk.bloghelper",
     info_plist={
         "CFBundleDisplayName": "Blog Helper Pro",
