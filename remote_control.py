@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import json
+import platform
+import socket
+import threading
+import time
+import uuid
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Callable
+from urllib.parse import urlencode, urlparse, urlunparse
+
+try:
+    import websocket
+except ImportError:  # pragma: no cover - packaged dependency
+    websocket = None
+
+
+@dataclass
+class RemoteAgentConfig:
+    enabled: bool = False
+    gateway_url: str = "https://ai.soullhk.kr"
+    device_id: str = ""
+    device_name: str = ""
+    agent_token: str = ""
+
+    def normalized(self) -> "RemoteAgentConfig":
+        self.gateway_url = self.gateway_url.strip().rstrip("/") or "https://ai.soullhk.kr"
+        self.device_id = self.device_id.strip() or str(uuid.uuid4())
+        self.device_name = self.device_name.strip() or socket.gethostname() or platform.node() or "Blog Helper PC"
+        self.agent_token = self.agent_token.strip()
+        return self
+
+
+class RemoteAgentConfigStore:
+    def __init__(self, data_dir: Path) -> None:
+        self.path = data_dir / "remote_agent.json"
+
+    def load(self) -> RemoteAgentConfig:
+        if not self.path.exists():
+            config = RemoteAgentConfig().normalized()
+            self.save(config)
+            return config
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        config = RemoteAgentConfig(
+            enabled=bool(payload.get("enabled", False)),
+            gateway_url=str(payload.get("gateway_url") or "https://ai.soullhk.kr"),
+            device_id=str(payload.get("device_id") or ""),
+            device_name=str(payload.get("device_name") or ""),
+            agent_token=str(payload.get("agent_token") or ""),
+        ).normalized()
+        self.save(config)
+        return config
+
+    def save(self, config: RemoteAgentConfig) -> None:
+        config.normalized()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps(asdict(config), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self.path)
+
+
+class RemoteControlAgent:
+    def __init__(
+        self,
+        config: RemoteAgentConfig,
+        app_version: str,
+        on_job: Callable[[dict], None],
+        on_status: Callable[[str, str], None],
+    ) -> None:
+        self.config = config.normalized()
+        self.app_version = app_version
+        self.on_job = on_job
+        self.on_status = on_status
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._socket = None
+        self._send_lock = threading.Lock()
+        self._active_job_id = ""
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive() and not self._stop_event.is_set())
+
+    def start(self) -> None:
+        if self.is_running:
+            return
+        if websocket is None:
+            self.on_status("error", "원격 연결 모듈(websocket-client)이 설치되지 않았습니다.")
+            return
+        if not self.config.enabled:
+            self.on_status("disabled", "원격 제어가 꺼져 있습니다.")
+            return
+        if not self.config.agent_token:
+            self.on_status("error", "원격 에이전트 토큰을 입력해 주세요.")
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="blog-helper-remote-agent")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        active_socket = self._socket
+        self._socket = None
+        if active_socket is not None:
+            try:
+                active_socket.close()
+            except Exception:
+                pass
+
+    def accept_job(self, job_id: str, message: str = "PC에서 작업을 시작합니다.") -> None:
+        self._active_job_id = job_id
+        self._send_job_event("job.accepted", job_id, progress=0.03, message=message)
+
+    def progress(self, job_id: str, progress: float, message: str) -> None:
+        self._send_job_event("job.progress", job_id, progress=max(0.0, min(progress, 0.99)), message=message)
+
+    def complete(self, job_id: str, result: dict | None = None, message: str = "작업을 완료했습니다.") -> None:
+        self._send_job_event("job.completed", job_id, progress=1.0, message=message, result=result or {})
+        if self._active_job_id == job_id:
+            self._active_job_id = ""
+
+    def fail(self, job_id: str, message: str) -> None:
+        self._send_job_event("job.failed", job_id, progress=0.0, message=message)
+        if self._active_job_id == job_id:
+            self._active_job_id = ""
+
+    def _run(self) -> None:
+        retry_seconds = 2
+        while not self._stop_event.is_set():
+            try:
+                self.on_status("connecting", "원격 서버에 연결 중입니다...")
+                socket_url = self._agent_socket_url()
+                headers = [f"Authorization: Bearer {self.config.agent_token}"]
+                socket_app = websocket.WebSocketApp(
+                    socket_url,
+                    header=headers,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._socket = socket_app
+                socket_app.run_forever(ping_interval=25, ping_timeout=10)
+            except Exception as exc:
+                self.on_status("error", f"원격 연결 오류: {exc}")
+            finally:
+                self._socket = None
+            if self._stop_event.wait(retry_seconds):
+                break
+            retry_seconds = min(retry_seconds * 2, 30)
+
+    def _agent_socket_url(self) -> str:
+        parsed = urlparse(self.config.gateway_url)
+        scheme = "wss" if parsed.scheme in ("", "https", "wss") else "ws"
+        query = urlencode(
+            {
+                "deviceId": self.config.device_id,
+                "name": self.config.device_name,
+                "platform": f"{platform.system()} {platform.release()}",
+                "version": self.app_version,
+            }
+        )
+        return urlunparse((scheme, parsed.netloc, "/api/agent", "", query, ""))
+
+    def _on_open(self, _socket) -> None:
+        self.on_status("online", f"{self.config.device_name} 원격 연결 완료")
+        self._send(
+            {
+                "type": "ready",
+                "deviceId": self.config.device_id,
+                "name": self.config.device_name,
+                "version": self.app_version,
+            }
+        )
+
+    def _on_message(self, _socket, raw_message: str) -> None:
+        try:
+            payload = json.loads(raw_message)
+        except (TypeError, json.JSONDecodeError):
+            return
+        if payload.get("type") == "ping":
+            self._send({"type": "pong", "timestamp": int(time.time() * 1000)})
+            return
+        if payload.get("type") != "job":
+            return
+        job_id = str(payload.get("id") or "").strip()
+        keyword = str(payload.get("keyword") or "").strip()
+        if not job_id or not keyword:
+            if job_id:
+                self.fail(job_id, "키워드가 비어 있어 작업을 시작할 수 없습니다.")
+            return
+        try:
+            self.on_job(payload)
+        except Exception as exc:
+            self.fail(job_id, f"원격 작업 전달 실패: {exc}")
+
+    def _on_error(self, _socket, error) -> None:
+        if not self._stop_event.is_set():
+            self.on_status("error", f"원격 연결 오류: {error}")
+
+    def _on_close(self, _socket, _status_code, _message) -> None:
+        if not self._stop_event.is_set():
+            self.on_status("offline", "원격 연결이 끊어져 재연결을 시도합니다.")
+
+    def _send_job_event(
+        self,
+        event_type: str,
+        job_id: str,
+        *,
+        progress: float,
+        message: str,
+        result: dict | None = None,
+    ) -> None:
+        payload = {
+            "type": event_type,
+            "jobId": job_id,
+            "progress": progress,
+            "message": message,
+        }
+        if result is not None:
+            payload["result"] = result
+        self._send(payload)
+
+    def _send(self, payload: dict) -> None:
+        active_socket = self._socket
+        if active_socket is None:
+            return
+        encoded = json.dumps(payload, ensure_ascii=False)
+        try:
+            with self._send_lock:
+                active_socket.send(encoded)
+        except Exception:
+            pass

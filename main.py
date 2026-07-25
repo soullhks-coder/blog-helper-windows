@@ -59,6 +59,11 @@ from app_updater import (
     platform_asset_name,
     prepare_delta_update,
 )
+from remote_control import (
+    RemoteAgentConfig,
+    RemoteAgentConfigStore,
+    RemoteControlAgent,
+)
 
 
 ctk.set_appearance_mode("dark")
@@ -9518,6 +9523,90 @@ class AutomationKeywordQueueWorker(threading.Thread):
         return items
 
 
+class RemoteKeywordQueueWorker(threading.Thread):
+    """Build one remote keyword with the same local prompts used by automation."""
+
+    def __init__(
+        self,
+        settings: WordPressSettings,
+        job: dict,
+        result_queue: queue.Queue,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.settings = WordPressSettings(**asdict(settings))
+        self.job = dict(job or {})
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        job_id = str(self.job.get("id") or "").strip()
+        keyword = str(self.job.get("keyword") or "").strip()
+        if not job_id or not keyword:
+            self.result_queue.put(
+                (
+                    "remote_job_error",
+                    {"job_id": job_id, "message": "원격 작업의 키워드가 비어 있습니다."},
+                )
+            )
+            return
+        try:
+            helper = AutomationKeywordQueueWorker(self.settings, [], self.result_queue)
+            payload = {
+                "source_name": "원격 웹",
+                "rank": 1,
+                "keyword": keyword,
+                "reference_text": "",
+                "source_urls": {
+                    "Google": f"https://www.google.com/search?q={quote_plus(keyword)}",
+                    "Naver": f"https://search.naver.com/search.naver?query={quote_plus(keyword)}",
+                },
+                "score": 0,
+                "categories": [],
+                "index": 1,
+                "total": 1,
+                "allow_duplicate": True,
+                "target_platforms": list(self.job.get("targets") or ["wordpress"]),
+                "remote_job_id": job_id,
+            }
+            self.result_queue.put(
+                (
+                    "remote_job_progress",
+                    {
+                        "job_id": job_id,
+                        "progress": 0.12,
+                        "message": f"'{keyword}'의 사실 기반 참고내용을 수집하고 있습니다.",
+                    },
+                )
+            )
+            payload["reference_text"] = helper._collect_reference_text_for_keyword(payload)
+            self.result_queue.put(
+                (
+                    "remote_job_progress",
+                    {
+                        "job_id": job_id,
+                        "progress": 0.48,
+                        "message": "PC에 저장된 프롬프트와 AI 설정으로 제목과 본문을 작성하고 있습니다.",
+                    },
+                )
+            )
+            title, article_html, provider_name = helper._generate_article_payload(payload)
+            payload.update(
+                {
+                    "title": title,
+                    "article_html": article_html,
+                    "provider": provider_name,
+                    "status": "원격 글 작성 완료",
+                }
+            )
+            self.result_queue.put(("remote_job_generated", payload))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(
+                (
+                    "remote_job_error",
+                    {"job_id": job_id, "message": str(exc).strip() or exc.__class__.__name__},
+                )
+            )
+
+
 class WordPressTestWorker(threading.Thread):
     def __init__(self, settings: WordPressSettings, result_queue: queue.Queue) -> None:
         super().__init__(daemon=True)
@@ -10667,6 +10756,11 @@ class KeywordApp(ctk.CTk):
         self.writing_complete_dialog: ctk.CTkToplevel | None = None
 
         self.result_queue: queue.Queue = queue.Queue()
+        self.remote_agent_store = RemoteAgentConfigStore(DATA_DIR)
+        self.remote_agent_config = self.remote_agent_store.load()
+        self.remote_agent: RemoteControlAgent | None = None
+        self.remote_keyword_worker: RemoteKeywordQueueWorker | None = None
+        self.remote_active_job_id = ""
         self.analysis_worker: AnalysisWorker | None = None
         self.wp_test_worker: WordPressTestWorker | None = None
         self.wp_publish_worker: WordPressPublishWorker | None = None
@@ -10774,6 +10868,7 @@ class KeywordApp(ctk.CTk):
         self.after(180, self._poll_queue)
         self.after(1200, self._automation_publish_scheduler_tick)
         self.after(2200, self._start_update_check)
+        self.after(600, self._start_remote_agent_if_enabled)
 
     def _start_update_check(self) -> None:
         if os.environ.get("BLOG_HELPER_DISABLE_UPDATES", "").strip() == "1":
@@ -11172,6 +11267,8 @@ class KeywordApp(ctk.CTk):
             AppStateStore.update_fields(window_geometry=safe_geometry)
 
     def _on_app_close(self) -> None:
+        if self.remote_agent is not None:
+            self.remote_agent.stop()
         if self._geometry_save_job is not None:
             self.after_cancel(self._geometry_save_job)
             self._geometry_save_job = None
@@ -12292,8 +12389,109 @@ class KeywordApp(ctk.CTk):
             command=self._edit_app_title_dialog,
         ).grid(row=0, column=1, padx=(8, 8), pady=6, sticky="e")
 
+        remote_card = ctk.CTkFrame(
+            card,
+            fg_color="#1b2533",
+            corner_radius=20,
+            border_width=1,
+            border_color="#334760",
+        )
+        remote_card.grid(row=3, column=0, columnspan=2, padx=28, pady=(4, 18), sticky="ew")
+        remote_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            remote_card,
+            text="원격 제어",
+            text_color="#6dadff",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).grid(row=0, column=0, padx=18, pady=(18, 8), sticky="w")
+        self.remote_enabled_var = tk.BooleanVar(value=self.remote_agent_config.enabled)
+        self.remote_enabled_switch = ctk.CTkSwitch(
+            remote_card,
+            text="이 PC를 원격 웹에 연결",
+            variable=self.remote_enabled_var,
+            onvalue=True,
+            offvalue=False,
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.remote_enabled_switch.grid(row=0, column=1, padx=18, pady=(18, 8), sticky="e")
+
+        ctk.CTkLabel(
+            remote_card,
+            text="서버 주소",
+            text_color="#cbd6e6",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=1, column=0, padx=(18, 12), pady=7, sticky="w")
+        self.remote_gateway_entry = ctk.CTkEntry(
+            remote_card,
+            height=42,
+            corner_radius=13,
+            fg_color="#0b1220",
+            border_color="#314761",
+            font=ctk.CTkFont(size=14),
+        )
+        self.remote_gateway_entry.grid(row=1, column=1, padx=(0, 18), pady=7, sticky="ew")
+        self.remote_gateway_entry.insert(0, self.remote_agent_config.gateway_url)
+
+        ctk.CTkLabel(
+            remote_card,
+            text="PC 이름",
+            text_color="#cbd6e6",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=2, column=0, padx=(18, 12), pady=7, sticky="w")
+        self.remote_device_name_entry = ctk.CTkEntry(
+            remote_card,
+            height=42,
+            corner_radius=13,
+            fg_color="#0b1220",
+            border_color="#314761",
+            font=ctk.CTkFont(size=14),
+        )
+        self.remote_device_name_entry.grid(row=2, column=1, padx=(0, 18), pady=7, sticky="ew")
+        self.remote_device_name_entry.insert(0, self.remote_agent_config.device_name)
+
+        ctk.CTkLabel(
+            remote_card,
+            text="에이전트 토큰",
+            text_color="#cbd6e6",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=3, column=0, padx=(18, 12), pady=7, sticky="w")
+        self.remote_agent_token_entry = ctk.CTkEntry(
+            remote_card,
+            height=42,
+            corner_radius=13,
+            fg_color="#0b1220",
+            border_color="#314761",
+            show="*",
+            font=ctk.CTkFont(size=14),
+        )
+        self.remote_agent_token_entry.grid(row=3, column=1, padx=(0, 18), pady=7, sticky="ew")
+        self.remote_agent_token_entry.insert(0, self.remote_agent_config.agent_token)
+
+        remote_action_row = ctk.CTkFrame(remote_card, fg_color="transparent")
+        remote_action_row.grid(row=4, column=0, columnspan=2, padx=18, pady=(10, 18), sticky="ew")
+        remote_action_row.grid_columnconfigure(0, weight=1)
+        self.remote_agent_status_label = ctk.CTkLabel(
+            remote_action_row,
+            text="원격 연결 대기 중",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.remote_agent_status_label.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            remote_action_row,
+            text="저장 및 연결확인",
+            width=150,
+            height=40,
+            corner_radius=13,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._save_remote_agent_settings,
+        ).grid(row=0, column=1, padx=(12, 0), sticky="e")
+
         button_row = ctk.CTkFrame(card, fg_color="transparent")
-        button_row.grid(row=3, column=0, columnspan=2, padx=28, pady=(0, 12), sticky="ew")
+        button_row.grid(row=4, column=0, columnspan=2, padx=28, pady=(0, 12), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         self.basic_settings_status_label = ctk.CTkLabel(
@@ -12333,7 +12531,98 @@ class KeywordApp(ctk.CTk):
             text="저장하면 왼쪽 메뉴 상단 타이틀에 바로 반영되고, 다음 실행 때도 유지됩니다.",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
-        ).grid(row=4, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
+        ).grid(row=5, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
+
+    def _save_remote_agent_settings(self) -> None:
+        config = RemoteAgentConfig(
+            enabled=bool(self.remote_enabled_var.get()),
+            gateway_url=self.remote_gateway_entry.get(),
+            device_id=self.remote_agent_config.device_id,
+            device_name=self.remote_device_name_entry.get(),
+            agent_token=self.remote_agent_token_entry.get(),
+        ).normalized()
+        self.remote_agent_config = config
+        self.remote_agent_store.save(config)
+        self._restart_remote_agent()
+
+    def _start_remote_agent_if_enabled(self) -> None:
+        if not self.remote_agent_config.enabled:
+            self._handle_remote_agent_status("disabled", "원격 제어가 꺼져 있습니다.")
+            return
+        self._restart_remote_agent()
+
+    def _restart_remote_agent(self) -> None:
+        if self.remote_agent is not None:
+            self.remote_agent.stop()
+        self.remote_agent = RemoteControlAgent(
+            config=self.remote_agent_config,
+            app_version=APP_VERSION,
+            on_job=lambda payload: self.result_queue.put(("remote_job_received", payload)),
+            on_status=lambda status, message: self.result_queue.put(
+                ("remote_agent_status", {"status": status, "message": message})
+            ),
+        )
+        self.remote_agent.start()
+
+    def _handle_remote_agent_status(self, status: str, message: str) -> None:
+        if not hasattr(self, "remote_agent_status_label"):
+            return
+        color_map = {
+            "online": "#48d980",
+            "connecting": "#6dadff",
+            "offline": "#ffcc66",
+            "disabled": "#9aa7bb",
+            "error": "#ff6b6b",
+        }
+        self.remote_agent_status_label.configure(
+            text=message,
+            text_color=color_map.get(status, "#9aa7bb"),
+        )
+
+    def _start_remote_keyword_job(self, payload: dict) -> None:
+        job_id = str(payload.get("id") or "").strip()
+        keyword = str(payload.get("keyword") or "").strip()
+        if not job_id or not keyword or self.remote_agent is None:
+            return
+        busy_workers = (
+            self.remote_keyword_worker,
+            self.article_worker,
+            self.pipeline_worker,
+            self.automation_keyword_worker,
+        )
+        if any(worker and worker.is_alive() for worker in busy_workers):
+            self.remote_agent.fail(job_id, "이 PC에서 다른 글 작성 작업이 진행 중입니다.")
+            return
+        settings = self._read_wordpress_settings(include_prompts=True)
+        settings.target_platforms = list(payload.get("targets") or ["wordpress"])
+        settings.automation_target_platforms = list(settings.target_platforms)
+        self.remote_active_job_id = job_id
+        self.remote_agent.accept_job(job_id, f"'{keyword}' 원격 글 작성을 시작합니다.")
+        self.remote_keyword_worker = RemoteKeywordQueueWorker(settings, payload, self.result_queue)
+        self.remote_keyword_worker.start()
+
+    def _handle_remote_job_generated(self, payload: dict) -> None:
+        job_id = str(payload.get("remote_job_id") or self.remote_active_job_id).strip()
+        if self.remote_agent is None or not job_id:
+            return
+        self.remote_agent.progress(job_id, 0.82, "글 작성이 끝나 썸네일과 카드뉴스를 준비하고 있습니다.")
+        before_count = len(self.automation_queue)
+        added = self._handle_automation_keyword_item_collected(payload)
+        if not added or len(self.automation_queue) <= before_count:
+            self.remote_agent.fail(job_id, "완성된 글을 자동화 대기열에 추가하지 못했습니다.")
+        else:
+            item = self.automation_queue[-1]
+            self.remote_agent.complete(
+                job_id,
+                {
+                    "queueId": item.get("id"),
+                    "title": item.get("title"),
+                    "status": item.get("status"),
+                },
+                "글, 썸네일, 카드뉴스를 완성해 자동화 대기열에 추가했습니다.",
+            )
+        self.remote_active_job_id = ""
+        self.remote_keyword_worker = None
 
     def _build_theme_settings_card(self) -> None:
         card = ctk.CTkFrame(
@@ -21951,7 +22240,7 @@ class KeywordApp(ctk.CTk):
 
     def _handle_automation_keyword_item_collected(self, payload: dict) -> bool:
         settings = self._read_wordpress_settings(include_prompts=False)
-        automation_targets = self._automation_target_platforms()
+        automation_targets = list(payload.get("target_platforms") or self._automation_target_platforms())
         existing_keys = {
             f"{item.get('source_name')}::{item.get('keyword')}"
             for item in self.automation_queue
@@ -21962,7 +22251,7 @@ class KeywordApp(ctk.CTk):
         if not keyword:
             return False
         dedupe_key = f"{source_name}::{keyword}"
-        if dedupe_key in existing_keys:
+        if dedupe_key in existing_keys and not payload.get("allow_duplicate"):
             return False
 
         queue_id = str(int(time.time() * 1000)) + f"-{len(self.automation_queue)}"
@@ -22774,6 +23063,29 @@ class KeywordApp(ctk.CTk):
                         pass
                 elif event_type == "update_none":
                     pass
+                elif event_type == "remote_agent_status":
+                    self._handle_remote_agent_status(
+                        str(payload.get("status") or ""),
+                        str(payload.get("message") or ""),
+                    )
+                elif event_type == "remote_job_received":
+                    self._start_remote_keyword_job(payload)
+                elif event_type == "remote_job_progress":
+                    if self.remote_agent is not None:
+                        self.remote_agent.progress(
+                            str(payload.get("job_id") or ""),
+                            float(payload.get("progress") or 0),
+                            str(payload.get("message") or ""),
+                        )
+                elif event_type == "remote_job_generated":
+                    self._handle_remote_job_generated(payload)
+                elif event_type == "remote_job_error":
+                    job_id = str(payload.get("job_id") or self.remote_active_job_id)
+                    message = str(payload.get("message") or "원격 글 작성에 실패했습니다.")
+                    if self.remote_agent is not None and job_id:
+                        self.remote_agent.fail(job_id, message)
+                    self.remote_active_job_id = ""
+                    self.remote_keyword_worker = None
                 elif event_type == "progress":
                     progress, message = payload
                     self.progress_bar.configure(mode="determinate")

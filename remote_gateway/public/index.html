@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d4f4a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Blog Helper" />
+    <title>Blog Helper Remote</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <main class="shell">
+      <section id="loginView" class="login-panel">
+        <div class="brand-mark">BH</div>
+        <p class="eyebrow">REMOTE WRITING DESK</p>
+        <h1>밖에서도<br />내 PC로 글쓰기</h1>
+        <p class="intro">PC 안의 프롬프트와 계정 설정은 밖으로 보내지 않고, 키워드 작업만 안전하게 전달합니다.</p>
+        <form id="loginForm" class="stack">
+          <label for="password">관리 비밀번호</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+          <button class="primary" type="submit">원격 작업실 열기</button>
+          <p id="loginError" class="error" role="alert"></p>
+        </form>
+      </section>
+
+      <section id="dashboardView" class="dashboard" hidden>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">BLOG HELPER REMOTE</p>
+            <h1>원격 글쓰기</h1>
+          </div>
+          <div class="top-actions">
+            <span id="onlineCount" class="online-pill">온라인 0대</span>
+            <button id="logoutButton" class="ghost" type="button">로그아웃</button>
+          </div>
+        </header>
+
+        <section class="compose-card">
+          <div class="section-heading">
+            <div>
+              <span class="step">01</span>
+              <h2>작업할 PC 선택</h2>
+            </div>
+            <button id="refreshButton" class="text-button" type="button">새로고침</button>
+          </div>
+          <div id="deviceGrid" class="device-grid" aria-live="polite"></div>
+        </section>
+
+        <section class="compose-card">
+          <div class="section-heading">
+            <div>
+              <span class="step coral">02</span>
+              <h2>키워드 보내기</h2>
+            </div>
+          </div>
+          <form id="jobForm">
+            <label for="keyword">작성할 주제 또는 키워드</label>
+            <textarea id="keyword" rows="3" maxlength="300" placeholder="예: 청년도약계좌 신청 조건과 준비 서류" required></textarea>
+            <fieldset>
+              <legend>발행 대상</legend>
+              <label class="check"><input type="checkbox" name="target" value="wordpress" checked /><span>워드프레스</span></label>
+              <label class="check"><input type="checkbox" name="target" value="tistory" /><span>티스토리</span></label>
+              <label class="check"><input type="checkbox" name="target" value="blogspot" /><span>블로그스팟</span></label>
+            </fieldset>
+            <p class="privacy-note">선택한 PC의 저장된 프롬프트, AI, 썸네일, 카드뉴스 설정으로 글을 완성해 자동화 대기열에 넣습니다.</p>
+            <button id="submitJob" class="primary" type="submit" disabled>PC를 먼저 선택해 주세요</button>
+            <p id="jobError" class="error" role="alert"></p>
+          </form>
+        </section>
+
+        <section class="compose-card jobs-card">
+          <div class="section-heading">
+            <div>
+              <span class="step blue">03</span>
+              <h2>최근 작업</h2>
+            </div>
+          </div>
+          <div id="jobList" class="job-list"></div>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
