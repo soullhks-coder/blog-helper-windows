@@ -31,6 +31,31 @@ class RemoteAgentConfigTests(unittest.TestCase):
             self.assertEqual(loaded.pairing_password, "")
             payload = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(payload["device_id"], "pc-001")
+            self.assertEqual(payload["schema_version"], 2)
+
+    def test_legacy_windows_config_is_migrated_to_pairing_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RemoteAgentConfigStore(Path(directory))
+            store.path.write_text(
+                json.dumps(
+                    {
+                        "enabled": False,
+                        "gateway_url": "https://ai.lhksoul.com",
+                        "device_id": "old-windows-id",
+                        "device_name": "엄마 노트북",
+                        "agent_token": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = store.load()
+
+            self.assertTrue(loaded.enabled)
+            self.assertEqual(loaded.device_id, "old-windows-id")
+            migrated = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated["schema_version"], 2)
 
     @patch("remote_control.platform.release", return_value="15.0")
     @patch("remote_control.platform.system", return_value="Darwin")

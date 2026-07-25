@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - requests already bundles it in package
 
 @dataclass
 class RemoteAgentConfig:
+    schema_version: int = 2
     enabled: bool = True
     gateway_url: str = "https://ai.lhksoul.com"
     device_id: str = ""
@@ -35,6 +36,7 @@ class RemoteAgentConfig:
     pairing_password: str = ""
 
     def normalized(self) -> "RemoteAgentConfig":
+        self.schema_version = 2
         self.gateway_url = self.gateway_url.strip().rstrip("/") or "https://ai.lhksoul.com"
         self.device_id = self.device_id.strip() or str(uuid.uuid4())
         self.device_name = self.device_name.strip() or socket.gethostname() or platform.node() or "Blog Helper PC"
@@ -56,8 +58,11 @@ class RemoteAgentConfigStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             payload = {}
+        schema_version = int(payload.get("schema_version") or 1)
+        legacy_needs_pairing = schema_version < 2 and not str(payload.get("agent_token") or "").strip()
         config = RemoteAgentConfig(
-            enabled=bool(payload.get("enabled", False)),
+            schema_version=2,
+            enabled=True if legacy_needs_pairing else bool(payload.get("enabled", True)),
             gateway_url=str(payload.get("gateway_url") or "https://ai.lhksoul.com"),
             device_id=str(payload.get("device_id") or ""),
             device_name=str(payload.get("device_name") or ""),
