@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import platform
 import socket
+import ssl
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 try:
     import websocket
@@ -24,17 +27,19 @@ except ImportError:  # pragma: no cover - requests already bundles it in package
 
 @dataclass
 class RemoteAgentConfig:
-    enabled: bool = False
+    enabled: bool = True
     gateway_url: str = "https://ai.lhksoul.com"
     device_id: str = ""
     device_name: str = ""
     agent_token: str = ""
+    pairing_password: str = ""
 
     def normalized(self) -> "RemoteAgentConfig":
         self.gateway_url = self.gateway_url.strip().rstrip("/") or "https://ai.lhksoul.com"
         self.device_id = self.device_id.strip() or str(uuid.uuid4())
         self.device_name = self.device_name.strip() or socket.gethostname() or platform.node() or "Blog Helper PC"
         self.agent_token = self.agent_token.strip()
+        self.pairing_password = self.pairing_password.strip()
         return self
 
 
@@ -57,6 +62,7 @@ class RemoteAgentConfigStore:
             device_id=str(payload.get("device_id") or ""),
             device_name=str(payload.get("device_name") or ""),
             agent_token=str(payload.get("agent_token") or ""),
+            pairing_password=str(payload.get("pairing_password") or ""),
         ).normalized()
         self.save(config)
         return config
@@ -79,11 +85,13 @@ class RemoteControlAgent:
         app_version: str,
         on_job: Callable[[dict], None],
         on_status: Callable[[str, str], None],
+        on_credentials: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config.normalized()
         self.app_version = app_version
         self.on_job = on_job
         self.on_status = on_status
+        self.on_credentials = on_credentials
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._socket = None
@@ -103,8 +111,8 @@ class RemoteControlAgent:
         if not self.config.enabled:
             self.on_status("disabled", "원격 제어가 꺼져 있습니다.")
             return
-        if not self.config.agent_token:
-            self.on_status("error", "원격 에이전트 토큰을 입력해 주세요.")
+        if not self.config.agent_token and not self.config.pairing_password:
+            self.on_status("error", "관리 비밀번호를 한 번 입력해 이 PC를 등록해 주세요.")
             return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="blog-helper-remote-agent")
@@ -140,7 +148,12 @@ class RemoteControlAgent:
     def _run(self) -> None:
         retry_seconds = 2
         while not self._stop_event.is_set():
+            if not self.config.agent_token and not self.config.pairing_password:
+                self.on_status("error", "관리 비밀번호를 다시 입력해 이 PC를 등록해 주세요.")
+                return
             try:
+                if not self.config.agent_token:
+                    self._pair_device()
                 self.on_status("connecting", "원격 서버에 연결 중입니다...")
                 socket_url = self._agent_socket_url()
                 headers = [f"Authorization: Bearer {self.config.agent_token}"]
@@ -166,6 +179,43 @@ class RemoteControlAgent:
             if self._stop_event.wait(retry_seconds):
                 break
             retry_seconds = min(retry_seconds * 2, 30)
+
+    def _pair_device(self) -> None:
+        self.on_status("connecting", f"{self.config.device_name} PC를 원격 서버에 등록 중입니다...")
+        endpoint = f"{self.config.gateway_url}/api/agent/pair"
+        payload = json.dumps(
+            {
+                "password": self.config.pairing_password,
+                "deviceId": self.config.device_id,
+                "name": self.config.device_name,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            endpoint,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": f"BlogHelper/{self.app_version}",
+            },
+            method="POST",
+        )
+        ssl_context = ssl.create_default_context(cafile=certifi.where()) if certifi is not None else None
+        try:
+            with urlopen(request, timeout=18, context=ssl_context) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code == 401:
+                self.config.pairing_password = ""
+                raise RuntimeError("관리 비밀번호가 올바르지 않습니다.") from exc
+            raise
+        device_token = str(result.get("deviceToken") or "").strip()
+        if not device_token:
+            raise RuntimeError("PC 전용 인증키를 발급받지 못했습니다.")
+        self.config.agent_token = device_token
+        self.config.pairing_password = ""
+        if self.on_credentials is not None:
+            self.on_credentials(device_token)
 
     def _agent_socket_url(self) -> str:
         parsed = urlparse(self.config.gateway_url)

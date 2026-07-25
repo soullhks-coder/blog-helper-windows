@@ -17,7 +17,7 @@ npx wrangler deploy
 
 - `CONTROL_PASSWORD`: 웹 로그인 비밀번호
 - `SESSION_SECRET`: 32자 이상의 임의 문자열
-- `AGENT_TOKEN`: PC 앱과 서버에 동일하게 입력할 32자 이상의 임의 문자열
+- `AGENT_TOKEN`: 기존 설치본 호환 및 비상 연결용 32자 이상의 임의 문자열
 
 `wrangler.jsonc`의 custom domain이 배포되면 Cloudflare가 `ai.lhksoul.com` DNS 레코드와 인증서를 자동 생성합니다. 수동 CNAME을 먼저 만들지 않습니다.
 
@@ -38,7 +38,8 @@ npx wrangler secret put SESSION_SECRET
 npx wrangler secret put AGENT_TOKEN
 ```
 
-`AGENT_TOKEN`은 Blog Helper PC 설정에도 동일하게 입력하지만, GitHub 저장소나 웹 소스에는 넣지 않습니다.
+신규 설치본은 `CONTROL_PASSWORD`로 최초 등록한 뒤 PC별 전용 인증키를 발급받습니다.
+`AGENT_TOKEN`은 기존 설치본 호환용이며 GitHub 저장소나 웹 소스에는 넣지 않습니다.
 
 ## PC 연결
 
@@ -46,7 +47,12 @@ Blog Helper의 `환경설정 > 기본설정 > 원격 제어`에서 아래 값을
 
 - 서버 주소: `https://ai.lhksoul.com`
 - PC 이름: 웹에서 구분할 이름
-- 에이전트 토큰: 위 `AGENT_TOKEN`
+- 관리 비밀번호: 웹 로그인에 사용하는 `CONTROL_PASSWORD`를 최초 한 번 입력
 - 원격 연결 사용: 켬
 
-PC는 외부에서 들어오는 포트를 열지 않고 Cloudflare로 WebSocket을 연결합니다. 워드프레스, 티스토리, AI API 키와 프롬프트는 PC 밖으로 전송하지 않습니다.
+등록에 성공하면 해당 Mac 또는 Windows PC의 고유 ID에 묶인 전용 인증키가 로컬에
+저장되어 다음 실행부터 자동 연결됩니다. 여러 대의 PC를 동시에 연결할 수 있으며,
+웹에서 온라인 PC를 선택할 수 있습니다. 작업 중인 PC는 완료될 때까지 자동 잠금됩니다.
+
+PC는 외부에서 들어오는 포트를 열지 않고 Cloudflare로 WebSocket을 연결합니다.
+워드프레스, 티스토리, AI API 키와 프롬프트는 PC 밖으로 전송하지 않습니다.

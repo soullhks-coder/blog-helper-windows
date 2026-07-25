@@ -1,3 +1,7 @@
+if (window.location.protocol === "file:") {
+  window.location.replace("https://ai.lhksoul.com");
+}
+
 const state = {
   devices: [],
   jobs: [],
@@ -107,12 +111,17 @@ function renderDevices() {
       const disabled = device.status !== "online";
       const selected = state.selectedDeviceId === device.deviceId;
       const statusLabel = device.status === "busy" ? "작업 중" : device.status === "online" ? "사용 가능" : "오프라인";
+      const platformLabel = String(device.platform || "").startsWith("Windows")
+        ? `Windows · ${device.platform}`
+        : String(device.platform || "").startsWith("Darwin")
+          ? `Mac · ${device.platform}`
+          : device.platform || "운영체제 확인 중";
       return `
         <button class="device ${selected ? "selected" : ""}" type="button"
           data-device-id="${escapeHtml(device.deviceId)}" ${disabled ? "disabled" : ""}>
           <i class="status-dot ${escapeHtml(device.status)}"></i>
           <strong>${escapeHtml(device.name || "이름 없는 PC")}</strong>
-          <span>${escapeHtml(device.platform || "")}</span>
+          <span>${escapeHtml(platformLabel)}</span>
           <span>Blog Helper v${escapeHtml(device.version || "-")} · ${statusLabel}</span>
         </button>`;
     })

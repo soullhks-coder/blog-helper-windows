@@ -12452,21 +12452,21 @@ class KeywordApp(ctk.CTk):
 
         ctk.CTkLabel(
             remote_card,
-            text="에이전트 토큰",
+            text="관리 비밀번호",
             text_color="#cbd6e6",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=3, column=0, padx=(18, 12), pady=7, sticky="w")
-        self.remote_agent_token_entry = ctk.CTkEntry(
+        self.remote_pairing_password_entry = ctk.CTkEntry(
             remote_card,
             height=42,
             corner_radius=13,
             fg_color="#0b1220",
             border_color="#314761",
             show="*",
+            placeholder_text="최초 연결 또는 PC 재등록 시 한 번만 입력",
             font=ctk.CTkFont(size=14),
         )
-        self.remote_agent_token_entry.grid(row=3, column=1, padx=(0, 18), pady=7, sticky="ew")
-        self.remote_agent_token_entry.insert(0, self.remote_agent_config.agent_token)
+        self.remote_pairing_password_entry.grid(row=3, column=1, padx=(0, 18), pady=7, sticky="ew")
 
         remote_action_row = ctk.CTkFrame(remote_card, fg_color="transparent")
         remote_action_row.grid(row=4, column=0, columnspan=2, padx=18, pady=(10, 18), sticky="ew")
@@ -12534,12 +12534,14 @@ class KeywordApp(ctk.CTk):
         ).grid(row=5, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
 
     def _save_remote_agent_settings(self) -> None:
+        pairing_password = self.remote_pairing_password_entry.get().strip()
         config = RemoteAgentConfig(
             enabled=bool(self.remote_enabled_var.get()),
             gateway_url=self.remote_gateway_entry.get(),
             device_id=self.remote_agent_config.device_id,
             device_name=self.remote_device_name_entry.get(),
-            agent_token=self.remote_agent_token_entry.get(),
+            agent_token="" if pairing_password else self.remote_agent_config.agent_token,
+            pairing_password=pairing_password,
         ).normalized()
         self.remote_agent_config = config
         self.remote_agent_store.save(config)
@@ -12549,6 +12551,27 @@ class KeywordApp(ctk.CTk):
         if not self.remote_agent_config.enabled:
             self._handle_remote_agent_status("disabled", "원격 제어가 꺼져 있습니다.")
             return
+        if not self.remote_agent_config.agent_token and not self.remote_agent_config.pairing_password:
+            pairing_password = simpledialog.askstring(
+                "원격 PC 연결",
+                (
+                    "이 PC를 원격 웹의 작업 PC 목록에 연결합니다.\n\n"
+                    "ai.lhksoul.com의 관리 비밀번호를 한 번만 입력해 주세요.\n"
+                    "연결 후에는 이 PC 전용 인증키가 저장되어 다시 입력하지 않아도 됩니다."
+                ),
+                parent=self,
+                show="*",
+            )
+            if not pairing_password:
+                self.remote_agent_config.enabled = False
+                self.remote_agent_store.save(self.remote_agent_config)
+                self._handle_remote_agent_status(
+                    "disabled",
+                    "원격 연결이 보류되었습니다. 환경설정에서 언제든 연결할 수 있습니다.",
+                )
+                return
+            self.remote_agent_config.pairing_password = pairing_password.strip()
+            self.remote_agent_store.save(self.remote_agent_config)
         self._restart_remote_agent()
 
     def _restart_remote_agent(self) -> None:
@@ -12561,8 +12584,20 @@ class KeywordApp(ctk.CTk):
             on_status=lambda status, message: self.result_queue.put(
                 ("remote_agent_status", {"status": status, "message": message})
             ),
+            on_credentials=lambda token: self.result_queue.put(("remote_agent_credentials", token)),
         )
         self.remote_agent.start()
+
+    def _handle_remote_agent_credentials(self, token: str) -> None:
+        token = str(token or "").strip()
+        if not token:
+            return
+        self.remote_agent_config.agent_token = token
+        self.remote_agent_config.pairing_password = ""
+        self.remote_agent_config.enabled = True
+        self.remote_agent_store.save(self.remote_agent_config)
+        if hasattr(self, "remote_pairing_password_entry"):
+            self.remote_pairing_password_entry.delete(0, "end")
 
     def _handle_remote_agent_status(self, status: str, message: str) -> None:
         if not hasattr(self, "remote_agent_status_label"):
@@ -23068,6 +23103,8 @@ class KeywordApp(ctk.CTk):
                         str(payload.get("status") or ""),
                         str(payload.get("message") or ""),
                     )
+                elif event_type == "remote_agent_credentials":
+                    self._handle_remote_agent_credentials(str(payload or ""))
                 elif event_type == "remote_job_received":
                     self._start_remote_keyword_job(payload)
                 elif event_type == "remote_job_progress":

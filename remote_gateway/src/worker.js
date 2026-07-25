@@ -1,5 +1,6 @@
 const SESSION_COOKIE = "blog_helper_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const DEVICE_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 365 * 10;
 
 export default {
   async fetch(request, env) {
@@ -37,14 +38,32 @@ export default {
       );
     }
 
+    if (url.pathname === "/api/agent/pair" && request.method === "POST") {
+      if (!env.CONTROL_PASSWORD || !env.SESSION_SECRET) {
+        return jsonResponse({ error: "원격 서버 비밀값이 아직 설정되지 않았습니다." }, 503);
+      }
+      const payload = await readJson(request);
+      const password = String(payload.password || "");
+      const deviceId = cleanText(payload.deviceId, 80);
+      if (!deviceId || !safeEqual(password, String(env.CONTROL_PASSWORD || ""))) {
+        return jsonResponse({ error: "관리 비밀번호가 올바르지 않습니다." }, 401);
+      }
+      const deviceToken = await createDeviceToken(env.SESSION_SECRET, deviceId);
+      return jsonResponse({ ok: true, deviceToken });
+    }
+
     const roomId = env.CONTROL_ROOM.idFromName("global");
     const room = env.CONTROL_ROOM.get(roomId);
     if (url.pathname === "/api/agent") {
-      if (!env.AGENT_TOKEN) {
+      if (!env.AGENT_TOKEN || !env.SESSION_SECRET) {
         return jsonResponse({ error: "원격 에이전트 토큰이 아직 설정되지 않았습니다." }, 503);
       }
       const authorization = request.headers.get("Authorization") || "";
-      if (!safeEqual(authorization, `Bearer ${env.AGENT_TOKEN || ""}`)) {
+      const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+      const requestedDeviceId = cleanText(url.searchParams.get("deviceId"), 80);
+      const globalTokenMatches = safeEqual(token, String(env.AGENT_TOKEN || ""));
+      const deviceTokenMatches = await verifyDeviceToken(token, env.SESSION_SECRET, requestedDeviceId);
+      if (!globalTokenMatches && !deviceTokenMatches) {
         return jsonResponse({ error: "에이전트 인증에 실패했습니다." }, 401);
       }
       return room.fetch(markAuthorized(request, "agent"));
@@ -378,6 +397,35 @@ async function verifySessionToken(token, secret) {
   }
   const expiresAt = Number(parts[0]);
   if (!Number.isFinite(expiresAt) || expiresAt < Math.floor(Date.now() / 1000)) {
+    return false;
+  }
+  const expected = await hmac(secret, `${parts[0]}.${parts[1]}`);
+  return safeEqual(parts[2], expected);
+}
+
+async function createDeviceToken(secret, deviceId) {
+  const expiresAt = Math.floor(Date.now() / 1000) + DEVICE_TOKEN_TTL_SECONDS;
+  const encodedDeviceId = base64Url(new TextEncoder().encode(deviceId));
+  const body = `${expiresAt}.${encodedDeviceId}`;
+  const signature = await hmac(secret, body);
+  return `${body}.${signature}`;
+}
+
+async function verifyDeviceToken(token, secret, deviceId) {
+  if (!token || !secret || !deviceId) {
+    return false;
+  }
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return false;
+  }
+  const expiresAt = Number(parts[0]);
+  const expectedDeviceId = base64Url(new TextEncoder().encode(deviceId));
+  if (
+    !Number.isFinite(expiresAt)
+    || expiresAt < Math.floor(Date.now() / 1000)
+    || !safeEqual(parts[1], expectedDeviceId)
+  ) {
     return false;
   }
   const expected = await hmac(secret, `${parts[0]}.${parts[1]}`);
