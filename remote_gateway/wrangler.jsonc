@@ -24,7 +24,7 @@
   ],
   "routes": [
     {
-      "pattern": "ai.soullhk.kr",
+      "pattern": "ai.lhksoul.com",
       "custom_domain": true
     }
   ],

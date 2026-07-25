@@ -31,3 +31,7 @@ tistory-automation*.js
 *.jpg
 *.jpeg
 *.webp
+
+# Cloudflare Worker local dependencies and dry-run output
+remote_gateway/node_modules/
+remote_gateway/.wrangler-dry-run/

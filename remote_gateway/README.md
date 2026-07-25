@@ -4,7 +4,7 @@
 
 ## 배포 준비
 
-1. `soullhk.kr` 도메인을 Cloudflare DNS에서 관리합니다.
+1. `lhksoul.com` 도메인을 Cloudflare DNS에서 관리합니다.
 2. Cloudflare 계정에서 Workers 유료 플랜 또는 Durable Objects를 사용할 수 있는 플랜을 확인합니다.
 3. 이 폴더에서 `npm install` 후 아래 비밀값을 등록합니다.
 
@@ -19,7 +19,7 @@ npx wrangler deploy
 - `SESSION_SECRET`: 32자 이상의 임의 문자열
 - `AGENT_TOKEN`: PC 앱과 서버에 동일하게 입력할 32자 이상의 임의 문자열
 
-`wrangler.jsonc`의 custom domain이 배포되면 Cloudflare가 `ai.soullhk.kr` DNS 레코드와 인증서를 자동 생성합니다. 수동 CNAME을 먼저 만들지 않습니다.
+`wrangler.jsonc`의 custom domain이 배포되면 Cloudflare가 `ai.lhksoul.com` DNS 레코드와 인증서를 자동 생성합니다. 수동 CNAME을 먼저 만들지 않습니다.
 
 ## GitHub Actions 자동 배포
 
@@ -44,7 +44,7 @@ npx wrangler secret put AGENT_TOKEN
 
 Blog Helper의 `환경설정 > 기본설정 > 원격 제어`에서 아래 값을 저장합니다.
 
-- 서버 주소: `https://ai.soullhk.kr`
+- 서버 주소: `https://ai.lhksoul.com`
 - PC 이름: 웹에서 구분할 이름
 - 에이전트 토큰: 위 `AGENT_TOKEN`
 - 원격 연결 사용: 켬

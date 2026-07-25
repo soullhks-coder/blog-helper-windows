@@ -16,17 +16,22 @@ try:
 except ImportError:  # pragma: no cover - packaged dependency
     websocket = None
 
+try:
+    import certifi
+except ImportError:  # pragma: no cover - requests already bundles it in packaged builds
+    certifi = None
+
 
 @dataclass
 class RemoteAgentConfig:
     enabled: bool = False
-    gateway_url: str = "https://ai.soullhk.kr"
+    gateway_url: str = "https://ai.lhksoul.com"
     device_id: str = ""
     device_name: str = ""
     agent_token: str = ""
 
     def normalized(self) -> "RemoteAgentConfig":
-        self.gateway_url = self.gateway_url.strip().rstrip("/") or "https://ai.soullhk.kr"
+        self.gateway_url = self.gateway_url.strip().rstrip("/") or "https://ai.lhksoul.com"
         self.device_id = self.device_id.strip() or str(uuid.uuid4())
         self.device_name = self.device_name.strip() or socket.gethostname() or platform.node() or "Blog Helper PC"
         self.agent_token = self.agent_token.strip()
@@ -48,7 +53,7 @@ class RemoteAgentConfigStore:
             payload = {}
         config = RemoteAgentConfig(
             enabled=bool(payload.get("enabled", False)),
-            gateway_url=str(payload.get("gateway_url") or "https://ai.soullhk.kr"),
+            gateway_url=str(payload.get("gateway_url") or "https://ai.lhksoul.com"),
             device_id=str(payload.get("device_id") or ""),
             device_name=str(payload.get("device_name") or ""),
             agent_token=str(payload.get("agent_token") or ""),
@@ -148,7 +153,12 @@ class RemoteControlAgent:
                     on_close=self._on_close,
                 )
                 self._socket = socket_app
-                socket_app.run_forever(ping_interval=25, ping_timeout=10)
+                ssl_options = {"ca_certs": certifi.where()} if certifi is not None else None
+                socket_app.run_forever(
+                    ping_interval=25,
+                    ping_timeout=10,
+                    sslopt=ssl_options,
+                )
             except Exception as exc:
                 self.on_status("error", f"원격 연결 오류: {exc}")
             finally:

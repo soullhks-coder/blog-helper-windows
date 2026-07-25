@@ -13,7 +13,7 @@ class RemoteAgentConfigTests(unittest.TestCase):
             store = RemoteAgentConfigStore(Path(directory))
             config = RemoteAgentConfig(
                 enabled=True,
-                gateway_url="https://ai.soullhk.kr/",
+                gateway_url="https://ai.lhksoul.com/",
                 device_id="pc-001",
                 device_name="거실 윈도우",
                 agent_token="secret-token",
@@ -23,7 +23,7 @@ class RemoteAgentConfigTests(unittest.TestCase):
             loaded = store.load()
 
             self.assertTrue(loaded.enabled)
-            self.assertEqual(loaded.gateway_url, "https://ai.soullhk.kr")
+            self.assertEqual(loaded.gateway_url, "https://ai.lhksoul.com")
             self.assertEqual(loaded.device_id, "pc-001")
             self.assertEqual(loaded.device_name, "거실 윈도우")
             self.assertEqual(loaded.agent_token, "secret-token")
@@ -35,7 +35,7 @@ class RemoteAgentConfigTests(unittest.TestCase):
     def test_agent_builds_secure_websocket_url(self, _system, _release) -> None:
         config = RemoteAgentConfig(
             enabled=True,
-            gateway_url="https://ai.soullhk.kr",
+            gateway_url="https://ai.lhksoul.com",
             device_id="mac-001",
             device_name="엄마 맥",
             agent_token="secret-token",
@@ -44,7 +44,7 @@ class RemoteAgentConfigTests(unittest.TestCase):
 
         socket_url = agent._agent_socket_url()
 
-        self.assertTrue(socket_url.startswith("wss://ai.soullhk.kr/api/agent?"))
+        self.assertTrue(socket_url.startswith("wss://ai.lhksoul.com/api/agent?"))
         self.assertIn("deviceId=mac-001", socket_url)
         self.assertIn("name=%EC%97%84%EB%A7%88+%EB%A7%A5", socket_url)
         self.assertIn("version=1.2.3", socket_url)
