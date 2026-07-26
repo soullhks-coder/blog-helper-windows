@@ -1247,6 +1247,7 @@ class WordPressSettings:
     writing_link_url: str = ""
     writing_links: list[dict] = field(default_factory=list)
     writing_enabled_sources: list[str] = field(default_factory=lambda: ["youtube", "google", "naver"])
+    writing_auto_progress: bool = False
     thumbnail_text: str = ""
     thumbnail_auto_title: bool = True
     thumbnail_width: int = 400
@@ -1616,6 +1617,7 @@ class AppStateStore:
             writing_link_url=payload.get("writing_link_url", ""),
             writing_links=writing_links,
             writing_enabled_sources=payload.get("writing_enabled_sources", ["youtube", "google", "naver"]),
+            writing_auto_progress=payload.get("writing_auto_progress", False),
             thumbnail_text=payload.get("thumbnail_text", ""),
             thumbnail_auto_title=payload.get("thumbnail_auto_title", True),
             thumbnail_width=payload.get("thumbnail_width", 400),
@@ -10758,6 +10760,8 @@ class KeywordApp(ctk.CTk):
         self.active_automation_upload_item_id = ""
         self.active_automation_tistory_pending = False
         self.pending_upload_cleanup_paths: list[str] = []
+        self.writing_auto_run_active = False
+        self.writing_auto_stage = ""
 
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
@@ -10813,6 +10817,9 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_next_run_at = float(self.wordpress_settings.naver_kin_next_run_at or 0)
         self.selected_public_event_var = ctk.StringVar(value=self.wordpress_settings.public_data_selected_seq)
         self.selected_keyword_var = ctk.StringVar(value="")
+        self.writing_auto_progress_var = tk.BooleanVar(
+            value=self.wordpress_settings.writing_auto_progress
+        )
         self.generated_article_title = ""
         self.generated_article_html = ""
         self.last_published_url = ""
@@ -12793,6 +12800,7 @@ class KeywordApp(ctk.CTk):
     def _build_writing_page(self) -> None:
         header = ctk.CTkFrame(self.writing_page, fg_color="transparent")
         header.grid(row=0, column=0, padx=28, pady=(26, 12), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
 
         page_title = ctk.CTkLabel(
             header,
@@ -12801,18 +12809,163 @@ class KeywordApp(ctk.CTk):
         )
         page_title.grid(row=0, column=0, sticky="w")
 
-        page_subtitle = ctk.CTkLabel(
-            header,
-            text="키워드를 분석하고 바로 워드프레스 초안 저장 또는 발행까지 연결합니다.",
-            text_color="#a7b3c4",
-            font=ctk.CTkFont(size=14),
+        auto_row = ctk.CTkFrame(header, fg_color="transparent")
+        auto_row.grid(row=1, column=0, pady=(8, 0), sticky="w")
+
+        self.writing_auto_progress_switch = ctk.CTkSwitch(
+            auto_row,
+            text="자동진행 OFF",
+            variable=self.writing_auto_progress_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=50,
+            switch_height=26,
+            corner_radius=13,
+            progress_color="#1faa55",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self._on_writing_auto_progress_toggled,
         )
-        page_subtitle.grid(row=1, column=0, pady=(6, 0), sticky="w")
+        self.writing_auto_progress_switch.grid(row=0, column=0, sticky="w")
+
+        self.writing_auto_progress_status = ctk.CTkLabel(
+            auto_row,
+            text="1→4단계를 순서대로 진행합니다.",
+            text_color="#a7b3c4",
+            font=ctk.CTkFont(size=13),
+        )
+        self.writing_auto_progress_status.grid(row=0, column=1, padx=(12, 0), sticky="w")
+
+        target_row = ctk.CTkFrame(header, fg_color="transparent")
+        target_row.grid(row=2, column=0, pady=(8, 0), sticky="w")
+        ctk.CTkLabel(
+            target_row,
+            text="자동 발행 대상",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 14), sticky="w")
+
+        selected_targets = set(self.wordpress_settings.target_platforms or ["wordpress"])
+        for index, (platform_key, label) in enumerate(
+            [("wordpress", "워드프레스"), ("tistory", "티스토리")],
+            start=1,
+        ):
+            variable = ctk.BooleanVar(value=platform_key in selected_targets)
+            self.target_platform_vars[platform_key] = variable
+            ctk.CTkCheckBox(
+                target_row,
+                text=label,
+                variable=variable,
+                onvalue=True,
+                offvalue=False,
+                checkbox_width=22,
+                checkbox_height=22,
+                corner_radius=6,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=self._on_writing_target_changed,
+            ).grid(row=0, column=index, padx=(0, 16), sticky="w")
+
+        self._refresh_writing_auto_progress_ui()
 
         self.writing_scroll = ctk.CTkScrollableFrame(self.writing_page, fg_color="transparent")
         self.writing_scroll.grid(row=1, column=0, padx=28, pady=(0, 26), sticky="nsew")
         self.writing_scroll.grid_columnconfigure(0, weight=1)
         self._build_writing_workflow(self.writing_scroll)
+
+    def _refresh_writing_auto_progress_ui(self) -> None:
+        if not hasattr(self, "writing_auto_progress_switch"):
+            return
+        enabled = bool(self.writing_auto_progress_var.get())
+        self.writing_auto_progress_switch.configure(text=f"자동진행 {'ON' if enabled else 'OFF'}")
+        if not hasattr(self, "writing_auto_progress_status"):
+            return
+        if self.writing_auto_run_active:
+            stage_labels = {
+                "keyword": "추천 키워드를 선택하고 참고내용을 수집하는 중입니다.",
+                "article": "프롬프트에 따라 글을 작성하는 중입니다.",
+                "publish": "썸네일·카드뉴스를 준비해 선택한 블로그에 발행하는 중입니다.",
+            }
+            text = stage_labels.get(self.writing_auto_stage, "자동진행을 준비하고 있습니다.")
+            color = "#48d980"
+        elif enabled:
+            text = "키워드 실행 시 1→4단계를 순서대로 진행합니다."
+            color = "#6dadff"
+        else:
+            text = "각 단계를 직접 확인하며 진행합니다."
+            color = "#a7b3c4"
+        self.writing_auto_progress_status.configure(text=text, text_color=color)
+
+    def _on_writing_auto_progress_toggled(self) -> None:
+        if not self.writing_auto_progress_var.get():
+            self._stop_writing_auto_progress()
+        self._refresh_writing_auto_progress_ui()
+        self._save_ui_state()
+
+    def _on_writing_target_changed(self) -> None:
+        self._save_ui_state()
+        self._refresh_writing_auto_progress_ui()
+
+    def _selected_writing_targets(self) -> list[str]:
+        return [platform for platform, variable in self.target_platform_vars.items() if variable.get()]
+
+    def _arm_writing_auto_progress(self) -> bool:
+        if not self.writing_auto_progress_var.get():
+            self._stop_writing_auto_progress()
+            return False
+        if not self._selected_writing_targets():
+            self._stop_writing_auto_progress()
+            messagebox.showwarning("자동 발행 대상 필요", "워드프레스 또는 티스토리를 한 개 이상 선택해 주세요.")
+            return False
+        self.writing_auto_run_active = True
+        self.writing_auto_stage = "keyword"
+        self._refresh_writing_auto_progress_ui()
+        return True
+
+    def _stop_writing_auto_progress(self) -> None:
+        self.writing_auto_run_active = False
+        self.writing_auto_stage = ""
+        self._refresh_writing_auto_progress_ui()
+
+    def _auto_select_first_keyword(self) -> None:
+        if not self.writing_auto_run_active or not self.current_insights:
+            return
+        first_keyword = self.current_insights[0].keyword.strip()
+        if not first_keyword:
+            self._stop_writing_auto_progress()
+            return
+        self.selected_keyword_var.set(first_keyword)
+        if hasattr(self, "manual_keyword_entry"):
+            self.manual_keyword_entry.delete(0, "end")
+        self.keyword_status_label.configure(text=f"자동진행: '{first_keyword}' 참고내용을 수집합니다.")
+        self._on_recommended_keyword_selected()
+
+    def _auto_continue_after_reference(self, keyword: str = "") -> None:
+        if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
+            return
+        selected_keyword = self._selected_or_manual_keyword()
+        if keyword and selected_keyword and keyword.strip() != selected_keyword.strip():
+            return
+        if self.article_worker and self.article_worker.is_alive():
+            return
+        self.writing_auto_stage = "article"
+        self._refresh_writing_auto_progress_ui()
+        self._generate_article_from_selection()
+
+    def _auto_continue_after_article(self) -> None:
+        if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
+            return
+        if not self._selected_writing_targets():
+            self._stop_writing_auto_progress()
+            return
+        self.writing_auto_stage = "publish"
+        self._refresh_writing_auto_progress_ui()
+        self._go_to_thumbnail_section()
+        self.after(450, self._auto_publish_current_article)
+
+    def _auto_publish_current_article(self) -> None:
+        if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
+            return
+        self._run_publish_pipeline()
+        if not (self.pipeline_worker and self.pipeline_worker.is_alive()):
+            self._stop_writing_auto_progress()
 
     def _is_widget_inside_scroll_frame(self, widget, scroll_frame: ctk.CTkScrollableFrame) -> bool:
         canvas = getattr(scroll_frame, "_parent_canvas", None)
@@ -16991,38 +17144,8 @@ class KeywordApp(ctk.CTk):
         )
         self.benchmark_button.grid(row=0, column=2, padx=(0, 14), pady=12, sticky="e")
 
-        target_label = ctk.CTkLabel(
-            topic_card,
-            text="발행 대상",
-            anchor="w",
-            font=ctk.CTkFont(size=15, weight="bold"),
-        )
-        target_label.grid(row=3, column=0, padx=24, pady=(0, 8), sticky="w")
-
-        target_row = ctk.CTkFrame(topic_card, fg_color="transparent")
-        target_row.grid(row=4, column=0, padx=24, pady=(0, 12), sticky="w")
-
-        for index, (platform_key, label) in enumerate(
-            [("wordpress", "워드프레스"), ("tistory", "티스토리"), ("blogspot", "블로그스팟")]
-        ):
-            variable = ctk.BooleanVar(value=platform_key == "wordpress")
-            self.target_platform_vars[platform_key] = variable
-            checkbox = ctk.CTkCheckBox(
-                target_row,
-                text=label,
-                variable=variable,
-                onvalue=True,
-                offvalue=False,
-                checkbox_width=22,
-                checkbox_height=22,
-                corner_radius=6,
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=self._save_ui_state,
-            )
-            checkbox.grid(row=0, column=index, padx=(0, 16), sticky="w")
-
         options_row = ctk.CTkFrame(topic_card, fg_color="transparent")
-        options_row.grid(row=5, column=0, padx=24, pady=(0, 12), sticky="ew")
+        options_row.grid(row=3, column=0, padx=24, pady=(0, 12), sticky="ew")
         options_row.grid_columnconfigure(0, weight=1)
 
         self.ai_provider_menu = ctk.CTkOptionMenu(
@@ -17102,14 +17225,14 @@ class KeywordApp(ctk.CTk):
             text_color="#d3d9e6",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.keyword_status_label.grid(row=6, column=0, padx=24, pady=(0, 8), sticky="ew")
+        self.keyword_status_label.grid(row=4, column=0, padx=24, pady=(0, 8), sticky="ew")
 
         self.progress_bar = ctk.CTkProgressBar(topic_card, height=16, corner_radius=10)
-        self.progress_bar.grid(row=7, column=0, padx=24, pady=(0, 18), sticky="ew")
+        self.progress_bar.grid(row=5, column=0, padx=24, pady=(0, 18), sticky="ew")
         self.progress_bar.set(0)
 
         source_row = ctk.CTkFrame(topic_card, fg_color="transparent")
-        source_row.grid(row=8, column=0, padx=24, pady=(0, 18), sticky="w")
+        source_row.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="w")
 
         for index, (source_key, label) in enumerate([("youtube", "YouTube"), ("google", "Google"), ("naver", "Naver")]):
             variable = ctk.BooleanVar(value=True)
@@ -20212,6 +20335,8 @@ class KeywordApp(ctk.CTk):
         target_platforms = set(self.wordpress_settings.target_platforms or ["wordpress"])
         for platform_key, variable in self.target_platform_vars.items():
             variable.set(platform_key in target_platforms)
+        self.writing_auto_progress_var.set(self.wordpress_settings.writing_auto_progress)
+        self._refresh_writing_auto_progress_ui()
         self.prompt_title_boxes["wordpress"].insert("1.0", self.wordpress_settings.wordpress_title_prompt_template)
         self.prompt_article_boxes["wordpress"].insert("1.0", self.wordpress_settings.wordpress_article_prompt_template)
         self.prompt_title_boxes["tistory"].insert("1.0", self.wordpress_settings.tistory_title_prompt_template)
@@ -21012,6 +21137,11 @@ class KeywordApp(ctk.CTk):
             writing_link_url=(current_writing_links[0]["url"] if current_writing_links else ""),
             writing_links=current_writing_links,
             writing_enabled_sources=[source for source, var in self.source_vars.items() if var.get()],
+            writing_auto_progress=(
+                self.writing_auto_progress_var.get()
+                if hasattr(self, "writing_auto_progress_var")
+                else self.wordpress_settings.writing_auto_progress
+            ),
             thumbnail_text=self.thumbnail_prompt_preview.get("1.0", "end").strip(),
             thumbnail_auto_title=self.thumbnail_auto_title_var.get(),
             thumbnail_width=self._safe_int(self.thumbnail_width_entry.get(), 400),
@@ -21701,6 +21831,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "현재 키워드 분석이 진행 중입니다.")
             return
 
+        self._arm_writing_auto_progress()
         self._reset_writing_section_completion()
         self.current_keyword = keyword
         self.current_insights = []
@@ -21759,6 +21890,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
 
+        self._arm_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -21791,6 +21923,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
 
+        self._arm_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -21823,6 +21956,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "시그널 실시간 검색어를 가져오는 중입니다.")
             return
 
+        self._arm_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -21859,6 +21993,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showwarning("URL 필요", "벤치마킹할 블로그 글 URL을 입력해 주세요.")
             return
 
+        self._arm_writing_auto_progress()
         self._reset_writing_section_completion()
         self.current_keyword = "다른사람글 벤치마킹"
         self.current_insights = []
@@ -21934,6 +22069,8 @@ class KeywordApp(ctk.CTk):
         return ""
 
     def _on_recommended_keyword_selected(self) -> None:
+        if self.writing_auto_progress_var.get() and not self.writing_auto_run_active:
+            self._arm_writing_auto_progress()
         if hasattr(self, "manual_keyword_entry"):
             self.manual_keyword_entry.delete(0, "end")
         selected_keyword = self.selected_keyword_var.get().strip()
@@ -22019,6 +22156,8 @@ class KeywordApp(ctk.CTk):
         self._collect_reference_for_selected_keyword(silent=True)
 
     def _generate_article_from_selection(self) -> None:
+        if self.writing_auto_progress_var.get() and not self.writing_auto_run_active:
+            self._arm_writing_auto_progress()
         selected_keyword = self._selected_or_manual_keyword()
         if not selected_keyword:
             messagebox.showwarning("선택 필요", "추천 키워드를 선택하거나 직접 키워드를 입력해 주세요.")
@@ -22036,9 +22175,11 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(settings)
 
         if settings.preferred_ai_provider == "gemini" and not settings.gemini_api_key:
+            self._stop_writing_auto_progress()
             messagebox.showerror("API 키 필요", "제미나이 API 키를 먼저 환경설정에 입력해 주세요.")
             return
         if settings.preferred_ai_provider == "gpt" and not settings.gpt_api_key:
+            self._stop_writing_auto_progress()
             messagebox.showerror("API 키 필요", "GPT API 키를 먼저 환경설정에 입력해 주세요.")
             return
 
@@ -23151,7 +23292,9 @@ class KeywordApp(ctk.CTk):
                     self._render_keyword_choices(payload)
                     self._render_results(payload)
                     self._open_writing_section("keyword", complete_previous=True)
+                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "analysis_error":
+                    self._stop_writing_auto_progress()
                     self.progress_bar.set(0)
                     self.keyword_status_label.configure(text="분석 오류")
                     self.find_keywords_button.configure(state="normal", text="키워드 찾기")
@@ -23181,7 +23324,9 @@ class KeywordApp(ctk.CTk):
                     )
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
+                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "daum_error":
+                    self._stop_writing_auto_progress()
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(0)
@@ -23214,7 +23359,9 @@ class KeywordApp(ctk.CTk):
                         self._update_reference_count()
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
+                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "signal_error":
+                    self._stop_writing_auto_progress()
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(0)
@@ -23247,7 +23394,9 @@ class KeywordApp(ctk.CTk):
                         self._update_reference_count()
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
+                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "newneek_error":
+                    self._stop_writing_auto_progress()
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(0)
@@ -23316,6 +23465,7 @@ class KeywordApp(ctk.CTk):
                     self.keyword_status_label.configure(text=f"'{keyword}' 참고내용 수집 완료")
                     self._save_ui_state()
                     self.after(180, self._start_pending_reference_collection)
+                    self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                 elif event_type == "reference_collect_empty":
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
@@ -23326,6 +23476,7 @@ class KeywordApp(ctk.CTk):
                     self.article_progress_label.configure(text=message)
                     self.keyword_status_label.configure(text=f"'{keyword}' 참고내용 자동수집 건너뜀")
                     self.after(180, self._start_pending_reference_collection)
+                    self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                 elif event_type == "reference_collect_error":
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
@@ -23339,8 +23490,10 @@ class KeywordApp(ctk.CTk):
                     else:
                         self.article_progress_label.configure(text="참고내용 수집에 실패했습니다. 다른 키워드로 다시 시도해 주세요.")
                         self.keyword_status_label.configure(text="참고내용 수집 실패")
-                        messagebox.showerror("참고내용 수집 실패", payload)
+                        if not self.writing_auto_run_active:
+                            messagebox.showerror("참고내용 수집 실패", payload)
                     self.after(180, self._start_pending_reference_collection)
+                    self.after(260, self._auto_continue_after_reference)
                 elif event_type == "benchmark_progress":
                     self.keyword_status_label.configure(text=payload)
                     self.article_progress_label.configure(text=payload)
@@ -23375,6 +23528,7 @@ class KeywordApp(ctk.CTk):
                         status_prefix="벤치마킹 기반",
                     )
                 elif event_type == "benchmark_error":
+                    self._stop_writing_auto_progress()
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(0)
@@ -23395,7 +23549,9 @@ class KeywordApp(ctk.CTk):
                     self.article_progress_label.configure(text=message)
                 elif event_type == "article_done":
                     self._handle_article_generation_success(payload)
+                    self.after(300, self._auto_continue_after_article)
                 elif event_type == "article_error":
+                    self._stop_writing_auto_progress()
                     self.article_worker = None
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
@@ -23410,6 +23566,7 @@ class KeywordApp(ctk.CTk):
                     else:
                         self._handle_publish_pipeline_success(payload)
                 elif event_type == "publish_pipeline_error":
+                    self._stop_writing_auto_progress()
                     if self.active_automation_upload_item_id:
                         self._handle_automation_publish_error(payload)
                     else:
@@ -23433,6 +23590,7 @@ class KeywordApp(ctk.CTk):
                     self.publish_progress_bar.start()
                     self.publish_status_label.configure(text=payload, text_color="#6dadff")
                 elif event_type == "tistory_automation_done":
+                    self._stop_writing_auto_progress()
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(1.0)
@@ -23453,6 +23611,7 @@ class KeywordApp(ctk.CTk):
                         self._set_writing_section_completed("publish")
                         self._show_writing_complete_dialog()
                 elif event_type == "tistory_automation_error":
+                    self._stop_writing_auto_progress()
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(0)
@@ -23840,6 +23999,7 @@ class KeywordApp(ctk.CTk):
         self._set_writing_section_completed("publish")
         self._open_writing_section("publish", complete_previous=True)
         if not tistory_worker_started:
+            self._stop_writing_auto_progress()
             self._show_writing_complete_dialog()
 
     def _handle_automation_publish_success(self, payload: dict) -> None:
