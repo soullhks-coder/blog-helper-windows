@@ -10772,6 +10772,7 @@ class KeywordApp(ctk.CTk):
         self.update_close_button: ctk.CTkButton | None = None
         self.pending_update_payload: dict | None = None
         self.writing_complete_dialog: ctk.CTkToplevel | None = None
+        self.reference_collection_dialog: ctk.CTkToplevel | None = None
 
         self.result_queue: queue.Queue = queue.Queue()
         self.remote_agent_store = RemoteAgentConfigStore(DATA_DIR)
@@ -11213,6 +11214,88 @@ class KeywordApp(ctk.CTk):
                 pass
             dialog.destroy()
         self._reset_writing_accordion_state()
+
+    def _show_reference_collection_complete_dialog(self, keyword: str, count: int) -> None:
+        if self.reference_collection_dialog and self.reference_collection_dialog.winfo_exists():
+            try:
+                self.reference_collection_dialog.destroy()
+            except tk.TclError:
+                pass
+
+        palette = self._theme_palette()
+        dialog = ctk.CTkToplevel(self)
+        self.reference_collection_dialog = dialog
+        dialog.title("참고내용 수집 완료")
+        dialog.geometry("520x310")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.configure(fg_color=palette["shell"])
+        dialog.attributes("-topmost", True)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_reference_collection_dialog)
+
+        card = ctk.CTkFrame(
+            dialog,
+            corner_radius=24,
+            fg_color=palette["card"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        card.pack(fill="both", expand=True, padx=22, pady=22)
+
+        ctk.CTkLabel(
+            card,
+            text="✓",
+            text_color="#48d980",
+            font=ctk.CTkFont(size=38, weight="bold"),
+        ).pack(padx=24, pady=(22, 2))
+        ctk.CTkLabel(
+            card,
+            text="참고내용 수집이 완료되었습니다.",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(padx=24, pady=(0, 8))
+        ctk.CTkLabel(
+            card,
+            text=f"'{keyword}' 관련 팩트 {count}개를 참고내용에 넣었습니다.\n확인을 누른 뒤 아래의 '다음: 글 작성' 버튼을 눌러 주세요.",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14),
+            justify="center",
+        ).pack(padx=24, pady=(0, 16))
+
+        confirm_button = ctk.CTkButton(
+            card,
+            text="확인",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#2f6df6",
+            hover_color="#255dcc",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._close_reference_collection_dialog,
+        )
+        confirm_button.pack(padx=24, pady=(0, 18))
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.bind("<Return>", lambda _event: self._close_reference_collection_dialog())
+        try:
+            dialog.grab_set()
+            dialog.lift()
+            confirm_button.focus_set()
+        except tk.TclError:
+            pass
+
+    def _close_reference_collection_dialog(self) -> None:
+        dialog = self.reference_collection_dialog
+        self.reference_collection_dialog = None
+        if dialog and dialog.winfo_exists():
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
 
     def _safe_window_geometry(self, geometry: str) -> str:
         match = re.match(r"^(\d+)x(\d+)", geometry or "")
@@ -12829,7 +12912,7 @@ class KeywordApp(ctk.CTk):
 
         self.writing_auto_progress_status = ctk.CTkLabel(
             auto_row,
-            text="1→4단계를 순서대로 진행합니다.",
+            text="1·2단계는 직접 선택하고 3·4단계를 자동 진행합니다.",
             text_color="#a7b3c4",
             font=ctk.CTkFont(size=13),
         )
@@ -12879,14 +12962,14 @@ class KeywordApp(ctk.CTk):
             return
         if self.writing_auto_run_active:
             stage_labels = {
-                "keyword": "추천 키워드를 선택하고 참고내용을 수집하는 중입니다.",
+                "keyword": "선택한 키워드의 참고내용을 수집하는 중입니다.",
                 "article": "프롬프트에 따라 글을 작성하는 중입니다.",
                 "publish": "썸네일·카드뉴스를 준비해 선택한 블로그에 발행하는 중입니다.",
             }
             text = stage_labels.get(self.writing_auto_stage, "자동진행을 준비하고 있습니다.")
             color = "#48d980"
         elif enabled:
-            text = "키워드 실행 시 1→4단계를 순서대로 진행합니다."
+            text = "1·2단계에서 키워드를 직접 선택하면 3·4단계를 자동 진행합니다."
             color = "#6dadff"
         else:
             text = "각 단계를 직접 확인하며 진행합니다."
@@ -12923,19 +13006,6 @@ class KeywordApp(ctk.CTk):
         self.writing_auto_run_active = False
         self.writing_auto_stage = ""
         self._refresh_writing_auto_progress_ui()
-
-    def _auto_select_first_keyword(self) -> None:
-        if not self.writing_auto_run_active or not self.current_insights:
-            return
-        first_keyword = self.current_insights[0].keyword.strip()
-        if not first_keyword:
-            self._stop_writing_auto_progress()
-            return
-        self.selected_keyword_var.set(first_keyword)
-        if hasattr(self, "manual_keyword_entry"):
-            self.manual_keyword_entry.delete(0, "end")
-        self.keyword_status_label.configure(text=f"자동진행: '{first_keyword}' 참고내용을 수집합니다.")
-        self._on_recommended_keyword_selected()
 
     def _auto_continue_after_reference(self, keyword: str = "") -> None:
         if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
@@ -21831,7 +21901,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "현재 키워드 분석이 진행 중입니다.")
             return
 
-        self._arm_writing_auto_progress()
+        self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.current_keyword = keyword
         self.current_insights = []
@@ -21890,7 +21960,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
 
-        self._arm_writing_auto_progress()
+        self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -21923,7 +21993,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
 
-        self._arm_writing_auto_progress()
+        self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -21956,7 +22026,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "시그널 실시간 검색어를 가져오는 중입니다.")
             return
 
-        self._arm_writing_auto_progress()
+        self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -23292,7 +23362,6 @@ class KeywordApp(ctk.CTk):
                     self._render_keyword_choices(payload)
                     self._render_results(payload)
                     self._open_writing_section("keyword", complete_previous=True)
-                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "analysis_error":
                     self._stop_writing_auto_progress()
                     self.progress_bar.set(0)
@@ -23324,7 +23393,6 @@ class KeywordApp(ctk.CTk):
                     )
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
-                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "daum_error":
                     self._stop_writing_auto_progress()
                     self.progress_bar.stop()
@@ -23348,18 +23416,16 @@ class KeywordApp(ctk.CTk):
                     self.newneek_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
-                    self.keyword_status_label.configure(text="시그널 실시간 검색어 10개를 불러왔습니다.")
-                    if self.current_insights:
-                        first_keyword = self.current_insights[0].keyword
-                        self.selected_keyword_var.set(first_keyword)
-                        if hasattr(self, "manual_keyword_entry"):
-                            self.manual_keyword_entry.delete(0, "end")
-                        self.reference_textbox.delete("1.0", "end")
-                        self.reference_textbox.insert("1.0", self.signal_reference_map.get(first_keyword, ""))
-                        self._update_reference_count()
+                    self.selected_keyword_var.set("")
+                    if hasattr(self, "manual_keyword_entry"):
+                        self.manual_keyword_entry.delete(0, "end")
+                    self.reference_textbox.delete("1.0", "end")
+                    self._update_reference_count()
+                    self.keyword_status_label.configure(
+                        text="시그널 실시간 검색어 10개를 불러왔습니다. 원하는 키워드를 직접 선택해 주세요."
+                    )
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
-                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "signal_error":
                     self._stop_writing_auto_progress()
                     self.progress_bar.stop()
@@ -23383,18 +23449,16 @@ class KeywordApp(ctk.CTk):
                     self.signal_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
-                    self.keyword_status_label.configure(text="뉴닉 사회 카테고리 뉴스 10개를 불러왔습니다.")
-                    if self.current_insights:
-                        first_keyword = self.current_insights[0].keyword
-                        self.selected_keyword_var.set(first_keyword)
-                        if hasattr(self, "manual_keyword_entry"):
-                            self.manual_keyword_entry.delete(0, "end")
-                        self.reference_textbox.delete("1.0", "end")
-                        self.reference_textbox.insert("1.0", self.newneek_reference_map.get(first_keyword, ""))
-                        self._update_reference_count()
+                    self.selected_keyword_var.set("")
+                    if hasattr(self, "manual_keyword_entry"):
+                        self.manual_keyword_entry.delete(0, "end")
+                    self.reference_textbox.delete("1.0", "end")
+                    self._update_reference_count()
+                    self.keyword_status_label.configure(
+                        text="뉴닉 사회 카테고리 뉴스 10개를 불러왔습니다. 원하는 키워드를 직접 선택해 주세요."
+                    )
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
-                    self.after(180, self._auto_select_first_keyword)
                 elif event_type == "newneek_error":
                     self._stop_writing_auto_progress()
                     self.progress_bar.stop()
@@ -23446,6 +23510,7 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "reference_collect_done":
                     keyword = payload.get("keyword", "")
                     reference_text = payload.get("reference_text", "")
+                    collected_count = int(payload.get("count", 0) or 0)
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
                     self.article_progress_bar.set(1.0)
@@ -23460,12 +23525,20 @@ class KeywordApp(ctk.CTk):
                         self.reference_textbox.insert("1.0", reference_text)
                         self._update_reference_count()
                     self.article_progress_label.configure(
-                        text=f"팩트 기반 참고내용 {payload.get('count', 0)}개를 수집했습니다. 이제 글 작성을 진행할 수 있습니다."
+                        text=f"팩트 기반 참고내용 {collected_count}개를 수집했습니다. 이제 글 작성을 진행할 수 있습니다."
                     )
-                    self.keyword_status_label.configure(text=f"'{keyword}' 참고내용 수집 완료")
+                    self.keyword_status_label.configure(text=f"✓ '{keyword}' 참고내용 수집 완료")
                     self._save_ui_state()
                     self.after(180, self._start_pending_reference_collection)
-                    self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
+                    if self.writing_auto_run_active:
+                        self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
+                    elif keyword == self._selected_or_manual_keyword():
+                        self.after(
+                            120,
+                            lambda current_keyword=keyword, count=collected_count: (
+                                self._show_reference_collection_complete_dialog(current_keyword, count)
+                            ),
+                        )
                 elif event_type == "reference_collect_empty":
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")

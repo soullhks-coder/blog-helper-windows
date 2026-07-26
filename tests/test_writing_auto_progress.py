@@ -32,11 +32,23 @@ class WritingAutoProgressTests(unittest.TestCase):
             self.source,
         )
 
-    def test_auto_progress_runs_keyword_article_and_publish_in_order(self) -> None:
-        self.assertIn(
-            "self._on_recommended_keyword_selected()",
-            self._method_source("_auto_select_first_keyword"),
-        )
+    def test_keyword_selection_is_manual_before_auto_progress(self) -> None:
+        self.assertNotIn("_auto_select_first_keyword", self.source)
+        for method_name in (
+            "start_analysis",
+            "load_daum_keywords",
+            "load_signal_keywords",
+            "load_newneek_keywords",
+        ):
+            self.assertNotIn(
+                "self._arm_writing_auto_progress()",
+                self._method_source(method_name),
+            )
+        selection_source = self._method_source("_on_recommended_keyword_selected")
+        self.assertIn("self._arm_writing_auto_progress()", selection_source)
+        self.assertIn("self._auto_collect_reference_for_keyword", selection_source)
+
+    def test_auto_progress_runs_article_and_publish_in_order(self) -> None:
         self.assertIn(
             "self._generate_article_from_selection()",
             self._method_source("_auto_continue_after_reference"),
@@ -44,6 +56,11 @@ class WritingAutoProgressTests(unittest.TestCase):
         publish_source = self._method_source("_auto_continue_after_article")
         self.assertIn("self._go_to_thumbnail_section()", publish_source)
         self.assertIn("self._auto_publish_current_article", publish_source)
+
+    def test_manual_reference_collection_shows_completion_dialog(self) -> None:
+        queue_source = self._method_source("_poll_queue")
+        self.assertIn("self._show_reference_collection_complete_dialog", queue_source)
+        self.assertIn("if self.writing_auto_run_active", queue_source)
 
     def test_publish_completion_stops_auto_progress(self) -> None:
         self.assertIn(
