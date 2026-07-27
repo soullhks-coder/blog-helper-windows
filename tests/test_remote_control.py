@@ -109,6 +109,57 @@ class RemoteAgentConfigTests(unittest.TestCase):
         self.assertEqual(body["deviceId"], "windows-001")
         self.assertEqual(body["password"], "one-time-password")
 
+    def test_agent_forwards_queue_commands_to_main_app(self) -> None:
+        received_commands: list[dict] = []
+        config = RemoteAgentConfig(
+            enabled=True,
+            gateway_url="https://ai.lhksoul.com",
+            device_id="mac-queue",
+            device_name="작업 맥",
+            agent_token="secret-token",
+        )
+        agent = RemoteControlAgent(
+            config,
+            "1.2.3",
+            lambda _job: None,
+            lambda _status, _message: None,
+            on_command=received_commands.append,
+        )
+
+        agent._on_message(
+            None,
+            json.dumps(
+                {
+                    "type": "queue.schedule.update",
+                    "commandId": "command-1",
+                    "itemId": "queue-1",
+                    "scheduledAt": 1_900_000_000,
+                }
+            ),
+        )
+
+        self.assertEqual(len(received_commands), 1)
+        self.assertEqual(received_commands[0]["itemId"], "queue-1")
+
+    def test_agent_sends_sanitized_queue_snapshot_payload(self) -> None:
+        config = RemoteAgentConfig(
+            enabled=True,
+            gateway_url="https://ai.lhksoul.com",
+            device_id="windows-queue",
+            device_name="작업 윈도우",
+            agent_token="secret-token",
+        )
+        agent = RemoteControlAgent(config, "1.2.3", lambda _job: None, lambda _status, _message: None)
+        agent._socket = MagicMock()
+
+        agent.send_queue_snapshot([{"id": "queue-1", "title": "원격 글"}])
+
+        encoded = agent._socket.send.call_args.args[0]
+        payload = json.loads(encoded)
+        self.assertEqual(payload["type"], "queue.snapshot")
+        self.assertEqual(payload["deviceId"], "windows-queue")
+        self.assertEqual(payload["items"][0]["title"], "원격 글")
+
 
 if __name__ == "__main__":
     unittest.main()

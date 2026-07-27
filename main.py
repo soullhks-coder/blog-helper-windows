@@ -10875,6 +10875,7 @@ class KeywordApp(ctk.CTk):
         self._theme_paint_last_run = 0.0
         self._theme_painted_widgets = weakref.WeakSet()
         self._automation_queue_render_signature = None
+        self._last_remote_queue_snapshot_signature = None
         self._thumbnail_background_cache = None
         self._cardnews_background_cache = None
         self._source_image_cache: dict[str, tuple[int, object]] = {}
@@ -12689,6 +12690,7 @@ class KeywordApp(ctk.CTk):
                 ("remote_agent_status", {"status": status, "message": message})
             ),
             on_credentials=lambda token: self.result_queue.put(("remote_agent_credentials", token)),
+            on_command=lambda payload: self.result_queue.put(("remote_queue_command", payload)),
         )
         self.remote_agent.start()
 
@@ -12704,6 +12706,8 @@ class KeywordApp(ctk.CTk):
             self.remote_pairing_password_entry.delete(0, "end")
 
     def _handle_remote_agent_status(self, status: str, message: str) -> None:
+        if status == "online":
+            self._send_remote_queue_snapshot(force=True)
         if not hasattr(self, "remote_agent_status_label"):
             return
         color_map = {
@@ -12717,6 +12721,134 @@ class KeywordApp(ctk.CTk):
             text=message,
             text_color=color_map.get(status, "#9aa7bb"),
         )
+
+    def _build_remote_queue_snapshot(self) -> list[dict]:
+        snapshot: list[dict] = []
+        for item in list(getattr(self, "automation_queue", []))[-30:]:
+            try:
+                scheduled_at = float(item.get("scheduled_at") or 0)
+            except (TypeError, ValueError):
+                scheduled_at = 0.0
+            article_html = str(item.get("article_html") or "").strip()
+            safe_html = re.sub(
+                r"<(script|style|iframe|object|embed|form|meta|link)\b[^>]*>.*?</\1\s*>",
+                "",
+                article_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            safe_html = re.sub(
+                r"<(script|style|iframe|object|embed|form|meta|link)\b[^>]*/?>",
+                "",
+                safe_html,
+                flags=re.IGNORECASE,
+            )
+            safe_html = re.sub(
+                r"<img\b[^>]*>",
+                "<p><em>본문 이미지가 포함되어 있습니다.</em></p>",
+                safe_html,
+                flags=re.IGNORECASE,
+            )
+            safe_html = re.sub(
+                r"\s+on[a-z]+\s*=\s*([\"']).*?\1",
+                "",
+                safe_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            safe_html = re.sub(
+                r"(href|src)\s*=\s*([\"'])\s*javascript:.*?\2",
+                r'\1="#"',
+                safe_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            # WebSocket 메시지가 과도하게 커지지 않도록 원격 미리보기만 적당한 길이로 제한합니다.
+            safe_html = safe_html[:8_000]
+            plain_text = re.sub(r"<[^>]+>", " ", safe_html)
+            plain_text = re.sub(r"\s+", " ", unescape(plain_text)).strip()
+            cardnews_paths = item.get("cardnews_image_paths") or item.get("cardnews_paths") or []
+            snapshot.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "title": str(item.get("title") or item.get("keyword") or "제목 없는 글")[:300],
+                    "keyword": str(item.get("keyword") or "")[:300],
+                    "status": str(item.get("status") or "대기 중")[:60],
+                    "scheduledAt": scheduled_at,
+                    "createdAt": str(item.get("created_at") or "")[:40],
+                    "targetPlatforms": list(item.get("target_platforms") or []),
+                    "articleHtml": safe_html,
+                    "excerpt": plain_text[:280],
+                    "hasThumbnail": bool(str(item.get("thumbnail_path") or "").strip()),
+                    "cardnewsCount": len(cardnews_paths),
+                }
+            )
+        return snapshot
+
+    def _send_remote_queue_snapshot(self, force: bool = False) -> None:
+        agent = getattr(self, "remote_agent", None)
+        if agent is None:
+            return
+        items = self._build_remote_queue_snapshot()
+        signature = tuple(
+            (
+                item["id"],
+                item["title"],
+                item["status"],
+                item["scheduledAt"],
+                tuple(item["targetPlatforms"]),
+                hash(item["articleHtml"]),
+            )
+            for item in items
+        )
+        if not force and signature == self._last_remote_queue_snapshot_signature:
+            return
+        self._last_remote_queue_snapshot_signature = signature
+        agent.send_queue_snapshot(items)
+
+    def _handle_remote_queue_command(self, payload: dict) -> None:
+        agent = getattr(self, "remote_agent", None)
+        if agent is None:
+            return
+        command_type = str(payload.get("type") or "")
+        command_id = str(payload.get("commandId") or "")
+        item_id = str(payload.get("itemId") or "")
+        try:
+            if command_type == "queue.request":
+                self._send_remote_queue_snapshot(force=True)
+                agent.command_result(command_id, True, "대기열을 새로 불러왔습니다.")
+                return
+
+            item = self._find_automation_queue_item(item_id)
+            if not item:
+                raise RuntimeError("선택한 대기열 글을 PC에서 찾지 못했습니다.")
+
+            if command_type == "queue.schedule.update":
+                if str(item.get("status") or "") == "업로드 중":
+                    raise RuntimeError("현재 발행 중인 글의 예정시간은 변경할 수 없습니다.")
+                scheduled_at = float(payload.get("scheduledAt") or 0)
+                if not scheduled_at or scheduled_at <= 0:
+                    raise RuntimeError("올바른 등록 예정시간을 입력해 주세요.")
+                item["scheduled_at"] = scheduled_at
+                item["status"] = "대기 중"
+                self._save_automation_queue()
+                self._refresh_automation_queue()
+                agent.command_result(command_id, True, "등록 예정시간을 변경했습니다.")
+                return
+
+            if command_type == "queue.publish.now":
+                started = self._publish_next_automation_queue_item(
+                    scheduled=False,
+                    item_id=item_id,
+                )
+                agent.command_result(
+                    command_id,
+                    started,
+                    "즉시발행을 시작했습니다." if started else "현재 즉시발행을 시작할 수 없습니다.",
+                )
+                return
+
+            raise RuntimeError("지원하지 않는 원격 대기열 명령입니다.")
+        except (RuntimeError, TypeError, ValueError) as exc:
+            agent.command_result(command_id, False, str(exc))
+            self._send_remote_queue_snapshot(force=True)
 
     def _start_remote_keyword_job(self, payload: dict) -> None:
         job_id = str(payload.get("id") or "").strip()
@@ -14783,6 +14915,7 @@ class KeywordApp(ctk.CTk):
                 self.automation_selection_vars.pop(item_id, None)
             self.wordpress_settings.automation_queue = list(self.automation_queue)
             AppStateStore.save(self.wordpress_settings, save_secrets=False)
+            self._send_remote_queue_snapshot()
         queue_items = list(self.automation_queue)
         queue_ids = {str(item.get("id") or "") for item in queue_items}
         self.automation_selection_vars = {
@@ -22429,6 +22562,7 @@ class KeywordApp(ctk.CTk):
         ]
         self.wordpress_settings.automation_target_platforms = self._automation_target_platforms()
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self._send_remote_queue_snapshot()
 
     def _collect_automation_keywords(self, scheduled: bool = False) -> None:
         if self.automation_keyword_worker and self.automation_keyword_worker.is_alive():
@@ -22797,49 +22931,68 @@ class KeywordApp(ctk.CTk):
                 )
             self._schedule_next_automation_publish()
 
-    def _publish_next_automation_queue_item(self, scheduled: bool = False) -> None:
+    def _publish_next_automation_queue_item(
+        self,
+        scheduled: bool = False,
+        item_id: str = "",
+    ) -> bool:
+        remote_request = bool(item_id)
         self._stop_automation_publish_countdown()
         if self.pipeline_worker and self.pipeline_worker.is_alive():
             if scheduled:
                 self._schedule_next_automation_publish()
-            else:
+            elif not remote_request:
                 messagebox.showinfo("진행 중", "현재 업로드가 진행 중입니다.")
-            return
+            return False
         if self.tistory_automation_worker and self.tistory_automation_worker.is_alive():
             if scheduled:
                 self.automation_status_label.configure(
                     text="티스토리 자동입력이 아직 마무리 중입니다. 완료 후 다음 등록을 예약합니다.",
                     text_color="#6dadff",
                 )
-            else:
+            elif not remote_request:
                 messagebox.showinfo("진행 중", "현재 티스토리 자동입력이 진행 중입니다.")
-            return
+            return False
 
-        item = self._next_publishable_automation_item_for_time(due_only=scheduled)
+        item = (
+            self._find_automation_queue_item(item_id)
+            if item_id
+            else self._next_publishable_automation_item_for_time(due_only=scheduled)
+        )
+        if item and str(item.get("status") or "") in ("업로드 완료", "업로드 중"):
+            item = None
+        if item and not str(item.get("article_html") or "").strip():
+            item = None
         if not item:
             if not scheduled:
                 self.automation_status_label.configure(text="등록할 대기열 작업이 없습니다.", text_color="#ffcc66")
             self._schedule_next_automation_publish()
-            return
+            return False
 
         settings = self._read_wordpress_settings(include_prompts=False)
-        automation_targets = self._automation_target_platforms()
+        automation_targets = (
+            list(item.get("target_platforms") or [])
+            if remote_request
+            else self._automation_target_platforms()
+        )
+        if not automation_targets:
+            automation_targets = self._automation_target_platforms()
         settings.target_platforms = list(automation_targets)
         settings.automation_target_platforms = list(automation_targets)
         if not automation_targets:
             self.automation_status_label.configure(text="등록할 블로그가 선택되어 있지 않습니다.", text_color="#ff6b6b")
-            return
+            return False
         if "wordpress" in automation_targets:
             try:
                 self._validate_wordpress_inputs(settings, allow_empty_password=False)
             except RuntimeError as exc:
                 self.automation_status_label.configure(text=str(exc), text_color="#ff6b6b")
-                if not scheduled:
+                if not scheduled and not remote_request:
                     messagebox.showerror("입력 오류", str(exc))
-                return
+                return False
         if "tistory" in automation_targets and not self._build_tistory_write_url(settings):
             self.automation_status_label.configure(text="티스토리 글쓰기 URL 또는 블로그 주소가 필요합니다.", text_color="#ff6b6b")
-            return
+            return False
         if "blogspot" in automation_targets and (
             not settings.blogspot_blog_id
             or not settings.blogspot_client_id
@@ -22847,7 +23000,7 @@ class KeywordApp(ctk.CTk):
             or not settings.blogspot_refresh_token
         ):
             self.automation_status_label.configure(text="블로그스팟 Blog ID와 OAuth 인증 정보가 필요합니다.", text_color="#ff6b6b")
-            return
+            return False
         if settings.threads_auto_publish and (
             not settings.threads_user_id or not settings.threads_access_token
         ):
@@ -22855,12 +23008,12 @@ class KeywordApp(ctk.CTk):
                 text="Threads 자동 게시용 User ID와 Access Token이 필요합니다.",
                 text_color="#ff6b6b",
             )
-            if not scheduled:
+            if not scheduled and not remote_request:
                 messagebox.showerror(
                     "Threads 설정 필요",
                     "환경설정 > Threads에서 User ID와 Access Token을 입력하고 연결확인을 해주세요.",
                 )
-            return
+            return False
 
         title = str(item.get("title") or item.get("keyword") or "자동화 글").strip()
         article_html = str(item.get("article_html") or "").strip()
@@ -22883,7 +23036,7 @@ class KeywordApp(ctk.CTk):
                 self._refresh_automation_queue()
                 if scheduled:
                     self._schedule_next_automation_publish()
-                return
+                return False
         expanded_keyword = expand_keyword_from_context(
             keyword,
             title,
@@ -22919,6 +23072,7 @@ class KeywordApp(ctk.CTk):
             result_queue=self.result_queue,
         )
         self.pipeline_worker.start()
+        return True
 
     def _schedule_next_automation_publish(self) -> None:
         if self._automation_publish_schedule_job is not None:
@@ -23330,6 +23484,8 @@ class KeywordApp(ctk.CTk):
                     )
                 elif event_type == "remote_agent_credentials":
                     self._handle_remote_agent_credentials(str(payload or ""))
+                elif event_type == "remote_queue_command":
+                    self._handle_remote_queue_command(payload)
                 elif event_type == "remote_job_received":
                     self._start_remote_keyword_job(payload)
                 elif event_type == "remote_job_progress":

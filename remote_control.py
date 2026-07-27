@@ -91,12 +91,14 @@ class RemoteControlAgent:
         on_job: Callable[[dict], None],
         on_status: Callable[[str, str], None],
         on_credentials: Callable[[str], None] | None = None,
+        on_command: Callable[[dict], None] | None = None,
     ) -> None:
         self.config = config.normalized()
         self.app_version = app_version
         self.on_job = on_job
         self.on_status = on_status
         self.on_credentials = on_credentials
+        self.on_command = on_command
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._socket = None
@@ -149,6 +151,27 @@ class RemoteControlAgent:
         self._send_job_event("job.failed", job_id, progress=0.0, message=message)
         if self._active_job_id == job_id:
             self._active_job_id = ""
+
+    def send_queue_snapshot(self, items: list[dict]) -> None:
+        self._send(
+            {
+                "type": "queue.snapshot",
+                "deviceId": self.config.device_id,
+                "items": list(items or []),
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
+
+    def command_result(self, command_id: str, ok: bool, message: str) -> None:
+        self._send(
+            {
+                "type": "command.result",
+                "commandId": str(command_id or ""),
+                "ok": bool(ok),
+                "message": str(message or ""),
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
 
     def _run(self) -> None:
         retry_seconds = 2
@@ -254,7 +277,19 @@ class RemoteControlAgent:
         if payload.get("type") == "ping":
             self._send({"type": "pong", "timestamp": int(time.time() * 1000)})
             return
-        if payload.get("type") != "job":
+        message_type = str(payload.get("type") or "")
+        if message_type.startswith("queue."):
+            if self.on_command is not None:
+                try:
+                    self.on_command(payload)
+                except Exception as exc:
+                    self.command_result(
+                        str(payload.get("commandId") or ""),
+                        False,
+                        f"원격 대기열 명령 전달 실패: {exc}",
+                    )
+            return
+        if message_type != "job":
             return
         job_id = str(payload.get("id") or "").strip()
         keyword = str(payload.get("keyword") or "").strip()

@@ -108,6 +108,38 @@ export class ControlRoom {
     if (url.pathname === "/api/jobs" && request.method === "POST") {
       return this.createJob(request);
     }
+    if (url.pathname === "/api/queue" && request.method === "GET") {
+      return this.listQueue(
+        url.searchParams.get("deviceId"),
+        url.searchParams.get("refresh") === "1",
+      );
+    }
+    const previewMatch = url.pathname.match(/^\/api\/queue\/([^/]+)\/([^/]+)\/preview$/);
+    if (previewMatch && request.method === "GET") {
+      return this.getQueuePreview(
+        decodeURIComponent(previewMatch[1]),
+        decodeURIComponent(previewMatch[2]),
+      );
+    }
+    const scheduleMatch = url.pathname.match(/^\/api\/queue\/([^/]+)\/([^/]+)\/schedule$/);
+    if (scheduleMatch && request.method === "POST") {
+      return this.updateQueueSchedule(
+        request,
+        decodeURIComponent(scheduleMatch[1]),
+        decodeURIComponent(scheduleMatch[2]),
+      );
+    }
+    const publishMatch = url.pathname.match(/^\/api\/queue\/([^/]+)\/([^/]+)\/publish$/);
+    if (publishMatch && request.method === "POST") {
+      return this.publishQueueItem(
+        decodeURIComponent(publishMatch[1]),
+        decodeURIComponent(publishMatch[2]),
+      );
+    }
+    const commandMatch = url.pathname.match(/^\/api\/commands\/([^/]+)$/);
+    if (commandMatch && request.method === "GET") {
+      return this.getCommandResult(decodeURIComponent(commandMatch[1]));
+    }
     const cancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
     if (cancelMatch && request.method === "POST") {
       return this.cancelJob(decodeURIComponent(cancelMatch[1]));
@@ -247,6 +279,116 @@ export class ControlRoom {
     return [...entries.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   }
 
+  async listQueue(rawDeviceId, requestRefresh = false) {
+    const deviceId = cleanText(rawDeviceId, 80);
+    if (!deviceId) {
+      return jsonResponse({ error: "대기열을 확인할 PC를 선택해 주세요." }, 400);
+    }
+    const device = await this.ctx.storage.get(`device:${deviceId}`);
+    if (!device) {
+      return jsonResponse({ error: "등록된 PC를 찾지 못했습니다." }, 404);
+    }
+    const stored = (await this.ctx.storage.get(`queue:${deviceId}`)) || {
+      items: [],
+      updatedAt: 0,
+    };
+    const sockets = this.ctx.getWebSockets(`device:${deviceId}`);
+    if (sockets.length && requestRefresh) {
+      try {
+        sockets[0].send(
+          JSON.stringify({
+            type: "queue.request",
+            commandId: crypto.randomUUID(),
+          }),
+        );
+      } catch {
+        // 저장된 마지막 대기열은 계속 표시합니다.
+      }
+    }
+    return jsonResponse({
+      deviceId,
+      deviceName: device.name || deviceId,
+      online: sockets.length > 0,
+      items: Array.isArray(stored.items) ? stored.items : [],
+      updatedAt: Number(stored.updatedAt || 0),
+    });
+  }
+
+  async getQueuePreview(rawDeviceId, rawItemId) {
+    const deviceId = cleanText(rawDeviceId, 80);
+    const itemId = cleanText(rawItemId, 100);
+    if (!deviceId || !itemId) {
+      return jsonResponse({ error: "미리보기 글을 찾지 못했습니다." }, 400);
+    }
+    const preview = await this.ctx.storage.get(`queue-preview:${deviceId}:${itemId}`);
+    if (!preview) {
+      return jsonResponse({ error: "아직 미리보기 본문이 PC에서 전송되지 않았습니다." }, 404);
+    }
+    return jsonResponse(preview);
+  }
+
+  async updateQueueSchedule(request, rawDeviceId, rawItemId) {
+    const deviceId = cleanText(rawDeviceId, 80);
+    const itemId = cleanText(rawItemId, 100);
+    const payload = await readJson(request);
+    const scheduledAt = Number(payload.scheduledAt || 0);
+    if (!deviceId || !itemId || !Number.isFinite(scheduledAt) || scheduledAt <= 0) {
+      return jsonResponse({ error: "올바른 등록 예정시간을 입력해 주세요." }, 400);
+    }
+    return this.sendQueueCommand(deviceId, {
+      type: "queue.schedule.update",
+      itemId,
+      scheduledAt,
+    });
+  }
+
+  async publishQueueItem(rawDeviceId, rawItemId) {
+    const deviceId = cleanText(rawDeviceId, 80);
+    const itemId = cleanText(rawItemId, 100);
+    if (!deviceId || !itemId) {
+      return jsonResponse({ error: "즉시발행할 글을 찾지 못했습니다." }, 400);
+    }
+    return this.sendQueueCommand(deviceId, {
+      type: "queue.publish.now",
+      itemId,
+    });
+  }
+
+  async sendQueueCommand(deviceId, command) {
+    const sockets = this.ctx.getWebSockets(`device:${deviceId}`);
+    if (!sockets.length) {
+      return jsonResponse({ error: "선택한 PC가 현재 오프라인입니다." }, 409);
+    }
+    const commandId = crypto.randomUUID();
+    try {
+      sockets[0].send(JSON.stringify({ ...command, commandId }));
+    } catch {
+      return jsonResponse({ error: "PC 연결이 끊어져 요청을 전달하지 못했습니다." }, 409);
+    }
+    return jsonResponse(
+      {
+        ok: true,
+        commandId,
+        message: command.type === "queue.publish.now"
+          ? "PC에 즉시발행을 요청했습니다."
+          : "PC에 등록 예정시간 변경을 요청했습니다.",
+      },
+      202,
+    );
+  }
+
+  async getCommandResult(rawCommandId) {
+    const commandId = cleanText(rawCommandId, 80);
+    if (!commandId) {
+      return jsonResponse({ error: "원격 명령을 찾지 못했습니다." }, 400);
+    }
+    const result = await this.ctx.storage.get(`command:${commandId}`);
+    if (!result) {
+      return jsonResponse({ pending: true }, 202);
+    }
+    return jsonResponse({ pending: false, ...result });
+  }
+
   async webSocketMessage(socket, message) {
     let payload;
     try {
@@ -262,6 +404,55 @@ export class ControlRoom {
     const deviceKey = `device:${deviceId}`;
     const device = (await this.ctx.storage.get(deviceKey)) || attachment;
     if (payload.type === "ready" || payload.type === "pong") {
+      await this.ctx.storage.put(deviceKey, { ...device, ...attachment, lastSeen: Date.now() });
+      return;
+    }
+    if (payload.type === "queue.snapshot") {
+      const previous = (await this.ctx.storage.get(`queue:${deviceId}`)) || { items: [] };
+      const normalized = normalizeQueueSnapshot(payload.items);
+      const activeIds = new Set(normalized.map((item) => item.id));
+      for (const oldItem of previous.items || []) {
+        const oldId = cleanText(oldItem.id, 100);
+        if (oldId && !activeIds.has(oldId)) {
+          await this.ctx.storage.delete(`queue-preview:${deviceId}:${oldId}`);
+        }
+      }
+      const summaries = [];
+      for (const item of normalized) {
+        await this.ctx.storage.put(`queue-preview:${deviceId}:${item.id}`, {
+          id: item.id,
+          title: item.title,
+          articleHtml: item.articleHtml,
+          updatedAt: Date.now(),
+        });
+        const { articleHtml, ...summary } = item;
+        summaries.push(summary);
+      }
+      const updatedAt = Number(payload.updatedAt || Date.now());
+      await this.ctx.storage.put(`queue:${deviceId}`, {
+        items: summaries,
+        updatedAt,
+      });
+      await this.ctx.storage.put(deviceKey, {
+        ...device,
+        ...attachment,
+        queueCount: summaries.length,
+        queueUpdatedAt: updatedAt,
+        lastSeen: Date.now(),
+      });
+      return;
+    }
+    if (payload.type === "command.result") {
+      const commandId = cleanText(payload.commandId, 80);
+      if (commandId) {
+        await this.ctx.storage.put(`command:${commandId}`, {
+          commandId,
+          deviceId,
+          ok: Boolean(payload.ok),
+          message: cleanText(payload.message, 500),
+          updatedAt: Date.now(),
+        });
+      }
       await this.ctx.storage.put(deviceKey, { ...device, ...attachment, lastSeen: Date.now() });
       return;
     }
@@ -337,6 +528,47 @@ function normalizeTargets(value) {
   const allowed = new Set(["wordpress", "tistory", "blogspot"]);
   const targets = Array.isArray(value) ? value.filter((item) => allowed.has(item)) : [];
   return targets.length ? [...new Set(targets)] : ["wordpress"];
+}
+
+function normalizeQueueSnapshot(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .slice(-30)
+    .map((item) => {
+      const id = cleanText(item && item.id, 100);
+      if (!id) {
+        return null;
+      }
+      const scheduledAt = Number(item.scheduledAt || 0);
+      return {
+        id,
+        title: cleanText(item.title, 300) || "제목 없는 글",
+        keyword: cleanText(item.keyword, 300),
+        status: cleanText(item.status, 60) || "대기 중",
+        scheduledAt: Number.isFinite(scheduledAt) ? scheduledAt : 0,
+        createdAt: cleanText(item.createdAt, 40),
+        targetPlatforms: normalizeTargets(item.targetPlatforms),
+        excerpt: cleanText(item.excerpt, 280),
+        hasThumbnail: Boolean(item.hasThumbnail),
+        cardnewsCount: Math.max(0, Math.min(Number(item.cardnewsCount || 0), 20)),
+        articleHtml: cleanPreviewHtml(item.articleHtml),
+      };
+    })
+    .filter(Boolean);
+}
+
+function cleanPreviewHtml(value) {
+  let html = String(value || "").slice(0, 8000);
+  html = html.replace(
+    /<(script|style|iframe|object|embed|form|meta|link)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+    "",
+  );
+  html = html.replace(/<(script|style|iframe|object|embed|form|meta|link)\b[^>]*\/?>/gi, "");
+  html = html.replace(/\son[a-z]+\s*=\s*(["'])[\s\S]*?\1/gi, "");
+  html = html.replace(/\s(href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\2/gi, ' $1="#"');
+  return html;
 }
 
 function isTerminal(status) {
