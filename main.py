@@ -3070,12 +3070,15 @@ def prepare_tistory_native_attachment_html(
                 )
                 return unescape(found.group(1)).strip() if found else ""
 
+            show_source_attribution = attr_value("data-blog-helper-show-source") != "0"
             source_url = attr_value("data-blog-helper-source-url")
             source_name = attr_value("data-blog-helper-source-name") or "재사용 허용 이미지"
             license_name = attr_value("data-blog-helper-license")
             creator = attr_value("data-blog-helper-creator")
             attribution = " · ".join(part for part in (source_name, creator, license_name) if part)
-            if source_url:
+            if not show_source_attribution:
+                caption = ""
+            elif source_url:
                 caption = (
                     f"{escape(label)} · 출처: "
                     f"<a href='{escape(source_url, quote=True)}' target='_blank' "
@@ -3083,12 +3086,13 @@ def prepare_tistory_native_attachment_html(
                 )
             elif attribution:
                 caption = f"{escape(label)} · 출처: {escape(attribution)}"
+        caption_html = f"<figcaption>{caption}</figcaption>" if caption else ""
         return (
             f"\n<figure class='{class_names} imageblock alignCenter' "
             "data-ke-mobilestyle='widthOrigin'>"
             f"<img src='{token}' alt='{escape(label)}' "
             "style='max-width:100%;height:auto;display:block;margin:0 auto;' />"
-            f"<figcaption>{caption}</figcaption>"
+            f"{caption_html}"
             "</figure>\n"
         )
 
@@ -4300,20 +4304,31 @@ def collect_tistory_reference_image_files(
     return captures
 
 
-def build_tistory_reference_image_figure(image: dict[str, str], title: str, index: int) -> str:
+def build_tistory_reference_image_figure(
+    image: dict[str, str],
+    title: str,
+    index: int,
+    show_source_attribution: bool = True,
+) -> str:
     image_path = str(image.get("path") or "").strip()
     source_url = str(image.get("source_url") or "").strip()
     source_name = str(image.get("source") or "재사용 허용 이미지").strip()
     license_name = str(image.get("license") or "재사용 허용").strip()
     creator = str(image.get("creator") or "").strip()
     alt = f"{title} 참고 이미지 {index}"
+    source_attributes = ""
+    if show_source_attribution:
+        source_attributes = (
+            f"data-blog-helper-source-url='{escape(source_url, quote=True)}' "
+            f"data-blog-helper-source-name='{escape(source_name, quote=True)}' "
+            f"data-blog-helper-license='{escape(license_name, quote=True)}' "
+            f"data-blog-helper-creator='{escape(creator, quote=True)}' "
+        )
     return (
         "\n<figure class='blog-helper-inline-image blog-helper-reference-image' "
         f"data-blog-helper-inline-image-path='{escape(image_path, quote=True)}' "
-        f"data-blog-helper-source-url='{escape(source_url, quote=True)}' "
-        f"data-blog-helper-source-name='{escape(source_name, quote=True)}' "
-        f"data-blog-helper-license='{escape(license_name, quote=True)}' "
-        f"data-blog-helper-creator='{escape(creator, quote=True)}'>"
+        f"data-blog-helper-show-source='{'1' if show_source_attribution else '0'}' "
+        f"{source_attributes}>"
         f"<p><strong>☑ 참고 이미지 {index}번 소스</strong> - 티스토리 파일 첨부로 업로드됩니다.</p>"
         f"<figcaption>{escape(alt)}</figcaption>"
         "</figure>\n"
@@ -11156,7 +11171,12 @@ class TistoryAutomationWorker(threading.Thread):
                 ]
                 if reference_images:
                     figures = [
-                        build_tistory_reference_image_figure(image, self.title, index)
+                        build_tistory_reference_image_figure(
+                            image,
+                            self.title,
+                            index,
+                            show_source_attribution=self.reference_image_protection_mode,
+                        )
                         for index, image in enumerate(reference_images, start=1)
                     ]
                     article_html = insert_reference_images_in_article_middle(article_html, figures)

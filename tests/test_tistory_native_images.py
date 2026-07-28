@@ -264,6 +264,35 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn(str(image_path), prepared)
             self.assertNotIn("data:image", prepared)
 
+    def test_reference_placeholder_omits_attribution_when_protection_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "reference-capture-unprotected.png"
+            image_path.write_bytes(b"reference-image")
+            image = {
+                "path": str(image_path),
+                "source_url": "https://news.example.com/article/123",
+                "source": "뉴스 이미지",
+                "license": "저작권 보호 모드 OFF",
+                "creator": "Example Creator",
+            }
+            source = main.build_tistory_reference_image_figure(
+                image,
+                "일본 지진",
+                1,
+                show_source_attribution=False,
+            )
+
+            prepared, native_files = main.prepare_tistory_native_attachment_html(source, "일본 지진")
+
+            self.assertEqual(list(native_files.values()), [str(image_path)])
+            self.assertIn("__BLOG_HELPER_TISTORY_NATIVE_IMAGE_1__", prepared)
+            self.assertNotIn("<figcaption>", prepared)
+            self.assertNotIn("출처:", prepared)
+            self.assertNotIn("뉴스 이미지", prepared)
+            self.assertNotIn("저작권 보호 모드 OFF", prepared)
+            self.assertNotIn("Example Creator", prepared)
+            self.assertNotIn("news.example.com", prepared)
+
     def test_reference_collector_saves_only_captured_image_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -487,8 +516,9 @@ class TistoryNativeImageTests(unittest.TestCase):
             script = call.args[1]
             native_files = call.kwargs["native_image_files"]
             self.assertIn(str(image_path), native_files.values())
-            self.assertIn("Wikimedia Commons", script)
-            self.assertIn("CC BY-SA 4.0", script)
+            self.assertNotIn("Wikimedia Commons", script)
+            self.assertNotIn("CC BY-SA 4.0", script)
+            self.assertNotIn("출처:", script)
             self.assertIn("const collageImages = []", script)
             event_types = [events.get_nowait()[0] for _ in range(events.qsize())]
             self.assertIn("tistory_automation_done", event_types)
