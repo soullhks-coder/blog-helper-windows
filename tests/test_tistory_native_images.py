@@ -182,6 +182,18 @@ class TistoryNativeImageTests(unittest.TestCase):
             ["specific", "alias"],
         )
 
+    def test_web_search_queries_retry_with_shorter_topic_phrases(self) -> None:
+        collector = main.GoogleImageCollageCollector()
+
+        queries = collector._web_search_queries(
+            "일본 구마모토 강진 대형 쇼핑몰 건물 붕괴 피해 최신 뉴스 사진"
+        )
+
+        self.assertGreaterEqual(len(queries), 3)
+        self.assertEqual(queries[0], "일본 구마모토 강진 대형 쇼핑몰 건물 붕괴 피해")
+        self.assertTrue(any(len(query.split()) <= 5 for query in queries[1:]))
+        self.assertTrue(any("강진" in query or "붕괴" in query for query in queries))
+
     def test_reference_image_protection_mode_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "app_state.json"
@@ -324,10 +336,113 @@ class TistoryNativeImageTests(unittest.TestCase):
 
             collect_web.assert_called_once()
             self.assertIn("뉴스 사진", collect_web.call_args.args[0])
-            self.assertEqual(collect_web.call_args.args[1], 1)
+            self.assertGreaterEqual(collect_web.call_args.args[1], 10)
             collect_licensed.assert_not_called()
             self.assertEqual(len(captures), 1)
             self.assertEqual(captures[0]["license"], "저작권 보호 모드 OFF")
+
+    def test_unprotected_reference_capture_retries_after_first_candidate_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            attempted_data_urls: list[str] = []
+
+            def fake_capture(data_url: str, destination: Path) -> bool:
+                attempted_data_urls.append(data_url)
+                if data_url.endswith("FIRST"):
+                    return False
+                destination.write_bytes(b"captured-second-web-image")
+                return True
+
+            candidates = [
+                {
+                    "data_url": "data:image/png;base64,FIRST",
+                    "image_url": "https://images.example.com/first.png",
+                    "source_url": "https://news.example.com/first",
+                    "source": "뉴스 이미지",
+                    "license": "저작권 보호 모드 OFF",
+                },
+                {
+                    "data_url": "data:image/png;base64,SECOND",
+                    "image_url": "https://images.example.com/second.png",
+                    "source_url": "https://news.example.com/second",
+                    "source": "뉴스 이미지",
+                    "license": "저작권 보호 모드 OFF",
+                },
+            ]
+            with (
+                patch.object(main, "GENERATED_UPLOAD_DIR", output_dir),
+                patch.object(
+                    main.GoogleImageCollageCollector,
+                    "collect_web",
+                    return_value=candidates,
+                ),
+                patch.object(main, "capture_reference_image_region", side_effect=fake_capture),
+            ):
+                captures = main.collect_tistory_reference_image_files(
+                    "일본 지진 건물 붕괴",
+                    ["일본 지진"],
+                    2,
+                    protection_mode=False,
+                )
+
+            self.assertEqual(len(captures), 1)
+            self.assertEqual(
+                attempted_data_urls,
+                ["data:image/png;base64,FIRST", "data:image/png;base64,SECOND"],
+            )
+            self.assertEqual(
+                captures[0]["source_url"],
+                "https://news.example.com/second",
+            )
+
+    def test_unprotected_reference_capture_uses_browser_when_downloaded_candidates_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            downloaded_candidate = {
+                "data_url": "data:image/png;base64,BROKEN",
+                "image_url": "https://images.example.com/broken.png",
+                "source_url": "https://news.example.com/broken",
+                "source": "뉴스 이미지",
+                "license": "저작권 보호 모드 OFF",
+            }
+            browser_candidate = {
+                "data_url": "data:image/png;base64,BROWSER",
+                "image_url": "https://images.example.com/browser.png",
+                "source_url": "https://search.example.com/images",
+                "source": "Chrome 이미지 검색 캡처",
+                "license": "저작권 보호 모드 OFF",
+            }
+
+            def fake_capture(data_url: str, destination: Path) -> bool:
+                if not data_url.endswith("BROWSER"):
+                    return False
+                destination.write_bytes(b"captured-browser-image")
+                return True
+
+            with (
+                patch.object(main, "GENERATED_UPLOAD_DIR", output_dir),
+                patch.object(
+                    main.GoogleImageCollageCollector,
+                    "collect_web",
+                    return_value=[downloaded_candidate],
+                ),
+                patch.object(
+                    main.GoogleImageCollageCollector,
+                    "_collect_browser_image_elements",
+                    return_value=[browser_candidate],
+                ) as browser_search,
+                patch.object(main, "capture_reference_image_region", side_effect=fake_capture),
+            ):
+                captures = main.collect_tistory_reference_image_files(
+                    "일본 지진 건물 붕괴",
+                    ["일본 지진"],
+                    2,
+                    protection_mode=False,
+                )
+
+            browser_search.assert_called_once()
+            self.assertEqual(len(captures), 1)
+            self.assertEqual(captures[0]["source"], "Chrome 이미지 검색 캡처")
 
     def test_tistory_worker_uploads_reference_capture_as_native_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

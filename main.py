@@ -3277,6 +3277,8 @@ def image_bytes_to_data_url(image_bytes: bytes, content_type: str = "image/jpeg"
 class GoogleImageCollageCollector:
     SEARCH_URL = "https://www.google.com/search"
     NAVER_NEWS_SEARCH_URL = "https://search.naver.com/search.naver"
+    NAVER_IMAGE_SEARCH_URL = "https://search.naver.com/search.naver"
+    BING_IMAGE_SEARCH_URL = "https://www.bing.com/images/search"
     OPENVERSE_API_URL = "https://api.openverse.org/v1/images/"
     COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
     ALLOWED_LICENSES = {"cc0", "pdm", "by", "by-sa"}
@@ -3360,47 +3362,93 @@ class GoogleImageCollageCollector:
         keyword = (keyword or "").strip()
         if not keyword:
             return []
-        images = self._collect_naver_news_images(keyword, count)
-        seen_data_urls: set[str] = set()
-        seen_data_urls.update(str(image.get("data_url") or "") for image in images)
-        try:
-            if len(images) < count:
-                html = self._fetch_google_images_html(keyword, licensed_only=False)
-                candidates = self._extract_image_candidates(html)
-                source_url = self._google_image_search_url(keyword, licensed_only=False)
-            else:
-                candidates = []
-                source_url = ""
-            for image_url in candidates:
-                if len(images) >= count:
+        target_count = max(1, count)
+        search_queries = self._web_search_queries(keyword)
+        images: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        def append_unique(found: list[dict[str, str]]) -> None:
+            for image in found:
+                if len(images) >= target_count:
                     break
-                if self._looks_unsafe_url(image_url):
+                key = str(image.get("image_url") or image.get("source_url") or "").split("?", 1)[0]
+                if not key:
+                    key = str(image.get("data_url") or "")[:160]
+                if not key or key in seen_urls:
                     continue
-                try:
-                    data_url = self._download_as_data_url(image_url)
-                except Exception:
-                    continue
-                if not data_url or data_url in seen_data_urls:
-                    continue
-                seen_data_urls.add(data_url)
-                images.append(
-                    {
-                        "data_url": data_url,
-                        "image_url": image_url,
-                        "source_url": source_url,
-                        "source": "일반 웹 이미지 검색",
-                        "license": "저작권 보호 모드 OFF",
-                        "creator": "",
-                        "title": keyword,
-                    }
+                seen_urls.add(key)
+                images.append(image)
+
+        # Prefer article images whose captions still match the title.
+        for query in search_queries:
+            if len(images) >= target_count:
+                break
+            append_unique(
+                self._collect_naver_news_images(
+                    query,
+                    target_count - len(images),
+                    relaxed=False,
                 )
-        except Exception:
-            pass
+            )
+
+        # Search multiple engines because any single result page can change or reject
+        # automated requests without warning.
+        for query in search_queries:
+            if len(images) >= target_count:
+                break
+            append_unique(self._collect_naver_image_search(query, target_count - len(images)))
+        for query in search_queries:
+            if len(images) >= target_count:
+                break
+            append_unique(self._collect_bing_images(query, target_count - len(images)))
+        for query in search_queries:
+            if len(images) >= target_count:
+                break
+            append_unique(self._collect_google_web_images(query, target_count - len(images)))
+
+        # A search result already came from the requested query. If caption matching
+        # was too strict, retry the ranked news candidates without rejecting them.
+        for query in search_queries:
+            if len(images) >= target_count:
+                break
+            append_unique(
+                self._collect_naver_news_images(
+                    query,
+                    target_count - len(images),
+                    relaxed=True,
+                )
+            )
+
+        # Final network fallback: let headless Chrome render an image search page and
+        # capture only the best matching image element.
+        if not images:
+            append_unique(self._collect_browser_image_elements(search_queries[0], target_count))
         if len(images) < count:
             images.extend(self._collect_commons_images(keyword, count - len(images)))
-        return images[:count]
+        return images[:target_count]
 
-    def _collect_naver_news_images(self, keyword: str, count: int) -> list[dict[str, str]]:
+    def _web_search_queries(self, keyword: str) -> list[str]:
+        cleaned = re.sub(r"\b(?:뉴스|사진|최신|소식|총정리|정리)\b", " ", keyword or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        tokens = list(dict.fromkeys(self._keyword_tokens(cleaned)))
+        queries = [
+            cleaned,
+            " ".join(tokens[:7]),
+            " ".join(tokens[:5]),
+            " ".join(tokens[:3]),
+        ]
+        event_tokens = [token for token in tokens if token in self.WEB_IMAGE_EVENT_TOKENS]
+        identity_tokens = [token for token in tokens if token not in self.WEB_IMAGE_EVENT_TOKENS]
+        if identity_tokens and event_tokens:
+            queries.insert(1, " ".join((*identity_tokens[:3], *event_tokens[:2])))
+        return list(dict.fromkeys(query for query in queries if len(query) >= 2))[:5]
+
+    def _collect_naver_news_images(
+        self,
+        keyword: str,
+        count: int,
+        relaxed: bool = False,
+    ) -> list[dict[str, str]]:
         images: list[dict[str, str]] = []
         try:
             html = self._fetch_naver_news_html(keyword)
@@ -3418,7 +3466,7 @@ class GoogleImageCollageCollector:
             title = str(candidate.get("title") or "").strip()
             if not image_url or self._looks_unsafe_url(image_url):
                 continue
-            if title and not self._is_relevant_text(keyword, title):
+            if not relaxed and title and not self._is_relevant_text(keyword, title):
                 continue
             try:
                 data_url = self._download_as_data_url(
@@ -3442,6 +3490,258 @@ class GoogleImageCollageCollector:
                 }
             )
         return images
+
+    def _naver_image_search_url(self, keyword: str) -> str:
+        return (
+            f"{self.NAVER_IMAGE_SEARCH_URL}?"
+            f"{urlencode({'where': 'image', 'sm': 'tab_jum', 'query': keyword})}"
+        )
+
+    def _fetch_search_html(self, url: str, timeout: int = 12) -> str:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+            },
+        )
+        with urlopen(request, timeout=timeout, context=self.ssl_context) as response:
+            return response.read().decode("utf-8", errors="ignore")
+
+    def _decode_json_string(self, value: str) -> str:
+        try:
+            return str(json.loads(f'"{value}"'))
+        except (json.JSONDecodeError, TypeError):
+            return unescape(value).replace("\\/", "/")
+
+    def _collect_naver_image_search(self, keyword: str, count: int) -> list[dict[str, str]]:
+        search_url = self._naver_image_search_url(keyword)
+        try:
+            html = self._fetch_search_html(search_url)
+        except Exception:
+            return []
+        image_urls: list[str] = []
+        patterns = (
+            r'"originalUrl"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r'"imageUrl"\s*:\s*"((?:\\.|[^"\\])*)"',
+            r'\bdata-lazysrc=["\']([^"\']+)["\']',
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, html or "", flags=re.I):
+                image_url = self._decode_json_string(match.group(1))
+                image_url = unescape(image_url).strip()
+                parsed = urlparse(image_url)
+                proxied_urls = parse_qs(parsed.query).get("src", [])
+                if proxied_urls:
+                    image_url = unquote(proxied_urls[0])
+                if not image_url.startswith(("http://", "https://")):
+                    continue
+                if image_url not in image_urls:
+                    image_urls.append(image_url)
+        return self._download_search_candidates(
+            keyword,
+            image_urls,
+            search_url,
+            "네이버 이미지 검색",
+            count,
+        )
+
+    def _bing_image_search_url(self, keyword: str) -> str:
+        return f"{self.BING_IMAGE_SEARCH_URL}?{urlencode({'q': keyword, 'setlang': 'ko-kr'})}"
+
+    def _collect_bing_images(self, keyword: str, count: int) -> list[dict[str, str]]:
+        search_url = self._bing_image_search_url(keyword)
+        try:
+            html = self._fetch_search_html(search_url)
+        except Exception:
+            return []
+        candidates: list[dict[str, str]] = []
+        for match in re.finditer(r'\bm=(["\'])(.*?)\1', html or "", flags=re.I | re.S):
+            raw = unescape(match.group(2))
+            try:
+                metadata = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            image_url = str(metadata.get("murl") or "").strip()
+            if not image_url.startswith(("http://", "https://")):
+                continue
+            candidates.append(
+                {
+                    "image_url": image_url,
+                    "source_url": str(metadata.get("purl") or search_url).strip(),
+                    "title": str(metadata.get("t") or keyword).strip(),
+                }
+            )
+        ranked = self._rank_web_image_candidates(keyword, candidates)
+        results: list[dict[str, str]] = []
+        for candidate in ranked:
+            if len(results) >= count:
+                break
+            image_url = str(candidate.get("image_url") or "").strip()
+            if self._looks_unsafe_url(image_url):
+                continue
+            source_url = str(candidate.get("source_url") or search_url).strip()
+            try:
+                data_url = self._download_as_data_url(image_url, source_url)
+            except Exception:
+                continue
+            if data_url:
+                results.append(
+                    {
+                        "data_url": data_url,
+                        "image_url": image_url,
+                        "source_url": source_url,
+                        "source": "Bing 이미지 검색",
+                        "license": "저작권 보호 모드 OFF",
+                        "creator": "",
+                        "title": str(candidate.get("title") or keyword),
+                    }
+                )
+        return results
+
+    def _collect_google_web_images(self, keyword: str, count: int) -> list[dict[str, str]]:
+        try:
+            html = self._fetch_google_images_html(keyword, licensed_only=False)
+        except Exception:
+            return []
+        source_url = self._google_image_search_url(keyword, licensed_only=False)
+        return self._download_search_candidates(
+            keyword,
+            self._extract_image_candidates(html),
+            source_url,
+            "Google 이미지 검색",
+            count,
+        )
+
+    def _download_search_candidates(
+        self,
+        keyword: str,
+        image_urls: list[str],
+        search_url: str,
+        source_name: str,
+        count: int,
+    ) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+        for image_url in image_urls:
+            if len(results) >= count:
+                break
+            if self._looks_unsafe_url(image_url):
+                continue
+            try:
+                data_url = self._download_as_data_url(image_url, search_url)
+            except Exception:
+                continue
+            if not data_url:
+                continue
+            results.append(
+                {
+                    "data_url": data_url,
+                    "image_url": image_url,
+                    "source_url": search_url,
+                    "source": source_name,
+                    "license": "저작권 보호 모드 OFF",
+                    "creator": "",
+                    "title": keyword,
+                }
+            )
+        return results
+
+    def _collect_browser_image_elements(self, keyword: str, count: int) -> list[dict[str, str]]:
+        try:
+            from playwright.sync_api import sync_playwright
+
+            chrome_path = require_google_chrome_executable()
+        except Exception:
+            return []
+        search_urls = (
+            self._naver_image_search_url(keyword),
+            self._bing_image_search_url(keyword),
+            self._google_image_search_url(keyword, licensed_only=False),
+        )
+        results: list[dict[str, str]] = []
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    executable_path=str(chrome_path),
+                    headless=True,
+                    args=["--disable-gpu", "--no-first-run", "--no-default-browser-check"],
+                )
+                try:
+                    context = browser.new_context(
+                        viewport={"width": 1440, "height": 1100},
+                        device_scale_factor=2,
+                        locale="ko-KR",
+                    )
+                    page = context.new_page()
+                    for search_url in search_urls:
+                        if len(results) >= count:
+                            break
+                        try:
+                            page.goto(search_url, wait_until="domcontentloaded", timeout=20_000)
+                            page.wait_for_timeout(1_200)
+                            locator = page.locator("img")
+                            candidates: list[tuple[int, int, dict[str, str]]] = []
+                            for index in range(min(locator.count(), 100)):
+                                image = locator.nth(index)
+                                try:
+                                    metadata = image.evaluate(
+                                        """img => ({
+                                            src: img.currentSrc || img.src || '',
+                                            alt: img.alt || '',
+                                            width: img.naturalWidth || 0,
+                                            height: img.naturalHeight || 0
+                                        })"""
+                                    )
+                                except Exception:
+                                    continue
+                                width = int(metadata.get("width") or 0)
+                                height = int(metadata.get("height") or 0)
+                                image_url = str(metadata.get("src") or "")
+                                alt = str(metadata.get("alt") or "")
+                                if width < 220 or height < 130 or width * height < 45_000:
+                                    continue
+                                if width / max(height, 1) > 4.0 or height / max(width, 1) > 4.0:
+                                    continue
+                                if self._looks_unsafe_url(image_url):
+                                    continue
+                                score = self._web_image_candidate_score(keyword, alt, search_url)
+                                candidates.append((score, index, metadata))
+                            candidates.sort(key=lambda item: -item[0])
+                            for _score, index, metadata in candidates:
+                                if len(results) >= count:
+                                    break
+                                try:
+                                    screenshot = locator.nth(index).screenshot(
+                                        type="png",
+                                        animations="disabled",
+                                        timeout=8_000,
+                                    )
+                                except Exception:
+                                    continue
+                                if len(screenshot) < 4_000:
+                                    continue
+                                results.append(
+                                    {
+                                        "data_url": image_bytes_to_data_url(screenshot, "image/png"),
+                                        "image_url": str(metadata.get("src") or search_url),
+                                        "source_url": search_url,
+                                        "source": "Chrome 이미지 검색 캡처",
+                                        "license": "저작권 보호 모드 OFF",
+                                        "creator": "",
+                                        "title": str(metadata.get("alt") or keyword),
+                                    }
+                                )
+                        except Exception:
+                            continue
+                finally:
+                    browser.close()
+        except Exception:
+            return []
+        return results
 
     def _rank_web_image_candidates(
         self,
@@ -3892,7 +4192,7 @@ def _save_reference_image_with_pillow(data_url: str, destination: Path) -> bool:
         with Image.open(io.BytesIO(image_bytes)) as source:
             image = ImageOps.exif_transpose(source) if ImageOps is not None else source.copy()
             image = image.convert("RGB")
-            if image.width < 320 or image.height < 180:
+            if image.width < 220 or image.height < 130 or image.width * image.height < 45_000:
                 return False
             image.thumbnail((1400, 1000), Image.Resampling.LANCZOS)
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -3930,7 +4230,8 @@ def capture_reference_image_region(data_url: str, destination: Path) -> bool:
                 )
                 page.wait_for_function(
                     "() => { const img = document.querySelector('#reference-image'); "
-                    "return img && img.complete && img.naturalWidth >= 320 && img.naturalHeight >= 180; }",
+                    "return img && img.complete && img.naturalWidth >= 220 && "
+                    "img.naturalHeight >= 130 && img.naturalWidth * img.naturalHeight >= 45000; }",
                     timeout=20_000,
                 )
                 page.locator("#reference-image").screenshot(
@@ -3961,22 +4262,41 @@ def collect_tistory_reference_image_files(
     image_count = max(1, min(count, 2))
     if protection_mode:
         candidates = collector.collect_licensed(query, image_count)
+        capture_target = image_count
     else:
-        # General web thumbnails are less predictable than curated sources. Keep only
-        # the strongest ranked result so an unrelated second image is not attached.
-        candidates = collector.collect_web(f"{query} 뉴스 사진", 1)
+        # Build a deep candidate pool first. If a remote host rejects a download or
+        # one thumbnail is too small, continue until one usable capture succeeds.
+        capture_target = 1
+        candidates = collector.collect_web(
+            f"{query} 뉴스 사진",
+            max(10, image_count * 6),
+        )
     captures: list[dict[str, str]] = []
     GENERATED_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.time_ns()
-    for index, candidate in enumerate(candidates, start=1):
-        destination = GENERATED_UPLOAD_DIR / f"{TISTORY_REFERENCE_IMAGE_PREFIX}{stamp}-{index}.png"
-        if not capture_reference_image_region(str(candidate.get("data_url") or ""), destination):
-            destination.unlink(missing_ok=True)
-            continue
-        capture = dict(candidate)
-        capture.pop("data_url", None)
-        capture["path"] = str(destination)
-        captures.append(capture)
+
+    def capture_candidates(items: list[dict[str, str]], start_index: int = 1) -> None:
+        for index, candidate in enumerate(items, start=start_index):
+            if len(captures) >= capture_target:
+                break
+            destination = GENERATED_UPLOAD_DIR / f"{TISTORY_REFERENCE_IMAGE_PREFIX}{stamp}-{index}.png"
+            if not capture_reference_image_region(str(candidate.get("data_url") or ""), destination):
+                destination.unlink(missing_ok=True)
+                continue
+            capture = dict(candidate)
+            capture.pop("data_url", None)
+            capture["path"] = str(destination)
+            captures.append(capture)
+
+    capture_candidates(candidates)
+    if not captures and not protection_mode:
+        search_queries = collector._web_search_queries(query)
+        fallback_query = search_queries[-1] if search_queries else query
+        browser_candidates = collector._collect_browser_image_elements(
+            f"{fallback_query} 관련 사진",
+            4,
+        )
+        capture_candidates(browser_candidates, start_index=len(candidates) + 1)
     return captures
 
 
