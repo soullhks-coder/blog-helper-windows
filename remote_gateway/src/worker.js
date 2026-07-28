@@ -11,6 +11,11 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (!url.pathname.startsWith("/api/")) {
+      if (url.pathname === "/") {
+        const indexUrl = new URL(request.url);
+        indexUrl.pathname = "/index.html";
+        return withSecurityHeaders(await env.ASSETS.fetch(new Request(indexUrl, request)));
+      }
       return withSecurityHeaders(await env.ASSETS.fetch(request));
     }
 

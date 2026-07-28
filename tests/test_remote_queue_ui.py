@@ -26,6 +26,7 @@ class RemoteQueueUITests(unittest.TestCase):
 
     def test_worker_has_pc_queue_endpoints(self) -> None:
         worker = (ROOT / "remote_gateway" / "src" / "worker.js").read_text(encoding="utf-8")
+        service_worker = (ROOT / "remote_gateway" / "public" / "sw.js").read_text(encoding="utf-8")
 
         self.assertIn('url.pathname === "/api/queue"', worker)
         self.assertIn("queue.schedule.update", worker)
@@ -36,6 +37,9 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn("hideDevice", worker)
         self.assertIn("clearJobHistory", worker)
         self.assertIn('payload.type === "queue.published"', worker)
+        self.assertIn('url.pathname === "/"', worker)
+        self.assertIn('indexUrl.pathname = "/index.html"', worker)
+        self.assertNotIn('STATIC_ASSETS = ["/",', service_worker)
 
     def test_schedule_command_updates_exact_queue_item(self) -> None:
         first = {"id": "first", "status": "대기 중", "scheduled_at": 100}
