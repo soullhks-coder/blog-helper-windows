@@ -122,6 +122,82 @@ class TistoryNativeImageTests(unittest.TestCase):
             "일본 지진 건물 붕괴 소식 일본 지진 건물 붕괴 여진",
         )
 
+    def test_reference_image_protection_mode_defaults_to_enabled(self) -> None:
+        self.assertTrue(main.WordPressSettings().tistory_reference_image_protection_mode)
+
+    def test_web_image_search_removes_license_filter_only_when_protection_is_off(self) -> None:
+        collector = main.GoogleImageCollageCollector()
+
+        protected_url = collector._google_image_search_url("일본 지진", licensed_only=True)
+        unrestricted_url = collector._google_image_search_url("일본 지진", licensed_only=False)
+
+        self.assertIn("tbs=il%3Acl", protected_url)
+        self.assertNotIn("tbs=il%3Acl", unrestricted_url)
+        self.assertIn("tbm=isch", unrestricted_url)
+
+    def test_naver_news_image_parser_keeps_article_image_and_source_page(self) -> None:
+        collector = main.GoogleImageCollageCollector()
+        html = """
+        <a href="https://news.example.com/article/123" target="_blank" data-heatmap-target=".img">
+          <div>
+            <img width="104"
+                 alt="일본 강진으로 쇼핑몰 &lt;mark&gt;붕괴&lt;/mark&gt;의 이미지"
+                 src="https://search.pstatic.net/common/?src=https%3A%2F%2Fimgnews.pstatic.net%2Fimage%2Forigin%2F001%2F2026%2F07%2F28%2Fexample.jpg&amp;type=fface200_200"/>
+          </div>
+        </a>
+        <img width="24" alt="언론사 프로필 이미지"
+             src="https://search.pstatic.net/common/?src=https%3A%2F%2Fmimgnews.pstatic.net%2Flogo.png"/>
+        """
+
+        candidates = collector._extract_naver_news_image_candidates(html)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source_url"], "https://news.example.com/article/123")
+        self.assertEqual(
+            candidates[0]["image_url"],
+            "https://imgnews.pstatic.net/image/origin/001/2026/07/28/example.jpg",
+        )
+        self.assertEqual(candidates[0]["title"], "일본 강진으로 쇼핑몰 붕괴")
+
+    def test_web_image_candidates_prefer_specific_event_over_news_roundup(self) -> None:
+        collector = main.GoogleImageCollageCollector()
+        candidates = [
+            {"title": "오늘의 뉴스 종합 일본 강진 관련 주요 소식", "source_url": "roundup"},
+            {"title": "건물 회복력과 도시 안전 세미나", "source_url": "generic"},
+            {
+                "title": "일본 혼슈 규모 7.2 지진 현장",
+                "source_url": "https://news.kbs.co.kr/news/pc/view/view.do?ncd=1",
+                "label": "specific",
+            },
+            {"title": "구마모토 지진으로 공장 굴뚝 붕괴", "source_url": "alias"},
+        ]
+
+        ranked = collector._rank_web_image_candidates(
+            "일본 지진 건물 붕괴 뉴스 사진",
+            candidates,
+        )
+
+        self.assertEqual(
+            [item.get("label") or item["source_url"] for item in ranked[:2]],
+            ["specific", "alias"],
+        )
+
+    def test_reference_image_protection_mode_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            settings = main.WordPressSettings(
+                tistory_reference_image_protection_mode=False,
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+
+            self.assertFalse(loaded.tistory_reference_image_protection_mode)
+
     def test_reference_image_is_inserted_in_article_middle(self) -> None:
         article = "".join(f"<p>본문 {index}</p>" for index in range(1, 7))
         marker = "<figure class='reference'>참고 이미지</figure>"
@@ -214,6 +290,45 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn("data_url", captures[0])
             self.assertEqual(captures[0]["license"], "CC0")
 
+    def test_reference_collector_uses_general_web_search_when_protection_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+
+            def fake_capture(_data_url: str, destination: Path) -> bool:
+                destination.write_bytes(b"captured-web-image")
+                return True
+
+            with (
+                patch.object(main, "GENERATED_UPLOAD_DIR", output_dir),
+                patch.object(
+                    main.GoogleImageCollageCollector,
+                    "collect_web",
+                    return_value=[
+                        {
+                            "data_url": "data:image/png;base64,AA==",
+                            "source_url": "https://www.google.com/search?tbm=isch&q=test",
+                            "source": "일반 웹 이미지 검색",
+                            "license": "저작권 보호 모드 OFF",
+                        }
+                    ],
+                ) as collect_web,
+                patch.object(main.GoogleImageCollageCollector, "collect_licensed") as collect_licensed,
+                patch.object(main, "capture_reference_image_region", side_effect=fake_capture),
+            ):
+                captures = main.collect_tistory_reference_image_files(
+                    "일본 지진 건물 붕괴",
+                    ["일본 지진"],
+                    2,
+                    protection_mode=False,
+                )
+
+            collect_web.assert_called_once()
+            self.assertIn("뉴스 사진", collect_web.call_args.args[0])
+            self.assertEqual(collect_web.call_args.args[1], 1)
+            collect_licensed.assert_not_called()
+            self.assertEqual(len(captures), 1)
+            self.assertEqual(captures[0]["license"], "저작권 보호 모드 OFF")
+
     def test_tistory_worker_uploads_reference_capture_as_native_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "reference-capture-worker.png"
@@ -232,7 +347,7 @@ class TistoryNativeImageTests(unittest.TestCase):
                     main,
                     "collect_tistory_reference_image_files",
                     return_value=[reference_image],
-                ),
+                ) as collect_reference_images,
                 patch.object(
                     main,
                     "run_tistory_playwright_automation",
@@ -248,9 +363,11 @@ class TistoryNativeImageTests(unittest.TestCase):
                     tag_names=["일본 지진", "건물 붕괴"],
                     publish_after_input=True,
                     write_url="https://example.tistory.com/manage/newpost",
+                    reference_image_protection_mode=False,
                 )
                 worker.run()
 
+            self.assertFalse(collect_reference_images.call_args.kwargs["protection_mode"])
             call = run_automation.call_args
             script = call.args[1]
             native_files = call.kwargs["native_image_files"]

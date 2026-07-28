@@ -1198,6 +1198,7 @@ class WordPressSettings:
     blogspot_access_token: str = ""
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
+    tistory_reference_image_protection_mode: bool = True
     naver_blog_profiles: list[dict] = field(default_factory=list)
     naver_blog_active_profile: str = "블로그 1"
     naver_blog_write_url: str = ""
@@ -1562,6 +1563,10 @@ class AppStateStore:
             blogspot_access_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_ACCOUNT) or blogspot_fallback,
             tistory_blog_url=payload.get("tistory_blog_url", ""),
             tistory_write_url=payload.get("tistory_write_url", ""),
+            tistory_reference_image_protection_mode=payload.get(
+                "tistory_reference_image_protection_mode",
+                True,
+            ),
             naver_blog_profiles=naver_profiles,
             naver_blog_active_profile=payload.get("naver_blog_active_profile", "블로그 1"),
             naver_blog_write_url=payload.get("naver_blog_write_url", ""),
@@ -3271,6 +3276,7 @@ def image_bytes_to_data_url(image_bytes: bytes, content_type: str = "image/jpeg"
 
 class GoogleImageCollageCollector:
     SEARCH_URL = "https://www.google.com/search"
+    NAVER_NEWS_SEARCH_URL = "https://search.naver.com/search.naver"
     OPENVERSE_API_URL = "https://api.openverse.org/v1/images/"
     COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
     ALLOWED_LICENSES = {"cc0", "pdm", "by", "by-sa"}
@@ -3290,18 +3296,81 @@ class GoogleImageCollageCollector:
         "stockphoto",
         "stock-photo",
     )
+    WEB_IMAGE_EVENT_TOKENS = {
+        "사고",
+        "강진",
+        "공격",
+        "붕괴",
+        "산불",
+        "시위",
+        "전쟁",
+        "지진",
+        "참사",
+        "충돌",
+        "태풍",
+        "폭발",
+        "폭우",
+        "피해",
+        "화재",
+        "홍수",
+    }
+    WEB_IMAGE_GENERIC_TOKENS = {
+        "가이드",
+        "뉴스",
+        "내용",
+        "방법",
+        "비교",
+        "사진",
+        "소식",
+        "이유",
+        "정보",
+        "정리",
+        "최신",
+        "총정리",
+    }
+    WEB_IMAGE_NOISE_HINTS = (
+        "뉴스 종합",
+        "오늘의 뉴스",
+        "뉴스 브리핑",
+        "한눈에 보는",
+        "주요 뉴스",
+    )
+    WEB_IMAGE_TRUSTED_DOMAINS = (
+        "imnews.imbc.com",
+        "jtbc.co.kr",
+        "news.kbs.co.kr",
+        "news.sbs.co.kr",
+        "news1.kr",
+        "newsis.com",
+        "yna.co.kr",
+        "ytn.co.kr",
+    )
+    WEB_IMAGE_TOPIC_ALIASES = {
+        "일본": ("일본", "구마모토", "규슈", "도쿄", "센다이", "오사카", "큐슈", "혼슈", "홋카이도"),
+    }
 
     def __init__(self) -> None:
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def collect(self, keyword: str, count: int = GOOGLE_IMAGE_COLLAGE_COUNT) -> list[dict[str, str]]:
+        return self.collect_web(keyword, count)
+
+    def collect_web(self, keyword: str, count: int = GOOGLE_IMAGE_COLLAGE_COUNT) -> list[dict[str, str]]:
+        """Collect topic-ranked public web image results when protection mode is disabled."""
         keyword = (keyword or "").strip()
         if not keyword:
             return []
-        images: list[dict[str, str]] = []
+        images = self._collect_naver_news_images(keyword, count)
+        seen_data_urls: set[str] = set()
+        seen_data_urls.update(str(image.get("data_url") or "") for image in images)
         try:
-            html = self._fetch_google_images_html(keyword)
-            candidates = self._extract_image_candidates(html)
+            if len(images) < count:
+                html = self._fetch_google_images_html(keyword, licensed_only=False)
+                candidates = self._extract_image_candidates(html)
+                source_url = self._google_image_search_url(keyword, licensed_only=False)
+            else:
+                candidates = []
+                source_url = ""
             for image_url in candidates:
                 if len(images) >= count:
                     break
@@ -3311,13 +3380,188 @@ class GoogleImageCollageCollector:
                     data_url = self._download_as_data_url(image_url)
                 except Exception:
                     continue
-                if data_url:
-                    images.append({"data_url": data_url, "source_url": image_url, "source": "Google Images CC"})
+                if not data_url or data_url in seen_data_urls:
+                    continue
+                seen_data_urls.add(data_url)
+                images.append(
+                    {
+                        "data_url": data_url,
+                        "image_url": image_url,
+                        "source_url": source_url,
+                        "source": "일반 웹 이미지 검색",
+                        "license": "저작권 보호 모드 OFF",
+                        "creator": "",
+                        "title": keyword,
+                    }
+                )
         except Exception:
             pass
         if len(images) < count:
             images.extend(self._collect_commons_images(keyword, count - len(images)))
         return images[:count]
+
+    def _collect_naver_news_images(self, keyword: str, count: int) -> list[dict[str, str]]:
+        images: list[dict[str, str]] = []
+        try:
+            html = self._fetch_naver_news_html(keyword)
+        except Exception:
+            return images
+        candidates = self._rank_web_image_candidates(
+            keyword,
+            self._extract_naver_news_image_candidates(html),
+        )
+        for candidate in candidates:
+            if len(images) >= count:
+                break
+            image_url = str(candidate.get("image_url") or "").strip()
+            source_url = str(candidate.get("source_url") or "").strip()
+            title = str(candidate.get("title") or "").strip()
+            if not image_url or self._looks_unsafe_url(image_url):
+                continue
+            if title and not self._is_relevant_text(keyword, title):
+                continue
+            try:
+                data_url = self._download_as_data_url(
+                    image_url,
+                    source_url or self.NAVER_NEWS_SEARCH_URL,
+                )
+            except Exception:
+                continue
+            if not data_url:
+                continue
+            source_host = urlparse(source_url).netloc.removeprefix("www.") if source_url else ""
+            images.append(
+                {
+                    "data_url": data_url,
+                    "image_url": image_url,
+                    "source_url": source_url or self._naver_news_search_url(keyword),
+                    "source": f"뉴스·포털 이미지{f' ({source_host})' if source_host else ''}",
+                    "license": "저작권 보호 모드 OFF",
+                    "creator": "",
+                    "title": title,
+                }
+            )
+        return images
+
+    def _rank_web_image_candidates(
+        self,
+        keyword: str,
+        candidates: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        indexed_candidates = list(enumerate(candidates))
+        indexed_candidates.sort(
+            key=lambda item: (
+                -self._web_image_candidate_score(
+                    keyword,
+                    str(item[1].get("title") or ""),
+                    str(item[1].get("source_url") or ""),
+                ),
+                item[0],
+            )
+        )
+        return [candidate for _, candidate in indexed_candidates]
+
+    def _web_image_candidate_score(
+        self,
+        keyword: str,
+        candidate_text: str,
+        source_url: str = "",
+    ) -> int:
+        keyword_tokens = list(dict.fromkeys(self._keyword_tokens(keyword)))
+        haystack = self._normalize_for_match(candidate_text)
+        matched_tokens = [token for token in keyword_tokens if token in haystack]
+        event_matches = [
+            token
+            for token in matched_tokens
+            if token in self.WEB_IMAGE_EVENT_TOKENS
+        ]
+        identity_tokens = [
+            token
+            for token in keyword_tokens
+            if token not in self.WEB_IMAGE_EVENT_TOKENS
+            and token not in self.WEB_IMAGE_GENERIC_TOKENS
+        ]
+        identity_matches = [token for token in identity_tokens if token in haystack]
+
+        score = (len(matched_tokens) * 10) + (len(event_matches) * 6)
+        alias_matched = False
+        normalized_keyword = self._normalize_for_match(keyword)
+        for topic, aliases in self.WEB_IMAGE_TOPIC_ALIASES.items():
+            if topic in normalized_keyword and any(alias in haystack for alias in aliases):
+                score += 12
+                alias_matched = True
+        if identity_tokens and not identity_matches and not alias_matched:
+            score -= 12
+        if any(hint in haystack for hint in self.WEB_IMAGE_NOISE_HINTS):
+            score -= 30
+        source_host = urlparse(source_url).netloc.lower().removeprefix("www.")
+        if any(
+            source_host == domain or source_host.endswith(f".{domain}")
+            for domain in self.WEB_IMAGE_TRUSTED_DOMAINS
+        ):
+            score += 24
+        return score
+
+    def _naver_news_search_url(self, keyword: str) -> str:
+        return f"{self.NAVER_NEWS_SEARCH_URL}?{urlencode({'where': 'news', 'query': keyword})}"
+
+    def _fetch_naver_news_html(self, keyword: str) -> str:
+        request = Request(
+            self._naver_news_search_url(keyword),
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+            },
+        )
+        with urlopen(request, timeout=12, context=self.ssl_context) as response:
+            return response.read().decode("utf-8", errors="ignore")
+
+    def _extract_naver_news_image_candidates(self, html: str) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
+        for image_match in re.finditer(r"<img\b[^>]*>", html or "", flags=re.I):
+            image_tag = image_match.group(0)
+            source_match = re.search(r"\bsrc=['\"]([^'\"]+)['\"]", image_tag, flags=re.I)
+            alt_match = re.search(r"\balt=['\"]([^'\"]*)['\"]", image_tag, flags=re.I)
+            if not source_match:
+                continue
+            proxy_url = unescape(source_match.group(1))
+            parsed_proxy = urlparse(proxy_url)
+            original_urls = parse_qs(parsed_proxy.query).get("src", [])
+            image_url = unquote(original_urls[0]) if original_urls else proxy_url
+            if "imgnews.pstatic.net/image/origin/" not in image_url.lower():
+                continue
+            title = unescape(unescape(alt_match.group(1) if alt_match else ""))
+            title = re.sub(r"<[^>]+>", " ", title)
+            title = re.sub(r"\s+", " ", title).strip()
+            title = re.sub(r"의 이미지$", "", title).strip(" \"'")
+
+            anchor_start = (html or "").rfind("<a", max(0, image_match.start() - 2_500), image_match.start())
+            source_url = ""
+            if anchor_start >= 0:
+                anchor_close = (html or "").rfind("</a>", anchor_start, image_match.start())
+                if anchor_close < anchor_start:
+                    anchor_end = (html or "").find(">", anchor_start, image_match.start())
+                    if anchor_end >= 0:
+                        anchor_tag = (html or "")[anchor_start : anchor_end + 1]
+                        href_match = re.search(r"\bhref=['\"]([^'\"]+)['\"]", anchor_tag, flags=re.I)
+                        if href_match:
+                            source_url = unescape(href_match.group(1)).strip()
+            key = image_url.split("?", 1)[0]
+            if any(item.get("key") == key for item in candidates):
+                continue
+            candidates.append(
+                {
+                    "key": key,
+                    "image_url": image_url,
+                    "source_url": source_url,
+                    "title": title,
+                }
+            )
+        return candidates[:20]
 
     def collect_licensed(self, keyword: str, count: int = GOOGLE_IMAGE_COLLAGE_COUNT) -> list[dict[str, str]]:
         """Collect only images with reusable license metadata for blog attachment."""
@@ -3339,19 +3583,21 @@ class GoogleImageCollageCollector:
                 break
         return unique
 
-    def _fetch_google_images_html(self, keyword: str) -> str:
-        query = urlencode(
-            {
-                "tbm": "isch",
-                "q": keyword,
-                "hl": "ko",
-                "gl": "kr",
-                "safe": "active",
-                "tbs": "il:cl",
-            }
-        )
+    def _google_image_search_url(self, keyword: str, licensed_only: bool = True) -> str:
+        params = {
+            "tbm": "isch",
+            "q": keyword,
+            "hl": "ko",
+            "gl": "kr",
+            "safe": "active",
+        }
+        if licensed_only:
+            params["tbs"] = "il:cl"
+        return f"{self.SEARCH_URL}?{urlencode(params)}"
+
+    def _fetch_google_images_html(self, keyword: str, licensed_only: bool = True) -> str:
         request = Request(
-            f"{self.SEARCH_URL}?{query}",
+            self._google_image_search_url(keyword, licensed_only=licensed_only),
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -3706,11 +3952,19 @@ def collect_tistory_reference_image_files(
     title: str,
     tag_names: list[str] | None = None,
     count: int = GOOGLE_IMAGE_COLLAGE_COUNT,
+    protection_mode: bool = True,
 ) -> list[dict[str, str]]:
     query = build_tistory_reference_image_query(title, tag_names)
     if not query:
         return []
-    candidates = GoogleImageCollageCollector().collect_licensed(query, max(1, min(count, 2)))
+    collector = GoogleImageCollageCollector()
+    image_count = max(1, min(count, 2))
+    if protection_mode:
+        candidates = collector.collect_licensed(query, image_count)
+    else:
+        # General web thumbnails are less predictable than curated sources. Keep only
+        # the strongest ranked result so an unrelated second image is not attached.
+        candidates = collector.collect_web(f"{query} 뉴스 사진", 1)
     captures: list[dict[str, str]] = []
     GENERATED_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.time_ns()
@@ -10528,6 +10782,7 @@ class TistoryAutomationWorker(threading.Thread):
         publish_after_input: bool = False,
         close_after_publish: bool = False,
         write_url: str = "",
+        reference_image_protection_mode: bool = True,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -10541,6 +10796,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.publish_after_input = publish_after_input
         self.close_after_publish = close_after_publish
         self.write_url = write_url
+        self.reference_image_protection_mode = reference_image_protection_mode
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -10556,16 +10812,22 @@ class TistoryAutomationWorker(threading.Thread):
 
             article_html = self.article_html
             if GOOGLE_IMAGE_COLLAGE_ENABLED and self.publish_after_input:
+                mode_message = (
+                    "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다..."
+                    if self.reference_image_protection_mode
+                    else "저작권 보호 모드 OFF: 뉴스·포털을 포함한 일반 웹 검색에서 관련 이미지를 찾고 있습니다..."
+                )
                 self.result_queue.put(
                     (
                         "tistory_progress",
-                        "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다...",
+                        mode_message,
                     )
                 )
                 reference_images = collect_tistory_reference_image_files(
                     self.title,
                     self.tag_names,
                     GOOGLE_IMAGE_COLLAGE_COUNT,
+                    protection_mode=self.reference_image_protection_mode,
                 )
                 reference_image_paths = [
                     str(image.get("path") or "").strip()
@@ -10585,10 +10847,15 @@ class TistoryAutomationWorker(threading.Thread):
                         )
                     )
                 else:
+                    empty_message = (
+                        "제목과 직접 관련되고 재사용 조건을 확인할 수 있는 이미지를 찾지 못해 참고 이미지 삽입은 생략합니다."
+                        if self.reference_image_protection_mode
+                        else "제목과 직접 관련된 일반 웹 이미지를 찾지 못해 참고 이미지 삽입은 생략합니다."
+                    )
                     self.result_queue.put(
                         (
                             "tistory_progress",
-                            "제목과 직접 관련되고 재사용 조건을 확인할 수 있는 이미지를 찾지 못해 참고 이미지 삽입은 생략합니다.",
+                            empty_message,
                         )
                     )
 
@@ -17442,8 +17709,28 @@ class KeywordApp(ctk.CTk):
         )
         helper.grid(row=5, column=0, padx=24, pady=(16, 18), sticky="ew")
 
+        self.tistory_reference_image_protection_var = tk.BooleanVar(value=True)
+        self.tistory_reference_protection_switch = ctk.CTkSwitch(
+            self.tistory_card,
+            text="저작권 보호 모드 ON · 재사용 허용 이미지만 사용",
+            variable=self.tistory_reference_image_protection_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=48,
+            switch_height=24,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_tistory_reference_image_mode_changed,
+        )
+        self.tistory_reference_protection_switch.grid(
+            row=6,
+            column=0,
+            padx=24,
+            pady=(0, 18),
+            sticky="w",
+        )
+
         button_row = ctk.CTkFrame(self.tistory_card, fg_color="transparent")
-        button_row.grid(row=6, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=7, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -17490,7 +17777,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.tistory_status_label.grid(row=7, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.tistory_status_label.grid(row=8, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_threads_card(self) -> None:
         ctk.CTkLabel(
@@ -18861,6 +19148,25 @@ class KeywordApp(ctk.CTk):
         self.open_published_post_button.grid(row=0, column=3, padx=(10, 0), sticky="e")
         self.open_published_post_button.configure(state="disabled")
 
+        self.writing_reference_protection_switch = ctk.CTkSwitch(
+            publish_card,
+            text="저작권 보호 모드 ON · 재사용 허용 이미지만 사용",
+            variable=self.tistory_reference_image_protection_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=44,
+            switch_height=22,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_tistory_reference_image_mode_changed,
+        )
+        self.writing_reference_protection_switch.grid(
+            row=3,
+            column=0,
+            padx=18,
+            pady=(0, 10),
+            sticky="w",
+        )
+
         self.publish_status_label = ctk.CTkLabel(
             publish_card,
             text="썸네일 제작 후 업로드를 실행하면 진행 상태가 여기 표시됩니다.",
@@ -18869,10 +19175,10 @@ class KeywordApp(ctk.CTk):
             text_color="#c4cede",
             font=ctk.CTkFont(size=14),
         )
-        self.publish_status_label.grid(row=3, column=0, padx=18, pady=(0, 8), sticky="ew")
+        self.publish_status_label.grid(row=4, column=0, padx=18, pady=(0, 8), sticky="ew")
 
         self.publish_progress_bar = ctk.CTkProgressBar(publish_card, height=14, corner_radius=10)
-        self.publish_progress_bar.grid(row=4, column=0, padx=18, pady=(0, 20), sticky="ew")
+        self.publish_progress_bar.grid(row=5, column=0, padx=18, pady=(0, 20), sticky="ew")
         self.publish_progress_bar.set(0)
         self._generate_thumbnail_preview()
 
@@ -20849,6 +21155,10 @@ class KeywordApp(ctk.CTk):
             self.writing_inline_images_provider_menu.set(self.wordpress_settings.inline_images_provider or "Imagen API")
         self.tistory_blog_url_entry.insert(0, self.wordpress_settings.tistory_blog_url)
         self.tistory_write_url_entry.insert(0, self.wordpress_settings.tistory_write_url)
+        self.tistory_reference_image_protection_var.set(
+            self.wordpress_settings.tistory_reference_image_protection_mode
+        )
+        self._on_tistory_reference_image_mode_changed(save=False)
         self.blogspot_blog_id_entry.insert(0, self.wordpress_settings.blogspot_blog_id)
         self.blogspot_client_id_entry.insert(0, self.wordpress_settings.blogspot_client_id)
         self.blogspot_redirect_uri_entry.insert(0, self.wordpress_settings.blogspot_redirect_uri or "http://localhost")
@@ -21590,6 +21900,9 @@ class KeywordApp(ctk.CTk):
             blogspot_access_token=self.wordpress_settings.blogspot_access_token,
             tistory_blog_url=self.tistory_blog_url_entry.get().strip(),
             tistory_write_url=self.tistory_write_url_entry.get().strip(),
+            tistory_reference_image_protection_mode=bool(
+                self.tistory_reference_image_protection_var.get()
+            ),
             naver_blog_profiles=self._current_naver_blog_profiles() if hasattr(self, "naver_blog_profile_vars") else list(self.wordpress_settings.naver_blog_profiles or []),
             naver_blog_active_profile=(
                 self.naver_blog_active_profile_var.get()
@@ -22062,6 +22375,24 @@ class KeywordApp(ctk.CTk):
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
         self._update_quick_status("티스토리 저장됨", "글쓰기 화면 연결 정보를 저장했습니다.", "#48d980")
 
+    def _on_tistory_reference_image_mode_changed(self, save: bool = True) -> None:
+        enabled = bool(self.tistory_reference_image_protection_var.get())
+        text = (
+            "저작권 보호 모드 ON · 재사용 허용 이미지만 사용"
+            if enabled
+            else "저작권 보호 모드 OFF · 뉴스·포털 등 일반 웹 이미지도 캡처 (사용자 책임)"
+        )
+        for widget_name in (
+            "tistory_reference_protection_switch",
+            "writing_reference_protection_switch",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.configure(text=text)
+        self.wordpress_settings.tistory_reference_image_protection_mode = enabled
+        if save:
+            self._save_ui_state()
+
     def _save_threads_settings(self) -> None:
         settings = self._read_wordpress_settings(include_prompts=False)
         if not settings.threads_user_id or not settings.threads_access_token:
@@ -22142,8 +22473,11 @@ class KeywordApp(ctk.CTk):
     def _reset_tistory_settings(self) -> None:
         self.tistory_blog_url_entry.delete(0, "end")
         self.tistory_write_url_entry.delete(0, "end")
+        self.tistory_reference_image_protection_var.set(True)
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
+        self.wordpress_settings.tistory_reference_image_protection_mode = True
+        self._on_tistory_reference_image_mode_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
         self.tistory_status_label.configure(text="● 티스토리 초기화 완료", text_color="#9aa7bb")
         self._update_quick_status("티스토리 초기화", "새로운 티스토리 주소를 입력해 주세요.", "#9aa7bb")
@@ -23657,6 +23991,7 @@ class KeywordApp(ctk.CTk):
             tag_names=tag_names,
             publish_after_input=True,
             write_url=write_url,
+            reference_image_protection_mode=settings.tistory_reference_image_protection_mode,
         )
         self.tistory_automation_worker.start()
 
@@ -24549,6 +24884,9 @@ class KeywordApp(ctk.CTk):
                         publish_after_input=True,
                         close_after_publish=False,
                         write_url=write_url,
+                        reference_image_protection_mode=bool(
+                            self.tistory_reference_image_protection_var.get()
+                        ),
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
@@ -24597,6 +24935,9 @@ class KeywordApp(ctk.CTk):
                         publish_after_input=True,
                         close_after_publish=False,
                         write_url=write_url,
+                        reference_image_protection_mode=bool(
+                            self.tistory_reference_image_protection_var.get()
+                        ),
                     )
                     self.active_automation_tistory_pending = True
                     self.tistory_automation_worker.start()
