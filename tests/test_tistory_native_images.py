@@ -111,6 +111,156 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn("data:image", prepared)
             self.assertIn("blog-helper-cardnews-image", prepared)
 
+    def test_reference_image_query_combines_title_and_meaningful_tags(self) -> None:
+        query = main.build_tistory_reference_image_query(
+            "일본 지진 건물 붕괴 소식",
+            ["#일본 지진", "건물 붕괴", "여진", "여진", "추가 태그"],
+        )
+
+        self.assertEqual(
+            query,
+            "일본 지진 건물 붕괴 소식 일본 지진 건물 붕괴 여진",
+        )
+
+    def test_reference_image_is_inserted_in_article_middle(self) -> None:
+        article = "".join(f"<p>본문 {index}</p>" for index in range(1, 7))
+        marker = "<figure class='reference'>참고 이미지</figure>"
+
+        prepared = main.insert_reference_images_in_article_middle(article, [marker])
+
+        self.assertGreater(prepared.index(marker), prepared.index("<p>본문 2</p>"))
+        self.assertLess(prepared.index(marker), prepared.index("<p>본문 6</p>"))
+
+    def test_reference_image_does_not_nest_inside_existing_cardnews(self) -> None:
+        cardnews = (
+            "<figure class='blog-helper-cardnews-image'>"
+            "<p>카드뉴스 이미지 자리</p><figcaption>카드뉴스</figcaption>"
+            "</figure>"
+        )
+        article = f"<p>도입부</p>{cardnews}<p>핵심 내용</p><p>마무리</p>"
+        marker = "<figure class='reference'>참고 이미지</figure>"
+
+        prepared = main.insert_reference_images_in_article_middle(article, [marker])
+        cardnews_start = prepared.index("<figure class='blog-helper-cardnews-image'>")
+        cardnews_end = prepared.index("</figure>", cardnews_start)
+        marker_index = prepared.index(marker)
+
+        self.assertFalse(cardnews_start < marker_index < cardnews_end)
+
+    def test_reference_placeholder_becomes_native_upload_with_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "reference-capture-test.png"
+            image_path.write_bytes(b"reference-image")
+            image = {
+                "path": str(image_path),
+                "source_url": "https://commons.wikimedia.org/wiki/File:Earthquake.jpg",
+                "source": "Wikimedia Commons",
+                "license": "CC BY-SA 4.0",
+                "creator": "Example Creator",
+            }
+            source = (
+                "<p>도입부</p>"
+                + main.build_tistory_reference_image_figure(image, "일본 지진", 1)
+                + "<p>마무리</p>"
+            )
+
+            prepared, native_files = main.prepare_tistory_native_attachment_html(source, "일본 지진")
+
+            self.assertEqual(list(native_files.values()), [str(image_path)])
+            self.assertIn("__BLOG_HELPER_TISTORY_NATIVE_IMAGE_1__", prepared)
+            self.assertIn("blog-helper-reference-image", prepared)
+            self.assertIn("Wikimedia Commons", prepared)
+            self.assertIn("CC BY-SA 4.0", prepared)
+            self.assertIn("Example Creator", prepared)
+            self.assertIn("target='_blank'", prepared)
+            self.assertNotIn(str(image_path), prepared)
+            self.assertNotIn("data:image", prepared)
+
+    def test_reference_collector_saves_only_captured_image_region(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+
+            def fake_capture(_data_url: str, destination: Path) -> bool:
+                destination.write_bytes(b"captured-image-region")
+                return True
+
+            with (
+                patch.object(main, "GENERATED_UPLOAD_DIR", output_dir),
+                patch.object(
+                    main.GoogleImageCollageCollector,
+                    "collect_licensed",
+                    return_value=[
+                        {
+                            "data_url": "data:image/png;base64,AA==",
+                            "source_url": "https://openverse.org/image/example",
+                            "source": "Openverse",
+                            "license": "CC0",
+                            "creator": "Creator",
+                        }
+                    ],
+                ),
+                patch.object(main, "capture_reference_image_region", side_effect=fake_capture),
+            ):
+                captures = main.collect_tistory_reference_image_files(
+                    "일본 지진 건물 붕괴",
+                    ["일본 지진"],
+                    1,
+                )
+
+            self.assertEqual(len(captures), 1)
+            capture_path = Path(captures[0]["path"])
+            self.assertTrue(capture_path.exists())
+            self.assertTrue(capture_path.name.startswith(main.TISTORY_REFERENCE_IMAGE_PREFIX))
+            self.assertNotIn("data_url", captures[0])
+            self.assertEqual(captures[0]["license"], "CC0")
+
+    def test_tistory_worker_uploads_reference_capture_as_native_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "reference-capture-worker.png"
+            image_path.write_bytes(b"reference-image")
+            reference_image = {
+                "path": str(image_path),
+                "source_url": "https://commons.wikimedia.org/wiki/File:Earthquake.jpg",
+                "source": "Wikimedia Commons",
+                "license": "CC BY-SA 4.0",
+                "creator": "Example Creator",
+            }
+            events: queue.Queue = queue.Queue()
+
+            with (
+                patch.object(
+                    main,
+                    "collect_tistory_reference_image_files",
+                    return_value=[reference_image],
+                ),
+                patch.object(
+                    main,
+                    "run_tistory_playwright_automation",
+                    return_value=(True, "완료"),
+                ) as run_automation,
+                patch.object(main, "cleanup_generated_upload_images", return_value=1),
+                patch.object(main, "cleanup_tistory_automation_files"),
+            ):
+                worker = main.TistoryAutomationWorker(
+                    "일본 지진 피해 정리",
+                    "<p>도입부</p><p>핵심 내용</p><p>마무리</p>",
+                    events,
+                    tag_names=["일본 지진", "건물 붕괴"],
+                    publish_after_input=True,
+                    write_url="https://example.tistory.com/manage/newpost",
+                )
+                worker.run()
+
+            call = run_automation.call_args
+            script = call.args[1]
+            native_files = call.kwargs["native_image_files"]
+            self.assertIn(str(image_path), native_files.values())
+            self.assertIn("Wikimedia Commons", script)
+            self.assertIn("CC BY-SA 4.0", script)
+            self.assertIn("const collageImages = []", script)
+            event_types = [events.get_nowait()[0] for _ in range(events.qsize())]
+            self.assertIn("tistory_automation_done", event_types)
+
     def test_thumbnail_body_uses_uploaded_content_url(self) -> None:
         script = main.build_tistory_editor_automation_script(
             "테스트 제목",

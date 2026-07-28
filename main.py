@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import io
 import os
 import json
 import queue
@@ -115,6 +116,7 @@ REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
 GOOGLE_IMAGE_COLLAGE_ENABLED = True
+TISTORY_REFERENCE_IMAGE_PREFIX = "reference-capture-"
 RUNTIME_LOG_FILE = DATA_DIR / "blog-helper-runtime.log"
 AI_GENERATION_TIMEOUT_SECONDS = 180
 AI_GENERATION_MAX_ATTEMPTS = 2
@@ -3045,16 +3047,43 @@ def prepare_tistory_native_attachment_html(
         token = f"__BLOG_HELPER_TISTORY_NATIVE_IMAGE_{counter}__"
         native_files[token] = str(image_path)
         is_cardnews = "blog-helper-cardnews-image" in match.group(0)
-        label = f"{title or '본문'} {'카드뉴스' if is_cardnews else '본문 이미지'} {counter}"
+        is_reference = "blog-helper-reference-image" in match.group(0)
+        image_kind = "카드뉴스" if is_cardnews else "참고 이미지" if is_reference else "본문 이미지"
+        label = f"{title or '본문'} {image_kind} {counter}"
         class_names = "blog-helper-inline-image"
         if is_cardnews:
             class_names += " blog-helper-cardnews-image"
+        if is_reference:
+            class_names += " blog-helper-reference-image"
+        caption = escape(label)
+        if is_reference:
+            def attr_value(name: str) -> str:
+                found = re.search(
+                    rf"\b{name}=['\"]([^'\"]*)['\"]",
+                    match.group(0),
+                    flags=re.I,
+                )
+                return unescape(found.group(1)).strip() if found else ""
+
+            source_url = attr_value("data-blog-helper-source-url")
+            source_name = attr_value("data-blog-helper-source-name") or "재사용 허용 이미지"
+            license_name = attr_value("data-blog-helper-license")
+            creator = attr_value("data-blog-helper-creator")
+            attribution = " · ".join(part for part in (source_name, creator, license_name) if part)
+            if source_url:
+                caption = (
+                    f"{escape(label)} · 출처: "
+                    f"<a href='{escape(source_url, quote=True)}' target='_blank' "
+                    f"rel='noopener noreferrer nofollow'>{escape(attribution or source_name)}</a>"
+                )
+            elif attribution:
+                caption = f"{escape(label)} · 출처: {escape(attribution)}"
         return (
             f"\n<figure class='{class_names} imageblock alignCenter' "
             "data-ke-mobilestyle='widthOrigin'>"
             f"<img src='{token}' alt='{escape(label)}' "
             "style='max-width:100%;height:auto;display:block;margin:0 auto;' />"
-            f"<figcaption>{escape(label)}</figcaption>"
+            f"<figcaption>{caption}</figcaption>"
             "</figure>\n"
         )
 
@@ -3070,6 +3099,7 @@ def cleanup_generated_upload_images(paths: list[str | Path]) -> int:
         "body-cardnews-",
         "inline-image-",
         "automation-inline-image-",
+        TISTORY_REFERENCE_IMAGE_PREFIX,
         "naver-kin-thumbnail-",
         "naver-kin-cardnews-",
         CARDNEWS_IMAGE_PREFIX,
@@ -3241,7 +3271,9 @@ def image_bytes_to_data_url(image_bytes: bytes, content_type: str = "image/jpeg"
 
 class GoogleImageCollageCollector:
     SEARCH_URL = "https://www.google.com/search"
+    OPENVERSE_API_URL = "https://api.openverse.org/v1/images/"
     COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
+    ALLOWED_LICENSES = {"cc0", "pdm", "by", "by-sa"}
     BLOCKED_HINTS = (
         "watermark",
         "logo",
@@ -3287,6 +3319,26 @@ class GoogleImageCollageCollector:
             images.extend(self._collect_commons_images(keyword, count - len(images)))
         return images[:count]
 
+    def collect_licensed(self, keyword: str, count: int = GOOGLE_IMAGE_COLLAGE_COUNT) -> list[dict[str, str]]:
+        """Collect only images with reusable license metadata for blog attachment."""
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return []
+        images = self._collect_openverse_images(keyword, count)
+        if len(images) < count:
+            images.extend(self._collect_commons_images(keyword, count - len(images)))
+        unique: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for image in images:
+            source_url = str(image.get("source_url") or image.get("image_url") or "").strip()
+            if not source_url or source_url in seen_urls:
+                continue
+            seen_urls.add(source_url)
+            unique.append(image)
+            if len(unique) >= count:
+                break
+        return unique
+
     def _fetch_google_images_html(self, keyword: str) -> str:
         query = urlencode(
             {
@@ -3327,7 +3379,7 @@ class GoogleImageCollageCollector:
                     candidates.append(image_url)
         return candidates[:20]
 
-    def _download_as_data_url(self, image_url: str) -> str:
+    def _download_as_data_url(self, image_url: str, referer: str = "https://www.google.com/") -> str:
         request = Request(
             image_url,
             headers={
@@ -3335,7 +3387,7 @@ class GoogleImageCollageCollector:
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
                 ),
-                "Referer": "https://www.google.com/",
+                "Referer": referer,
             },
         )
         with urlopen(request, timeout=10, context=self.ssl_context) as response:
@@ -3350,6 +3402,69 @@ class GoogleImageCollageCollector:
     def _looks_unsafe_url(self, image_url: str) -> bool:
         lower_url = image_url.lower()
         return any(hint in lower_url for hint in self.BLOCKED_HINTS)
+
+    def _collect_openverse_images(self, keyword: str, count: int) -> list[dict[str, str]]:
+        images: list[dict[str, str]] = []
+        params = urlencode(
+            {
+                "q": keyword,
+                "page_size": max(8, min(20, count * 6)),
+                "license": ",".join(sorted(self.ALLOWED_LICENSES)),
+                "mature": "false",
+            }
+        )
+        request = Request(
+            f"{self.OPENVERSE_API_URL}?{params}",
+            headers={
+                "User-Agent": "BlogHelperPro/1.0 (local desktop app)",
+                "Accept": "application/json,text/plain,*/*",
+            },
+        )
+        try:
+            with urlopen(request, timeout=12, context=self.ssl_context) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+        except Exception:
+            return images
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        for item in results:
+            if len(images) >= count:
+                break
+            if not isinstance(item, dict) or item.get("mature"):
+                continue
+            license_code = str(item.get("license") or "").strip().lower()
+            if license_code not in self.ALLOWED_LICENSES:
+                continue
+            title = str(item.get("title") or "")
+            creator = str(item.get("creator") or "")
+            tags = " ".join(
+                str(tag.get("name") or "")
+                for tag in (item.get("tags") or [])
+                if isinstance(tag, dict)
+            )
+            if not self._is_relevant_text(keyword, f"{title} {creator} {tags}"):
+                continue
+            image_url = str(item.get("thumbnail") or item.get("url") or "").strip()
+            source_url = str(item.get("foreign_landing_url") or item.get("detail_url") or image_url).strip()
+            if not image_url or self._looks_unsafe_url(image_url):
+                continue
+            try:
+                data_url = self._download_as_data_url(image_url, source_url or "https://openverse.org/")
+            except Exception:
+                continue
+            if not data_url:
+                continue
+            images.append(
+                {
+                    "data_url": data_url,
+                    "image_url": image_url,
+                    "source_url": source_url,
+                    "source": "Openverse",
+                    "license": license_code.upper(),
+                    "creator": creator,
+                    "title": title,
+                }
+            )
+        return images
 
     def _collect_commons_images(self, keyword: str, count: int) -> list[dict[str, str]]:
         images: list[dict[str, str]] = []
@@ -3381,11 +3496,26 @@ class GoogleImageCollageCollector:
                 if not image_url or self._looks_unsafe_url(image_url):
                     continue
                 try:
-                    data_url = self._download_as_data_url(image_url)
+                    source_url = str(info.get("descriptionurl") or image_url).strip()
+                    data_url = self._download_as_data_url(
+                        image_url,
+                        source_url or "https://commons.wikimedia.org/",
+                    )
                 except Exception:
                     continue
                 if data_url:
-                    images.append({"data_url": data_url, "source_url": image_url, "source": "Wikimedia Commons"})
+                    creator = self._metadata_value(metadata, "Artist")
+                    images.append(
+                        {
+                            "data_url": data_url,
+                            "image_url": image_url,
+                            "source_url": source_url,
+                            "source": "Wikimedia Commons",
+                            "license": license_name or "Wikimedia Commons",
+                            "creator": creator,
+                            "title": str(page.get("title") or "").removeprefix("File:"),
+                        }
+                    )
         return images
 
     def _fetch_commons_payload(self, query: str) -> dict:
@@ -3425,9 +3555,25 @@ class GoogleImageCollageCollector:
             if isinstance(value, dict)
         )
         haystack = self._normalize_for_match(f"{title} {metadata_text}")
-        if any(token in haystack for token in keyword_tokens if len(token) >= 2):
+        keyword_matches = sum(1 for token in keyword_tokens if token in haystack)
+        keyword_required = 2 if len(keyword_tokens) >= 3 else 1
+        if keyword_matches >= keyword_required:
             return True
         return bool(query_tokens and sum(1 for token in query_tokens if token in haystack) >= min(2, len(query_tokens)))
+
+    def _is_relevant_text(self, keyword: str, candidate_text: str) -> bool:
+        keyword_tokens = self._keyword_tokens(keyword)
+        if not keyword_tokens:
+            return True
+        haystack = self._normalize_for_match(candidate_text)
+        matched = sum(1 for token in keyword_tokens if token in haystack)
+        required = 2 if len(keyword_tokens) >= 3 else 1
+        return matched >= required
+
+    def _metadata_value(self, metadata: dict, key: str) -> str:
+        value = metadata.get(key) if isinstance(metadata, dict) else None
+        raw = str(value.get("value") or "") if isinstance(value, dict) else ""
+        return re.sub(r"<[^>]+>", " ", unescape(raw)).strip()
 
     def _keyword_tokens(self, value: str) -> list[str]:
         normalized = self._normalize_for_match(value)
@@ -3444,6 +3590,10 @@ class GoogleImageCollageCollector:
         compact = re.sub(r"\s+", " ", keyword.lower()).strip()
         queries = [keyword]
         hints = [
+            (("지진", "붕괴", "진도", "여진"), "Japan earthquake damaged building"),
+            (("태풍", "홍수", "침수", "폭우"), "flood storm disaster"),
+            (("산불", "화재", "불길"), "wildfire disaster"),
+            (("폭발", "사고", "참사"), "emergency disaster site"),
             (("축구", "월드컵", "피파", "선수"), "football stadium"),
             (("배구", "avc"), "volleyball"),
             (("콘서트", "공연", "bts", "가수"), "concert stage"),
@@ -3459,6 +3609,169 @@ class GoogleImageCollageCollector:
             if query and query not in deduped:
                 deduped.append(query)
         return deduped[:3]
+
+
+def build_tistory_reference_image_query(title: str, tag_names: list[str] | None = None) -> str:
+    title_text = re.sub(r"\s+", " ", title or "").strip()
+    meaningful_tags: list[str] = []
+    for tag in tag_names or []:
+        normalized = re.sub(r"^[#\s]+", "", str(tag or "")).strip()
+        if len(normalized) < 2 or normalized in meaningful_tags:
+            continue
+        meaningful_tags.append(normalized)
+        if len(meaningful_tags) >= 3:
+            break
+    return " ".join(part for part in (title_text, *meaningful_tags) if part).strip()
+
+
+def _decode_image_data_url(data_url: str) -> bytes:
+    if not data_url or "," not in data_url:
+        return b""
+    header, encoded = data_url.split(",", 1)
+    if "base64" not in header.lower():
+        return b""
+    try:
+        return base64.b64decode(encoded, validate=False)
+    except (ValueError, TypeError):
+        return b""
+
+
+def _save_reference_image_with_pillow(data_url: str, destination: Path) -> bool:
+    if Image is None:
+        return False
+    image_bytes = _decode_image_data_url(data_url)
+    if not image_bytes:
+        return False
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source) if ImageOps is not None else source.copy()
+            image = image.convert("RGB")
+            if image.width < 320 or image.height < 180:
+                return False
+            image.thumbnail((1400, 1000), Image.Resampling.LANCZOS)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            image.save(destination, format="PNG", optimize=True)
+        return destination.exists() and destination.stat().st_size >= 4_000
+    except (OSError, ValueError):
+        return False
+
+
+def capture_reference_image_region(data_url: str, destination: Path) -> bool:
+    """Render one reusable image and capture only its element, never browser chrome."""
+    if not data_url:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from playwright.sync_api import sync_playwright
+
+        chrome_path = require_google_chrome_executable()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(chrome_path),
+                headless=True,
+                args=["--disable-gpu", "--no-first-run", "--no-default-browser-check"],
+            )
+            try:
+                page = browser.new_page(viewport={"width": 1500, "height": 1100})
+                page.set_content(
+                    "<!doctype html><html><head><meta charset='utf-8'>"
+                    "<style>html,body{margin:0;padding:0;background:#fff;}"
+                    "#reference-image{display:block;max-width:1400px;max-height:1000px;"
+                    "width:auto;height:auto;object-fit:contain;}</style></head>"
+                    f"<body><img id='reference-image' src='{escape(data_url, quote=True)}'></body></html>",
+                    wait_until="load",
+                    timeout=20_000,
+                )
+                page.wait_for_function(
+                    "() => { const img = document.querySelector('#reference-image'); "
+                    "return img && img.complete && img.naturalWidth >= 320 && img.naturalHeight >= 180; }",
+                    timeout=20_000,
+                )
+                page.locator("#reference-image").screenshot(
+                    path=str(destination),
+                    type="png",
+                    animations="disabled",
+                    timeout=20_000,
+                )
+            finally:
+                browser.close()
+        if destination.exists() and destination.stat().st_size >= 4_000:
+            return True
+    except Exception:
+        pass
+    return _save_reference_image_with_pillow(data_url, destination)
+
+
+def collect_tistory_reference_image_files(
+    title: str,
+    tag_names: list[str] | None = None,
+    count: int = GOOGLE_IMAGE_COLLAGE_COUNT,
+) -> list[dict[str, str]]:
+    query = build_tistory_reference_image_query(title, tag_names)
+    if not query:
+        return []
+    candidates = GoogleImageCollageCollector().collect_licensed(query, max(1, min(count, 2)))
+    captures: list[dict[str, str]] = []
+    GENERATED_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.time_ns()
+    for index, candidate in enumerate(candidates, start=1):
+        destination = GENERATED_UPLOAD_DIR / f"{TISTORY_REFERENCE_IMAGE_PREFIX}{stamp}-{index}.png"
+        if not capture_reference_image_region(str(candidate.get("data_url") or ""), destination):
+            destination.unlink(missing_ok=True)
+            continue
+        capture = dict(candidate)
+        capture.pop("data_url", None)
+        capture["path"] = str(destination)
+        captures.append(capture)
+    return captures
+
+
+def build_tistory_reference_image_figure(image: dict[str, str], title: str, index: int) -> str:
+    image_path = str(image.get("path") or "").strip()
+    source_url = str(image.get("source_url") or "").strip()
+    source_name = str(image.get("source") or "재사용 허용 이미지").strip()
+    license_name = str(image.get("license") or "재사용 허용").strip()
+    creator = str(image.get("creator") or "").strip()
+    alt = f"{title} 참고 이미지 {index}"
+    return (
+        "\n<figure class='blog-helper-inline-image blog-helper-reference-image' "
+        f"data-blog-helper-inline-image-path='{escape(image_path, quote=True)}' "
+        f"data-blog-helper-source-url='{escape(source_url, quote=True)}' "
+        f"data-blog-helper-source-name='{escape(source_name, quote=True)}' "
+        f"data-blog-helper-license='{escape(license_name, quote=True)}' "
+        f"data-blog-helper-creator='{escape(creator, quote=True)}'>"
+        f"<p><strong>☑ 참고 이미지 {index}번 소스</strong> - 티스토리 파일 첨부로 업로드됩니다.</p>"
+        f"<figcaption>{escape(alt)}</figcaption>"
+        "</figure>\n"
+    )
+
+
+def insert_reference_images_in_article_middle(article_html: str, figures: list[str]) -> str:
+    if not figures:
+        return article_html
+    content = article_html or ""
+    fractions = [0.5] if len(figures) == 1 else [0.42, 0.64]
+    for figure, fraction in zip(figures, fractions):
+        protected_ranges = [
+            (match.start(), match.end())
+            for match in re.finditer(
+                r"<(figure|table|script|style)\b[^>]*>.*?</\1>",
+                content,
+                flags=re.I | re.S,
+            )
+        ]
+        matches = [
+            match
+            for match in re.finditer(r"</(?:p|h2|h3|ul|ol|table)>", content, flags=re.I)
+            if not any(start < match.end() < end for start, end in protected_ranges)
+        ]
+        if not matches:
+            content += figure
+            continue
+        target_index = min(max(0, round((len(matches) - 1) * fraction)), len(matches) - 1)
+        insert_at = matches[target_index].end()
+        content = content[:insert_at] + figure + content[insert_at:]
+    return content
 
 
 def copy_png_to_macos_clipboard(image_path: str | Path) -> bool:
@@ -10230,6 +10543,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.write_url = write_url
 
     def run(self) -> None:
+        reference_image_paths: list[str] = []
         try:
             thumbnail_data_url = ""
             thumbnail_content_url = ""
@@ -10239,27 +10553,57 @@ class TistoryAutomationWorker(threading.Thread):
                 thumbnail_data_url = image_file_to_data_url(self.thumbnail_path)
                 thumbnail_content_url = "__BLOG_HELPER_TISTORY_NATIVE_THUMBNAIL__"
                 native_image_files[thumbnail_content_url] = self.thumbnail_path
+
+            article_html = self.article_html
+            if GOOGLE_IMAGE_COLLAGE_ENABLED and self.publish_after_input:
+                self.result_queue.put(
+                    (
+                        "tistory_progress",
+                        "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다...",
+                    )
+                )
+                reference_images = collect_tistory_reference_image_files(
+                    self.title,
+                    self.tag_names,
+                    GOOGLE_IMAGE_COLLAGE_COUNT,
+                )
+                reference_image_paths = [
+                    str(image.get("path") or "").strip()
+                    for image in reference_images
+                    if str(image.get("path") or "").strip()
+                ]
+                if reference_images:
+                    figures = [
+                        build_tistory_reference_image_figure(image, self.title, index)
+                        for index, image in enumerate(reference_images, start=1)
+                    ]
+                    article_html = insert_reference_images_in_article_middle(article_html, figures)
+                    self.result_queue.put(
+                        (
+                            "tistory_progress",
+                            f"관련 참고 이미지 {len(reference_images)}장의 이미지 영역만 캡처해 본문 중간에 배치했습니다.",
+                        )
+                    )
+                else:
+                    self.result_queue.put(
+                        (
+                            "tistory_progress",
+                            "제목과 직접 관련되고 재사용 조건을 확인할 수 있는 이미지를 찾지 못해 참고 이미지 삽입은 생략합니다.",
+                        )
+                    )
+
             prepared_article_html, article_native_files = prepare_tistory_native_attachment_html(
-                self.article_html,
+                article_html,
                 self.title,
             )
             native_image_files.update(article_native_files)
-            collage_images: list[dict[str, str]] = []
-            if GOOGLE_IMAGE_COLLAGE_ENABLED and self.publish_after_input:
-                self.result_queue.put(("tistory_progress", "Google 이미지 검색에서 본문 콜라주용 참고 이미지 2장을 찾는 중입니다..."))
-                image_keyword = self.tag_names[0] if self.tag_names else self.title
-                collage_images = GoogleImageCollageCollector().collect(image_keyword, GOOGLE_IMAGE_COLLAGE_COUNT)
-                if collage_images:
-                    self.result_queue.put(("tistory_progress", f"본문 콜라주 이미지 {len(collage_images)}장을 준비했습니다."))
-                else:
-                    self.result_queue.put(("tistory_progress", "주제와 직접 관련 있는 안전한 콜라주 이미지를 찾지 못해 이미지 삽입은 생략합니다."))
             script = build_tistory_editor_automation_script(
                 self.title,
                 prepared_article_html,
                 mode_only=self.mode_only,
                 thumbnail_data_url=thumbnail_data_url,
                 thumbnail_content_url=thumbnail_content_url,
-                collage_images=collage_images,
+                collage_images=[],
                 automation_actions=parse_tistory_automation_prompt(self.automation_prompt),
                 tag_names=self.tag_names,
                 thumbnail_file_name=Path(self.thumbnail_path).name if self.thumbnail_path else "blog-helper-thumbnail.png",
@@ -10281,6 +10625,7 @@ class TistoryAutomationWorker(threading.Thread):
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("tistory_automation_error", str(exc)))
         finally:
+            cleanup_generated_upload_images(reference_image_paths)
             cleanup_tistory_automation_files()
 
 
