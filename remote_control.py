@@ -104,6 +104,9 @@ class RemoteControlAgent:
         self._socket = None
         self._send_lock = threading.Lock()
         self._active_job_id = ""
+        # A deleted PC stays hidden only for this process session. Restarting the
+        # app creates a new session and lets the gateway register it again.
+        self._session_id = str(uuid.uuid4())
 
     @property
     def is_running(self) -> bool:
@@ -169,6 +172,28 @@ class RemoteControlAgent:
                 "commandId": str(command_id or ""),
                 "ok": bool(ok),
                 "message": str(message or ""),
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
+
+    def notify_published(
+        self,
+        *,
+        job_id: str = "",
+        queue_id: str = "",
+        published_url: str,
+        title: str = "",
+    ) -> None:
+        url = str(published_url or "").strip()
+        if not url:
+            return
+        self._send(
+            {
+                "type": "queue.published",
+                "jobId": str(job_id or "").strip(),
+                "queueId": str(queue_id or "").strip(),
+                "publishedUrl": url,
+                "title": str(title or "").strip(),
                 "updatedAt": int(time.time() * 1000),
             }
         )
@@ -254,6 +279,7 @@ class RemoteControlAgent:
                 "name": self.config.device_name,
                 "platform": f"{platform.system()} {platform.release()}",
                 "version": self.app_version,
+                "sessionId": self._session_id,
             }
         )
         return urlunparse((scheme, parsed.netloc, "/api/agent", "", query, ""))
@@ -266,6 +292,7 @@ class RemoteControlAgent:
                 "deviceId": self.config.device_id,
                 "name": self.config.device_name,
                 "version": self.app_version,
+                "sessionId": self._session_id,
             }
         )
 

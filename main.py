@@ -23670,6 +23670,7 @@ class KeywordApp(ctk.CTk):
             "score": payload.get("score", 0),
             "categories": payload.get("categories", []),
             "provider": payload.get("provider", ""),
+            "remote_job_id": str(payload.get("remote_job_id") or "").strip(),
         }
         if self._should_apply_automation_cardnews(settings):
             self.automation_status_label.configure(
@@ -25240,6 +25241,16 @@ class KeywordApp(ctk.CTk):
         title = str(item.get("title") or "자동화 글") if item else "자동화 글"
         if item is not None:
             item["cleanup_paths"] = list(payload.get("cleanup_paths") or [])
+            wordpress = payload.get("wordpress") or {}
+            blogspot = payload.get("blogspot") or {}
+            published_url = str(
+                wordpress.get("link")
+                or wordpress.get("post_url")
+                or blogspot.get("link")
+                or ""
+            ).strip()
+            if published_url:
+                item["published_url"] = published_url
         tistory = payload.get("tistory") or {}
         if tistory:
             write_url = tistory.get("write_url")
@@ -25297,6 +25308,16 @@ class KeywordApp(ctk.CTk):
         self.tistory_automation_worker = None
         cleanup_tistory_automation_files()
         if success:
+            published_url = str(item.get("published_url") or "").strip() if item else ""
+            remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
+            remote_agent = getattr(self, "remote_agent", None)
+            if published_url and remote_agent is not None:
+                remote_agent.notify_published(
+                    job_id=remote_job_id,
+                    queue_id=str(completed_item_id or ""),
+                    published_url=published_url,
+                    title=title,
+                )
             deleted_count = self._cleanup_uploaded_generated_images(
                 list(item.get("cleanup_paths") or []) if item else [],
                 item=item,

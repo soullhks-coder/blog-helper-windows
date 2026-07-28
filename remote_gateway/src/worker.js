@@ -1,6 +1,11 @@
 const SESSION_COOKIE = "blog_helper_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const DEVICE_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 365 * 10;
+const DAUM_REALTIME_URL =
+  "https://m.search.daum.net/search?w=tot"
+  + "&q=%EB%8B%A4%EC%9D%8C%20%EC%8B%A4%EC%8B%9C%EA%B0%84%20%EA%B2%80%EC%83%89%EC%96%B4%20%EC%88%9C%EC%9C%84"
+  + "&nzq=%EB%8B%A4%EC%9D%8C%20%EC%8B%A4%EC%8B%9C%EA%B0%84%ED%8A%B8%EB%A0%8C%EB%93%9C"
+  + "&DA=NSJ";
 
 export default {
   async fetch(request, env) {
@@ -102,11 +107,21 @@ export class ControlRoom {
     if (url.pathname === "/api/devices" && request.method === "GET") {
       return jsonResponse({ devices: await this.listDevices() });
     }
+    const deviceMatch = url.pathname.match(/^\/api\/devices\/([^/]+)$/);
+    if (deviceMatch && request.method === "DELETE") {
+      return this.hideDevice(decodeURIComponent(deviceMatch[1]));
+    }
     if (url.pathname === "/api/jobs" && request.method === "GET") {
       return jsonResponse({ jobs: await this.listJobs() });
     }
     if (url.pathname === "/api/jobs" && request.method === "POST") {
       return this.createJob(request);
+    }
+    if (url.pathname === "/api/jobs" && request.method === "DELETE") {
+      return this.clearJobHistory();
+    }
+    if (url.pathname === "/api/trends/daum" && request.method === "GET") {
+      return this.fetchDaumRealtimeTrends();
     }
     if (url.pathname === "/api/queue" && request.method === "GET") {
       return this.listQueue(
@@ -173,10 +188,19 @@ export class ControlRoom {
       name,
       platform: cleanText(url.searchParams.get("platform"), 100),
       version: cleanText(url.searchParams.get("version"), 30),
+      sessionId: cleanText(url.searchParams.get("sessionId"), 80),
     };
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server, ["agents", `device:${deviceId}`]);
-    const existingDevice = (await this.ctx.storage.get(`device:${deviceId}`)) || {};
+    let existingDevice = (await this.ctx.storage.get(`device:${deviceId}`)) || {};
+    if (
+      existingDevice.hiddenSessionId
+      && attachment.sessionId
+      && attachment.sessionId !== existingDevice.hiddenSessionId
+    ) {
+      const { hiddenSessionId: _hiddenSessionId, hiddenAt: _hiddenAt, ...visibleDevice } = existingDevice;
+      existingDevice = visibleDevice;
+    }
     await this.ctx.storage.put(`device:${deviceId}`, {
       ...existingDevice,
       ...attachment,
@@ -263,6 +287,9 @@ export class ControlRoom {
     const devices = [];
     for (const [key, value] of entries) {
       const deviceId = key.slice("device:".length);
+      if (value.hiddenSessionId && value.hiddenSessionId === value.sessionId) {
+        continue;
+      }
       const online = this.ctx.getWebSockets(`device:${deviceId}`).length > 0;
       devices.push({
         ...value,
@@ -274,9 +301,92 @@ export class ControlRoom {
     return devices.sort((a, b) => Number(b.online) - Number(a.online) || String(a.name).localeCompare(String(b.name)));
   }
 
+  async hideDevice(rawDeviceId) {
+    const deviceId = cleanText(rawDeviceId, 80);
+    const deviceKey = `device:${deviceId}`;
+    const device = deviceId ? await this.ctx.storage.get(deviceKey) : null;
+    if (!device) {
+      return jsonResponse({ error: "삭제할 PC를 찾지 못했습니다." }, 404);
+    }
+    if (device.busyJobId) {
+      return jsonResponse({ error: "현재 작업 중인 PC는 작업 완료 후 삭제할 수 있습니다." }, 409);
+    }
+    const hiddenSessionId = cleanText(device.sessionId, 80) || `legacy-${deviceId}`;
+    await this.ctx.storage.put(deviceKey, {
+      ...device,
+      hiddenSessionId,
+      hiddenAt: Date.now(),
+      busyJobId: "",
+    });
+    for (const socket of this.ctx.getWebSockets(`device:${deviceId}`)) {
+      try {
+        socket.close(4002, "원격 목록에서 PC를 숨겼습니다.");
+      } catch {
+        // The hidden-session marker still keeps the current process out of the list.
+      }
+    }
+    return jsonResponse({
+      ok: true,
+      message: "PC를 목록에서 삭제했습니다. 해당 PC의 Blog Helper를 다시 실행하면 자동으로 다시 연결됩니다.",
+    });
+  }
+
   async listJobs() {
     const entries = await this.ctx.storage.list({ prefix: "job:", reverse: true, limit: 40 });
     return [...entries.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  }
+
+  async clearJobHistory() {
+    const entries = await this.ctx.storage.list({ prefix: "job:" });
+    const removableKeys = [];
+    for (const [key, job] of entries) {
+      if (isTerminal(job.status)) {
+        removableKeys.push(key);
+      }
+    }
+    if (removableKeys.length) {
+      await this.ctx.storage.delete(removableKeys);
+    }
+    return jsonResponse({
+      ok: true,
+      cleared: removableKeys.length,
+      message: removableKeys.length
+        ? `완료된 최근 작업 ${removableKeys.length}개를 초기화했습니다.`
+        : "초기화할 완료 작업이 없습니다.",
+    });
+  }
+
+  async fetchDaumRealtimeTrends() {
+    let response;
+    try {
+      response = await fetch(DAUM_REALTIME_URL, {
+        headers: {
+          "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+          ),
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+          "Referer": "https://www.daum.net/",
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch {
+      return jsonResponse({ error: "다음 실시간 검색어 서버 응답이 늦어 불러오지 못했습니다." }, 504);
+    }
+    if (!response.ok) {
+      return jsonResponse({ error: `다음 실시간 검색어를 불러오지 못했습니다. (${response.status})` }, 502);
+    }
+    const html = await response.text();
+    const trends = parseDaumRealtimeTrends(html);
+    if (!trends.length) {
+      return jsonResponse({ error: "현재 다음 실시간 검색어 1~10위를 찾지 못했습니다." }, 502);
+    }
+    return jsonResponse({
+      source: "다음 실시간",
+      fetchedAt: Date.now(),
+      trends,
+    });
   }
 
   async listQueue(rawDeviceId, requestRefresh = false) {
@@ -456,6 +566,39 @@ export class ControlRoom {
       await this.ctx.storage.put(deviceKey, { ...device, ...attachment, lastSeen: Date.now() });
       return;
     }
+    if (payload.type === "queue.published") {
+      const publishedUrl = cleanHttpUrl(payload.publishedUrl);
+      const queueId = cleanText(payload.queueId, 100);
+      let jobId = cleanText(payload.jobId, 80);
+      let job = jobId ? await this.ctx.storage.get(`job:${jobId}`) : null;
+      if ((!job || job.deviceId !== deviceId) && queueId) {
+        const jobs = await this.ctx.storage.list({ prefix: "job:", reverse: true, limit: 80 });
+        job = [...jobs.values()].find(
+          (candidate) => (
+            candidate.deviceId === deviceId
+            && cleanText(candidate.result && candidate.result.queueId, 100) === queueId
+          ),
+        );
+        jobId = job ? cleanText(job.id, 80) : "";
+      }
+      if (job && jobId && publishedUrl) {
+        await this.ctx.storage.put(`job:${jobId}`, {
+          ...job,
+          status: "completed",
+          progress: 1,
+          message: "블로그 발행을 완료했습니다. 눌러서 실제 글을 확인할 수 있습니다.",
+          result: {
+            ...(job.result || {}),
+            queueId,
+            publishedUrl,
+            title: cleanText(payload.title, 300) || cleanText(job.result && job.result.title, 300),
+          },
+          updatedAt: Date.now(),
+        });
+      }
+      await this.ctx.storage.put(deviceKey, { ...device, ...attachment, lastSeen: Date.now() });
+      return;
+    }
     if (!String(payload.type || "").startsWith("job.")) {
       return;
     }
@@ -577,6 +720,62 @@ function isTerminal(status) {
 
 function cleanText(value, maxLength) {
   return String(value || "").trim().slice(0, maxLength);
+}
+
+function cleanHttpUrl(value) {
+  const text = cleanText(value, 2000);
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = new URL(text);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function parseDaumRealtimeTrends(html) {
+  const trends = [];
+  const seen = new Set();
+  const anchors = String(html || "").match(
+    /<a\b[^>]*\bclass\s*=\s*(?:"[^"]*\blink_trend\b[^"]*"|'[^']*\blink_trend\b[^']*')[^>]*>/gis,
+  ) || [];
+  for (const anchor of anchors) {
+    const keyword = cleanText(decodeHtmlEntities(readHtmlAttribute(anchor, "data-keyword")), 120);
+    const rank = Number.parseInt(readHtmlAttribute(anchor, "data-rank"), 10);
+    if (!keyword || seen.has(keyword)) {
+      continue;
+    }
+    seen.add(keyword);
+    trends.push({
+      rank: Number.isFinite(rank) && rank > 0 ? rank : trends.length + 1,
+      keyword,
+      status: cleanText(decodeHtmlEntities(readHtmlAttribute(anchor, "data-status")), 40),
+      url: `https://m.search.daum.net/search?w=tot&q=${encodeURIComponent(keyword)}`,
+    });
+  }
+  return trends
+    .sort((left, right) => left.rank - right.rank)
+    .slice(0, 10);
+}
+
+function readHtmlAttribute(tag, name) {
+  const match = String(tag || "").match(
+    new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"),
+  );
+  return match ? (match[1] ?? match[2] ?? "") : "";
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code) || 0))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16) || 0))
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
 }
 
 async function readJson(request) {

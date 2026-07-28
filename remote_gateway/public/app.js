@@ -9,6 +9,8 @@ const state = {
   queueUpdatedAt: 0,
   queueRenderSignature: "",
   selectedDeviceId: "",
+  daumTrends: [],
+  jobSubmitting: false,
   pollTimer: null,
 };
 
@@ -22,6 +24,10 @@ const jobList = document.querySelector("#jobList");
 const queueList = document.querySelector("#queueList");
 const previewDialog = document.querySelector("#previewDialog");
 const previewBody = document.querySelector("#previewBody");
+const daumTrendButton = document.querySelector("#daumTrendButton");
+const daumTrendAccordion = document.querySelector("#daumTrendAccordion");
+const daumTrendList = document.querySelector("#daumTrendList");
+const clearJobsButton = document.querySelector("#clearJobsButton");
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -40,17 +46,30 @@ loginForm.addEventListener("submit", async (event) => {
 
 jobForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  await submitKeywordJob(document.querySelector("#keyword").value);
+});
+
+async function submitKeywordJob(rawKeyword) {
   setText("#jobError", "");
-  const keyword = document.querySelector("#keyword").value.trim();
+  const keyword = String(rawKeyword || "").trim();
   const targets = [...document.querySelectorAll("input[name='target']:checked")].map((item) => item.value);
   if (!state.selectedDeviceId) {
     setText("#jobError", "작업할 PC를 먼저 선택해 주세요.");
-    return;
+    return false;
+  }
+  if (!keyword) {
+    setText("#jobError", "작성할 키워드를 입력하거나 실시간 검색어를 선택해 주세요.");
+    return false;
   }
   if (!targets.length) {
     setText("#jobError", "발행 대상을 하나 이상 선택해 주세요.");
-    return;
+    return false;
   }
+  if (state.jobSubmitting) {
+    setText("#jobError", "현재 키워드를 PC로 전달하고 있습니다. 잠시만 기다려 주세요.");
+    return false;
+  }
+  state.jobSubmitting = true;
   submitJob.disabled = true;
   submitJob.textContent = "PC로 전달 중...";
   const response = await api("/api/jobs", {
@@ -68,8 +87,10 @@ jobForm.addEventListener("submit", async (event) => {
     document.querySelector("#keyword").value = "";
     await refreshDashboard();
   }
+  state.jobSubmitting = false;
   updateSubmitButton();
-});
+  return response.ok;
+}
 
 document.querySelector("#refreshButton").addEventListener("click", refreshDashboard);
 document.querySelector("#refreshQueueButton").addEventListener("click", async () => {
@@ -83,6 +104,9 @@ document.querySelector("#logoutButton").addEventListener("click", async () => {
   dashboardView.hidden = true;
   loginView.hidden = false;
 });
+daumTrendButton.addEventListener("click", loadDaumRealtimeTrends);
+daumTrendList.addEventListener("change", handleDaumTrendSelection);
+clearJobsButton.addEventListener("click", clearRecentJobs);
 document.querySelector("#closePreviewButton").addEventListener("click", () => previewDialog.close());
 previewDialog.addEventListener("click", (event) => {
   if (event.target === previewDialog) {
@@ -139,16 +163,20 @@ function renderDevices() {
           ? `Mac · ${device.platform}`
           : device.platform || "운영체제 확인 중";
       return `
-        <button class="device ${selected ? "selected" : ""}" type="button"
-          data-device-id="${escapeHtml(device.deviceId)}" ${disabled ? "disabled" : ""}>
-          <i class="status-dot ${escapeHtml(device.status)}"></i>
-          <strong>${escapeHtml(device.name || "이름 없는 PC")}</strong>
-          <span>${escapeHtml(platformLabel)}</span>
-          <span>Blog Helper v${escapeHtml(device.version || "-")} · ${statusLabel}</span>
-        </button>`;
+        <article class="device-card ${selected ? "selected" : ""}">
+          <button class="device-select" type="button"
+            data-device-id="${escapeHtml(device.deviceId)}" ${disabled ? "disabled" : ""}>
+            <i class="status-dot ${escapeHtml(device.status)}"></i>
+            <strong>${escapeHtml(device.name || "이름 없는 PC")}</strong>
+            <span>${escapeHtml(platformLabel)}</span>
+            <span>Blog Helper v${escapeHtml(device.version || "-")} · ${statusLabel}</span>
+          </button>
+          <button class="device-delete" type="button" data-delete-device-id="${escapeHtml(device.deviceId)}"
+            aria-label="${escapeHtml(device.name || "PC")} 삭제">PC 삭제</button>
+        </article>`;
     })
     .join("");
-  deviceGrid.querySelectorAll(".device:not(:disabled)").forEach((button) => {
+  deviceGrid.querySelectorAll(".device-select:not(:disabled)").forEach((button) => {
     button.addEventListener("click", async () => {
       state.selectedDeviceId = button.dataset.deviceId || "";
       state.queue = [];
@@ -161,6 +189,128 @@ function renderDevices() {
       setQueueMessage("선택한 PC의 대기열을 불러왔습니다.");
     });
   });
+  deviceGrid.querySelectorAll(".device-delete").forEach((button) => {
+    button.addEventListener("click", () => deleteDevice(button.dataset.deleteDeviceId || ""));
+  });
+}
+
+async function deleteDevice(deviceId) {
+  const device = state.devices.find((item) => item.deviceId === deviceId);
+  if (!device) {
+    return;
+  }
+  const message = (
+    `'${device.name || "선택한 PC"}'를 원격 목록에서 삭제할까요?\n\n`
+    + "이 PC에서 Blog Helper를 다시 실행하면 자동으로 목록에 다시 연결됩니다."
+  );
+  if (!window.confirm(message)) {
+    return;
+  }
+  const response = await api(`/api/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+  if (!response.ok) {
+    window.alert(response.data.error || "PC를 삭제하지 못했습니다.");
+    return;
+  }
+  if (state.selectedDeviceId === deviceId) {
+    state.selectedDeviceId = "";
+    state.queue = [];
+    state.queueUpdatedAt = 0;
+    state.queueRenderSignature = "";
+  }
+  await refreshDashboard();
+  window.alert(response.data.message || "PC를 목록에서 삭제했습니다.");
+}
+
+async function loadDaumRealtimeTrends() {
+  setText("#jobError", "");
+  daumTrendButton.disabled = true;
+  daumTrendButton.textContent = "불러오는 중...";
+  setText("#daumTrendStatus", "다음 실시간 검색어 1~10위를 확인하고 있습니다.");
+  const response = await api("/api/trends/daum");
+  daumTrendButton.disabled = false;
+  daumTrendButton.textContent = "다음 실시간";
+  if (!response.ok) {
+    state.daumTrends = [];
+    daumTrendAccordion.hidden = true;
+    daumTrendList.innerHTML = "";
+    setText("#daumTrendStatus", response.data.error || "실시간 검색어를 불러오지 못했습니다.");
+    return;
+  }
+  state.daumTrends = Array.isArray(response.data.trends) ? response.data.trends.slice(0, 10) : [];
+  renderDaumTrends();
+  setText(
+    "#daumTrendStatus",
+    state.daumTrends.length
+      ? "키워드를 선택하면 선택한 PC에서 바로 글쓰기를 시작합니다."
+      : "표시할 실시간 검색어가 없습니다.",
+  );
+}
+
+function renderDaumTrends() {
+  daumTrendAccordion.hidden = !state.daumTrends.length;
+  daumTrendAccordion.open = true;
+  daumTrendList.innerHTML = state.daumTrends
+    .map((trend, index) => {
+      const rank = Number(trend.rank || index + 1);
+      return `
+        <label class="trend-item">
+          <input type="radio" name="daum-trend" value="${escapeHtml(trend.keyword)}" />
+          <strong>${rank}위</strong>
+          <span>${escapeHtml(trend.keyword)}</span>
+        </label>`;
+    })
+    .join("");
+}
+
+async function handleDaumTrendSelection(event) {
+  const radio = event.target.closest("input[name='daum-trend']");
+  if (!radio || !radio.checked) {
+    return;
+  }
+  const keyword = String(radio.value || "").trim();
+  document.querySelector("#keyword").value = keyword;
+  if (!state.selectedDeviceId) {
+    setText("#jobError", "실시간 키워드를 보내려면 작업할 PC를 먼저 선택해 주세요.");
+    radio.checked = false;
+    document.querySelector("#keyword").focus();
+    return;
+  }
+  daumTrendList.querySelectorAll("input").forEach((input) => {
+    input.disabled = true;
+  });
+  setText("#daumTrendStatus", `'${keyword}' 작업을 선택한 PC로 보내고 있습니다.`);
+  const sent = await submitKeywordJob(keyword);
+  daumTrendList.querySelectorAll("input").forEach((input) => {
+    input.disabled = false;
+  });
+  if (sent) {
+    setText("#daumTrendStatus", `'${keyword}' 글쓰기를 시작했습니다. 최근 작업에서 진행 상황을 확인해 주세요.`);
+  } else {
+    radio.checked = false;
+    setText("#daumTrendStatus", "작업을 시작하지 못했습니다. PC 상태와 발행 대상을 확인해 주세요.");
+  }
+}
+
+async function clearRecentJobs() {
+  if (!state.jobs.length) {
+    setText("#jobsMessage", "초기화할 최근 작업이 없습니다.");
+    return;
+  }
+  if (!window.confirm("완료되었거나 실패한 최근 작업 내역을 초기화할까요?\n진행 중인 작업은 그대로 유지됩니다.")) {
+    return;
+  }
+  clearJobsButton.disabled = true;
+  clearJobsButton.textContent = "초기화 중...";
+  const response = await api("/api/jobs", { method: "DELETE" });
+  clearJobsButton.disabled = false;
+  clearJobsButton.textContent = "내역 초기화";
+  setText(
+    "#jobsMessage",
+    response.data.message || response.data.error || "최근 작업 내역 초기화를 완료했습니다.",
+  );
+  if (response.ok) {
+    await refreshDashboard();
+  }
 }
 
 async function refreshQueue(requestFreshSnapshot = false) {
@@ -427,6 +577,7 @@ function delay(milliseconds) {
 }
 
 function renderJobs() {
+  clearJobsButton.disabled = !state.jobs.some((job) => ["completed", "failed", "cancelled"].includes(job.status));
   if (!state.jobs.length) {
     jobList.innerHTML = `<div class="empty">아직 원격 작업 기록이 없습니다.</div>`;
     return;
@@ -443,8 +594,15 @@ function renderJobs() {
     .map((job) => {
       const progress = Math.round(Number(job.progress || 0) * 100);
       const failedClass = ["failed", "cancelled"].includes(job.status) ? "failed" : "";
+      const publishedUrl = job.status === "completed"
+        ? safeExternalUrl(job.result && job.result.publishedUrl)
+        : "";
+      const openingTag = publishedUrl
+        ? `<a class="job job-link" href="${escapeHtml(publishedUrl)}" target="_blank" rel="noopener noreferrer">`
+        : `<article class="job">`;
+      const closingTag = publishedUrl ? "</a>" : "</article>";
       return `
-        <article class="job">
+        ${openingTag}
           <div class="job-head">
             <div>
               <h3>${escapeHtml(job.keyword)}</h3>
@@ -453,7 +611,8 @@ function renderJobs() {
             <span class="job-state ${failedClass}">${statusLabel[job.status] || job.status}</span>
           </div>
           <div class="progress-track"><div class="progress-value" style="width:${progress}%"></div></div>
-        </article>`;
+          ${publishedUrl ? '<span class="job-open-hint">발행된 블로그 글 보러가기 →</span>' : ""}
+        ${closingTag}`;
     })
     .join("");
 }
@@ -509,6 +668,15 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function safeExternalUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
 }
 
 const sessionCheck = await api("/api/devices");

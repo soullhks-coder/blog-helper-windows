@@ -61,6 +61,14 @@
           <form id="jobForm">
             <label for="keyword">작성할 주제 또는 키워드</label>
             <textarea id="keyword" rows="3" maxlength="300" placeholder="예: 청년도약계좌 신청 조건과 준비 서류" required></textarea>
+            <div class="trend-toolbar">
+              <button id="daumTrendButton" class="trend-button" type="button">다음 실시간</button>
+              <span id="daumTrendStatus" class="trend-status" role="status">실시간 검색어를 불러와 바로 작업할 수 있습니다.</span>
+            </div>
+            <details id="daumTrendAccordion" class="trend-accordion" hidden open>
+              <summary>다음 실시간 검색어 1~10위</summary>
+              <div id="daumTrendList" class="trend-list" aria-live="polite"></div>
+            </details>
             <fieldset>
               <legend>발행 대상</legend>
               <label class="check"><input type="checkbox" name="target" value="wordpress" checked /><span>워드프레스</span></label>
@@ -97,7 +105,9 @@
               <span class="step coral">04</span>
               <h2>최근 작업</h2>
             </div>
+            <button id="clearJobsButton" class="text-button" type="button">내역 초기화</button>
           </div>
+          <p id="jobsMessage" class="queue-message" role="status"></p>
           <div id="jobList" class="job-list"></div>
         </section>
       </section>

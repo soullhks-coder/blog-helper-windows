@@ -1,4 +1,4 @@
-const CACHE_NAME = "blog-helper-remote-v1.2.0";
+const CACHE_NAME = "blog-helper-remote-v1.3.0";
 const STATIC_ASSETS = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

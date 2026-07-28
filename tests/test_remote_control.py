@@ -75,6 +75,7 @@ class RemoteAgentConfigTests(unittest.TestCase):
         self.assertIn("deviceId=mac-001", socket_url)
         self.assertIn("name=%EC%97%84%EB%A7%88+%EB%A7%A5", socket_url)
         self.assertIn("version=1.2.3", socket_url)
+        self.assertIn("sessionId=", socket_url)
 
     @patch("remote_control.urlopen")
     def test_agent_pairs_and_keeps_pc_specific_token(self, mocked_urlopen) -> None:
@@ -159,6 +160,30 @@ class RemoteAgentConfigTests(unittest.TestCase):
         self.assertEqual(payload["type"], "queue.snapshot")
         self.assertEqual(payload["deviceId"], "windows-queue")
         self.assertEqual(payload["items"][0]["title"], "원격 글")
+
+    def test_agent_notifies_gateway_with_published_blog_url(self) -> None:
+        config = RemoteAgentConfig(
+            enabled=True,
+            gateway_url="https://ai.lhksoul.com",
+            device_id="mac-published",
+            device_name="발행 맥",
+            agent_token="secret-token",
+        )
+        agent = RemoteControlAgent(config, "1.2.3", lambda _job: None, lambda _status, _message: None)
+        agent._socket = MagicMock()
+
+        agent.notify_published(
+            job_id="job-1",
+            queue_id="queue-1",
+            published_url="https://blog.example.com/published-post",
+            title="발행된 글",
+        )
+
+        payload = json.loads(agent._socket.send.call_args.args[0])
+        self.assertEqual(payload["type"], "queue.published")
+        self.assertEqual(payload["jobId"], "job-1")
+        self.assertEqual(payload["queueId"], "queue-1")
+        self.assertEqual(payload["publishedUrl"], "https://blog.example.com/published-post")
 
 
 if __name__ == "__main__":

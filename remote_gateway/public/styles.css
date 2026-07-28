@@ -516,45 +516,65 @@ textarea:focus {
   gap: 12px;
 }
 
-.device {
+.device-card {
   position: relative;
-  padding: 18px;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 20px 6px 20px 6px;
   background: white;
-  text-align: left;
   transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
 }
 
-.device:not(:disabled):hover {
+.device-card:hover {
   transform: translateY(-2px);
   border-color: #7eb1a5;
 }
 
-.device.selected {
+.device-card.selected {
   border-color: var(--teal);
   box-shadow: inset 0 0 0 2px var(--teal);
 }
 
-.device:disabled {
+.device-select {
+  width: 100%;
+  padding: 18px 18px 13px;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+
+.device-select:disabled {
   cursor: not-allowed;
   opacity: 0.58;
 }
 
-.device strong,
-.device span {
+.device-select strong,
+.device-select span {
   display: block;
 }
 
-.device strong {
+.device-select strong {
   margin-bottom: 8px;
   font-size: 17px;
 }
 
-.device span {
+.device-select span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.device-delete {
+  width: calc(100% - 36px);
+  margin: 0 18px 14px;
+  padding: 8px 10px;
+  border: 1px solid #e6c8bd;
+  border-radius: 12px 4px 12px 4px;
+  color: #9e321f;
+  background: #fff3ef;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .status-dot {
@@ -580,6 +600,90 @@ textarea:focus {
 #jobForm {
   display: grid;
   gap: 13px;
+}
+
+.trend-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.trend-button {
+  flex: none;
+  min-height: 44px;
+  padding: 0 17px;
+  border: 0;
+  border-radius: 14px 5px 14px 5px;
+  color: white;
+  background: var(--coral);
+  font-weight: 800;
+}
+
+.trend-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.trend-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.trend-accordion {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px 6px 18px 6px;
+  background: white;
+}
+
+.trend-accordion summary {
+  padding: 15px 17px;
+  color: var(--teal);
+  background: var(--teal-soft);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.trend-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.trend-item {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 50px;
+  padding: 11px 14px;
+  background: white;
+  cursor: pointer;
+}
+
+.trend-item:hover {
+  background: #f4f8f4;
+}
+
+.trend-item input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--coral);
+}
+
+.trend-item strong {
+  color: var(--coral);
+  font-size: 12px;
+}
+
+.trend-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 fieldset {
@@ -635,10 +739,24 @@ legend {
 }
 
 .job {
+  display: block;
   padding: 17px;
   border: 1px solid var(--line);
   border-radius: 18px 6px 18px 6px;
+  color: inherit;
   background: white;
+  text-decoration: none;
+}
+
+.job-link {
+  cursor: pointer;
+  transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.job-link:hover {
+  transform: translateY(-2px);
+  border-color: var(--teal);
+  box-shadow: 0 10px 24px rgba(13, 79, 74, 0.1);
 }
 
 .job-head {
@@ -672,6 +790,14 @@ legend {
 .job-state.failed {
   color: #9e321f;
   background: #fee2d9;
+}
+
+.job-open-hint {
+  display: block;
+  margin-top: 11px;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .progress-track {
@@ -720,6 +846,19 @@ legend {
   }
 
   .device-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trend-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .trend-button {
+    width: 100%;
+  }
+
+  .trend-list {
     grid-template-columns: 1fr;
   }
 

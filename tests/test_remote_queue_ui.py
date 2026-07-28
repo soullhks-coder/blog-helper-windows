@@ -18,6 +18,11 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn("등록 예정시간", script)
         self.assertIn("대기 없이 즉시발행", script)
         self.assertIn('data-action="preview"', script)
+        self.assertIn('id="daumTrendButton"', html)
+        self.assertIn('id="clearJobsButton"', html)
+        self.assertIn("/api/trends/daum", script)
+        self.assertIn('method: "DELETE"', script)
+        self.assertIn("publishedUrl", script)
 
     def test_worker_has_pc_queue_endpoints(self) -> None:
         worker = (ROOT / "remote_gateway" / "src" / "worker.js").read_text(encoding="utf-8")
@@ -27,6 +32,10 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn("queue.publish.now", worker)
         self.assertIn("queue.snapshot", worker)
         self.assertIn("cleanPreviewHtml", worker)
+        self.assertIn('url.pathname === "/api/trends/daum"', worker)
+        self.assertIn("hideDevice", worker)
+        self.assertIn("clearJobHistory", worker)
+        self.assertIn('payload.type === "queue.published"', worker)
 
     def test_schedule_command_updates_exact_queue_item(self) -> None:
         first = {"id": "first", "status": "대기 중", "scheduled_at": 100}
