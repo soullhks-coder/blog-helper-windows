@@ -58,7 +58,12 @@ class WritingCompletionFlowTests(unittest.TestCase):
             '"https://searchadvisor.naver.com/console/site/request/crawl"',
             self.source,
         )
-        self.assertIn("?site=https%3A%2F%2Fblog.lhksoul.com", self.source)
+        self.assertIn("?site=https%3A%2F%2Fblog.soullhk.kr", self.source)
+        self.assertIn(
+            "_naver_search_advisor_submission_visible(page, published_url)",
+            method_source,
+        )
+        self.assertIn("수집 요청 내역 등록 확인 완료", method_source)
 
     def test_automation_wordpress_publish_also_queues_crawl_request(self) -> None:
         method_source = ast.get_source_segment(

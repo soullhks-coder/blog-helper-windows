@@ -116,7 +116,7 @@ NAVER_KIN_QUESTION_LIST_URL = "https://kin.naver.com/qna/questionList.naver"
 NAVER_KIN_DEBUG_LOG_FILE = DATA_DIR / "naver-kin-debug.log"
 NAVER_SEARCH_ADVISOR_CRAWL_URL = (
     "https://searchadvisor.naver.com/console/site/request/crawl"
-    "?site=https%3A%2F%2Fblog.lhksoul.com"
+    "?site=https%3A%2F%2Fblog.soullhk.kr"
 )
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
@@ -6272,10 +6272,11 @@ def _find_naver_search_advisor_url_input(page):
     """Return the visible crawl-request URL input without depending on one DOM version."""
     inputs = page.locator("input:not([type='hidden'])")
     candidates: list[tuple[int, object]] = []
+    fallback_inputs: list[object] = []
     for index in range(min(inputs.count(), 80)):
         locator = inputs.nth(index)
         try:
-            if not locator.is_visible():
+            if not locator.is_visible() or not locator.is_enabled():
                 continue
             placeholder = str(locator.get_attribute("placeholder") or "")
             input_type = str(locator.get_attribute("type") or "text").lower()
@@ -6283,15 +6284,22 @@ def _find_naver_search_advisor_url_input(page):
             nearby_text = str(
                 locator.evaluate(
                     """node => {
-                        const root = node.closest('form, section, article, li, tr, div');
-                        return (root?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
+                        const parts = [];
+                        let current = node;
+                        for (let depth = 0; depth < 10 && current; depth += 1) {
+                            current = current.parentElement;
+                            const text = (current?.innerText || '').replace(/\\s+/g, ' ').trim();
+                            if (text) parts.push(text);
+                            if (text.includes('수집 요청 URL 입력')) break;
+                        }
+                        return parts.join(' ').slice(0, 800);
                     }"""
                 )
                 or ""
             )
             searchable = f"{placeholder} {aria_label} {nearby_text}".lower()
             score = 0
-            if "blog.lhksoul.com" in searchable or "blog.soullhk.kr" in searchable:
+            if "blog.soullhk.kr" in searchable:
                 score += 120
             if placeholder.lower().startswith(("http://", "https://")):
                 score += 90
@@ -6303,10 +6311,14 @@ def _find_naver_search_advisor_url_input(page):
                 score += 35
             if input_type in {"search", "password", "date", "time"}:
                 score -= 80
+            if input_type in {"text", "url"}:
+                fallback_inputs.append(locator)
             if score > 0:
                 candidates.append((score, locator))
         except Exception:
             continue
+    if not candidates and len(fallback_inputs) == 1:
+        return fallback_inputs[0]
     if not candidates:
         raise RuntimeError(
             "네이버 서치어드바이저의 '수집 요청 URL 입력' 칸을 찾지 못했습니다. "
@@ -6350,6 +6362,35 @@ def _find_naver_search_advisor_confirm_button(page, url_input):
     return candidates[0][1]
 
 
+def _naver_search_advisor_submission_visible(page, published_url: str) -> bool:
+    """Confirm that the submitted WordPress URL is present in the request history."""
+    parsed_url = urlparse(str(published_url or "").strip())
+    expected = {
+        "host": str(parsed_url.hostname or "").lower(),
+        "path": unquote(str(parsed_url.path or "")).rstrip("/"),
+    }
+    if not expected["host"] or not expected["path"]:
+        return False
+    try:
+        return bool(
+            page.locator("table a[href]").evaluate_all(
+                """(links, expected) => links.some((link) => {
+                    try {
+                        const current = new URL(link.href);
+                        const path = decodeURIComponent(current.pathname).replace(/\\/+$/, '');
+                        return current.hostname.toLowerCase() === expected.host
+                            && path === expected.path;
+                    } catch (_) {
+                        return false;
+                    }
+                })""",
+                expected,
+            )
+        )
+    except Exception:
+        return False
+
+
 def run_naver_search_advisor_playwright(
     published_url: str,
     result_queue: queue.Queue,
@@ -6360,6 +6401,10 @@ def run_naver_search_advisor_playwright(
     parsed_url = urlparse(published_url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise RuntimeError("네이버 수집 요청에 사용할 워드프레스 발행 URL이 올바르지 않습니다.")
+    if str(parsed_url.hostname or "").lower() != "blog.soullhk.kr":
+        raise RuntimeError(
+            "네이버 서치어드바이저에는 blog.soullhk.kr에서 발행한 글만 수집 요청할 수 있습니다."
+        )
 
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -6409,6 +6454,10 @@ def run_naver_search_advisor_playwright(
             )
             page.goto(NAVER_SEARCH_ADVISOR_CRAWL_URL, wait_until="domcontentloaded")
             page.wait_for_timeout(1200)
+            append_runtime_log(
+                "naver-search-advisor",
+                f"수집 요청 페이지 열기 완료: {page.url}",
+            )
 
             login_deadline = time.time() + max(30, int(login_timeout_seconds or 300))
             login_notice_sent = False
@@ -6424,6 +6473,10 @@ def run_naver_search_advisor_playwright(
                     page = search_advisor_pages[-1]
                     try:
                         _find_naver_search_advisor_url_input(page)
+                        append_runtime_log(
+                            "naver-search-advisor",
+                            "blog.soullhk.kr 수집 요청 입력칸 확인 완료",
+                        )
                         break
                     except RuntimeError:
                         if (
@@ -6512,34 +6565,49 @@ def run_naver_search_advisor_playwright(
             url_input.fill(published_url)
             if str(url_input.input_value() or "").strip() != published_url:
                 raise RuntimeError("수집 요청 URL 입력란에 발행 주소를 입력하지 못했습니다.")
+            append_runtime_log("naver-search-advisor", f"발행 URL 입력 완료: {published_url}")
             url_input.press("Tab")
             page.wait_for_timeout(250)
 
             confirm_button = _find_naver_search_advisor_confirm_button(page, url_input)
             confirm_button.scroll_into_view_if_needed()
             confirm_button.click()
-            page.wait_for_timeout(1800)
+            append_runtime_log("naver-search-advisor", "수집 요청 확인 버튼 클릭 완료")
 
-            page_text = ""
-            try:
-                page_text = str(page.locator("body").inner_text(timeout=3000) or "")
-            except Exception:
-                pass
-            normalized_text = re.sub(r"\s+", " ", page_text)
             error_messages = (
                 "올바른 URL을 입력",
                 "사이트 주소와 일치하지",
                 "수집 요청에 실패",
                 "요청 처리 중 오류",
             )
-            matched_error = next(
-                (message for message in error_messages if message in normalized_text),
-                "",
-            )
-            if matched_error:
-                raise RuntimeError(f"네이버 서치어드바이저가 요청을 거부했습니다: {matched_error}")
+            submission_deadline = time.time() + 25
+            while time.time() < submission_deadline:
+                if _naver_search_advisor_submission_visible(page, published_url):
+                    break
+                page_text = ""
+                try:
+                    page_text = str(page.locator("body").inner_text(timeout=1500) or "")
+                except Exception:
+                    pass
+                normalized_text = re.sub(r"\s+", " ", page_text)
+                matched_error = next(
+                    (message for message in error_messages if message in normalized_text),
+                    "",
+                )
+                if matched_error:
+                    raise RuntimeError(
+                        f"네이버 서치어드바이저가 요청을 거부했습니다: {matched_error}"
+                    )
+                page.wait_for_timeout(400)
+            else:
+                raise RuntimeError(
+                    "확인 버튼은 눌렀지만 수집 요청 내역에서 발행 URL을 확인하지 못했습니다."
+                )
 
-            append_runtime_log("naver-search-advisor", f"확인 버튼 클릭 완료: {published_url}")
+            append_runtime_log(
+                "naver-search-advisor",
+                f"수집 요청 내역 등록 확인 완료: {published_url}",
+            )
             return True, "네이버 서치어드바이저에 워드프레스 글 수집 요청을 완료했습니다."
         except PlaywrightTimeoutError as exc:
             append_runtime_log("naver-search-advisor", f"화면 응답 시간 초과: {exc}")
@@ -6547,6 +6615,7 @@ def run_naver_search_advisor_playwright(
         finally:
             save_naver_blog_storage_state(context)
             context.close()
+            append_runtime_log("naver-search-advisor", "전용 Chrome 종료 완료")
 
 
 def run_naver_kin_playwright_bootstrap(
