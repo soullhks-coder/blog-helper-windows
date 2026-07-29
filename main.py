@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import io
+import mimetypes
 import os
 import json
 import queue
@@ -1135,6 +1137,26 @@ def build_thumbnail_filename(title: str) -> str:
     return f"{normalized[:120]}.png"
 
 
+def build_wordpress_media_filename(image_path: Path, title: str = "") -> str:
+    """Build an ASCII-only filename safe for urllib HTTP headers."""
+    suffix = image_path.suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,8}", suffix):
+        suffix = ".png"
+
+    ascii_stem = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        f"{title} {image_path.stem}".lower().encode("ascii", errors="ignore").decode("ascii"),
+    ).strip("-")
+    if not ascii_stem:
+        ascii_stem = "blog-helper-media"
+
+    fingerprint = hashlib.sha256(
+        f"{title}\0{image_path.name}".encode("utf-8", errors="replace")
+    ).hexdigest()[:12]
+    return f"{ascii_stem[:64].rstrip('-')}-{fingerprint}{suffix}"
+
+
 def build_meta_description(topic: str, keyword: str) -> str:
     description = (
         f"{keyword} 핵심 정보와 준비 방법, 주의사항을 빠르게 정리했습니다. "
@@ -1902,12 +1924,13 @@ class WordPressClient:
         }
 
     def upload_media(self, image_path: Path, title: str) -> dict:
-        file_name = image_path.name
+        file_name = build_wordpress_media_filename(image_path, title)
         image_bytes = image_path.read_bytes()
+        content_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
         headers = {
             "Authorization": self._build_auth_header(),
             "User-Agent": "BlogHelper/1.0",
-            "Content-Type": "image/png",
+            "Content-Type": content_type,
             "Content-Disposition": f'attachment; filename="{file_name}"',
         }
         request = Request(
