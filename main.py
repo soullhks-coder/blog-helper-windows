@@ -613,7 +613,7 @@ DEFAULT_NAVER_BLOG_CONVERSION_RULES = (
     "5. 확인되지 않은 사실, 가격, 날짜, 인물 정보는 임의로 만들지 않는다.\n"
     "6. 이미지 마커가 있으면 [image_1.jpg] 형식으로 남겨 자동화가 삽입 위치를 알 수 있게 한다.\n"
 )
-DEFAULT_NAVER_KIN_ANSWER_PROMPT = (
+LEGACY_NAVER_KIN_ANSWER_PROMPT = (
     "【N지식인 답변형 워드프레스 글쓰기 프롬프트】\n\n"
     "당신은 네이버 지식인 질문에 답변할 수 있는 워드프레스 블로그 글을 작성하는 전문가입니다.\n\n"
     "주제: {topic}\n"
@@ -631,6 +631,18 @@ DEFAULT_NAVER_KIN_ANSWER_PROMPT = (
     "5. 마지막에는 지식인 답변에 붙일 수 있도록 요약 문장과 추가 확인 포인트를 정리합니다.\n"
     "6. HTML 본문만 반환합니다."
 )
+DEFAULT_NAVER_KIN_ANSWER_PROMPT = (
+    "【N지식인 답변 댓글 프롬프트】\n\n"
+    "당신은 네이버 지식인 질문자에게 도움이 되는 답변을 작성하는 전문가입니다.\n\n"
+    "작성 원칙:\n"
+    "1. 질문 제목뿐 아니라 상세 본문의 상황과 조건을 반드시 반영합니다.\n"
+    "2. 첫 2~4문장에서 질문에 대한 핵심 답부터 다정하고 자연스러운 말투로 설명합니다.\n"
+    "3. 확인 가능한 사실만 사용하고, 의료·법률·금융 내용은 확정적으로 단정하지 않습니다.\n"
+    "4. 광고처럼 과장하거나 워드프레스 글을 그대로 복사하지 않습니다.\n"
+    "5. HTML, 마크다운, 코드블록 없이 읽기 쉬운 일반 텍스트로 작성합니다.\n"
+    "6. 워드프레스 URL 문자열은 답변 본문에 직접 쓰지 않습니다. 프로그램이 에디터의 링크 추가 기능으로 별도 삽입합니다.\n"
+    "7. 전체 답변은 1,200자 이내로 작성합니다."
+)
 DEFAULT_CARDNEWS_PROMPT = (
     "Create a square 1:1 Korean blog article visual card WITHOUT ANY TEXT. "
     "Article title: '{title}'. Main keyword: '{keyword}'. "
@@ -645,6 +657,58 @@ DEFAULT_CARDNEWS_PROMPT = (
 def nonempty_text(value: str | None, fallback: str) -> str:
     value = (value or "").strip()
     return value if value else fallback
+
+
+def clean_naver_kin_question_title(value: str | None) -> str:
+    raw = unescape(str(value or "")).replace("\u200b", " ").strip()
+    if not raw:
+        return ""
+    lines = []
+    for line in re.split(r"[\r\n]+", raw):
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        cleaned = re.sub(r"(?:\s*새\s*창\s*)+$", "", cleaned).strip()
+        if not cleaned or re.fullmatch(r"(?:답변|조회|공감)\s*\d*", cleaned):
+            continue
+        lines.append(cleaned)
+    candidate = lines[0] if lines else re.sub(r"\s+", " ", raw)
+    candidate = re.split(
+        r"\s+(?:새\s*창|답변\s*\d+|조회(?:수)?\s*\d+|공감\s*\d+)(?:\s|$)",
+        candidate,
+        maxsplit=1,
+    )[0].strip()
+    candidate = re.sub(r"^\s*[Qq]\s*[.:]\s*", "", candidate)
+    return candidate[:160].strip()
+
+
+def clean_naver_kin_question_body(value: str | None, title: str = "") -> str:
+    body = unescape(str(value or "")).replace("\u200b", " ")
+    body = re.sub(r"\s+", " ", body).strip()
+    clean_title = clean_naver_kin_question_title(title)
+    if clean_title and body.startswith(clean_title):
+        body = body[len(clean_title):].lstrip(" \t\r\n:.-")
+    body = re.sub(
+        r"^(?:질문|질문내용|질문 본문)\s*[:：]?\s*",
+        "",
+        body,
+        flags=re.I,
+    )
+    return body[:3500].strip()
+
+
+def naver_kin_question_ready(question: dict | None) -> bool:
+    if not isinstance(question, dict):
+        return False
+    if question.get("stale") or question.get("has_image"):
+        return False
+    title = clean_naver_kin_question_title(question.get("title"))
+    body = clean_naver_kin_question_body(question.get("question_text"), title)
+    url = str(question.get("url") or "").strip().lower()
+    return bool(
+        len(title) >= 2
+        and len(body) >= 20
+        and ("kin.naver.com" in url)
+        and ("/qna/detail.naver" in url or "docid=" in url or "questionid=" in url)
+    )
 
 
 def build_keyword_focused_article_html(topic: str, keyword: str) -> str:
@@ -1245,7 +1309,9 @@ class WordPressSettings:
     naver_kin_answer_interval_minutes: int = 30
     naver_kin_answer_template: str = "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}"
     naver_kin_answer_prompt: str = DEFAULT_NAVER_KIN_ANSWER_PROMPT
+    naver_kin_wordpress_prompt_id: str = ""
     naver_kin_next_run_at: float = 0.0
+    naver_kin_next_action: str = "answer"
     naver_kin_last_questions: list[dict] = field(default_factory=list)
     threads_app_id: str = ""
     threads_app_secret: str = ""
@@ -1344,6 +1410,12 @@ class PromptFileStore:
                     value = path.read_text(encoding="utf-8").strip()
                 except OSError:
                     value = ""
+                if (
+                    attribute == "naver_kin_answer_prompt"
+                    and value == LEGACY_NAVER_KIN_ANSWER_PROMPT
+                ):
+                    value = DEFAULT_NAVER_KIN_ANSWER_PROMPT
+                    cls._write_text(path, value)
                 if value:
                     setattr(settings, attribute, value)
                     continue
@@ -1486,6 +1558,37 @@ class PromptFileStore:
         }[attribute]
 
 
+def resolve_naver_kin_wordpress_prompt_set(settings: WordPressSettings) -> dict:
+    prompt_sets = PromptFileStore.normalize_prompt_sets(settings.prompt_sets, settings)
+    preferred_ids = (
+        str(settings.naver_kin_wordpress_prompt_id or "").strip(),
+        str(settings.selected_prompt_id or "").strip(),
+    )
+    for prompt_id in preferred_ids:
+        if not prompt_id:
+            continue
+        matched = next(
+            (
+                item
+                for item in prompt_sets
+                if item.get("id") == prompt_id and item.get("platform") == "wordpress"
+            ),
+            None,
+        )
+        if matched:
+            return matched
+    fallback = next((item for item in prompt_sets if item.get("platform") == "wordpress"), None)
+    if fallback:
+        return fallback
+    return {
+        "id": "wordpress-default",
+        "platform": "wordpress",
+        "name": "기본",
+        "title_prompt": settings.wordpress_title_prompt_template or DEFAULT_WORDPRESS_TITLE_PROMPT,
+        "article_prompt": settings.wordpress_article_prompt_template or DEFAULT_WORDPRESS_ARTICLE_PROMPT,
+    }
+
+
 class AppStateStore:
     PRESERVE_ON_AUTOSAVE = (
         "blog_url",
@@ -1619,7 +1722,13 @@ class AppStateStore:
                 payload.get("naver_kin_answer_prompt"),
                 DEFAULT_NAVER_KIN_ANSWER_PROMPT,
             ),
+            naver_kin_wordpress_prompt_id=payload.get("naver_kin_wordpress_prompt_id", ""),
             naver_kin_next_run_at=float(payload.get("naver_kin_next_run_at") or 0),
+            naver_kin_next_action=(
+                payload.get("naver_kin_next_action")
+                if payload.get("naver_kin_next_action") in ("answer", "collect")
+                else "answer"
+            ),
             naver_kin_last_questions=payload.get("naver_kin_last_questions", []),
             threads_app_id=payload.get("threads_app_id", ""),
             threads_app_secret=KeychainStore.load_secret(KEYCHAIN_THREADS_APP_SECRET) or threads_app_secret_fallback,
@@ -6655,7 +6764,7 @@ def run_naver_kin_playwright_bootstrap(
                 locator = detail_page.locator(selector).first
                 if locator.count() <= 0:
                     continue
-                text = re.sub(r"\s+", " ", locator.inner_text(timeout=1200) or "").strip()
+                text = clean_naver_kin_question_body(locator.inner_text(timeout=1200) or "")
                 if len(text) >= 20:
                     return text[:3500]
             except Exception:
@@ -6683,7 +6792,7 @@ def run_naver_kin_playwright_bootstrap(
                 }
                 """
             )
-            return re.sub(r"\s+", " ", str(text or "")).strip()[:3500]
+            return clean_naver_kin_question_body(str(text or ""))[:3500]
         except Exception:
             return ""
 
@@ -6741,13 +6850,36 @@ def run_naver_kin_playwright_bootstrap(
                     text = detail_page.title()
                 else:
                     text = detail_page.locator(selector).first.inner_text(timeout=800)
-                text = re.sub(r"\s+", " ", text or "").strip()
+                text = clean_naver_kin_question_title(text)
                 text = re.sub(r"\s*:\s*네이버 지식iN.*$", "", text)
                 if len(text) >= 4:
                     return text[:160]
             except Exception:
                 continue
         return ""
+
+    def extract_anchor_title(anchor) -> str:
+        for attribute in ("title", "aria-label"):
+            try:
+                title = clean_naver_kin_question_title(anchor.get_attribute(attribute))
+                if len(title) >= 2:
+                    return title
+            except Exception:
+                continue
+        for selector in (".title", "[class*='title']", "strong", "h2", "h3"):
+            try:
+                child = anchor.locator(selector).first
+                if child.count() <= 0:
+                    continue
+                title = clean_naver_kin_question_title(child.inner_text(timeout=500))
+                if len(title) >= 2:
+                    return title
+            except Exception:
+                continue
+        try:
+            return clean_naver_kin_question_title(anchor.inner_text(timeout=800) or "")
+        except Exception:
+            return ""
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -6803,7 +6935,7 @@ def run_naver_kin_playwright_bootstrap(
                     count = min(anchors.count(), 20)
                     for index in range(count):
                         anchor = anchors.nth(index)
-                        title = re.sub(r"\s+", " ", anchor.inner_text(timeout=800) or "").strip()
+                        title = extract_anchor_title(anchor)
                         href = (anchor.get_attribute("href") or "").strip()
                         if not title or not href:
                             continue
@@ -6813,7 +6945,14 @@ def run_naver_kin_playwright_bootstrap(
                         if url in seen_urls:
                             continue
                         seen_urls.add(url)
-                        questions.append({"title": title[:160], "url": url, "question_text": ""})
+                        questions.append(
+                            {
+                                "title": title[:160],
+                                "url": url,
+                                "question_text": "",
+                                "collected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
                         if len(questions) >= 10:
                             break
                     if questions:
@@ -6842,13 +6981,18 @@ def run_naver_kin_playwright_bootstrap(
                                 question["detail_error"] = f"redirected_to={detail_page.url}"
                                 continue
                             detail_title = extract_detail_title(detail_page)
-                            if detail_title and len(detail_title) > len(str(question.get("title") or "")):
+                            if detail_title:
                                 question["title"] = detail_title[:160]
                             if question_has_attached_image(detail_page):
                                 question["has_image"] = True
                                 question["skip_reason"] = "이미지 첨부 질문은 현재 이미지 분석 대상에서 제외됩니다."
                                 continue
-                            question["question_text"] = extract_question_body(detail_page)
+                            question["question_text"] = clean_naver_kin_question_body(
+                                extract_question_body(detail_page),
+                                str(question.get("title") or ""),
+                            )
+                            if len(question["question_text"]) < 20:
+                                question["detail_error"] = "질문 상세 본문을 20자 이상 확인하지 못했습니다."
                         except Exception as exc:
                             question["question_text"] = ""
                             question["detail_error"] = str(exc)[:180]
@@ -6866,6 +7010,13 @@ def run_naver_kin_playwright_bootstrap(
             if stale_count:
                 result_queue.put(("naver_kin_progress", f"홈/목록으로 이동된 질문 {stale_count}개는 자동화 대상에서 제외했습니다."))
                 questions = [question for question in questions if not question.get("stale")]
+            ready_count = sum(1 for question in questions if naver_kin_question_ready(question))
+            result_queue.put(
+                (
+                    "naver_kin_progress",
+                    f"상세 본문까지 확인된 자동화 가능 질문은 {ready_count}개입니다.",
+                )
+            )
 
             save_naver_blog_storage_state(context)
             return True, {
@@ -6873,6 +7024,7 @@ def run_naver_kin_playwright_bootstrap(
                 "current_url": page.url,
                 "sort_mode": sort_mode,
                 "questions": questions,
+                "ready_count": ready_count,
             }
         finally:
             try:
@@ -11177,11 +11329,26 @@ class NaverKinAutomationWorker(threading.Thread):
     def run(self) -> None:
         cleanup_paths: list[str] = []
         try:
-            question_title = str(self.question.get("title") or "").strip()
-            question_text = str(self.question.get("question_text") or "").strip()
+            question_title = clean_naver_kin_question_title(self.question.get("title"))
+            question_text = clean_naver_kin_question_body(
+                self.question.get("question_text"),
+                question_title,
+            )
             question_url = str(self.question.get("url") or "").strip()
             if not question_title or not question_url:
                 raise RuntimeError("처리할 지식인 질문 제목 또는 URL이 없습니다.")
+            if not naver_kin_question_ready(
+                {
+                    **self.question,
+                    "title": question_title,
+                    "question_text": question_text,
+                    "url": question_url,
+                }
+            ):
+                raise RuntimeError(
+                    "질문 상세 본문이 충분히 수집되지 않아 자동 답변을 중단했습니다. "
+                    "질문 목록을 다시 수집해 주세요."
+                )
             if not self.settings.blog_url or not self.settings.username or not self.settings.app_password:
                 raise RuntimeError("워드프레스 연결 정보가 없습니다. 환경설정에서 워드프레스 연결을 먼저 확인해 주세요.")
 
@@ -11199,6 +11366,20 @@ class NaverKinAutomationWorker(threading.Thread):
             self.result_queue.put(("naver_kin_auto_progress", "지식인 질문을 바탕으로 워드프레스 글 작성 프롬프트를 준비합니다..."))
             self.settings.target_platforms = ["wordpress"]
             self.settings.post_mode = "공개발행"
+            wordpress_prompt = resolve_naver_kin_wordpress_prompt_set(self.settings)
+            self.settings.naver_kin_wordpress_prompt_id = str(wordpress_prompt.get("id") or "")
+            self.settings.wordpress_title_prompt_template = nonempty_text(
+                wordpress_prompt.get("title_prompt"),
+                DEFAULT_WORDPRESS_TITLE_PROMPT,
+            )
+            self.settings.wordpress_article_prompt_template = nonempty_text(
+                wordpress_prompt.get("article_prompt"),
+                DEFAULT_WORDPRESS_ARTICLE_PROMPT,
+            )
+            put_naver_kin_action_log(
+                self.result_queue,
+                f"워드프레스 프롬프트 적용: {wordpress_prompt.get('name') or '기본'}",
+            )
             topic = "N지식인 답변"
             keyword = question_title
             reference_text = (
@@ -12188,6 +12369,11 @@ class KeywordApp(ctk.CTk):
         self.public_data_events: list[dict] = []
         self.naver_kin_questions: list[dict] = list(self.wordpress_settings.naver_kin_last_questions or [])
         self.naver_kin_next_run_at = float(self.wordpress_settings.naver_kin_next_run_at or 0)
+        self.naver_kin_next_action = (
+            self.wordpress_settings.naver_kin_next_action
+            if self.wordpress_settings.naver_kin_next_action in ("answer", "collect")
+            else "answer"
+        )
         self.selected_public_event_var = ctk.StringVar(value=self.wordpress_settings.public_data_selected_seq)
         self.selected_keyword_var = ctk.StringVar(value="")
         self.writing_auto_progress_var = tk.BooleanVar(
@@ -14780,6 +14966,35 @@ class KeywordApp(ctk.CTk):
         )
         self.naver_kin_start_button.grid(row=1, column=3, padx=(0, 18), pady=8, sticky="e")
 
+        ctk.CTkLabel(
+            setup_card,
+            text="워드프레스 글 프롬프트",
+            text_color="#dce6f3",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=2, column=0, padx=18, pady=8, sticky="w")
+        self.naver_kin_wordpress_prompt_menu = ctk.CTkOptionMenu(
+            setup_card,
+            values=["워드프레스 · 기본"],
+            height=40,
+            corner_radius=12,
+            fg_color="#111826",
+            button_color="#31445f",
+            button_hover_color="#3b5170",
+            dropdown_fg_color="#273142",
+            dropdown_hover_color="#3468e8",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_naver_kin_wordpress_prompt_changed,
+        )
+        self.naver_kin_wordpress_prompt_menu.grid(
+            row=2,
+            column=1,
+            columnspan=3,
+            padx=(0, 18),
+            pady=8,
+            sticky="ew",
+        )
+        self._refresh_naver_kin_wordpress_prompt_menu()
+
         self.naver_kin_status_label = ctk.CTkLabel(
             setup_card,
             text="현재 상태: 대기 중",
@@ -14787,7 +15002,7 @@ class KeywordApp(ctk.CTk):
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self.naver_kin_status_label.grid(row=2, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
+        self.naver_kin_status_label.grid(row=3, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
 
         schedule_card = ctk.CTkFrame(
             self.naver_kin_scroll,
@@ -15499,6 +15714,46 @@ class KeywordApp(ctk.CTk):
             return self.wordpress_settings.naver_kin_answer_interval_minutes
         return self._naver_kin_interval_minutes_from_label(self.naver_kin_answer_interval_menu.get(), 30)
 
+    def _refresh_naver_kin_wordpress_prompt_menu(self) -> None:
+        if not hasattr(self, "naver_kin_wordpress_prompt_menu"):
+            return
+        prompt_sets = PromptFileStore.normalize_prompt_sets(
+            self.wordpress_settings.prompt_sets,
+            self.wordpress_settings,
+        )
+        wordpress_sets = [item for item in prompt_sets if item.get("platform") == "wordpress"]
+        labels: list[str] = []
+        ids_by_label: dict[str, str] = {}
+        for index, prompt_set in enumerate(wordpress_sets, start=1):
+            base_label = f"워드프레스 · {prompt_set.get('name') or '기본'}"
+            label = base_label
+            if label in ids_by_label:
+                label = f"{base_label} ({index})"
+            labels.append(label)
+            ids_by_label[label] = str(prompt_set.get("id") or "")
+        if not labels:
+            labels = ["워드프레스 · 기본"]
+            ids_by_label[labels[0]] = "wordpress-default"
+        self.naver_kin_wordpress_prompt_ids_by_label = ids_by_label
+        self.naver_kin_wordpress_prompt_menu.configure(values=labels)
+        selected = resolve_naver_kin_wordpress_prompt_set(self.wordpress_settings)
+        selected_id = str(selected.get("id") or "")
+        selected_label = next(
+            (label for label, prompt_id in ids_by_label.items() if prompt_id == selected_id),
+            labels[0],
+        )
+        self.naver_kin_wordpress_prompt_menu.set(selected_label)
+        self.wordpress_settings.naver_kin_wordpress_prompt_id = ids_by_label.get(
+            selected_label,
+            selected_id,
+        )
+
+    def _on_naver_kin_wordpress_prompt_changed(self, label: str) -> None:
+        prompt_id = getattr(self, "naver_kin_wordpress_prompt_ids_by_label", {}).get(label, "")
+        if prompt_id:
+            self.wordpress_settings.naver_kin_wordpress_prompt_id = prompt_id
+        self._save_naver_kin_settings(silent=True)
+
     def _update_naver_kin_schedule_summary(self) -> None:
         if not hasattr(self, "naver_kin_schedule_summary_label"):
             return
@@ -15531,7 +15786,14 @@ class KeywordApp(ctk.CTk):
         if not hasattr(self, "naver_kin_next_run_label"):
             return
         prefix = "자동화 실행 중" if getattr(self, "naver_kin_automation_running", False) else "다음 실행"
-        self.naver_kin_next_run_label.configure(text=f"{prefix}: {self._format_naver_kin_next_run()}")
+        action_text = (
+            "질문 자동수집"
+            if getattr(self, "naver_kin_next_action", "answer") == "collect"
+            else "답변 등록"
+        )
+        self.naver_kin_next_run_label.configure(
+            text=f"{prefix} ({action_text}): {self._format_naver_kin_next_run()}"
+        )
 
     def _start_naver_kin_clock(self) -> None:
         if self._naver_kin_clock_job is not None:
@@ -15548,6 +15810,11 @@ class KeywordApp(ctk.CTk):
 
     def _persist_naver_kin_schedule_state(self) -> None:
         self.wordpress_settings.naver_kin_next_run_at = float(getattr(self, "naver_kin_next_run_at", 0) or 0)
+        self.wordpress_settings.naver_kin_next_action = (
+            self.naver_kin_next_action
+            if getattr(self, "naver_kin_next_action", "answer") in ("answer", "collect")
+            else "answer"
+        )
         self.wordpress_settings.naver_kin_last_questions = list(getattr(self, "naver_kin_questions", []))
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
 
@@ -15607,6 +15874,7 @@ class KeywordApp(ctk.CTk):
                 self.after_cancel(self._naver_kin_clock_job)
                 self._naver_kin_clock_job = None
             self.naver_kin_next_run_at = 0
+            self.naver_kin_next_action = "answer"
             self._persist_naver_kin_schedule_state()
             self._set_naver_kin_automation_button_state()
             self._update_naver_kin_next_run_label()
@@ -15630,6 +15898,12 @@ class KeywordApp(ctk.CTk):
             self._start_naver_kin_clock()
         else:
             self.naver_kin_next_run_at = now
+            self.naver_kin_next_action = (
+                "answer"
+                if self._next_naver_kin_question_for_automation() is not None
+                else "collect"
+            )
+            self._persist_naver_kin_schedule_state()
             self._update_naver_kin_next_run_label()
             self._start_naver_kin_clock()
             self.after(150, self._run_naver_kin_automation_once)
@@ -15642,6 +15916,7 @@ class KeywordApp(ctk.CTk):
             self._naver_kin_automation_job = None
         minutes = int(delay_minutes or (self._naver_kin_collect_interval_minutes() if collect_mode else self._naver_kin_answer_interval_minutes()))
         minutes = max(1, minutes)
+        self.naver_kin_next_action = "collect" if collect_mode else "answer"
         self.naver_kin_next_run_at = time.time() + (minutes * 60)
         self._persist_naver_kin_schedule_state()
         self._update_naver_kin_next_run_label()
@@ -15658,7 +15933,7 @@ class KeywordApp(ctk.CTk):
         skip_statuses = {"진행 중", "답변 완료", "오류"}
         for question in self.naver_kin_questions:
             status = str(question.get("automation_status") or "").strip()
-            if status not in skip_statuses and str(question.get("url") or "").strip():
+            if status not in skip_statuses and naver_kin_question_ready(question):
                 return question
         return None
 
@@ -15666,30 +15941,44 @@ class KeywordApp(ctk.CTk):
         self._naver_kin_automation_job = None
         if not self.naver_kin_automation_running:
             return
+        scheduled_action = (
+            self.naver_kin_next_action
+            if getattr(self, "naver_kin_next_action", "answer") in ("answer", "collect")
+            else "answer"
+        )
         if self.naver_kin_automation_worker and self.naver_kin_automation_worker.is_alive():
-            self._schedule_next_naver_kin_automation(delay_minutes=1)
+            self._schedule_next_naver_kin_automation(
+                delay_minutes=1,
+                collect_mode=scheduled_action == "collect",
+            )
             return
         if self.naver_kin_worker and self.naver_kin_worker.is_alive():
             if hasattr(self, "naver_kin_status_label"):
                 self.naver_kin_status_label.configure(text="현재 상태: 질문 목록 수집 완료를 기다리는 중...", text_color="#6dadff")
             return
+        if scheduled_action == "collect":
+            self.naver_kin_next_run_at = 0
+            self.naver_kin_next_action = "answer"
+            self._persist_naver_kin_schedule_state()
+            if hasattr(self, "naver_kin_status_label"):
+                self.naver_kin_status_label.configure(
+                    text="현재 상태: 예약된 최신 질문 자동수집을 시작합니다.",
+                    text_color="#6dadff",
+                )
+            self._start_naver_kin_bootstrap()
+            return
 
         question = self._next_naver_kin_question_for_automation()
         if question is None:
-            if self.naver_kin_questions:
-                if hasattr(self, "naver_kin_status_label"):
-                    self.naver_kin_status_label.configure(
-                        text="현재 상태: 현재 목록의 질문은 모두 처리되어 다음 자동수집 시간까지 대기합니다.",
-                        text_color="#6dadff",
-                    )
-                self._schedule_next_naver_kin_automation(
-                    delay_minutes=self._naver_kin_collect_interval_minutes(),
-                    collect_mode=True,
-                )
-                return
             if hasattr(self, "naver_kin_status_label"):
-                self.naver_kin_status_label.configure(text="현재 상태: 처리할 질문이 없어 최신 질문을 먼저 수집합니다.", text_color="#6dadff")
-            self._start_naver_kin_bootstrap()
+                self.naver_kin_status_label.configure(
+                    text="현재 상태: 상세 본문까지 준비된 질문이 없어 다음 자동수집 시간까지 대기합니다.",
+                    text_color="#6dadff",
+                )
+            self._schedule_next_naver_kin_automation(
+                delay_minutes=self._naver_kin_collect_interval_minutes(),
+                collect_mode=True,
+            )
             return
 
         try:
@@ -15746,6 +16035,20 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.naver_kin_collect_interval_minutes = self._naver_kin_collect_interval_minutes()
         self.wordpress_settings.naver_kin_answer_interval_minutes = self._naver_kin_answer_interval_minutes()
         self.wordpress_settings.naver_kin_next_run_at = float(getattr(self, "naver_kin_next_run_at", 0) or 0)
+        self.wordpress_settings.naver_kin_next_action = (
+            self.naver_kin_next_action
+            if getattr(self, "naver_kin_next_action", "answer") in ("answer", "collect")
+            else "answer"
+        )
+        if hasattr(self, "naver_kin_wordpress_prompt_menu"):
+            selected_label = self.naver_kin_wordpress_prompt_menu.get()
+            selected_prompt_id = getattr(
+                self,
+                "naver_kin_wordpress_prompt_ids_by_label",
+                {},
+            ).get(selected_label, "")
+            if selected_prompt_id:
+                self.wordpress_settings.naver_kin_wordpress_prompt_id = selected_prompt_id
         if hasattr(self, "naver_kin_answer_template_box"):
             self.wordpress_settings.naver_kin_answer_template = (
                 self.naver_kin_answer_template_box.get("1.0", "end").strip()
@@ -15783,20 +16086,36 @@ class KeywordApp(ctk.CTk):
             for item in getattr(self, "naver_kin_questions", [])
             if str(item.get("url") or "")
         }
-        self.naver_kin_questions = [
-            {
-                "title": str(item.get("title") or "").strip(),
-                "url": str(item.get("url") or "").strip(),
-                "question_text": str(item.get("question_text") or "").strip(),
+        normalized_questions: list[dict] = []
+        for item in questions:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            title = clean_naver_kin_question_title(item.get("title"))
+            if not title or not url:
+                continue
+            previous = previous_by_url.get(url, {})
+            normalized = {
+                "title": title,
+                "url": url,
+                "question_text": clean_naver_kin_question_body(
+                    item.get("question_text"),
+                    title,
+                ),
                 "detail_error": str(item.get("detail_error") or "").strip(),
-                "automation_status": str(previous_by_url.get(str(item.get("url") or ""), {}).get("automation_status") or "").strip(),
-                "wordpress_url": str(previous_by_url.get(str(item.get("url") or ""), {}).get("wordpress_url") or "").strip(),
-                "wordpress_title": str(previous_by_url.get(str(item.get("url") or ""), {}).get("wordpress_title") or "").strip(),
-                "answered_at": str(previous_by_url.get(str(item.get("url") or ""), {}).get("answered_at") or "").strip(),
+                "collected_at": str(item.get("collected_at") or "").strip(),
+                "has_image": bool(item.get("has_image")),
+                "stale": bool(item.get("stale")),
+                "skip_reason": str(item.get("skip_reason") or "").strip(),
+                "automation_status": str(previous.get("automation_status") or "").strip(),
+                "wordpress_url": str(previous.get("wordpress_url") or "").strip(),
+                "wordpress_title": str(previous.get("wordpress_title") or "").strip(),
+                "answered_at": str(previous.get("answered_at") or "").strip(),
             }
-            for item in questions
-            if isinstance(item, dict) and str(item.get("title") or "").strip()
-        ]
+            if normalized["automation_status"] == "오류" and naver_kin_question_ready(normalized):
+                normalized["automation_status"] = ""
+            normalized_questions.append(normalized)
+        self.naver_kin_questions = normalized_questions
         self.wordpress_settings.naver_kin_last_questions = list(self.naver_kin_questions)
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
         self._render_naver_kin_questions(self.naver_kin_questions)
@@ -15812,7 +16131,10 @@ class KeywordApp(ctk.CTk):
             )
         self._update_quick_status("N지식인 준비 완료", message, "#48d980")
         if self.naver_kin_automation_running:
-            if self.naver_kin_questions:
+            if self._next_naver_kin_question_for_automation() is not None:
+                self.naver_kin_next_action = "answer"
+                self.naver_kin_next_run_at = 0
+                self._persist_naver_kin_schedule_state()
                 self.after(500, self._run_naver_kin_automation_once)
             else:
                 self._schedule_next_naver_kin_automation(
@@ -15865,7 +16187,15 @@ class KeywordApp(ctk.CTk):
             "자동화가 완료되었습니다.\n\n[진행 로그]\n" + self._recent_naver_kin_run_log_text(),
         )
         if self.naver_kin_automation_running:
-            self._schedule_next_naver_kin_automation(delay_minutes=self._naver_kin_answer_interval_minutes())
+            if self._next_naver_kin_question_for_automation() is not None:
+                self._schedule_next_naver_kin_automation(
+                    delay_minutes=self._naver_kin_answer_interval_minutes()
+                )
+            else:
+                self._schedule_next_naver_kin_automation(
+                    delay_minutes=self._naver_kin_collect_interval_minutes(),
+                    collect_mode=True,
+                )
         else:
             self.naver_kin_next_run_at = 0
             self._update_naver_kin_next_run_label()
@@ -15891,7 +16221,15 @@ class KeywordApp(ctk.CTk):
         )
         if self.naver_kin_automation_running:
             # 같은 질문에서 무한 반복하지 않도록 오류 항목은 건너뛰고 다음 답변 간격 뒤에 이어갑니다.
-            self._schedule_next_naver_kin_automation(delay_minutes=self._naver_kin_answer_interval_minutes())
+            if self._next_naver_kin_question_for_automation() is not None:
+                self._schedule_next_naver_kin_automation(
+                    delay_minutes=self._naver_kin_answer_interval_minutes()
+                )
+            else:
+                self._schedule_next_naver_kin_automation(
+                    delay_minutes=self._naver_kin_collect_interval_minutes(),
+                    collect_mode=True,
+                )
         else:
             self.naver_kin_next_run_at = 0
             self._update_naver_kin_next_run_label()
@@ -17285,6 +17623,7 @@ class KeywordApp(ctk.CTk):
             if active_set:
                 menu.set(self._prompt_set_label(active_set))
         self._refresh_writing_prompt_menu()
+        self._refresh_naver_kin_wordpress_prompt_menu()
 
     def _refresh_writing_prompt_menu(self) -> None:
         if not hasattr(self, "writing_prompt_menu"):
@@ -17434,28 +17773,13 @@ class KeywordApp(ctk.CTk):
         return prompt
 
     def _select_naver_kin_prompt_for_writing(self) -> None:
-        prompt = self._current_naver_kin_answer_prompt()
         prompt_sets = PromptFileStore.normalize_prompt_sets(self.wordpress_settings.prompt_sets, self.wordpress_settings)
-        target_id = "wordpress-naver-kin-answer"
-        target_set = next((item for item in prompt_sets if item.get("id") == target_id), None)
-        if not target_set:
-            target_set = {
-                "id": target_id,
-                "platform": "wordpress",
-                "name": "N지식인 답변",
-                "title_prompt": DEFAULT_WORDPRESS_TITLE_PROMPT,
-                "article_prompt": prompt,
-            }
-            prompt_sets.append(target_set)
-        target_set["name"] = "N지식인 답변"
-        target_set["platform"] = "wordpress"
-        target_set["article_prompt"] = prompt
-        if not str(target_set.get("title_prompt") or "").strip():
-            target_set["title_prompt"] = DEFAULT_WORDPRESS_TITLE_PROMPT
-        self.wordpress_settings.prompt_sets = PromptFileStore.normalize_prompt_sets(prompt_sets, self.wordpress_settings)
+        self.wordpress_settings.prompt_sets = prompt_sets
+        target_set = resolve_naver_kin_wordpress_prompt_set(self.wordpress_settings)
+        target_id = str(target_set.get("id") or "wordpress-default")
+        self.wordpress_settings.naver_kin_wordpress_prompt_id = target_id
         self.wordpress_settings.selected_prompt_id = target_id
         self.active_prompt_set_ids["wordpress"] = target_id
-        PromptFileStore.save_prompt_sets(self.wordpress_settings.prompt_sets)
         if hasattr(self, "prompt_set_menus"):
             self._refresh_prompt_set_menus()
 
@@ -22728,6 +23052,19 @@ class KeywordApp(ctk.CTk):
             ) or "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}",
             naver_kin_answer_prompt=naver_kin_answer_prompt or DEFAULT_NAVER_KIN_ANSWER_PROMPT,
             naver_kin_next_run_at=float(getattr(self, "naver_kin_next_run_at", self.wordpress_settings.naver_kin_next_run_at) or 0),
+            naver_kin_wordpress_prompt_id=(
+                getattr(self, "naver_kin_wordpress_prompt_ids_by_label", {}).get(
+                    self.naver_kin_wordpress_prompt_menu.get(),
+                    self.wordpress_settings.naver_kin_wordpress_prompt_id,
+                )
+                if hasattr(self, "naver_kin_wordpress_prompt_menu")
+                else self.wordpress_settings.naver_kin_wordpress_prompt_id
+            ),
+            naver_kin_next_action=(
+                self.naver_kin_next_action
+                if getattr(self, "naver_kin_next_action", "answer") in ("answer", "collect")
+                else "answer"
+            ),
             naver_kin_last_questions=list(getattr(self, "naver_kin_questions", self.wordpress_settings.naver_kin_last_questions or [])),
             threads_app_id=self.wordpress_settings.threads_app_id,
             threads_app_secret=self.wordpress_settings.threads_app_secret,
