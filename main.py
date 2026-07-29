@@ -54,6 +54,7 @@ except ImportError:  # pragma: no cover - runtime handling
 from app_updater import (
     APP_VERSION,
     UPDATE_REPOSITORY,
+    ReleaseVersionProbeWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
     cleanup_old_downloads,
@@ -108,6 +109,11 @@ TISTORY_AUTOMATION_SCRIPT_FILE = DATA_DIR / "tistory-automation.js"
 TISTORY_AUTOMATION_RUNNER_FILE = DATA_DIR / "tistory-automation-runner.js"
 TISTORY_CHROME_PROFILE_DIR = DATA_DIR / "Tistory Chrome Profile"
 TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
+# The running app only follows GitHub's tiny latest-release redirect. Five
+# minutes keeps long-running, multi-PC installations responsive without
+# wasting API quota or network traffic.
+UPDATE_PROBE_INTERVAL_MS = 5 * 60_000
+UPDATE_PROBE_RETRY_MS = 60_000
 TISTORY_COOKIE_KEEP_DAYS = 180
 NAVER_BLOG_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog Chrome Profile"
 NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
@@ -12298,7 +12304,10 @@ class KeywordApp(ctk.CTk):
         self.writing_auto_stage = ""
 
         self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_probe_worker: ReleaseVersionProbeWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
+        self._update_probe_job = None
+        self._app_closing = False
         self.update_dialog: ctk.CTkToplevel | None = None
         self.update_progress_bar: ctk.CTkProgressBar | None = None
         self.update_status_label: ctk.CTkLabel | None = None
@@ -12434,10 +12443,61 @@ class KeywordApp(ctk.CTk):
         self.after(2200, self._start_update_check)
         self.after(600, self._start_remote_agent_if_enabled)
 
-    def _start_update_check(self) -> None:
-        if os.environ.get("BLOG_HELPER_DISABLE_UPDATES", "").strip() == "1":
+    def _update_monitor_enabled(self) -> bool:
+        return (
+            not self._app_closing
+            and os.environ.get("BLOG_HELPER_DISABLE_UPDATES", "").strip() != "1"
+            and is_frozen_app()
+            and bool(platform_asset_name())
+        )
+
+    def _cancel_update_probe(self) -> None:
+        if self._update_probe_job is None:
             return
-        if not is_frozen_app() or not platform_asset_name():
+        try:
+            self.after_cancel(self._update_probe_job)
+        except (tk.TclError, ValueError):
+            pass
+        self._update_probe_job = None
+
+    def _schedule_update_probe(self, delay_ms: int = UPDATE_PROBE_INTERVAL_MS) -> None:
+        if not self._update_monitor_enabled():
+            return
+        if self.update_dialog and self.update_dialog.winfo_exists():
+            return
+        if self.update_download_worker and self.update_download_worker.is_alive():
+            return
+        self._cancel_update_probe()
+        self._update_probe_job = self.after(max(1_000, int(delay_ms)), self._start_update_probe)
+
+    def _start_update_probe(self) -> None:
+        self._update_probe_job = None
+        if not self._update_monitor_enabled():
+            return
+        if self.update_dialog and self.update_dialog.winfo_exists():
+            return
+        if self.update_download_worker and self.update_download_worker.is_alive():
+            return
+        if self.update_check_worker and self.update_check_worker.is_alive():
+            self._schedule_update_probe(5_000)
+            return
+        if self.update_probe_worker and self.update_probe_worker.is_alive():
+            self._schedule_update_probe(5_000)
+            return
+        self.update_probe_worker = ReleaseVersionProbeWorker(
+            result_queue=self.result_queue,
+            repository=UPDATE_REPOSITORY,
+            current_version=APP_VERSION,
+        )
+        self.update_probe_worker.start()
+
+    def _start_update_check(self) -> None:
+        if not self._update_monitor_enabled():
+            return
+        self._cancel_update_probe()
+        if self.update_dialog and self.update_dialog.winfo_exists():
+            return
+        if self.update_download_worker and self.update_download_worker.is_alive():
             return
         if self.update_check_worker and self.update_check_worker.is_alive():
             return
@@ -12528,10 +12588,20 @@ class KeywordApp(ctk.CTk):
             dialog.grab_set()
         except tk.TclError:
             pass
+        try:
+            if self.state() == "iconic":
+                self.deiconify()
+            self.lift()
+            dialog.lift()
+            dialog.focus_force()
+            dialog.bell()
+        except tk.TclError:
+            pass
 
     def _handle_update_available(self, payload: dict) -> None:
         if self.update_download_worker and self.update_download_worker.is_alive():
             return
+        self._cancel_update_probe()
         self.pending_update_payload = dict(payload)
         self._show_update_dialog(payload)
         if payload.get("update_kind") == "delta" and self.update_status_label:
@@ -12672,6 +12742,8 @@ class KeywordApp(ctk.CTk):
         self.update_status_label = None
         self.update_detail_label = None
         self.update_close_button = None
+        self.pending_update_payload = None
+        self._schedule_update_probe(5_000)
 
     def _show_writing_complete_dialog(self) -> None:
         if self.writing_complete_dialog and self.writing_complete_dialog.winfo_exists():
@@ -12913,6 +12985,8 @@ class KeywordApp(ctk.CTk):
             AppStateStore.update_fields(window_geometry=safe_geometry)
 
     def _on_app_close(self) -> None:
+        self._app_closing = True
+        self._cancel_update_probe()
         if self.remote_agent is not None:
             self.remote_agent.stop()
         if self._geometry_save_job is not None:
@@ -25236,8 +25310,20 @@ class KeywordApp(ctk.CTk):
                             log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {payload}\n")
                     except OSError:
                         pass
+                    self._schedule_update_probe(UPDATE_PROBE_RETRY_MS)
                 elif event_type == "update_none":
-                    pass
+                    self._schedule_update_probe()
+                elif event_type == "update_probe_available":
+                    self._start_update_check()
+                elif event_type == "update_probe_none":
+                    self._schedule_update_probe()
+                elif event_type == "update_probe_error":
+                    try:
+                        with (DATA_DIR / "update-check.log").open("a", encoding="utf-8") as log_file:
+                            log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 실시간 확인: {payload}\n")
+                    except OSError:
+                        pass
+                    self._schedule_update_probe(UPDATE_PROBE_RETRY_MS)
                 elif event_type == "remote_agent_status":
                     self._handle_remote_agent_status(
                         str(payload.get("status") or ""),

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app_updater import (
     APP_VERSION,
+    ReleaseVersionProbeWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
     _windows_restart_environment,
@@ -40,7 +41,29 @@ class _ReleaseServer:
         port_getter = lambda: self.server.server_address[1]
 
         class Handler(BaseHTTPRequestHandler):
+            def do_HEAD(self):  # noqa: N802
+                if self.path == "/latest":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{port_getter()}/releases/tag/v9.9.9")
+                    self.end_headers()
+                    return
+                if self.path == "/releases/tag/v9.9.9":
+                    self.send_response(200)
+                    self.end_headers()
+                    return
+                self.send_error(404)
+
             def do_GET(self):  # noqa: N802
+                if self.path == "/latest":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{port_getter()}/releases/tag/v9.9.9")
+                    self.end_headers()
+                    return
+                if self.path == "/releases/tag/v9.9.9":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if self.path == "/release":
                     assets = [
                         {
@@ -105,6 +128,10 @@ class _ReleaseServer:
     def release_url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/release"
 
+    @property
+    def latest_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/latest"
+
 
 class AppUpdaterTests(unittest.TestCase):
     def test_semantic_version_comparison(self):
@@ -143,6 +170,29 @@ class AppUpdaterTests(unittest.TestCase):
             self.assertEqual(Path(downloaded["local_path"]).read_bytes(), binary)
             self.assertEqual(downloaded["sha256"], hashlib.sha256(binary).hexdigest())
             self.assertEqual(progress_events[-1][1]["downloaded"], len(binary))
+
+    def test_lightweight_release_probe_detects_new_version(self):
+        result_queue: queue.Queue = queue.Queue()
+        with _ReleaseServer(b"unused") as release_server:
+            probe = ReleaseVersionProbeWorker(
+                result_queue,
+                current_version=APP_VERSION,
+                latest_url=release_server.latest_url,
+            )
+            probe.run()
+            event_type, payload = result_queue.get(timeout=2)
+            self.assertEqual(event_type, "update_probe_available")
+            self.assertEqual(payload, "9.9.9")
+
+            current_probe = ReleaseVersionProbeWorker(
+                result_queue,
+                current_version="9.9.9",
+                latest_url=release_server.latest_url,
+            )
+            current_probe.run()
+            event_type, payload = result_queue.get(timeout=2)
+            self.assertEqual(event_type, "update_probe_none")
+            self.assertEqual(payload, "9.9.9")
 
     def test_install_scripts_preserve_quoted_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

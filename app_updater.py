@@ -11,6 +11,8 @@ import tempfile
 import threading
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import certifi
@@ -85,6 +87,65 @@ def delta_asset_name(current_version: str, latest_version: str) -> str:
     else:
         return ""
     return f"BlogHelper-{platform_name}-v{current}-to-v{latest}.patch.zip"
+
+
+class ReleaseVersionProbeWorker(threading.Thread):
+    """Checks the public latest-release redirect without consuming GitHub API quota."""
+
+    def __init__(
+        self,
+        result_queue,
+        repository: str = UPDATE_REPOSITORY,
+        current_version: str = APP_VERSION,
+        latest_url: str = "",
+    ) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+        self.repository = repository
+        self.current_version = current_version
+        self.latest_url = latest_url or f"https://github.com/{repository}/releases/latest"
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    def run(self) -> None:
+        try:
+            request = Request(
+                self.latest_url,
+                headers={
+                    "Accept": "text/html",
+                    "User-Agent": f"BlogHelper/{self.current_version}",
+                },
+                method="HEAD",
+            )
+            try:
+                response_context = urlopen(request, timeout=12, context=self.ssl_context)
+            except HTTPError as exc:
+                if exc.code not in {405, 501}:
+                    raise
+                request = Request(
+                    self.latest_url,
+                    headers={
+                        "Accept": "text/html",
+                        "User-Agent": f"BlogHelper/{self.current_version}",
+                    },
+                )
+                response_context = urlopen(request, timeout=12, context=self.ssl_context)
+
+            with response_context as response:
+                final_url = response.geturl()
+
+            path_parts = [part for part in urlparse(final_url).path.split("/") if part]
+            if "tag" not in path_parts:
+                raise RuntimeError("최신 버전 주소에서 릴리스 태그를 확인하지 못했습니다.")
+            tag_index = path_parts.index("tag")
+            if tag_index + 1 >= len(path_parts):
+                raise RuntimeError("최신 버전 태그가 비어 있습니다.")
+            latest_version = unquote(path_parts[tag_index + 1]).strip().lstrip("v")
+            if latest_version and is_newer_version(latest_version, self.current_version):
+                self.result_queue.put(("update_probe_available", latest_version))
+            else:
+                self.result_queue.put(("update_probe_none", latest_version or self.current_version))
+        except Exception as exc:  # pragma: no cover - network/runtime handling
+            self.result_queue.put(("update_probe_error", str(exc)))
 
 
 class UpdateCheckWorker(threading.Thread):
