@@ -12275,7 +12275,8 @@ class KeywordApp(ctk.CTk):
         self.title(f"Blog Helper Pro v{APP_VERSION}")
         self._window_icon_image: tk.PhotoImage | None = None
         try:
-            if APP_ICON_PATH.exists():
+            # macOS Dock should keep the size-normalized icon from the app bundle.
+            if sys.platform != "darwin" and APP_ICON_PATH.exists():
                 self._window_icon_image = tk.PhotoImage(file=str(APP_ICON_PATH))
                 self.iconphoto(True, self._window_icon_image)
         except tk.TclError:
