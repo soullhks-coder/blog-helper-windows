@@ -34,6 +34,26 @@ class WritingCompletionFlowTests(unittest.TestCase):
         calls = self._called_methods("_handle_publish_pipeline_success")
         self.assertIn("_show_writing_complete_dialog", calls)
 
+    def test_published_wordpress_post_opens_naver_search_advisor(self) -> None:
+        method_source = ast.get_source_segment(
+            self.source,
+            self.methods["_handle_publish_pipeline_success"],
+        )
+        self.assertIn("self._open_naver_search_advisor", method_source)
+        self.assertIn('wordpress.get("status")', method_source)
+        self.assertIn('== "publish"', method_source)
+
+    def test_naver_search_advisor_uses_stable_console_url(self) -> None:
+        method_source = ast.get_source_segment(
+            self.source,
+            self.methods["_open_naver_search_advisor"],
+        )
+        self.assertIn("NAVER_SEARCH_ADVISOR_CONSOLE_URL", method_source)
+        self.assertIn(
+            'NAVER_SEARCH_ADVISOR_CONSOLE_URL = "https://searchadvisor.naver.com/console/board"',
+            self.source,
+        )
+
     def test_reset_returns_to_topic_section(self) -> None:
         method_source = ast.get_source_segment(
             self.source,

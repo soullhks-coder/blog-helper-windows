@@ -112,6 +112,7 @@ NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
 NAVER_BLOG_COOKIE_KEEP_DAYS = 180
 NAVER_KIN_QUESTION_LIST_URL = "https://kin.naver.com/qna/questionList.naver"
 NAVER_KIN_DEBUG_LOG_FILE = DATA_DIR / "naver-kin-debug.log"
+NAVER_SEARCH_ADVISOR_CONSOLE_URL = "https://searchadvisor.naver.com/console/board"
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
@@ -25211,6 +25212,9 @@ class KeywordApp(ctk.CTk):
             if wordpress.get("tag_names"):
                 message.append(f"태그: {', '.join(wordpress['tag_names'])}")
             message.append(f"본문 카드뉴스 이미지: {wordpress.get('cardnews_count', 0)}장")
+            if published_url and str(wordpress.get("status") or "").lower() == "publish":
+                message.append("네이버 웹마스터도구를 브라우저에서 열었습니다.")
+                self.after(250, self._open_naver_search_advisor)
         if tistory:
             write_url = tistory.get("write_url")
             if write_url:
@@ -25465,6 +25469,9 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("링크 없음", "아직 열 수 있는 발행 글 링크가 없습니다.")
             return
         self._open_source_url(self.last_published_url)
+
+    def _open_naver_search_advisor(self) -> None:
+        self._open_source_url(NAVER_SEARCH_ADVISOR_CONSOLE_URL)
 
     def _open_source_url(self, url: str) -> None:
         try:
