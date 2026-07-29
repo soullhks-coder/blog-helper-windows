@@ -23,6 +23,10 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn("/api/trends/daum", script)
         self.assertIn('method: "DELETE"', script)
         self.assertIn("publishedUrl", script)
+        self.assertIn("TARGET_PREFERENCE_KEY", script)
+        self.assertIn("restoreTargetPreferences", script)
+        self.assertIn("saveTargetPreferences", script)
+        self.assertIn("window.localStorage.setItem", script)
 
     def test_worker_has_pc_queue_endpoints(self) -> None:
         worker = (ROOT / "remote_gateway" / "src" / "worker.js").read_text(encoding="utf-8")
@@ -35,11 +39,14 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn("cleanPreviewHtml", worker)
         self.assertIn('url.pathname === "/api/trends/daum"', worker)
         self.assertIn("hideDevice", worker)
+        self.assertIn("if (value.hiddenAt)", worker)
+        self.assertIn("await this.ctx.storage.delete(deviceKey)", worker)
         self.assertIn("clearJobHistory", worker)
         self.assertIn('payload.type === "queue.published"', worker)
         self.assertIn('url.pathname === "/"', worker)
         self.assertIn('indexUrl.pathname = "/index.html"', worker)
         self.assertNotIn('STATIC_ASSETS = ["/",', service_worker)
+        self.assertIn("blog-helper-remote-v1.3.2", service_worker)
 
     def test_schedule_command_updates_exact_queue_item(self) -> None:
         first = {"id": "first", "status": "대기 중", "scheduled_at": 100}

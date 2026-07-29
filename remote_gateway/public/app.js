@@ -2,6 +2,9 @@ if (window.location.protocol === "file:") {
   window.location.replace("https://ai.lhksoul.com");
 }
 
+const TARGET_PREFERENCE_KEY = "blog-helper-remote-targets";
+const ALLOWED_TARGETS = new Set(["wordpress", "tistory", "blogspot"]);
+
 const state = {
   devices: [],
   jobs: [],
@@ -28,6 +31,12 @@ const daumTrendButton = document.querySelector("#daumTrendButton");
 const daumTrendAccordion = document.querySelector("#daumTrendAccordion");
 const daumTrendList = document.querySelector("#daumTrendList");
 const clearJobsButton = document.querySelector("#clearJobsButton");
+const targetInputs = [...document.querySelectorAll("input[name='target']")];
+
+restoreTargetPreferences();
+targetInputs.forEach((input) => {
+  input.addEventListener("change", saveTargetPreferences);
+});
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -52,7 +61,7 @@ jobForm.addEventListener("submit", async (event) => {
 async function submitKeywordJob(rawKeyword) {
   setText("#jobError", "");
   const keyword = String(rawKeyword || "").trim();
-  const targets = [...document.querySelectorAll("input[name='target']:checked")].map((item) => item.value);
+  const targets = selectedTargets();
   if (!state.selectedDeviceId) {
     setText("#jobError", "작업할 PC를 먼저 선택해 주세요.");
     return false;
@@ -69,6 +78,7 @@ async function submitKeywordJob(rawKeyword) {
     setText("#jobError", "현재 키워드를 PC로 전달하고 있습니다. 잠시만 기다려 주세요.");
     return false;
   }
+  saveTargetPreferences();
   state.jobSubmitting = true;
   submitJob.disabled = true;
   submitJob.textContent = "PC로 전달 중...";
@@ -217,8 +227,38 @@ async function deleteDevice(deviceId) {
     state.queueUpdatedAt = 0;
     state.queueRenderSignature = "";
   }
+  state.devices = state.devices.filter((item) => item.deviceId !== deviceId);
+  renderDevices();
+  updateSubmitButton();
   await refreshDashboard();
   window.alert(response.data.message || "PC를 목록에서 삭제했습니다.");
+}
+
+function selectedTargets() {
+  return targetInputs.filter((input) => input.checked).map((input) => input.value);
+}
+
+function restoreTargetPreferences() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(TARGET_PREFERENCE_KEY) || "null");
+    if (!Array.isArray(saved)) {
+      return;
+    }
+    const selected = new Set(saved.filter((target) => ALLOWED_TARGETS.has(target)));
+    targetInputs.forEach((input) => {
+      input.checked = selected.has(input.value);
+    });
+  } catch {
+    // Keep the HTML defaults when private browsing blocks local storage.
+  }
+}
+
+function saveTargetPreferences() {
+  try {
+    window.localStorage.setItem(TARGET_PREFERENCE_KEY, JSON.stringify(selectedTargets()));
+  } catch {
+    // The current selection still works when storage is unavailable.
+  }
 }
 
 async function loadDaumRealtimeTrends() {

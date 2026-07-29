@@ -292,7 +292,7 @@ export class ControlRoom {
     const devices = [];
     for (const [key, value] of entries) {
       const deviceId = key.slice("device:".length);
-      if (value.hiddenSessionId && value.hiddenSessionId === value.sessionId) {
+      if (value.hiddenAt) {
         continue;
       }
       const online = this.ctx.getWebSockets(`device:${deviceId}`).length > 0;
@@ -316,6 +316,14 @@ export class ControlRoom {
     if (device.busyJobId) {
       return jsonResponse({ error: "현재 작업 중인 PC는 작업 완료 후 삭제할 수 있습니다." }, 409);
     }
+    const sockets = this.ctx.getWebSockets(`device:${deviceId}`);
+    if (!sockets.length) {
+      await this.ctx.storage.delete(deviceKey);
+      return jsonResponse({
+        ok: true,
+        message: "오프라인 PC를 목록에서 완전히 삭제했습니다. 해당 PC에서 Blog Helper를 실행하면 다시 연결됩니다.",
+      });
+    }
     const hiddenSessionId = cleanText(device.sessionId, 80) || `legacy-${deviceId}`;
     await this.ctx.storage.put(deviceKey, {
       ...device,
@@ -323,7 +331,7 @@ export class ControlRoom {
       hiddenAt: Date.now(),
       busyJobId: "",
     });
-    for (const socket of this.ctx.getWebSockets(`device:${deviceId}`)) {
+    for (const socket of sockets) {
       try {
         socket.close(4002, "원격 목록에서 PC를 숨겼습니다.");
       } catch {
