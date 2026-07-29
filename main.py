@@ -114,7 +114,10 @@ NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
 NAVER_BLOG_COOKIE_KEEP_DAYS = 180
 NAVER_KIN_QUESTION_LIST_URL = "https://kin.naver.com/qna/questionList.naver"
 NAVER_KIN_DEBUG_LOG_FILE = DATA_DIR / "naver-kin-debug.log"
-NAVER_SEARCH_ADVISOR_CONSOLE_URL = "https://searchadvisor.naver.com/console/board"
+NAVER_SEARCH_ADVISOR_CRAWL_URL = (
+    "https://searchadvisor.naver.com/console/site/request/crawl"
+    "?site=https%3A%2F%2Fblog.lhksoul.com"
+)
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
@@ -6265,6 +6268,287 @@ def run_naver_blog_playwright_bootstrap(
             context.close()
 
 
+def _find_naver_search_advisor_url_input(page):
+    """Return the visible crawl-request URL input without depending on one DOM version."""
+    inputs = page.locator("input:not([type='hidden'])")
+    candidates: list[tuple[int, object]] = []
+    for index in range(min(inputs.count(), 80)):
+        locator = inputs.nth(index)
+        try:
+            if not locator.is_visible():
+                continue
+            placeholder = str(locator.get_attribute("placeholder") or "")
+            input_type = str(locator.get_attribute("type") or "text").lower()
+            aria_label = str(locator.get_attribute("aria-label") or "")
+            nearby_text = str(
+                locator.evaluate(
+                    """node => {
+                        const root = node.closest('form, section, article, li, tr, div');
+                        return (root?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
+                    }"""
+                )
+                or ""
+            )
+            searchable = f"{placeholder} {aria_label} {nearby_text}".lower()
+            score = 0
+            if "blog.lhksoul.com" in searchable or "blog.soullhk.kr" in searchable:
+                score += 120
+            if placeholder.lower().startswith(("http://", "https://")):
+                score += 90
+            if input_type == "url":
+                score += 70
+            if "수집 요청 url 입력" in searchable or "수집요청 url 입력" in searchable:
+                score += 60
+            if "수집 요청" in searchable:
+                score += 35
+            if input_type in {"search", "password", "date", "time"}:
+                score -= 80
+            if score > 0:
+                candidates.append((score, locator))
+        except Exception:
+            continue
+    if not candidates:
+        raise RuntimeError(
+            "네이버 서치어드바이저의 '수집 요청 URL 입력' 칸을 찾지 못했습니다. "
+            "페이지가 완전히 열린 뒤 다시 시도해 주세요."
+        )
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _find_naver_search_advisor_confirm_button(page, url_input):
+    """Find the visible exact '확인' button closest to the crawl URL input."""
+    input_box = url_input.bounding_box() or {}
+    input_right = float(input_box.get("x", 0)) + float(input_box.get("width", 0))
+    input_center_y = float(input_box.get("y", 0)) + (float(input_box.get("height", 0)) / 2)
+    controls = page.locator(
+        "button, [role='button'], input[type='button'], input[type='submit']"
+    )
+    candidates: list[tuple[float, object]] = []
+    for index in range(min(controls.count(), 120)):
+        locator = controls.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            text = str(locator.inner_text(timeout=500) or "").strip()
+            if not text:
+                text = str(locator.get_attribute("value") or "").strip()
+            if re.sub(r"\s+", "", text) != "확인":
+                continue
+            box = locator.bounding_box() or {}
+            center_y = float(box.get("y", 0)) + (float(box.get("height", 0)) / 2)
+            left = float(box.get("x", 0))
+            distance = abs(center_y - input_center_y) + (abs(left - input_right) * 0.2)
+            candidates.append((distance, locator))
+        except Exception:
+            continue
+    if not candidates:
+        raise RuntimeError(
+            "네이버 서치어드바이저의 수집 요청 '확인' 버튼을 찾지 못했습니다."
+        )
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def run_naver_search_advisor_playwright(
+    published_url: str,
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+) -> tuple[bool, str]:
+    """Submit a newly published WordPress URL to Naver Search Advisor."""
+    published_url = str(published_url or "").strip()
+    parsed_url = urlparse(published_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise RuntimeError("네이버 수집 요청에 사용할 워드프레스 발행 URL이 올바르지 않습니다.")
+
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 프로그램을 다시 설치하거나 업데이트해 주세요."
+        ) from exc
+
+    chrome_path = require_google_chrome_executable()
+    NAVER_BLOG_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("naver-search-advisor", f"수집 요청 시작: {published_url}")
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
+            executable_path=str(chrome_path),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        try:
+            saved_state = load_naver_blog_storage_state()
+            saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
+            if saved_cookies:
+                try:
+                    context.add_cookies(saved_cookies)
+                except Exception:
+                    pass
+
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "네이버 서치어드바이저 수집 요청 페이지로 이동 중입니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            page.goto(NAVER_SEARCH_ADVISOR_CRAWL_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(1200)
+
+            login_deadline = time.time() + max(30, int(login_timeout_seconds or 300))
+            login_notice_sent = False
+            last_console_navigation_at = time.time()
+            while time.time() < login_deadline:
+                active_pages = list(context.pages) or [page]
+                search_advisor_pages = [
+                    candidate
+                    for candidate in active_pages
+                    if "searchadvisor.naver.com/console" in str(candidate.url or "").lower()
+                ]
+                if search_advisor_pages:
+                    page = search_advisor_pages[-1]
+                    try:
+                        _find_naver_search_advisor_url_input(page)
+                        break
+                    except RuntimeError:
+                        if (
+                            "/site/request/crawl" not in str(page.url or "")
+                            and time.time() - last_console_navigation_at >= 4
+                        ):
+                            page.goto(
+                                NAVER_SEARCH_ADVISOR_CRAWL_URL,
+                                wait_until="domcontentloaded",
+                            )
+                            last_console_navigation_at = time.time()
+                        page.wait_for_timeout(700)
+                        continue
+
+                login_pages = [
+                    candidate
+                    for candidate in active_pages
+                    if "nid.naver.com" in str(candidate.url or "").lower()
+                ]
+                if login_pages:
+                    page = login_pages[-1]
+                    if not login_notice_sent:
+                        result_queue.put(
+                            (
+                                "naver_search_advisor_progress",
+                                {
+                                    "message": "전용 Chrome에서 네이버 로그인과 권한 승인을 완료해 주세요. 완료될 때까지 기다립니다...",
+                                    "published_url": published_url,
+                                },
+                            )
+                        )
+                        login_notice_sent = True
+                    time.sleep(1)
+                    continue
+
+                if (
+                    is_naver_logged_in_context(context)
+                    and time.time() - last_console_navigation_at >= 4
+                ):
+                    page = active_pages[-1]
+                    page.goto(NAVER_SEARCH_ADVISOR_CRAWL_URL, wait_until="domcontentloaded")
+                    page.wait_for_timeout(1200)
+                    last_console_navigation_at = time.time()
+                else:
+                    for candidate in active_pages:
+                        try:
+                            login_button = candidate.get_by_role(
+                                "button",
+                                name=re.compile(r"^(네이버\s*)?로그인$"),
+                            ).first
+                            if login_button.count() and login_button.is_visible():
+                                login_button.click(timeout=1200)
+                                break
+                        except Exception:
+                            continue
+                    if not login_notice_sent:
+                        result_queue.put(
+                            (
+                                "naver_search_advisor_progress",
+                                {
+                                    "message": "전용 Chrome에서 네이버 로그인을 완료해 주세요. 로그인 완료까지 기다립니다...",
+                                    "published_url": published_url,
+                                },
+                            )
+                        )
+                        login_notice_sent = True
+                time.sleep(1)
+            else:
+                raise RuntimeError(
+                    "5분 안에 네이버 로그인 또는 서치어드바이저 화면을 확인하지 못했습니다. "
+                    "전용 Chrome에서 로그인한 뒤 다시 시도해 주세요."
+                )
+
+            save_naver_blog_storage_state(context)
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "발행한 워드프레스 URL을 수집 요청란에 입력하고 있습니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            url_input = _find_naver_search_advisor_url_input(page)
+            url_input.scroll_into_view_if_needed()
+            url_input.fill(published_url)
+            if str(url_input.input_value() or "").strip() != published_url:
+                raise RuntimeError("수집 요청 URL 입력란에 발행 주소를 입력하지 못했습니다.")
+            url_input.press("Tab")
+            page.wait_for_timeout(250)
+
+            confirm_button = _find_naver_search_advisor_confirm_button(page, url_input)
+            confirm_button.scroll_into_view_if_needed()
+            confirm_button.click()
+            page.wait_for_timeout(1800)
+
+            page_text = ""
+            try:
+                page_text = str(page.locator("body").inner_text(timeout=3000) or "")
+            except Exception:
+                pass
+            normalized_text = re.sub(r"\s+", " ", page_text)
+            error_messages = (
+                "올바른 URL을 입력",
+                "사이트 주소와 일치하지",
+                "수집 요청에 실패",
+                "요청 처리 중 오류",
+            )
+            matched_error = next(
+                (message for message in error_messages if message in normalized_text),
+                "",
+            )
+            if matched_error:
+                raise RuntimeError(f"네이버 서치어드바이저가 요청을 거부했습니다: {matched_error}")
+
+            append_runtime_log("naver-search-advisor", f"확인 버튼 클릭 완료: {published_url}")
+            return True, "네이버 서치어드바이저에 워드프레스 글 수집 요청을 완료했습니다."
+        except PlaywrightTimeoutError as exc:
+            append_runtime_log("naver-search-advisor", f"화면 응답 시간 초과: {exc}")
+            raise RuntimeError(f"네이버 서치어드바이저 화면 응답 시간이 초과되었습니다: {exc}") from exc
+        finally:
+            save_naver_blog_storage_state(context)
+            context.close()
+
+
 def run_naver_kin_playwright_bootstrap(
     question_list_url: str,
     sort_mode: str,
@@ -10751,6 +11035,47 @@ class NaverBlogBootstrapWorker(threading.Thread):
             self.result_queue.put(("naver_blog_error", str(exc)))
 
 
+class NaverSearchAdvisorWorker(threading.Thread):
+    def __init__(
+        self,
+        published_url: str,
+        result_queue: queue.Queue,
+        show_feedback: bool = True,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.published_url = str(published_url or "").strip()
+        self.result_queue = result_queue
+        self.show_feedback = bool(show_feedback)
+
+    def run(self) -> None:
+        try:
+            success, message = run_naver_search_advisor_playwright(
+                self.published_url,
+                self.result_queue,
+            )
+            payload = {
+                "message": message,
+                "published_url": self.published_url,
+                "show_feedback": self.show_feedback,
+            }
+            if success:
+                self.result_queue.put(("naver_search_advisor_done", payload))
+            else:
+                self.result_queue.put(("naver_search_advisor_error", payload))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            append_runtime_log("naver-search-advisor", f"수집 요청 실패: {exc}")
+            self.result_queue.put(
+                (
+                    "naver_search_advisor_error",
+                    {
+                        "message": str(exc),
+                        "published_url": self.published_url,
+                        "show_feedback": self.show_feedback,
+                    },
+                )
+            )
+
+
 class NaverKinBootstrapWorker(threading.Thread):
     def __init__(self, question_list_url: str, sort_mode: str, result_queue: queue.Queue) -> None:
         super().__init__(daemon=True)
@@ -11763,6 +12088,8 @@ class KeywordApp(ctk.CTk):
         self.imagen_test_worker: ImagenTestWorker | None = None
         self.codex_test_worker: CodexCLITestWorker | None = None
         self.naver_blog_worker: NaverBlogBootstrapWorker | None = None
+        self.naver_search_advisor_worker: NaverSearchAdvisorWorker | None = None
+        self.naver_search_advisor_pending_urls: list[dict] = []
         self.naver_kin_worker: NaverKinBootstrapWorker | None = None
         self.naver_kin_automation_worker: NaverKinAutomationWorker | None = None
         self.threads_auth_worker: ThreadsAuthWorker | None = None
@@ -24923,6 +25250,14 @@ class KeywordApp(ctk.CTk):
                         self.naver_blog_status_label.configure(text="현재 상태: 네이버 블로그 자동화 준비 실패", text_color="#ff6b6b")
                     self.naver_blog_worker = None
                     messagebox.showwarning("네이버 블로그 자동화 준비 실패", payload)
+                elif event_type == "naver_search_advisor_progress":
+                    message = str((payload or {}).get("message") or "")
+                    if hasattr(self, "publish_status_label"):
+                        self.publish_status_label.configure(text=message, text_color="#6dadff")
+                elif event_type == "naver_search_advisor_done":
+                    self._handle_naver_search_advisor_done(payload)
+                elif event_type == "naver_search_advisor_error":
+                    self._handle_naver_search_advisor_error(payload)
                 elif event_type == "naver_kin_progress":
                     if hasattr(self, "naver_kin_status_label"):
                         self.naver_kin_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")
@@ -25236,8 +25571,14 @@ class KeywordApp(ctk.CTk):
                 message.append(f"태그: {', '.join(wordpress['tag_names'])}")
             message.append(f"본문 카드뉴스 이미지: {wordpress.get('cardnews_count', 0)}장")
             if published_url and str(wordpress.get("status") or "").lower() == "publish":
-                message.append("네이버 웹마스터도구를 브라우저에서 열었습니다.")
-                self.after(250, self._open_naver_search_advisor)
+                message.append("네이버 서치어드바이저 수집 요청 자동화를 시작했습니다.")
+                self.after(
+                    250,
+                    lambda url=published_url: self._queue_naver_search_advisor_submission(
+                        url,
+                        show_feedback=True,
+                    ),
+                )
         if tistory:
             write_url = tistory.get("write_url")
             if write_url:
@@ -25298,6 +25639,15 @@ class KeywordApp(ctk.CTk):
             ).strip()
             if published_url:
                 item["published_url"] = published_url
+            if (
+                published_url
+                and wordpress
+                and str(wordpress.get("status") or "").lower() == "publish"
+            ):
+                self._queue_naver_search_advisor_submission(
+                    published_url,
+                    show_feedback=False,
+                )
         tistory = payload.get("tistory") or {}
         if tistory:
             write_url = tistory.get("write_url")
@@ -25493,8 +25843,75 @@ class KeywordApp(ctk.CTk):
             return
         self._open_source_url(self.last_published_url)
 
-    def _open_naver_search_advisor(self) -> None:
-        self._open_source_url(NAVER_SEARCH_ADVISOR_CONSOLE_URL)
+    def _queue_naver_search_advisor_submission(
+        self,
+        published_url: str,
+        show_feedback: bool = True,
+    ) -> None:
+        published_url = str(published_url or "").strip()
+        if not published_url:
+            return
+        active_url = (
+            self.naver_search_advisor_worker.published_url
+            if self.naver_search_advisor_worker
+            else ""
+        )
+        pending_urls = {
+            str(item.get("published_url") or "")
+            for item in self.naver_search_advisor_pending_urls
+        }
+        if published_url == active_url or published_url in pending_urls:
+            return
+        self.naver_search_advisor_pending_urls.append(
+            {
+                "published_url": published_url,
+                "show_feedback": bool(show_feedback),
+            }
+        )
+        self._start_next_naver_search_advisor_submission()
+
+    def _start_next_naver_search_advisor_submission(self) -> None:
+        if self.naver_search_advisor_worker and self.naver_search_advisor_worker.is_alive():
+            return
+        self.naver_search_advisor_worker = None
+        if not self.naver_search_advisor_pending_urls:
+            return
+        pending = self.naver_search_advisor_pending_urls.pop(0)
+        self.naver_search_advisor_worker = NaverSearchAdvisorWorker(
+            str(pending.get("published_url") or ""),
+            self.result_queue,
+            show_feedback=bool(pending.get("show_feedback", True)),
+        )
+        self.naver_search_advisor_worker.start()
+
+    def _handle_naver_search_advisor_done(self, payload: dict) -> None:
+        message = str((payload or {}).get("message") or "네이버 수집 요청을 완료했습니다.")
+        show_feedback = bool((payload or {}).get("show_feedback", True))
+        self.naver_search_advisor_worker = None
+        if hasattr(self, "publish_status_label"):
+            self.publish_status_label.configure(text=message, text_color="#48d980")
+        self._update_quick_status("네이버 수집 요청 완료", message, "#48d980")
+        if show_feedback:
+            messagebox.showinfo("네이버 서치어드바이저", message)
+        self.after(350, self._start_next_naver_search_advisor_submission)
+
+    def _handle_naver_search_advisor_error(self, payload: dict) -> None:
+        message = str((payload or {}).get("message") or "네이버 수집 요청에 실패했습니다.")
+        show_feedback = bool((payload or {}).get("show_feedback", True))
+        self.naver_search_advisor_worker = None
+        if hasattr(self, "publish_status_label"):
+            self.publish_status_label.configure(
+                text=f"글 발행은 완료됐지만 네이버 수집 요청은 실패했습니다: {message}",
+                text_color="#ffb86b",
+            )
+        self._update_quick_status("네이버 수집 요청 실패", message, "#ffb86b")
+        if show_feedback:
+            messagebox.showwarning(
+                "네이버 수집 요청 실패",
+                "워드프레스 글 발행은 정상적으로 완료되었습니다.\n\n"
+                f"네이버 서치어드바이저 후속 요청만 실패했습니다.\n{message}",
+            )
+        self.after(350, self._start_next_naver_search_advisor_submission)
 
     def _open_source_url(self, url: str) -> None:
         try:
