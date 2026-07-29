@@ -659,6 +659,26 @@ def nonempty_text(value: str | None, fallback: str) -> str:
     return value if value else fallback
 
 
+def is_invalid_naver_kin_question_title(value: str | None) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    if not normalized:
+        return True
+    invalid_titles = (
+        "권장 브라우저 업데이트 안내",
+        "브라우저 업데이트 안내",
+        "지원되지 않는 브라우저",
+        "네이버 지식in",
+        "네이버 지식iN",
+        "지식in",
+        "질문과 답변",
+    )
+    for title in invalid_titles:
+        invalid = re.sub(r"\s+", " ", title).strip().lower()
+        if normalized == invalid or normalized.startswith(invalid + " "):
+            return True
+    return False
+
+
 def clean_naver_kin_question_title(value: str | None) -> str:
     raw = unescape(str(value or "")).replace("\u200b", " ").strip()
     if not raw:
@@ -677,6 +697,14 @@ def clean_naver_kin_question_title(value: str | None) -> str:
         maxsplit=1,
     )[0].strip()
     candidate = re.sub(r"^\s*[Qq]\s*[.:]\s*", "", candidate)
+    candidate = re.sub(
+        r"\s*[:|·\-]\s*네이버\s*지식\s*[iI][nN].*$",
+        "",
+        candidate,
+        flags=re.I,
+    ).strip()
+    if is_invalid_naver_kin_question_title(candidate):
+        return ""
     return candidate[:160].strip()
 
 
@@ -6844,16 +6872,53 @@ def run_naver_kin_playwright_bootstrap(
             return False
 
     def extract_detail_title(detail_page) -> str:
-        for selector in ("h1", ".title", ".questionTitle", ".c-heading__title", "title"):
+        for selector in (
+            ".questionDetail .c-heading__title",
+            ".end_question .c-heading__title",
+            ".qna_detail_question .c-heading__title",
+            ".questionTitle",
+            "[class*='questionTitle']",
+            ".c-heading__title",
+        ):
             try:
-                if selector == "title":
-                    text = detail_page.title()
-                else:
-                    text = detail_page.locator(selector).first.inner_text(timeout=800)
-                text = clean_naver_kin_question_title(text)
-                text = re.sub(r"\s*:\s*네이버 지식iN.*$", "", text)
+                candidates = detail_page.locator(selector)
+                for index in range(min(candidates.count(), 6)):
+                    candidate = candidates.nth(index)
+                    if not candidate.is_visible(timeout=500):
+                        continue
+                    text = clean_naver_kin_question_title(candidate.inner_text(timeout=800))
+                    if len(text) >= 4:
+                        return text[:160]
+            except Exception:
+                continue
+        for selector, attribute in (
+            ("meta[property='og:title']", "content"),
+            ("meta[name='twitter:title']", "content"),
+        ):
+            try:
+                text = clean_naver_kin_question_title(
+                    detail_page.locator(selector).first.get_attribute(attribute)
+                )
                 if len(text) >= 4:
                     return text[:160]
+            except Exception:
+                continue
+        try:
+            text = clean_naver_kin_question_title(detail_page.title())
+            if len(text) >= 4:
+                return text[:160]
+        except Exception:
+            pass
+        for selector in ("main h1", "#content h1", "h1"):
+            try:
+                candidates = detail_page.locator(selector)
+                for index in range(min(candidates.count(), 6)):
+                    candidate = candidates.nth(index)
+                    if not candidate.is_visible(timeout=500):
+                        continue
+                    text = clean_naver_kin_question_title(candidate.inner_text(timeout=800))
+                    if len(text) >= 4:
+                        return text[:160]
             except Exception:
                 continue
         return ""
@@ -7416,6 +7481,7 @@ def run_naver_kin_answer_playwright(
 
     def fill_editor(target_page, value: str) -> bool:
         selectors = (
+            ".se-content[contenteditable='true']",
             ".se_editable[contenteditable='true']",
             ".se-editable[contenteditable='true']",
             ".se-component-content [contenteditable='true']",
@@ -7433,158 +7499,16 @@ def run_naver_kin_answer_playwright(
             ".se-editable",
             "body[contenteditable='true']",
         )
-        url_sample_match = re.search(r"https?://[^\s<>'\"]+", value)
-        sample_text = (
-            re.sub(r"\s+", " ", url_sample_match.group(0)[:80]).strip()
-            if url_sample_match
-            else re.sub(r"\s+", " ", value[:24]).strip()
-        )
         normalized_value = re.sub(r"\s+", " ", value).strip()
-        paste_used = False
-
-        def set_system_clipboard_text(text: str) -> bool:
-            try:
-                command = (
-                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard"]
-                    if os.name == "nt"
-                    else ["pbcopy"]
-                )
-                subprocess.run(command, input=text, text=True, check=True, timeout=5)
-                return True
-            except Exception:
-                return False
-
-        def focus_editor_with_js(frame) -> bool:
-            try:
-                return bool(frame.evaluate(
-                    """
-                    () => {
-                      const visible = (node) => {
-                        if (!node) return false;
-                        const rect = node.getBoundingClientRect();
-                        const style = window.getComputedStyle(node);
-                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-                      };
-                      const selectors = [
-                        '.se_editable[contenteditable="true"]',
-                        '.se-editable[contenteditable="true"]',
-                        '.se-component-content [contenteditable="true"]',
-                        '.se-module-text [contenteditable="true"]',
-                        '.se-text-paragraph[contenteditable="true"]',
-                        '[contenteditable="true"]',
-                        'textarea[placeholder*="답변"]',
-                        'textarea',
-                        'body[contenteditable="true"]'
-                      ];
-                      for (const selector of selectors) {
-                        const target = Array.from(document.querySelectorAll(selector)).find(visible);
-                        if (!target) continue;
-                        target.scrollIntoView({ block: 'center', inline: 'center' });
-                        target.focus();
-                        target.click?.();
-                        return true;
-                      }
-                      return false;
-                    }
-                    """
-                ))
-            except Exception:
-                return False
-
-        def paste_with_system_clipboard(frame) -> bool:
-            nonlocal paste_used
-            if paste_used:
-                return False
-            if not focus_editor_with_js(frame):
-                return False
-            if not set_system_clipboard_text(value):
-                return False
-            try:
-                target_page.wait_for_timeout(250)
-                target_page.keyboard.press("Meta+A")
-                target_page.wait_for_timeout(120)
-                target_page.keyboard.press("Backspace")
-                target_page.wait_for_timeout(180)
-                paste_used = True
-                target_page.keyboard.press("Meta+V")
-                frame.wait_for_timeout(2200)
-                return editor_contains_inserted_text(frame)
-            except Exception:
-                return False
-
-        def insert_with_keyboard(frame) -> bool:
-            if not focus_editor_with_js(frame):
-                return False
-            try:
-                target_page.keyboard.press("Meta+A")
-                target_page.keyboard.press("Backspace")
-                target_page.keyboard.insert_text(value)
-                frame.wait_for_timeout(900)
-                return editor_contains_inserted_text(frame)
-            except Exception:
-                return False
-
-        def try_insert_with_js(frame) -> bool:
-            try:
-                return bool(frame.evaluate(
-                    """
-                    (text) => {
-                      const visible = (node) => {
-                        if (!node) return false;
-                        const rect = node.getBoundingClientRect();
-                        const style = window.getComputedStyle(node);
-                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-                      };
-                      const selectors = [
-                        '.se_editable[contenteditable="true"]',
-                        '.se-editable[contenteditable="true"]',
-                        '.se-component-content [contenteditable="true"]',
-                        '.se-module-text [contenteditable="true"]',
-                        '.se-text-paragraph[contenteditable="true"]',
-                        '.se-text-paragraph',
-                        '[contenteditable="true"]',
-                        'textarea',
-                        'body[contenteditable="true"]'
-                      ];
-                      let target = null;
-                      for (const selector of selectors) {
-                        target = Array.from(document.querySelectorAll(selector)).find(visible);
-                        if (target) break;
-                      }
-                      if (!target) return false;
-                      target.scrollIntoView({ block: 'center', inline: 'center' });
-                      target.focus();
-                      target.click?.();
-                      if ('value' in target) {
-                        target.value = text;
-                        target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-                        target.dispatchEvent(new Event('change', { bubbles: true }));
-                        return String(target.value || '').replace(/\\s+/g, ' ').includes(text.replace(/\\s+/g, ' ').slice(0, 20));
-                      }
-                      target.textContent = '';
-                      const lines = text.split(/\\n/);
-                      for (const [index, line] of lines.entries()) {
-                        if (index > 0) target.appendChild(document.createElement('br'));
-                        target.appendChild(document.createTextNode(line));
-                      }
-                      target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-                      target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Process' }));
-                      target.dispatchEvent(new Event('change', { bubbles: true }));
-                      return (target.innerText || target.textContent || '').replace(/\\s+/g, ' ').includes(text.replace(/\\s+/g, ' ').slice(0, 20));
-                    }
-                    """,
-                    value,
-                ))
-            except Exception:
-                return False
+        sample_text = normalized_value[:40]
+        if not sample_text:
+            return False
 
         def editor_contains_inserted_text(frame) -> bool:
-            if not sample_text:
-                return False
             try:
                 return bool(frame.evaluate(
                     """
-                    ({ sample, fullText }) => {
+                    ({ sample, minimumLength }) => {
                       const visible = (node) => {
                         if (!node) return false;
                         const rect = node.getBoundingClientRect();
@@ -7592,6 +7516,7 @@ def run_naver_kin_answer_playwright(
                         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
                       };
                       const selectors = [
+                        '.se-content[contenteditable="true"]',
                         '.se_editable[contenteditable="true"]',
                         '.se-editable[contenteditable="true"]',
                         '.se-component-content [contenteditable="true"]',
@@ -7604,7 +7529,6 @@ def run_naver_kin_answer_playwright(
                         'body[contenteditable="true"]'
                       ];
                       const expected = String(sample || '').replace(/\\s+/g, ' ').trim();
-                      const fullExpected = String(fullText || '').replace(/\\s+/g, ' ').trim();
                       if (!expected) return false;
                       for (const selector of selectors) {
                         const targets = Array.from(document.querySelectorAll(selector)).filter(visible);
@@ -7613,84 +7537,143 @@ def run_naver_kin_answer_playwright(
                             .replace(/\\s+/g, ' ')
                             .trim();
                           if (text.includes(expected)) return true;
-                          if (fullExpected && fullExpected.length > 40 && text.length >= Math.min(40, fullExpected.length) && fullExpected.startsWith(text.slice(0, Math.min(40, text.length)))) return true;
+                          if (text.length >= minimumLength && expected.startsWith(text.slice(0, Math.min(expected.length, text.length)))) return true;
                         }
                       }
                       return false;
                     }
                     """,
-                    {"sample": sample_text, "fullText": normalized_value},
+                    {
+                        "sample": sample_text,
+                        "minimumLength": min(24, max(8, len(sample_text))),
+                    },
                 ))
             except Exception:
                 return False
 
-        def try_paste(frame, locator) -> bool:
-            nonlocal paste_used
-            if paste_used:
+        def activate_editor(frame, locator) -> bool:
+            try:
+                locator.scroll_into_view_if_needed(timeout=1500)
+                locator.click(timeout=1500)
+            except Exception:
                 return False
             try:
-                target_page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=target_page.url)
+                locator.evaluate(
+                    """
+                    (node) => {
+                      const editable =
+                        node.closest?.('[contenteditable="true"], textarea') ||
+                        node.querySelector?.('[contenteditable="true"], textarea') ||
+                        node;
+                      editable.focus?.();
+                      editable.click?.();
+                    }
+                    """
+                )
             except Exception:
                 pass
             try:
-                target_page.evaluate("(text) => navigator.clipboard.writeText(text)", value)
-            except Exception:
-                try:
-                    target_page.set_extra_http_headers({})
-                except Exception:
-                    pass
-            try:
-                locator.click(timeout=1200)
-                target_page.keyboard.press("Meta+A")
-                try:
-                    target_page.keyboard.press("Backspace")
-                except Exception:
-                    pass
-                try:
-                    target_page.keyboard.insert_text(value)
-                    frame.wait_for_timeout(900)
-                    return editor_contains_inserted_text(frame)
-                except Exception:
-                    pass
-                paste_used = True
-                target_page.keyboard.press("Meta+V")
-                frame.wait_for_timeout(900)
-                return editor_contains_inserted_text(frame)
+                frame.wait_for_timeout(180)
+                return bool(frame.evaluate(
+                    """
+                    () => {
+                      const active = document.activeElement;
+                      if (!active) return false;
+                      if (active.matches?.('textarea, input')) return true;
+                      if (active.isContentEditable || active.getAttribute?.('contenteditable') === 'true') return true;
+                      return Boolean(active.closest?.('[contenteditable="true"]'));
+                    }
+                    """
+                ))
             except Exception:
                 return False
 
-        for frame in [target_page, *target_page.frames]:
-            if paste_with_system_clipboard(frame):
-                return True
-            if paste_used:
+        def type_answer_directly(frame, locator) -> bool:
+            if not activate_editor(frame, locator):
                 return False
-            if insert_with_keyboard(frame):
-                return True
+            modifier = "Control" if os.name == "nt" else "Meta"
+            try:
+                target_page.keyboard.press(f"{modifier}+A")
+                target_page.keyboard.press("Backspace")
+                target_page.wait_for_timeout(120)
+                put_naver_kin_action_log(
+                    result_queue,
+                    f"답변 에디터를 선택했습니다. {len(value)}자를 키 입력으로 작성합니다.",
+                )
+                lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                for line_index, line in enumerate(lines):
+                    if line_index:
+                        target_page.keyboard.press("Enter")
+                    if line:
+                        target_page.keyboard.type(line, delay=2)
+                frame.wait_for_timeout(1000)
+                if editor_contains_inserted_text(frame):
+                    put_naver_kin_action_log(
+                        result_queue,
+                        f"답변 본문 키 입력을 확인했습니다. 입력 글자 수: {len(value)}자",
+                    )
+                    return True
+            except Exception as exc:
+                append_naver_kin_debug_log(f"direct_editor_typing_error error={exc}")
+            return False
+
+        def insert_answer_as_browser_text(frame, locator) -> bool:
+            if not activate_editor(frame, locator):
+                return False
+            modifier = "Control" if os.name == "nt" else "Meta"
+            try:
+                target_page.keyboard.press(f"{modifier}+A")
+                target_page.keyboard.press("Backspace")
+                target_page.keyboard.insert_text(value)
+                frame.wait_for_timeout(900)
+                if editor_contains_inserted_text(frame):
+                    put_naver_kin_action_log(
+                        result_queue,
+                        "키 입력 호환성 보정으로 브라우저 입력 이벤트를 사용해 답변 본문을 작성했습니다.",
+                    )
+                    return True
+            except Exception as exc:
+                append_naver_kin_debug_log(f"browser_text_input_error error={exc}")
+            return False
+
+        frames = []
+        seen_frames: set[int] = set()
+        for frame in [target_page, *target_page.frames]:
+            frame_id = id(frame)
+            if frame_id in seen_frames:
+                continue
+            seen_frames.add(frame_id)
+            frames.append(frame)
+
+        for frame in frames:
             for selector in selectors:
                 try:
-                    locator = frame.locator(selector).first
-                    if locator.count() <= 0:
-                        continue
-                    locator.scroll_into_view_if_needed(timeout=1200)
-                    locator.click(timeout=1200)
-                    if paste_with_system_clipboard(frame):
-                        return True
-                    try:
-                        locator.fill(value, timeout=1200)
-                    except Exception:
-                        if not try_insert_with_js(frame):
-                            try_paste(frame, locator)
-                    frame.wait_for_timeout(500)
-                    if editor_contains_inserted_text(frame):
-                        return True
-                    if try_insert_with_js(frame) and editor_contains_inserted_text(frame):
-                        return True
+                    candidates = frame.locator(selector)
+                    for index in range(min(candidates.count(), 8)):
+                        locator = candidates.nth(index)
+                        if not locator.is_visible(timeout=500):
+                            continue
+                        if type_answer_directly(frame, locator):
+                            return True
                 except Exception:
                     continue
-            if try_insert_with_js(frame) and editor_contains_inserted_text(frame):
-                return True
-            if insert_with_keyboard(frame):
-                return True
+
+        put_naver_kin_action_log(
+            result_queue,
+            "일반 키 입력이 반영되지 않아 에디터 호환 입력을 한 번 시도합니다.",
+        )
+        for frame in frames:
+            for selector in selectors:
+                try:
+                    candidates = frame.locator(selector)
+                    for index in range(min(candidates.count(), 8)):
+                        locator = candidates.nth(index)
+                        if not locator.is_visible(timeout=500):
+                            continue
+                        if insert_answer_as_browser_text(frame, locator):
+                            return True
+                except Exception:
+                    continue
         return False
 
     def click_editor_link_toolbar(target_page) -> bool:

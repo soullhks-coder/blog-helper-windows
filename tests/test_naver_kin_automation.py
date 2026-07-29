@@ -33,6 +33,16 @@ class NaverKinAutomationTests(unittest.TestCase):
             "청년도약계좌 가입 조건",
         )
 
+    def test_browser_update_notice_is_not_used_as_question_title(self) -> None:
+        self.assertEqual(
+            main.clean_naver_kin_question_title("권장 브라우저 업데이트 안내"),
+            "",
+        )
+        self.assertEqual(
+            main.clean_naver_kin_question_title("크롬 브라우저 업데이트 후 오류 해결 방법"),
+            "크롬 브라우저 업데이트 후 오류 해결 방법",
+        )
+
     def test_question_body_removes_repeated_title(self) -> None:
         body = main.clean_naver_kin_question_body(
             "청년도약계좌 가입 조건: 신청하려는데 소득 조건과 준비 서류가 궁금합니다.",
@@ -137,6 +147,18 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("extract_question_body(detail_page)", source)
         self.assertIn("naver_kin_question_ready(question)", source)
         self.assertIn('sort_mode == "최신순"', source)
+        self.assertLess(
+            source.index('".questionTitle"'),
+            source.index('for selector in ("main h1", "#content h1", "h1")'),
+        )
+
+    def test_answer_editor_uses_direct_keyboard_input_without_clipboard_paste(self) -> None:
+        source = self._method_source("run_naver_kin_answer_playwright")
+
+        self.assertIn("target_page.keyboard.type(line, delay=2)", source)
+        self.assertIn("editor_contains_inserted_text(frame)", source)
+        self.assertNotIn("paste_with_system_clipboard", source)
+        self.assertNotIn('keyboard.press("Meta+V")', source)
 
     def test_collect_schedule_runs_fresh_playwright_collection(self) -> None:
         source = self._method_source("_run_naver_kin_automation_once")
