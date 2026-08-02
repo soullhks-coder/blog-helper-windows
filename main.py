@@ -109,6 +109,9 @@ TISTORY_AUTOMATION_SCRIPT_FILE = DATA_DIR / "tistory-automation.js"
 TISTORY_AUTOMATION_RUNNER_FILE = DATA_DIR / "tistory-automation-runner.js"
 TISTORY_CHROME_PROFILE_DIR = DATA_DIR / "Tistory Chrome Profile"
 TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
+TEXT_INPUT_MODE_FAST = "빠른 입력"
+TEXT_INPUT_MODE_TYPING = "직접 타이핑"
+TEXT_INPUT_MODE_OPTIONS = (TEXT_INPUT_MODE_FAST, TEXT_INPUT_MODE_TYPING)
 # The running app only follows GitHub's tiny latest-release redirect. Five
 # minutes keeps long-running, multi-PC installations responsive without
 # wasting API quota or network traffic.
@@ -1322,6 +1325,7 @@ class WordPressSettings:
     blogspot_access_token: str = ""
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
+    tistory_input_mode: str = TEXT_INPUT_MODE_FAST
     tistory_reference_image_protection_mode: bool = True
     naver_blog_profiles: list[dict] = field(default_factory=list)
     naver_blog_active_profile: str = "블로그 1"
@@ -1726,6 +1730,11 @@ class AppStateStore:
             blogspot_access_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_ACCOUNT) or blogspot_fallback,
             tistory_blog_url=payload.get("tistory_blog_url", ""),
             tistory_write_url=payload.get("tistory_write_url", ""),
+            tistory_input_mode=(
+                payload.get("tistory_input_mode")
+                if payload.get("tistory_input_mode") in TEXT_INPUT_MODE_OPTIONS
+                else TEXT_INPUT_MODE_FAST
+            ),
             tistory_reference_image_protection_mode=payload.get(
                 "tistory_reference_image_protection_mode",
                 True,
@@ -4634,10 +4643,15 @@ def parse_tistory_automation_prompt(prompt_text: str) -> list[str]:
     return normalized
 
 
+def normalize_text_input_mode(value: str) -> str:
+    return value if value in TEXT_INPUT_MODE_OPTIONS else TEXT_INPUT_MODE_FAST
+
+
 def build_tistory_editor_automation_script(
     title: str,
     article_html: str,
     mode_only: bool = False,
+    input_mode: str = TEXT_INPUT_MODE_FAST,
     thumbnail_data_url: str = "",
     thumbnail_content_url: str = "",
     collage_images: list[dict[str, str]] | None = None,
@@ -4650,6 +4664,7 @@ def build_tistory_editor_automation_script(
     title_json = json.dumps(title, ensure_ascii=False)
     html_json = json.dumps(article_html, ensure_ascii=False)
     mode_only_json = json.dumps(mode_only)
+    input_mode_json = json.dumps(normalize_text_input_mode(input_mode), ensure_ascii=False)
     thumbnail_data_url_json = json.dumps(thumbnail_data_url)
     thumbnail_content_url_json = json.dumps(thumbnail_content_url)
     collage_images_json = json.dumps(collage_images or [], ensure_ascii=False)
@@ -4678,6 +4693,8 @@ def build_tistory_editor_automation_script(
   const title = {title_json};
   const html = {html_json};
   const modeOnly = {mode_only_json};
+  const inputMode = {input_mode_json};
+  const directTyping = inputMode === {json.dumps(TEXT_INPUT_MODE_TYPING, ensure_ascii=False)};
   const thumbnailDataUrl = {thumbnail_data_url_json};
   const thumbnailContentUrl = {thumbnail_content_url_json};
   const collageImages = {collage_images_json};
@@ -4763,6 +4780,62 @@ def build_tistory_editor_automation_script(
       node.value = value;
     }}
     fire(node);
+    return true;
+  }};
+
+  const reportTypingProgress = async (stage, completed, total) => {{
+    if (typeof window.blogHelperTypingProgress !== 'function') return;
+    const safeTotal = Math.max(1, Number(total) || 1);
+    const percent = Math.max(0, Math.min(100, Math.round((Number(completed) || 0) * 100 / safeTotal)));
+    try {{ await window.blogHelperTypingProgress(stage, percent); }} catch (_error) {{}}
+  }};
+
+  const typeNativeValue = async (node, value, stage, delayMs) => {{
+    if (!node) return false;
+    if (!directTyping) return setNativeValue(node, value);
+    node.focus();
+    setNativeValue(node, '');
+    const characters = Array.from(String(value || ''));
+    const reportEvery = Math.max(1, Math.floor(characters.length / 20));
+    let current = '';
+    await reportTypingProgress(stage, 0, characters.length);
+    for (let index = 0; index < characters.length; index += 1) {{
+      const character = characters[index];
+      current += character;
+      const prototype = Object.getPrototypeOf(node);
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (descriptor && descriptor.set) descriptor.set.call(node, current);
+      else node.value = current;
+      node.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: character }}));
+      node.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true, key: character }}));
+      if ((index + 1) % reportEvery === 0 || index + 1 === characters.length) {{
+        await reportTypingProgress(stage, index + 1, characters.length);
+      }}
+      await wait(character === '\\n' ? Math.max(35, delayMs * 3) : delayMs);
+    }}
+    node.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    return true;
+  }};
+
+  const typeCodeMirrorValue = async (codeMirror, value) => {{
+    if (!codeMirror) return false;
+    if (!directTyping) {{
+      codeMirror.focus();
+      codeMirror.setValue(value);
+      return true;
+    }}
+    codeMirror.focus();
+    codeMirror.setValue('');
+    const characters = Array.from(String(value || ''));
+    const reportEvery = Math.max(1, Math.floor(characters.length / 20));
+    await reportTypingProgress('본문', 0, characters.length);
+    for (let index = 0; index < characters.length; index += 1) {{
+      codeMirror.replaceRange(characters[index], codeMirror.getDoc().getCursor());
+      if ((index + 1) % reportEvery === 0 || index + 1 === characters.length) {{
+        await reportTypingProgress('본문', index + 1, characters.length);
+      }}
+      await wait(characters[index] === '\\n' ? 40 : 12);
+    }}
     return true;
   }};
 
@@ -4876,7 +4949,7 @@ def build_tistory_editor_automation_script(
     return false;
   }};
 
-  const setTitle = () => {{
+  const setTitle = async () => {{
     const selectors = [
       '#post-title-inp',
       '.textarea_tit',
@@ -4889,31 +4962,29 @@ def build_tistory_editor_automation_script(
     const target = selectors.map((selector) => document.querySelector(selector)).find(Boolean);
     if (!target) return false;
     target.focus();
-    return setNativeValue(target, title);
+    return await typeNativeValue(target, title, '제목', 28);
   }};
 
-  const setHtmlBody = () => {{
+  const setHtmlBody = async () => {{
     const tistoryHtmlEditor = document.querySelector('#editor-tistory');
     if (tistoryHtmlEditor) {{
-      setNativeValue(tistoryHtmlEditor, composedHtml);
-      return true;
+      return await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12);
     }}
 
     const codeMirror = document.querySelector('.CodeMirror');
     if (codeMirror && codeMirror.CodeMirror) {{
-      codeMirror.CodeMirror.focus();
-      codeMirror.CodeMirror.setValue(composedHtml);
-      return true;
+      return await typeCodeMirrorValue(codeMirror.CodeMirror, composedHtml);
     }}
 
     const textarea = Array.from(document.querySelectorAll('textarea')).find((node) => visible(node) && !/제목/.test(node.placeholder || ''));
     if (textarea) {{
       textarea.focus();
-      return setNativeValue(textarea, composedHtml);
+      return await typeNativeValue(textarea, composedHtml, '본문', 12);
     }}
 
     const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
     if (editable) {{
+      if (directTyping) return false;
       editable.focus();
       editable.innerHTML = composedHtml;
       fire(editable);
@@ -4923,6 +4994,8 @@ def build_tistory_editor_automation_script(
   }};
 
   const setRichBody = () => {{
+    // 직접 타이핑 모드는 HTML 편집기에서 이미 입력을 끝냈으므로 중복 입력하지 않습니다.
+    if (directTyping) return true;
     const iframe = document.querySelector('#editor-tistory_ifr') || document.querySelector('iframe[title*="텍스트 편집기"], iframe[title*="편집기"]');
     const iframeDocument = iframe && (iframe.contentDocument || iframe.contentWindow?.document);
     const iframeBody = iframeDocument && (iframeDocument.querySelector('body#tinymce') || iframeDocument.body);
@@ -5209,7 +5282,8 @@ def build_tistory_editor_automation_script(
     publicPublishOk: false,
     closeTabOk: false,
     thumbnailPrepared: Boolean(thumbnailContentUrl || thumbnailDataUrl),
-    modeOnly
+    modeOnly,
+    inputMode
   }};
   const runAction = async (action) => {{
     allowDialogs();
@@ -5231,11 +5305,11 @@ def build_tistory_editor_automation_script(
       return results.htmlModeOk;
     }}
     if (action === 'set_title') {{
-      results.titleOk = modeOnly ? false : setTitle();
+      results.titleOk = modeOnly ? false : await setTitle();
       return results.titleOk;
     }}
     if (action === 'set_body') {{
-      results.bodyOk = modeOnly ? false : setHtmlBody();
+      results.bodyOk = modeOnly ? false : await setHtmlBody();
       return results.bodyOk;
     }}
     if (action === 'switch_basic') {{
@@ -8329,6 +8403,18 @@ def run_tistory_playwright_automation(
             page.set_default_timeout(20_000)
             page.set_default_navigation_timeout(60_000)
             page.on("dialog", lambda dialog: dialog.accept())
+
+            def report_typing_progress(stage: str, percent: int) -> None:
+                safe_stage = str(stage or "본문")
+                safe_percent = max(0, min(100, int(percent or 0)))
+                result_queue.put(
+                    (
+                        "tistory_progress",
+                        f"{safe_stage}을(를) 직접 타이핑하고 있습니다... {safe_percent}%",
+                    )
+                )
+
+            page.expose_function("blogHelperTypingProgress", report_typing_progress)
             result_queue.put(
                 (
                     "tistory_progress",
@@ -8406,8 +8492,10 @@ def run_tistory_playwright_automation(
                 if not published:
                     raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
                 page.wait_for_timeout(5000)
-                return True, "Playwright 네이티브 클릭으로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
-            return True, "Playwright로 티스토리 제목·본문 자동입력을 완료했습니다."
+                mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
+                return True, f"Playwright {mode_label} 모드로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
+            mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
+            return True, f"Playwright {mode_label} 모드로 티스토리 제목·본문 자동입력을 완료했습니다."
         except PlaywrightTimeoutError as exc:
             raise RuntimeError(f"티스토리 화면 응답 시간이 초과되었습니다: {exc}") from exc
         finally:
@@ -11706,6 +11794,7 @@ class TistoryAutomationWorker(threading.Thread):
         close_after_publish: bool = False,
         write_url: str = "",
         reference_image_protection_mode: bool = True,
+        input_mode: str = TEXT_INPUT_MODE_FAST,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -11720,6 +11809,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.close_after_publish = close_after_publish
         self.write_url = write_url
         self.reference_image_protection_mode = reference_image_protection_mode
+        self.input_mode = normalize_text_input_mode(input_mode)
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -11796,6 +11886,7 @@ class TistoryAutomationWorker(threading.Thread):
                 self.title,
                 prepared_article_html,
                 mode_only=self.mode_only,
+                input_mode=self.input_mode,
                 thumbnail_data_url=thumbnail_data_url,
                 thumbnail_content_url=thumbnail_content_url,
                 collage_images=[],
@@ -18851,6 +18942,59 @@ class KeywordApp(ctk.CTk):
         )
         helper.grid(row=5, column=0, padx=24, pady=(16, 18), sticky="ew")
 
+        input_mode_frame = ctk.CTkFrame(
+            self.tistory_card,
+            corner_radius=16,
+            fg_color=("#e8eff9", "#111b2b"),
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        input_mode_frame.grid(row=6, column=0, padx=24, pady=(0, 16), sticky="ew")
+        input_mode_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            input_mode_frame,
+            text="본문 입력 방식",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=(16, 12), pady=(14, 8), sticky="w")
+        self.tistory_input_mode_var = tk.StringVar(value=TEXT_INPUT_MODE_FAST)
+        self.tistory_input_mode_selector = ctk.CTkSegmentedButton(
+            input_mode_frame,
+            values=list(TEXT_INPUT_MODE_OPTIONS),
+            variable=self.tistory_input_mode_var,
+            height=38,
+            corner_radius=12,
+            selected_color="#3468e8",
+            selected_hover_color="#2d5cd0",
+            unselected_color=("#f7f9fc", "#263247"),
+            unselected_hover_color=("#dce7f6", "#314761"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_tistory_input_mode_changed,
+        )
+        self.tistory_input_mode_selector.grid(
+            row=0,
+            column=1,
+            padx=(0, 16),
+            pady=(12, 8),
+            sticky="ew",
+        )
+        self.tistory_input_mode_help_label = ctk.CTkLabel(
+            input_mode_frame,
+            text="빠른 입력 · 현재 방식으로 즉시 입력합니다. 이미지는 두 모드 모두 실제 파일로 첨부합니다.",
+            anchor="w",
+            justify="left",
+            text_color=("#607089", "#9aa7bb"),
+            wraplength=850,
+            font=ctk.CTkFont(size=13),
+        )
+        self.tistory_input_mode_help_label.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 13),
+            sticky="ew",
+        )
+
         self.tistory_reference_image_protection_var = tk.BooleanVar(value=True)
         self.tistory_reference_protection_switch = ctk.CTkSwitch(
             self.tistory_card,
@@ -18864,7 +19008,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_tistory_reference_image_mode_changed,
         )
         self.tistory_reference_protection_switch.grid(
-            row=6,
+            row=7,
             column=0,
             padx=24,
             pady=(0, 18),
@@ -18872,7 +19016,7 @@ class KeywordApp(ctk.CTk):
         )
 
         button_row = ctk.CTkFrame(self.tistory_card, fg_color="transparent")
-        button_row.grid(row=7, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=8, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -18919,7 +19063,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.tistory_status_label.grid(row=8, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.tistory_status_label.grid(row=9, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_threads_card(self) -> None:
         ctk.CTkLabel(
@@ -22297,6 +22441,10 @@ class KeywordApp(ctk.CTk):
             self.writing_inline_images_provider_menu.set(self.wordpress_settings.inline_images_provider or "Imagen API")
         self.tistory_blog_url_entry.insert(0, self.wordpress_settings.tistory_blog_url)
         self.tistory_write_url_entry.insert(0, self.wordpress_settings.tistory_write_url)
+        self.tistory_input_mode_var.set(
+            normalize_text_input_mode(self.wordpress_settings.tistory_input_mode)
+        )
+        self._on_tistory_input_mode_changed(save=False)
         self.tistory_reference_image_protection_var.set(
             self.wordpress_settings.tistory_reference_image_protection_mode
         )
@@ -23042,6 +23190,9 @@ class KeywordApp(ctk.CTk):
             blogspot_access_token=self.wordpress_settings.blogspot_access_token,
             tistory_blog_url=self.tistory_blog_url_entry.get().strip(),
             tistory_write_url=self.tistory_write_url_entry.get().strip(),
+            tistory_input_mode=normalize_text_input_mode(
+                self.tistory_input_mode_var.get()
+            ),
             tistory_reference_image_protection_mode=bool(
                 self.tistory_reference_image_protection_var.get()
             ),
@@ -23530,6 +23681,28 @@ class KeywordApp(ctk.CTk):
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
         self._update_quick_status("티스토리 저장됨", "글쓰기 화면 연결 정보를 저장했습니다.", "#48d980")
 
+    def _on_tistory_input_mode_changed(
+        self,
+        value: str | None = None,
+        save: bool = True,
+    ) -> None:
+        mode = normalize_text_input_mode(value or self.tistory_input_mode_var.get())
+        self.tistory_input_mode_var.set(mode)
+        if mode == TEXT_INPUT_MODE_TYPING:
+            help_text = (
+                "직접 타이핑 · 제목과 본문이 글자 단위로 입력되어 글 길이에 따라 1~3분 이상 걸릴 수 있습니다. "
+                "썸네일·카드뉴스·본문 이미지는 실제 파일 선택으로 첨부합니다."
+            )
+        else:
+            help_text = (
+                "빠른 입력 · 현재 방식으로 즉시 입력합니다. "
+                "이미지는 두 모드 모두 실제 파일로 첨부합니다."
+            )
+        self.tistory_input_mode_help_label.configure(text=help_text)
+        self.wordpress_settings.tistory_input_mode = mode
+        if save:
+            self._save_ui_state()
+
     def _on_tistory_reference_image_mode_changed(self, save: bool = True) -> None:
         enabled = bool(self.tistory_reference_image_protection_var.get())
         text = (
@@ -23628,10 +23801,13 @@ class KeywordApp(ctk.CTk):
     def _reset_tistory_settings(self) -> None:
         self.tistory_blog_url_entry.delete(0, "end")
         self.tistory_write_url_entry.delete(0, "end")
+        self.tistory_input_mode_var.set(TEXT_INPUT_MODE_FAST)
         self.tistory_reference_image_protection_var.set(True)
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
+        self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
         self.wordpress_settings.tistory_reference_image_protection_mode = True
+        self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
         self.tistory_status_label.configure(text="● 티스토리 초기화 완료", text_color="#9aa7bb")
@@ -25148,6 +25324,7 @@ class KeywordApp(ctk.CTk):
             publish_after_input=True,
             write_url=write_url,
             reference_image_protection_mode=settings.tistory_reference_image_protection_mode,
+            input_mode=settings.tistory_input_mode,
         )
         self.tistory_automation_worker.start()
 
@@ -26072,6 +26249,9 @@ class KeywordApp(ctk.CTk):
                         reference_image_protection_mode=bool(
                             self.tistory_reference_image_protection_var.get()
                         ),
+                        input_mode=normalize_text_input_mode(
+                            self.tistory_input_mode_var.get()
+                        ),
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
@@ -26141,6 +26321,9 @@ class KeywordApp(ctk.CTk):
                         write_url=write_url,
                         reference_image_protection_mode=bool(
                             self.tistory_reference_image_protection_var.get()
+                        ),
+                        input_mode=normalize_text_input_mode(
+                            self.tistory_input_mode_var.get()
                         ),
                     )
                     self.active_automation_tistory_pending = True

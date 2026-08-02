@@ -125,6 +125,29 @@ class TistoryNativeImageTests(unittest.TestCase):
     def test_reference_image_protection_mode_defaults_to_enabled(self) -> None:
         self.assertTrue(main.WordPressSettings().tistory_reference_image_protection_mode)
 
+    def test_tistory_input_mode_defaults_to_fast_and_normalizes_unknown_values(self) -> None:
+        self.assertEqual(
+            main.WordPressSettings().tistory_input_mode,
+            main.TEXT_INPUT_MODE_FAST,
+        )
+        self.assertEqual(
+            main.normalize_text_input_mode("알 수 없는 모드"),
+            main.TEXT_INPUT_MODE_FAST,
+        )
+
+    def test_direct_typing_script_types_title_and_body_sequentially(self) -> None:
+        script = main.build_tistory_editor_automation_script(
+            "직접 타이핑 제목",
+            "<p>직접 타이핑 본문</p>",
+            input_mode=main.TEXT_INPUT_MODE_TYPING,
+        )
+
+        self.assertIn('const inputMode = "직접 타이핑"', script)
+        self.assertIn("const typeNativeValue = async", script)
+        self.assertIn("await typeNativeValue(target, title, '제목', 28)", script)
+        self.assertIn("await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12)", script)
+        self.assertIn("if (directTyping) return true", script)
+
     def test_web_image_search_removes_license_filter_only_when_protection_is_off(self) -> None:
         collector = main.GoogleImageCollageCollector()
 
@@ -209,6 +232,22 @@ class TistoryNativeImageTests(unittest.TestCase):
                 loaded = main.AppStateStore.load()
 
             self.assertFalse(loaded.tistory_reference_image_protection_mode)
+
+    def test_tistory_input_mode_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            settings = main.WordPressSettings(
+                tistory_input_mode=main.TEXT_INPUT_MODE_TYPING,
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+
+            self.assertEqual(loaded.tistory_input_mode, main.TEXT_INPUT_MODE_TYPING)
 
     def test_reference_image_is_inserted_in_article_middle(self) -> None:
         article = "".join(f"<p>본문 {index}</p>" for index in range(1, 7))
@@ -508,6 +547,7 @@ class TistoryNativeImageTests(unittest.TestCase):
                     publish_after_input=True,
                     write_url="https://example.tistory.com/manage/newpost",
                     reference_image_protection_mode=False,
+                    input_mode=main.TEXT_INPUT_MODE_TYPING,
                 )
                 worker.run()
 
@@ -520,6 +560,7 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn("CC BY-SA 4.0", script)
             self.assertNotIn("출처:", script)
             self.assertIn("const collageImages = []", script)
+            self.assertIn('const inputMode = "직접 타이핑"', script)
             event_types = [events.get_nowait()[0] for _ in range(events.qsize())]
             self.assertIn("tistory_automation_done", event_types)
 
