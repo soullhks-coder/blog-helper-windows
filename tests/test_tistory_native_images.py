@@ -1,3 +1,4 @@
+import json
 import queue
 import tempfile
 import unittest
@@ -122,8 +123,14 @@ class TistoryNativeImageTests(unittest.TestCase):
             "일본 지진 건물 붕괴 소식 일본 지진 건물 붕괴 여진",
         )
 
-    def test_reference_image_protection_mode_defaults_to_enabled(self) -> None:
-        self.assertTrue(main.WordPressSettings().tistory_reference_image_protection_mode)
+    def test_reference_image_protection_mode_defaults_to_disabled(self) -> None:
+        settings = main.WordPressSettings()
+
+        self.assertFalse(settings.tistory_reference_image_protection_mode)
+        self.assertIn(
+            main.TISTORY_PROTECTION_OFF_MIGRATION,
+            settings.applied_settings_migrations,
+        )
 
     def test_tistory_input_mode_defaults_to_fast_and_normalizes_unknown_values(self) -> None:
         self.assertEqual(
@@ -244,6 +251,55 @@ class TistoryNativeImageTests(unittest.TestCase):
                 loaded = main.AppStateStore.load()
 
             self.assertFalse(loaded.tistory_reference_image_protection_mode)
+
+    def test_v1_1_23_migration_turns_existing_protection_mode_off_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            state_file.write_text(
+                json.dumps(
+                    {"tistory_reference_image_protection_mode": True},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                loaded = main.AppStateStore.load()
+
+            migrated_payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertFalse(loaded.tistory_reference_image_protection_mode)
+            self.assertFalse(migrated_payload["tistory_reference_image_protection_mode"])
+            self.assertIn(
+                main.TISTORY_PROTECTION_OFF_MIGRATION,
+                migrated_payload["applied_settings_migrations"],
+            )
+
+    def test_v1_1_23_migration_does_not_override_later_user_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            state_file.write_text(
+                json.dumps(
+                    {
+                        "tistory_reference_image_protection_mode": True,
+                        "applied_settings_migrations": [
+                            main.TISTORY_PROTECTION_OFF_MIGRATION
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                loaded = main.AppStateStore.load()
+
+            self.assertTrue(loaded.tistory_reference_image_protection_mode)
 
     def test_tistory_input_mode_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

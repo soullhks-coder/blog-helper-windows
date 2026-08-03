@@ -118,6 +118,7 @@ TISTORY_ADSENSE_MIDDLE_HTML = (
     '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7920445775975888"\n'
     '     crossorigin="anonymous"></script>\n'
 )
+TISTORY_PROTECTION_OFF_MIGRATION = "1.1.23:tistory-reference-image-protection-off"
 # The running app only follows GitHub's tiny latest-release redirect. Five
 # minutes keeps long-running, multi-PC installations responsive without
 # wasting API quota or network traffic.
@@ -1339,7 +1340,10 @@ class WordPressSettings:
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
     tistory_input_mode: str = TEXT_INPUT_MODE_FAST
-    tistory_reference_image_protection_mode: bool = True
+    tistory_reference_image_protection_mode: bool = False
+    applied_settings_migrations: list[str] = field(
+        default_factory=lambda: [TISTORY_PROTECTION_OFF_MIGRATION]
+    )
     naver_blog_profiles: list[dict] = field(default_factory=list)
     naver_blog_active_profile: str = "블로그 1"
     naver_blog_write_url: str = ""
@@ -1662,6 +1666,31 @@ class AppStateStore:
     )
 
     @staticmethod
+    def _apply_settings_migrations(payload: dict) -> tuple[dict, bool]:
+        migrations = payload.get("applied_settings_migrations", [])
+        if not isinstance(migrations, list):
+            migrations = []
+        migrations = [str(item) for item in migrations if str(item).strip()]
+        if TISTORY_PROTECTION_OFF_MIGRATION in migrations:
+            return payload, False
+
+        payload["tistory_reference_image_protection_mode"] = False
+        payload["applied_settings_migrations"] = [
+            *migrations,
+            TISTORY_PROTECTION_OFF_MIGRATION,
+        ]
+        return payload, True
+
+    @staticmethod
+    def _write_payload(payload: dict) -> None:
+        temporary_state_file = STATE_FILE.with_suffix(".json.tmp")
+        temporary_state_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_state_file.replace(STATE_FILE)
+
+    @staticmethod
     def load() -> WordPressSettings:
         if not STATE_FILE.exists():
             return PromptFileStore.load_into(WordPressSettings())
@@ -1670,6 +1699,13 @@ class AppStateStore:
             payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return PromptFileStore.load_into(WordPressSettings())
+
+        payload, migrated = AppStateStore._apply_settings_migrations(payload)
+        if migrated:
+            try:
+                AppStateStore._write_payload(payload)
+            except OSError:
+                pass
 
         username = payload.get("username", "")
         fallback_password = payload.get("app_password_fallback", "")
@@ -1750,7 +1786,11 @@ class AppStateStore:
             ),
             tistory_reference_image_protection_mode=payload.get(
                 "tistory_reference_image_protection_mode",
-                True,
+                False,
+            ),
+            applied_settings_migrations=payload.get(
+                "applied_settings_migrations",
+                [TISTORY_PROTECTION_OFF_MIGRATION],
             ),
             naver_blog_profiles=naver_profiles,
             naver_blog_active_profile=payload.get("naver_blog_active_profile", "블로그 1"),
@@ -1930,12 +1970,7 @@ class AppStateStore:
             KeychainStore.save_secret(KEYCHAIN_THREADS_ACCESS_TOKEN, settings.threads_access_token)
         if payload == previous_payload:
             return
-        temporary_state_file = STATE_FILE.with_suffix(".json.tmp")
-        temporary_state_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary_state_file.replace(STATE_FILE)
+        AppStateStore._write_payload(payload)
 
     @staticmethod
     def update_fields(**values) -> None:
@@ -1951,12 +1986,7 @@ class AppStateStore:
                 changed = True
         if not changed:
             return
-        temporary_state_file = STATE_FILE.with_suffix(".json.tmp")
-        temporary_state_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary_state_file.replace(STATE_FILE)
+        AppStateStore._write_payload(payload)
 
 
 class KeychainStore:
@@ -19015,7 +19045,7 @@ class KeywordApp(ctk.CTk):
             sticky="ew",
         )
 
-        self.tistory_reference_image_protection_var = tk.BooleanVar(value=True)
+        self.tistory_reference_image_protection_var = tk.BooleanVar(value=False)
         self.tistory_reference_protection_switch = ctk.CTkSwitch(
             self.tistory_card,
             text="저작권 보호 모드 ON · 재사용 허용 이미지만 사용",
@@ -23822,11 +23852,11 @@ class KeywordApp(ctk.CTk):
         self.tistory_blog_url_entry.delete(0, "end")
         self.tistory_write_url_entry.delete(0, "end")
         self.tistory_input_mode_var.set(TEXT_INPUT_MODE_FAST)
-        self.tistory_reference_image_protection_var.set(True)
+        self.tistory_reference_image_protection_var.set(False)
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
         self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
-        self.wordpress_settings.tistory_reference_image_protection_mode = True
+        self.wordpress_settings.tistory_reference_image_protection_mode = False
         self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
