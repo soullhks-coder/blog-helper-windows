@@ -112,6 +112,12 @@ TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
 TEXT_INPUT_MODE_FAST = "빠른 입력"
 TEXT_INPUT_MODE_TYPING = "직접 타이핑"
 TEXT_INPUT_MODE_OPTIONS = (TEXT_INPUT_MODE_FAST, TEXT_INPUT_MODE_TYPING)
+TISTORY_ADSENSE_MIDDLE_MARKER = "BLOG_HELPER_TISTORY_ADSENSE_MIDDLE"
+TISTORY_ADSENSE_MIDDLE_HTML = (
+    f"\n<!-- {TISTORY_ADSENSE_MIDDLE_MARKER} -->\n"
+    '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7920445775975888"\n'
+    '     crossorigin="anonymous"></script>\n'
+)
 # The running app only follows GitHub's tiny latest-release redirect. Five
 # minutes keeps long-running, multi-PC installations responsive without
 # wasting API quota or network traffic.
@@ -871,6 +877,13 @@ def insert_html_near_middle(article_html: str, html_to_insert: str) -> str:
         return article_html[:insert_at] + html_to_insert + article_html[insert_at:]
     midpoint = max(0, len(article_html) // 2)
     return article_html[:midpoint] + html_to_insert + article_html[midpoint:]
+
+
+def insert_tistory_adsense_script(article_html: str) -> str:
+    content = (article_html or "").strip()
+    if TISTORY_ADSENSE_MIDDLE_MARKER in content:
+        return content
+    return insert_html_near_middle(content, TISTORY_ADSENSE_MIDDLE_HTML)
 
 
 def append_external_link_buttons(article_html: str, links: list[dict]) -> str:
@@ -11877,6 +11890,13 @@ class TistoryAutomationWorker(threading.Thread):
                         )
                     )
 
+            article_html = insert_tistory_adsense_script(article_html)
+            self.result_queue.put(
+                (
+                    "tistory_progress",
+                    "애드센스 광고 스크립트를 HTML 본문 중간에 삽입했습니다.",
+                )
+            )
             prepared_article_html, article_native_files = prepare_tistory_native_attachment_html(
                 article_html,
                 self.title,

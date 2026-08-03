@@ -148,6 +148,18 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertIn("await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12)", script)
         self.assertIn("if (directTyping) return true", script)
 
+    def test_tistory_adsense_script_is_inserted_in_article_middle_once(self) -> None:
+        article = "<p>첫 문단</p><p>둘째 문단</p><p>셋째 문단</p><p>마지막 문단</p>"
+
+        inserted = main.insert_tistory_adsense_script(article)
+        inserted_again = main.insert_tistory_adsense_script(inserted)
+
+        self.assertIn(main.TISTORY_ADSENSE_MIDDLE_MARKER, inserted)
+        self.assertIn("ca-pub-7920445775975888", inserted)
+        self.assertLess(inserted.index("ca-pub-7920445775975888"), inserted.index("셋째 문단"))
+        self.assertEqual(inserted_again.count(main.TISTORY_ADSENSE_MIDDLE_MARKER), 1)
+        self.assertEqual(inserted_again.count("ca-pub-7920445775975888"), 1)
+
     def test_web_image_search_removes_license_filter_only_when_protection_is_off(self) -> None:
         collector = main.GoogleImageCollageCollector()
 
@@ -561,6 +573,8 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn("출처:", script)
             self.assertIn("const collageImages = []", script)
             self.assertIn('const inputMode = "직접 타이핑"', script)
+            self.assertIn(main.TISTORY_ADSENSE_MIDDLE_MARKER, script)
+            self.assertIn("ca-pub-7920445775975888", script)
             event_types = [events.get_nowait()[0] for _ in range(events.qsize())]
             self.assertIn("tistory_automation_done", event_types)
 
