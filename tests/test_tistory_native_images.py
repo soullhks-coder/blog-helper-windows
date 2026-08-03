@@ -9,6 +9,29 @@ import main
 
 
 class TistoryNativeImageTests(unittest.TestCase):
+    def test_published_entry_url_is_read_from_tistory_publish_sheet(self) -> None:
+        class FakePage:
+            url = "https://soullhka.tistory.com/manage/newpost/"
+
+            def evaluate(self, _script: str) -> list[str]:
+                return [
+                    "URL https://soullhka.tistory.com/entry/혹세무민-뜻과-유래",
+                ]
+
+        self.assertEqual(
+            main.find_tistory_published_entry_url(FakePage()),
+            "https://soullhka.tistory.com/entry/혹세무민-뜻과-유래",
+        )
+
+    def test_relative_tistory_entry_url_uses_blog_origin(self) -> None:
+        self.assertEqual(
+            main.normalize_tistory_entry_url(
+                "/entry/테스트-글",
+                "https://example.tistory.com/manage/newpost/",
+            ),
+            "https://example.tistory.com/entry/테스트-글",
+        )
+
     def test_representative_image_replaces_old_preview_through_thumb_box_input(self) -> None:
         class FakeInput:
             selected_path = ""

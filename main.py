@@ -6293,6 +6293,75 @@ def find_tistory_public_publish_button_rect(page) -> dict | None:
     )
 
 
+def normalize_tistory_entry_url(value: str, base_url: str = "") -> str:
+    """Return a clean Tistory entry URL found in a page value or text block."""
+    decoded = unescape(str(value or "")).strip()
+    if not decoded:
+        return ""
+
+    candidates = re.findall(
+        r"https?://[^\s\"'<>]+/entry/[^\s\"'<>]+|/entry/[^\s\"'<>]+",
+        decoded,
+        flags=re.I,
+    )
+    for candidate in candidates:
+        candidate = candidate.rstrip(".,;:!?)>]}'\"")
+        if candidate.startswith("/entry/"):
+            candidate = urljoin(base_url, candidate)
+        parsed = urlparse(candidate)
+        if parsed.scheme in {"http", "https"} and parsed.netloc.endswith("tistory.com") and "/entry/" in parsed.path:
+            return candidate
+    return ""
+
+
+def find_tistory_published_entry_url(page, base_url: str = "") -> str:
+    """Read the actual entry URL from the publish sheet or the post-publish page."""
+    values: list[str] = [str(getattr(page, "url", "") or "")]
+    try:
+        page_values = page.evaluate(
+            """
+() => {
+  const values = [String(window.location.href || '')];
+  const selectors = [
+    '.ReactModal__Content--after-open input[value*="/entry/"]',
+    '.ReactModal__Content--after-open textarea',
+    '.ReactModal__Content--after-open a[href*="/entry/"]',
+    '.ReactModal__Content--after-open [data-url*="/entry/"]',
+    '.ReactModal__Content--after-open [data-link*="/entry/"]',
+    '.ReactModal__Content--after-open',
+    'link[rel="canonical"]'
+  ];
+  for (const selector of selectors) {
+    for (const node of Array.from(document.querySelectorAll(selector))) {
+      for (const value of [
+        node.href,
+        node.value,
+        node.getAttribute?.('data-url'),
+        node.getAttribute?.('data-link'),
+        node.innerText,
+        node.textContent
+      ]) {
+        const text = String(value || '').trim();
+        if (text && !values.includes(text)) values.push(text);
+      }
+    }
+  }
+  return values.slice(0, 120);
+}
+"""
+        )
+        values.extend(str(value or "") for value in (page_values or []))
+    except Exception:
+        pass
+
+    effective_base_url = base_url or values[0]
+    for value in values:
+        entry_url = normalize_tistory_entry_url(value, effective_base_url)
+        if entry_url:
+            return entry_url
+    return ""
+
+
 def click_tistory_publish_now_native(page, result_queue: queue.Queue | None = None) -> bool:
     if result_queue:
         result_queue.put(("tistory_progress", "티스토리 발행일을 '예약'이 아닌 '현재'로 강제 선택 중입니다..."))
@@ -8410,7 +8479,7 @@ def run_tistory_playwright_automation(
     login_timeout_seconds: int = 300,
     native_image_files: dict[str, str] | None = None,
     representative_image_path: str = "",
-) -> tuple[bool, str]:
+) -> tuple[bool, str | dict[str, str]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -8531,12 +8600,29 @@ def run_tistory_playwright_automation(
                         representative_image_path,
                         result_queue,
                     )
+                published_url = find_tistory_published_entry_url(page, write_url)
                 published = click_tistory_public_publish_native(page, result_queue)
                 if not published:
                     raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
-                page.wait_for_timeout(5000)
+                deadline = time.time() + 15
+                attempts = 0
+                while time.time() < deadline:
+                    attempts += 1
+                    page.wait_for_timeout(500)
+                    detected_url = find_tistory_published_entry_url(page, write_url)
+                    if detected_url:
+                        published_url = detected_url
+                    current_url = str(page.url or "")
+                    if published_url and ("/entry/" in current_url or attempts >= 8):
+                        break
                 mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
-                return True, f"Playwright {mode_label} 모드로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
+                message = f"Playwright {mode_label} 모드로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
+                if published_url:
+                    result_queue.put(("tistory_progress", f"발행된 티스토리 글 주소를 확인했습니다: {published_url}"))
+                return True, {
+                    "message": message,
+                    "published_url": published_url,
+                }
             mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
             return True, f"Playwright {mode_label} 모드로 티스토리 제목·본문 자동입력을 완료했습니다."
         except PlaywrightTimeoutError as exc:
@@ -11955,7 +12041,17 @@ class TistoryAutomationWorker(threading.Thread):
                 representative_image_path=self.thumbnail_path if self.publish_after_input else "",
             )
             if success:
-                self.result_queue.put(("tistory_automation_done", message))
+                if isinstance(message, dict):
+                    done_payload = {
+                        "message": str(message.get("message") or "티스토리 자동화를 완료했습니다."),
+                        "published_url": str(message.get("published_url") or "").strip(),
+                    }
+                else:
+                    done_payload = {
+                        "message": str(message or "티스토리 자동화를 완료했습니다."),
+                        "published_url": "",
+                    }
+                self.result_queue.put(("tistory_automation_done", done_payload))
             else:
                 self.result_queue.put(("tistory_automation_error", message))
         except Exception as exc:  # pragma: no cover - runtime handling
@@ -12516,6 +12612,7 @@ class KeywordApp(ctk.CTk):
         self.generated_article_title = ""
         self.generated_article_html = ""
         self.last_published_url = ""
+        self.last_published_urls: dict[str, str] = {}
         self.automation_queue = list(self.wordpress_settings.automation_queue or [])
         self.password_visible = False
         self.current_page = "writing"
@@ -12935,8 +13032,26 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14),
         ).pack(padx=24, pady=(0, 18))
 
+        action_row = ctk.CTkFrame(card, fg_color="transparent")
+        action_row.pack(padx=24, pady=(0, 18))
+
+        published_urls = self._completed_published_post_urls()
+        view_button = ctk.CTkButton(
+            action_row,
+            text="보러가기",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#1faa4a",
+            hover_color="#16913e",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            state="normal" if published_urls else "disabled",
+            command=self._open_completed_published_posts,
+        )
+        view_button.grid(row=0, column=0, padx=(0, 10))
+
         confirm_button = ctk.CTkButton(
-            card,
+            action_row,
             text="확인",
             width=170,
             height=44,
@@ -12946,7 +13061,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
             command=self._close_writing_complete_dialog_and_reset,
         )
-        confirm_button.pack(padx=24, pady=(0, 18))
+        confirm_button.grid(row=0, column=1)
 
         dialog.update_idletasks()
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
@@ -25292,6 +25407,7 @@ class KeywordApp(ctk.CTk):
         self.keyword_status_label.configure(text="썸네일 완료 후 자동 업로드 파이프라인 실행 중...")
         self.publish_status_label.configure(text="업로드 작업을 시작했습니다. 잠시만 기다려 주세요.", text_color="#6dadff")
         self.last_published_url = ""
+        self.last_published_urls = {}
         if hasattr(self, "open_published_post_button"):
             self.open_published_post_button.configure(state="disabled")
         self.publish_progress_bar.configure(mode="indeterminate")
@@ -25362,6 +25478,10 @@ class KeywordApp(ctk.CTk):
         )
         self.publish_progress_bar.configure(mode="indeterminate")
         self.publish_progress_bar.start()
+        self.last_published_url = ""
+        self.last_published_urls = {}
+        if hasattr(self, "open_published_post_button"):
+            self.open_published_post_button.configure(state="disabled")
         self.tistory_automation_worker = TistoryAutomationWorker(
             title=title,
             article_html=article_html,
@@ -25894,14 +26014,25 @@ class KeywordApp(ctk.CTk):
                     self.publish_progress_bar.start()
                     self.publish_status_label.configure(text=payload, text_color="#6dadff")
                 elif event_type == "tistory_automation_done":
+                    if isinstance(payload, dict):
+                        tistory_message = str(payload.get("message") or "티스토리 자동화를 완료했습니다.")
+                        tistory_published_url = str(payload.get("published_url") or "").strip()
+                    else:
+                        tistory_message = str(payload or "티스토리 자동화를 완료했습니다.")
+                        tistory_published_url = ""
+                    if tistory_published_url:
+                        self._remember_published_post_url("tistory", tistory_published_url)
                     self._stop_writing_auto_progress()
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(1.0)
                     self.publish_status_label.configure(text="티스토리 전용 Chrome 자동입력과 공개발행을 완료했습니다.", text_color="#48d980")
                     self.keyword_status_label.configure(text="티스토리 Playwright 자동화 완료")
-                    self._update_quick_status("티스토리 자동화 완료", payload, "#48d980")
+                    self._update_quick_status("티스토리 자동화 완료", tistory_message, "#48d980")
                     if self.active_automation_upload_item_id and self.active_automation_tistory_pending:
+                        item = self._find_automation_queue_item(self.active_automation_upload_item_id)
+                        if item is not None and tistory_published_url:
+                            item["published_url"] = tistory_published_url
                         self._finalize_active_automation_publish(success=True, status_message="티스토리 공개발행 완료")
                     else:
                         if self.pending_upload_cleanup_paths:
@@ -26251,9 +26382,13 @@ class KeywordApp(ctk.CTk):
             published_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
         if not published_url and blogspot:
             published_url = str(blogspot.get("link") or "").strip()
-        self.last_published_url = published_url
-        if hasattr(self, "open_published_post_button"):
-            self.open_published_post_button.configure(state="normal" if published_url else "disabled")
+        if wordpress:
+            self._remember_published_post_url(
+                "wordpress",
+                str(wordpress.get("link") or wordpress.get("post_url") or "").strip(),
+            )
+        if blogspot:
+            self._remember_published_post_url("blogspot", str(blogspot.get("link") or "").strip())
         message = []
         if wordpress:
             message.append("워드프레스 업로드 완료")
@@ -26545,6 +26680,35 @@ class KeywordApp(ctk.CTk):
     def _update_quick_status(self, title: str, detail: str, color: str) -> None:
         self.quick_status_label.configure(text=title, text_color=color)
         self.quick_status_detail.configure(text=detail)
+
+    def _remember_published_post_url(self, platform: str, published_url: str) -> None:
+        published_url = str(published_url or "").strip()
+        if not published_url.startswith(("http://", "https://")):
+            return
+        platform_key = str(platform or "blog").strip().lower() or "blog"
+        self.last_published_urls[platform_key] = published_url
+        self.last_published_url = published_url
+        if hasattr(self, "open_published_post_button"):
+            self.open_published_post_button.configure(state="normal")
+
+    def _completed_published_post_urls(self) -> list[str]:
+        urls: list[str] = []
+        for published_url in self.last_published_urls.values():
+            clean_url = str(published_url or "").strip()
+            if clean_url.startswith(("http://", "https://")) and clean_url not in urls:
+                urls.append(clean_url)
+        if not urls and self.last_published_url.startswith(("http://", "https://")):
+            urls.append(self.last_published_url)
+        return urls
+
+    def _open_completed_published_posts(self) -> None:
+        published_urls = self._completed_published_post_urls()
+        if not published_urls:
+            messagebox.showinfo("링크 없음", "아직 열 수 있는 발행 글 링크가 없습니다.")
+            return
+        self._close_writing_complete_dialog_and_reset()
+        for published_url in published_urls:
+            self._open_source_url(published_url)
 
     def _open_last_published_post(self) -> None:
         if not self.last_published_url:
