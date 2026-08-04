@@ -204,8 +204,37 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertIn('const inputMode = "직접 타이핑"', script)
         self.assertIn("const typeNativeValue = async", script)
         self.assertIn("await typeNativeValue(target, title, '제목', 28)", script)
-        self.assertIn("await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12)", script)
-        self.assertIn("if (directTyping) return true", script)
+        self.assertIn("await typeCodeMirrorValue(codeMirror.CodeMirror, composedHtml)", script)
+        self.assertIn("codeMirror.save?.()", script)
+        self.assertIn("bodyContentLooksComplete", script)
+        self.assertIn("tinyEditor.setContent(composedHtml)", script)
+        self.assertIn("bodyVerified", script)
+        self.assertIn("completionBlocked", script)
+
+    def test_tistory_body_updates_codemirror_before_hidden_textarea(self) -> None:
+        script = main.build_tistory_editor_automation_script(
+            "본문 검증 제목",
+            "<p>사진만 남지 않아야 하는 충분한 길이의 본문입니다.</p>",
+        )
+
+        set_body_start = script.index("const setHtmlBody = async")
+        set_body_end = script.index("const currentHtmlEditorContent", set_body_start)
+        set_body_script = script[set_body_start:set_body_end]
+        self.assertLess(
+            set_body_script.index("document.querySelector('.CodeMirror')"),
+            set_body_script.index("document.querySelector('#editor-tistory')"),
+        )
+        self.assertIn("bodyContentLooksComplete(tistoryHtmlEditor.value", set_body_script)
+
+    def test_tistory_publish_is_blocked_until_rich_body_is_verified(self) -> None:
+        script = main.build_tistory_editor_automation_script(
+            "발행 차단 제목",
+            "<p>본문 검증에 실패하면 완료 버튼을 누르지 않습니다.</p>",
+            publish_after_input=True,
+        )
+
+        self.assertIn("action === 'click_complete' && !modeOnly && !results.bodyVerified", script)
+        self.assertIn("results.completionBlocked = true", script)
 
     def test_tistory_adsense_script_is_inserted_in_article_middle_once(self) -> None:
         article = "<p>첫 문단</p><p>둘째 문단</p><p>셋째 문단</p><p>마지막 문단</p>"

@@ -4763,6 +4763,22 @@ def build_tistory_editor_automation_script(
     return sourceHtml.slice(0, insertAt) + collageBlock + sourceHtml.slice(insertAt);
   }};
   const composedHtml = thumbnailHtml + insertCollageInMiddle(html, collageHtml);
+  const normalizeEditorText = (value) => String(value || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+  const textFromHtml = (value) => {{
+    try {{
+      const parsed = new DOMParser().parseFromString(String(value || ''), 'text/html');
+      for (const node of Array.from(parsed.querySelectorAll('script, style, noscript'))) node.remove();
+      return normalizeEditorText(parsed.body?.textContent || '');
+    }} catch (_error) {{
+      return normalizeEditorText(String(value || '').replace(/<[^>]+>/g, ' '));
+    }}
+  }};
+  const expectedBodyTextLength = textFromHtml(composedHtml).length;
+  const minimumBodyTextLength = expectedBodyTextLength <= 80
+    ? Math.max(1, Math.floor(expectedBodyTextLength * 0.5))
+    : Math.max(80, Math.floor(expectedBodyTextLength * 0.5));
+  const bodyTextLength = (value) => textFromHtml(value).length;
+  const bodyContentLooksComplete = (value) => bodyTextLength(value) >= minimumBodyTextLength;
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const allowDialogs = () => {{
     try {{
@@ -4865,7 +4881,10 @@ def build_tistory_editor_automation_script(
     if (!directTyping) {{
       codeMirror.focus();
       codeMirror.setValue(value);
-      return true;
+      try {{ codeMirror.save?.(); }} catch (_error) {{}}
+      const textArea = codeMirror.getTextArea?.();
+      if (textArea) fire(textArea);
+      return bodyContentLooksComplete(codeMirror.getValue?.() || value);
     }}
     codeMirror.focus();
     codeMirror.setValue('');
@@ -4879,7 +4898,10 @@ def build_tistory_editor_automation_script(
       }}
       await wait(characters[index] === '\\n' ? 40 : 12);
     }}
-    return true;
+    try {{ codeMirror.save?.(); }} catch (_error) {{}}
+    const textArea = codeMirror.getTextArea?.();
+    if (textArea) fire(textArea);
+    return bodyContentLooksComplete(codeMirror.getValue?.() || '');
   }};
 
   const pressKey = (node, key, code, keyCode) => {{
@@ -5009,20 +5031,24 @@ def build_tistory_editor_automation_script(
   }};
 
   const setHtmlBody = async () => {{
-    const tistoryHtmlEditor = document.querySelector('#editor-tistory');
-    if (tistoryHtmlEditor) {{
-      return await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12);
-    }}
-
+    // Tistory HTML mode is backed by CodeMirror. Updating only its hidden
+    // textarea is discarded when the editor switches back to basic mode.
     const codeMirror = document.querySelector('.CodeMirror');
     if (codeMirror && codeMirror.CodeMirror) {{
       return await typeCodeMirrorValue(codeMirror.CodeMirror, composedHtml);
     }}
 
+    const tistoryHtmlEditor = document.querySelector('#editor-tistory');
+    if (tistoryHtmlEditor) {{
+      const inserted = await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12);
+      return inserted && bodyContentLooksComplete(tistoryHtmlEditor.value || '');
+    }}
+
     const textarea = Array.from(document.querySelectorAll('textarea')).find((node) => visible(node) && !/제목/.test(node.placeholder || ''));
     if (textarea) {{
       textarea.focus();
-      return await typeNativeValue(textarea, composedHtml, '본문', 12);
+      const inserted = await typeNativeValue(textarea, composedHtml, '본문', 12);
+      return inserted && bodyContentLooksComplete(textarea.value || '');
     }}
 
     const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
@@ -5031,14 +5057,48 @@ def build_tistory_editor_automation_script(
       editable.focus();
       editable.innerHTML = composedHtml;
       fire(editable);
-      return true;
+      return bodyContentLooksComplete(editable.innerHTML || '');
     }}
     return false;
   }};
 
-  const setRichBody = () => {{
-    // 직접 타이핑 모드는 HTML 편집기에서 이미 입력을 끝냈으므로 중복 입력하지 않습니다.
-    if (directTyping) return true;
+  const currentHtmlEditorContent = () => {{
+    const codeMirror = document.querySelector('.CodeMirror');
+    if (codeMirror?.CodeMirror) return String(codeMirror.CodeMirror.getValue?.() || '');
+    return String(document.querySelector('#editor-tistory')?.value || '');
+  }};
+
+  const currentRichEditorContent = () => {{
+    try {{
+      const tinyContent = window.tinymce?.activeEditor?.getContent?.();
+      if (tinyContent) return String(tinyContent);
+    }} catch (_error) {{}}
+    const iframe = document.querySelector('#editor-tistory_ifr') || document.querySelector('iframe[title*="텍스트 편집기"], iframe[title*="편집기"]');
+    const iframeDocument = iframe && (iframe.contentDocument || iframe.contentWindow?.document);
+    const iframeBody = iframeDocument && (iframeDocument.querySelector('body#tinymce') || iframeDocument.body);
+    if (iframeBody) return String(iframeBody.innerHTML || '');
+    const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
+    return String(editable?.innerHTML || '');
+  }};
+
+  const setRichBody = async () => {{
+    const existingContent = currentRichEditorContent();
+    if (bodyContentLooksComplete(existingContent)) return true;
+
+    // If the HTML-to-basic-mode transition lost the typed body, repair the
+    // actual TinyMCE model once instead of continuing with an image-only post.
+    try {{
+      const tinyEditor = window.tinymce?.activeEditor;
+      if (tinyEditor?.setContent) {{
+        tinyEditor.focus?.();
+        tinyEditor.setContent(composedHtml);
+        tinyEditor.fire?.('input');
+        tinyEditor.fire?.('change');
+        await wait(250);
+        if (bodyContentLooksComplete(tinyEditor.getContent?.() || '')) return true;
+      }}
+    }} catch (_error) {{}}
+
     const iframe = document.querySelector('#editor-tistory_ifr') || document.querySelector('iframe[title*="텍스트 편집기"], iframe[title*="편집기"]');
     const iframeDocument = iframe && (iframe.contentDocument || iframe.contentWindow?.document);
     const iframeBody = iframeDocument && (iframeDocument.querySelector('body#tinymce') || iframeDocument.body);
@@ -5048,7 +5108,8 @@ def build_tistory_editor_automation_script(
       iframeBody.dispatchEvent(new Event('input', {{ bubbles: true }}));
       iframeBody.dispatchEvent(new Event('change', {{ bubbles: true }}));
       iframeBody.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true }}));
-      return true;
+      await wait(250);
+      return bodyContentLooksComplete(iframeBody.innerHTML || '');
     }}
 
     const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
@@ -5056,7 +5117,8 @@ def build_tistory_editor_automation_script(
       editable.focus();
       editable.innerHTML = composedHtml;
       fire(editable);
-      return true;
+      await wait(250);
+      return bodyContentLooksComplete(editable.innerHTML || '');
     }}
     return false;
   }};
@@ -5325,6 +5387,12 @@ def build_tistory_editor_automation_script(
     publicPublishOk: false,
     closeTabOk: false,
     thumbnailPrepared: Boolean(thumbnailContentUrl || thumbnailDataUrl),
+    expectedBodyTextLength,
+    htmlBodyTextLength: 0,
+    richBodyTextLength: 0,
+    bodyVerified: false,
+    bodyRecoveryUsed: false,
+    completionBlocked: false,
     modeOnly,
     inputMode
   }};
@@ -5353,6 +5421,7 @@ def build_tistory_editor_automation_script(
     }}
     if (action === 'set_body') {{
       results.bodyOk = modeOnly ? false : await setHtmlBody();
+      results.htmlBodyTextLength = bodyTextLength(currentHtmlEditorContent());
       return results.bodyOk;
     }}
     if (action === 'switch_basic') {{
@@ -5361,7 +5430,11 @@ def build_tistory_editor_automation_script(
       return results.basicModeOk;
     }}
     if (action === 'set_rich_body') {{
-      results.richBodyOk = modeOnly ? false : setRichBody();
+      const beforeLength = bodyTextLength(currentRichEditorContent());
+      results.richBodyOk = modeOnly ? false : await setRichBody();
+      results.richBodyTextLength = bodyTextLength(currentRichEditorContent());
+      results.bodyRecoveryUsed = !modeOnly && beforeLength < minimumBodyTextLength && results.richBodyOk;
+      results.bodyVerified = modeOnly ? false : results.richBodyOk && results.richBodyTextLength >= minimumBodyTextLength;
       return results.richBodyOk;
     }}
     if (action === 'set_tags') {{
@@ -5404,8 +5477,17 @@ def build_tistory_editor_automation_script(
 
   await wait(1200);
   for (const action of automationActions) {{
+    if (action === 'click_complete' && !modeOnly && !results.bodyVerified) {{
+      results.completionBlocked = true;
+      break;
+    }}
     await runAction(action);
     await wait(250);
+  }}
+
+  if (!modeOnly && !automationActions.includes('set_rich_body')) {{
+    results.richBodyTextLength = bodyTextLength(currentRichEditorContent());
+    results.bodyVerified = results.richBodyTextLength >= minimumBodyTextLength;
   }}
 
   window.clearInterval(dialogGuard);
@@ -8688,10 +8770,23 @@ def run_tistory_playwright_automation(
                 result_payload = json.loads(result_text)
             except (TypeError, json.JSONDecodeError):
                 result_payload = {}
+            expected_body_length = int(result_payload.get("expectedBodyTextLength") or 0)
+            html_body_length = int(result_payload.get("htmlBodyTextLength") or 0)
+            rich_body_length = int(result_payload.get("richBodyTextLength") or 0)
+            body_verified = bool(result_payload.get("bodyVerified"))
+            body_diagnostic = (
+                f"본문 검증: 원문 {expected_body_length}자 / HTML {html_body_length}자 / "
+                f"기본모드 {rich_body_length}자"
+            )
+            append_runtime_log("TISTORY", body_diagnostic)
+            result_queue.put(("tistory_progress", body_diagnostic))
             if not result_payload.get("titleOk") and not result_payload.get("modeOnly"):
                 raise RuntimeError("티스토리 제목 입력 요소를 찾지 못했습니다.")
-            if not (result_payload.get("bodyOk") or result_payload.get("richBodyOk")) and not result_payload.get("modeOnly"):
-                raise RuntimeError("티스토리 본문 입력 요소를 찾지 못했습니다.")
+            if not result_payload.get("modeOnly") and not body_verified:
+                raise RuntimeError(
+                    "티스토리 본문이 실제 편집기에 반영되지 않아 사진만 발행되는 것을 막고 중단했습니다. "
+                    f"{body_diagnostic}. 편집기 화면을 닫지 말고 다시 시도해 주세요."
+                )
             if publish_after_input:
                 if representative_image_path:
                     attach_tistory_representative_image_file(
