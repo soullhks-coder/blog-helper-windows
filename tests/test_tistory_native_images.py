@@ -52,13 +52,40 @@ class TistoryNativeImageTests(unittest.TestCase):
             "",
         )
 
-    def test_title_fallback_uses_custom_domain_and_utf8_slug(self) -> None:
+    def test_rss_match_returns_only_the_actual_published_entry_url(self) -> None:
+        rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel>
+          <item>
+            <title>김민재 주장 완장 착용, 바이에른 뮌헨 제주SK전 선발 출격 소식</title>
+            <link>https://info.soullhk.kr/entry/actual-entry-42</link>
+          </item>
+        </channel></rss>"""
+
         self.assertEqual(
-            main.build_tistory_entry_url_from_title(
+            main.find_tistory_entry_url_in_rss(
+                rss_xml,
                 "https://info.soullhk.kr/",
-                "인공눈물 오인 사고 주의보",
+                "김민재 주장 완장 착용,  바이에른 뮌헨 제주SK전 선발 출격 소식",
             ),
-            "https://info.soullhk.kr/entry/%EC%9D%B8%EA%B3%B5%EB%88%88%EB%AC%BC-%EC%98%A4%EC%9D%B8-%EC%82%AC%EA%B3%A0-%EC%A3%BC%EC%9D%98%EB%B3%B4",
+            "https://info.soullhk.kr/entry/actual-entry-42",
+        )
+
+    def test_rss_mismatch_never_guesses_an_entry_url(self) -> None:
+        rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel>
+          <item>
+            <title>다른 글</title>
+            <link>https://info.soullhk.kr/entry/other-entry</link>
+          </item>
+        </channel></rss>"""
+
+        self.assertEqual(
+            main.find_tistory_entry_url_in_rss(
+                rss_xml,
+                "https://info.soullhk.kr/",
+                "맨시티 포든 방한 소식",
+            ),
+            "",
         )
 
     def test_representative_image_replaces_old_preview_through_thumb_box_input(self) -> None:

@@ -6372,23 +6372,78 @@ def normalize_tistory_entry_url(value: str, base_url: str = "") -> str:
     return ""
 
 
-def build_tistory_entry_url_from_title(public_blog_url: str, title: str) -> str:
-    """Build a safe final fallback for title-address Tistory blogs."""
-    origin = _tistory_public_origin(public_blog_url)
-    clean_title = plain_text_from_html(str(title or ""), limit=240)
-    clean_title = re.sub(r"[\\/?#%<>:{}|\[\]^`]+", " ", clean_title)
-    clean_title = re.sub(r"\s+", "-", clean_title).strip("-._ ")
-    if not origin or not clean_title:
-        return ""
-    return f"{origin}/entry/{quote(clean_title, safe='-._~')}"
-
-
 def find_tistory_entry_url_in_values(values: list[str], base_url: str = "") -> str:
     for value in values:
         entry_url = normalize_tistory_entry_url(value, base_url)
         if entry_url:
             return entry_url
     return ""
+
+
+def normalize_tistory_feed_title(value: str) -> str:
+    """Normalize editor and RSS titles for an exact published-post match."""
+    text = plain_text_from_html(unescape(str(value or "")), limit=500)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def find_tistory_entry_url_in_rss(
+    rss_xml: str,
+    public_blog_url: str,
+    expected_title: str,
+) -> str:
+    """Return an entry URL only when the RSS item title exactly matches."""
+    expected = normalize_tistory_feed_title(expected_title)
+    if not expected or not str(rss_xml or "").strip():
+        return ""
+    try:
+        root = ET.fromstring(str(rss_xml))
+    except ET.ParseError:
+        return ""
+
+    for item in root.iter():
+        if str(item.tag).rsplit("}", 1)[-1].lower() != "item":
+            continue
+        item_title = ""
+        item_link = ""
+        for child in list(item):
+            child_name = str(child.tag).rsplit("}", 1)[-1].lower()
+            if child_name == "title":
+                item_title = "".join(child.itertext()).strip()
+            elif child_name == "link":
+                item_link = "".join(child.itertext()).strip()
+        if normalize_tistory_feed_title(item_title) != expected:
+            continue
+        return normalize_tistory_entry_url(item_link, public_blog_url)
+    return ""
+
+
+def fetch_tistory_entry_url_from_rss(
+    public_blog_url: str,
+    expected_title: str,
+    timeout: float = 12.0,
+) -> str:
+    """Resolve the real public URL from Tistory RSS without guessing a slug."""
+    origin = _tistory_public_origin(public_blog_url)
+    if not origin or not normalize_tistory_feed_title(expected_title):
+        return ""
+    request = Request(
+        f"{origin}/rss",
+        headers={
+            "User-Agent": "Mozilla/5.0 (Blog Helper; Tistory publish verification)",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Cache-Control": "no-cache",
+        },
+    )
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urlopen(request, timeout=max(3.0, float(timeout)), context=ssl_context) as response:
+        payload = response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+    rss_xml = payload.decode(charset, errors="replace")
+    return find_tistory_entry_url_in_rss(
+        rss_xml,
+        public_blog_url,
+        expected_title,
+    )
 
 
 def find_tistory_published_entry_url(
@@ -8771,10 +8826,33 @@ def run_tistory_playwright_automation(
                             except Exception:
                                 pass
 
+                if not published_url and _tistory_public_origin(public_blog_url):
+                    result_queue.put(("tistory_progress", "티스토리 RSS에서 실제 공개 글 주소를 확인하고 있습니다..."))
+                    for attempt in range(4):
+                        try:
+                            published_url = fetch_tistory_entry_url_from_rss(
+                                public_blog_url,
+                                expected_title,
+                            )
+                        except (OSError, HTTPError, URLError, ValueError) as exc:
+                            append_runtime_log(
+                                "TISTORY",
+                                f"RSS 발행 주소 확인 {attempt + 1}/4 실패: {exc}",
+                            )
+                        if published_url:
+                            break
+                        if attempt < 3:
+                            page.wait_for_timeout(1800)
+
                 if not published_url:
-                    published_url = build_tistory_entry_url_from_title(
-                        public_blog_url,
-                        expected_title,
+                    append_runtime_log(
+                        "TISTORY",
+                        f"공개발행 URL 확인 실패 - 제목: {expected_title}",
+                    )
+                    raise RuntimeError(
+                        "공개발행 버튼은 눌렀지만 티스토리에서 실제 발행 글을 확인하지 못했습니다. "
+                        "존재하지 않는 주소를 임의로 만들지 않고 작업을 중단했습니다. "
+                        "티스토리 관리 화면에서 글이 발행됐는지 확인한 뒤 다시 시도해 주세요."
                     )
                 mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
                 message = f"Playwright {mode_label} 모드로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
