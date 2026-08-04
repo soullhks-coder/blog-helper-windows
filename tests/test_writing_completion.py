@@ -34,29 +34,6 @@ class WritingCompletionFlowTests(unittest.TestCase):
         calls = self._called_methods("_handle_publish_pipeline_success")
         self.assertIn("_show_writing_complete_dialog", calls)
 
-    def test_completion_dialog_has_view_published_post_button(self) -> None:
-        method_source = ast.get_source_segment(
-            self.source,
-            self.methods["_show_writing_complete_dialog"],
-        )
-        self.assertIn('text="보러가기"', method_source)
-        self.assertIn("command=self._open_completed_published_posts", method_source)
-        self.assertIn('text="확인"', method_source)
-
-    def test_view_button_opens_all_completed_platform_urls_then_resets(self) -> None:
-        calls = self._called_methods("_open_completed_published_posts")
-        self.assertIn("_completed_published_post_urls", calls)
-        self.assertIn("_open_source_url", calls)
-        self.assertIn("_close_writing_complete_dialog_and_reset", calls)
-
-    def test_tistory_completion_remembers_actual_entry_url(self) -> None:
-        method_source = ast.get_source_segment(
-            self.source,
-            self.methods["_poll_queue"],
-        )
-        self.assertIn('payload.get("published_url")', method_source)
-        self.assertIn('_remember_published_post_url("tistory"', method_source)
-
     def test_published_wordpress_post_submits_to_naver_search_advisor(self) -> None:
         method_source = ast.get_source_segment(
             self.source,

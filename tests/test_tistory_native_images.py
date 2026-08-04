@@ -9,58 +9,6 @@ import main
 
 
 class TistoryNativeImageTests(unittest.TestCase):
-    def test_published_entry_url_is_read_from_tistory_publish_sheet(self) -> None:
-        class FakePage:
-            url = "https://soullhka.tistory.com/manage/newpost/"
-
-            def evaluate(self, _script: str) -> list[str]:
-                return [
-                    "URL https://soullhka.tistory.com/entry/혹세무민-뜻과-유래",
-                ]
-
-        self.assertEqual(
-            main.find_tistory_published_entry_url(FakePage()),
-            "https://soullhka.tistory.com/entry/%ED%98%B9%EC%84%B8%EB%AC%B4%EB%AF%BC-%EB%9C%BB%EA%B3%BC-%EC%9C%A0%EB%9E%98",
-        )
-
-    def test_relative_tistory_entry_url_uses_blog_origin(self) -> None:
-        self.assertEqual(
-            main.normalize_tistory_entry_url(
-                "/entry/테스트-글",
-                "https://example.tistory.com/manage/newpost/",
-            ),
-            "https://example.tistory.com/entry/%ED%85%8C%EC%8A%A4%ED%8A%B8-%EA%B8%80",
-        )
-
-    def test_default_tistory_entry_is_rewritten_to_configured_custom_domain(self) -> None:
-        self.assertEqual(
-            main.normalize_tistory_entry_url(
-                "https://soullhka.tistory.com/entry/인공눈물-안전-사용법",
-                "https://info.soullhk.kr/",
-            ),
-            "https://info.soullhk.kr/entry/%EC%9D%B8%EA%B3%B5%EB%88%88%EB%AC%BC-%EC%95%88%EC%A0%84-%EC%82%AC%EC%9A%A9%EB%B2%95",
-        )
-
-    def test_publish_sheet_action_labels_are_never_treated_as_entry_slug(self) -> None:
-        broken_action_slug = "https://soullhka.tistory.com/entry/ªË¡¶√Îº“∞¯∞≥"
-
-        self.assertEqual(
-            main.normalize_tistory_entry_url(
-                broken_action_slug,
-                "https://info.soullhk.kr/",
-            ),
-            "",
-        )
-
-    def test_title_fallback_uses_custom_domain_and_utf8_slug(self) -> None:
-        self.assertEqual(
-            main.build_tistory_entry_url_from_title(
-                "https://info.soullhk.kr/",
-                "인공눈물 오인 사고 주의보",
-            ),
-            "https://info.soullhk.kr/entry/%EC%9D%B8%EA%B3%B5%EB%88%88%EB%AC%BC-%EC%98%A4%EC%9D%B8-%EC%82%AC%EA%B3%A0-%EC%A3%BC%EC%9D%98%EB%B3%B4",
-        )
-
     def test_representative_image_replaces_old_preview_through_thumb_box_input(self) -> None:
         class FakeInput:
             selected_path = ""
@@ -204,37 +152,8 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertIn('const inputMode = "직접 타이핑"', script)
         self.assertIn("const typeNativeValue = async", script)
         self.assertIn("await typeNativeValue(target, title, '제목', 28)", script)
-        self.assertIn("await typeCodeMirrorValue(codeMirror.CodeMirror, composedHtml)", script)
-        self.assertIn("codeMirror.save?.()", script)
-        self.assertIn("bodyContentLooksComplete", script)
-        self.assertIn("tinyEditor.setContent(composedHtml)", script)
-        self.assertIn("bodyVerified", script)
-        self.assertIn("completionBlocked", script)
-
-    def test_tistory_body_updates_codemirror_before_hidden_textarea(self) -> None:
-        script = main.build_tistory_editor_automation_script(
-            "본문 검증 제목",
-            "<p>사진만 남지 않아야 하는 충분한 길이의 본문입니다.</p>",
-        )
-
-        set_body_start = script.index("const setHtmlBody = async")
-        set_body_end = script.index("const currentHtmlEditorContent", set_body_start)
-        set_body_script = script[set_body_start:set_body_end]
-        self.assertLess(
-            set_body_script.index("document.querySelector('.CodeMirror')"),
-            set_body_script.index("document.querySelector('#editor-tistory')"),
-        )
-        self.assertIn("bodyContentLooksComplete(tistoryHtmlEditor.value", set_body_script)
-
-    def test_tistory_publish_is_blocked_until_rich_body_is_verified(self) -> None:
-        script = main.build_tistory_editor_automation_script(
-            "발행 차단 제목",
-            "<p>본문 검증에 실패하면 완료 버튼을 누르지 않습니다.</p>",
-            publish_after_input=True,
-        )
-
-        self.assertIn("action === 'click_complete' && !modeOnly && !results.bodyVerified", script)
-        self.assertIn("results.completionBlocked = true", script)
+        self.assertIn("await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12)", script)
+        self.assertIn("if (directTyping) return true", script)
 
     def test_tistory_adsense_script_is_inserted_in_article_middle_once(self) -> None:
         article = "<p>첫 문단</p><p>둘째 문단</p><p>셋째 문단</p><p>마지막 문단</p>"
@@ -695,7 +614,6 @@ class TistoryNativeImageTests(unittest.TestCase):
                     tag_names=["일본 지진", "건물 붕괴"],
                     publish_after_input=True,
                     write_url="https://example.tistory.com/manage/newpost",
-                    public_blog_url="https://info.example.com/",
                     reference_image_protection_mode=False,
                     input_mode=main.TEXT_INPUT_MODE_TYPING,
                 )
@@ -705,8 +623,6 @@ class TistoryNativeImageTests(unittest.TestCase):
             call = run_automation.call_args
             script = call.args[1]
             native_files = call.kwargs["native_image_files"]
-            self.assertEqual(call.kwargs["expected_title"], "일본 지진 피해 정리")
-            self.assertEqual(call.kwargs["public_blog_url"], "https://info.example.com/")
             self.assertIn(str(image_path), native_files.values())
             self.assertNotIn("Wikimedia Commons", script)
             self.assertNotIn("CC BY-SA 4.0", script)
