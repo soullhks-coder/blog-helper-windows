@@ -4763,6 +4763,22 @@ def build_tistory_editor_automation_script(
     return sourceHtml.slice(0, insertAt) + collageBlock + sourceHtml.slice(insertAt);
   }};
   const composedHtml = thumbnailHtml + insertCollageInMiddle(html, collageHtml);
+  const normalizeEditorText = (value) => String(value || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+  const textFromHtml = (value) => {{
+    try {{
+      const parsed = new DOMParser().parseFromString(String(value || ''), 'text/html');
+      for (const node of Array.from(parsed.querySelectorAll('script, style, noscript'))) node.remove();
+      return normalizeEditorText(parsed.body?.textContent || '');
+    }} catch (_error) {{
+      return normalizeEditorText(String(value || '').replace(/<[^>]+>/g, ' '));
+    }}
+  }};
+  const expectedBodyTextLength = textFromHtml(composedHtml).length;
+  const minimumBodyTextLength = expectedBodyTextLength <= 80
+    ? Math.max(1, Math.floor(expectedBodyTextLength * 0.5))
+    : Math.max(80, Math.floor(expectedBodyTextLength * 0.5));
+  const bodyTextLength = (value) => textFromHtml(value).length;
+  const bodyContentLooksComplete = (value) => bodyTextLength(value) >= minimumBodyTextLength;
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const allowDialogs = () => {{
     try {{
@@ -4865,7 +4881,10 @@ def build_tistory_editor_automation_script(
     if (!directTyping) {{
       codeMirror.focus();
       codeMirror.setValue(value);
-      return true;
+      try {{ codeMirror.save?.(); }} catch (_error) {{}}
+      const textArea = codeMirror.getTextArea?.();
+      if (textArea) fire(textArea);
+      return bodyContentLooksComplete(codeMirror.getValue?.() || value);
     }}
     codeMirror.focus();
     codeMirror.setValue('');
@@ -4879,7 +4898,10 @@ def build_tistory_editor_automation_script(
       }}
       await wait(characters[index] === '\\n' ? 40 : 12);
     }}
-    return true;
+    try {{ codeMirror.save?.(); }} catch (_error) {{}}
+    const textArea = codeMirror.getTextArea?.();
+    if (textArea) fire(textArea);
+    return bodyContentLooksComplete(codeMirror.getValue?.() || '');
   }};
 
   const pressKey = (node, key, code, keyCode) => {{
@@ -5009,20 +5031,24 @@ def build_tistory_editor_automation_script(
   }};
 
   const setHtmlBody = async () => {{
-    const tistoryHtmlEditor = document.querySelector('#editor-tistory');
-    if (tistoryHtmlEditor) {{
-      return await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12);
-    }}
-
+    // Tistory HTML mode is backed by CodeMirror. Updating only its hidden
+    // textarea is discarded when the editor switches back to basic mode.
     const codeMirror = document.querySelector('.CodeMirror');
     if (codeMirror && codeMirror.CodeMirror) {{
       return await typeCodeMirrorValue(codeMirror.CodeMirror, composedHtml);
     }}
 
+    const tistoryHtmlEditor = document.querySelector('#editor-tistory');
+    if (tistoryHtmlEditor) {{
+      const inserted = await typeNativeValue(tistoryHtmlEditor, composedHtml, '본문', 12);
+      return inserted && bodyContentLooksComplete(tistoryHtmlEditor.value || '');
+    }}
+
     const textarea = Array.from(document.querySelectorAll('textarea')).find((node) => visible(node) && !/제목/.test(node.placeholder || ''));
     if (textarea) {{
       textarea.focus();
-      return await typeNativeValue(textarea, composedHtml, '본문', 12);
+      const inserted = await typeNativeValue(textarea, composedHtml, '본문', 12);
+      return inserted && bodyContentLooksComplete(textarea.value || '');
     }}
 
     const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
@@ -5031,14 +5057,48 @@ def build_tistory_editor_automation_script(
       editable.focus();
       editable.innerHTML = composedHtml;
       fire(editable);
-      return true;
+      return bodyContentLooksComplete(editable.innerHTML || '');
     }}
     return false;
   }};
 
-  const setRichBody = () => {{
-    // 직접 타이핑 모드는 HTML 편집기에서 이미 입력을 끝냈으므로 중복 입력하지 않습니다.
-    if (directTyping) return true;
+  const currentHtmlEditorContent = () => {{
+    const codeMirror = document.querySelector('.CodeMirror');
+    if (codeMirror?.CodeMirror) return String(codeMirror.CodeMirror.getValue?.() || '');
+    return String(document.querySelector('#editor-tistory')?.value || '');
+  }};
+
+  const currentRichEditorContent = () => {{
+    try {{
+      const tinyContent = window.tinymce?.activeEditor?.getContent?.();
+      if (tinyContent) return String(tinyContent);
+    }} catch (_error) {{}}
+    const iframe = document.querySelector('#editor-tistory_ifr') || document.querySelector('iframe[title*="텍스트 편집기"], iframe[title*="편집기"]');
+    const iframeDocument = iframe && (iframe.contentDocument || iframe.contentWindow?.document);
+    const iframeBody = iframeDocument && (iframeDocument.querySelector('body#tinymce') || iframeDocument.body);
+    if (iframeBody) return String(iframeBody.innerHTML || '');
+    const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
+    return String(editable?.innerHTML || '');
+  }};
+
+  const setRichBody = async () => {{
+    const existingContent = currentRichEditorContent();
+    if (bodyContentLooksComplete(existingContent)) return true;
+
+    // If the HTML-to-basic-mode transition lost the typed body, repair the
+    // actual TinyMCE model once instead of continuing with an image-only post.
+    try {{
+      const tinyEditor = window.tinymce?.activeEditor;
+      if (tinyEditor?.setContent) {{
+        tinyEditor.focus?.();
+        tinyEditor.setContent(composedHtml);
+        tinyEditor.fire?.('input');
+        tinyEditor.fire?.('change');
+        await wait(250);
+        if (bodyContentLooksComplete(tinyEditor.getContent?.() || '')) return true;
+      }}
+    }} catch (_error) {{}}
+
     const iframe = document.querySelector('#editor-tistory_ifr') || document.querySelector('iframe[title*="텍스트 편집기"], iframe[title*="편집기"]');
     const iframeDocument = iframe && (iframe.contentDocument || iframe.contentWindow?.document);
     const iframeBody = iframeDocument && (iframeDocument.querySelector('body#tinymce') || iframeDocument.body);
@@ -5048,7 +5108,8 @@ def build_tistory_editor_automation_script(
       iframeBody.dispatchEvent(new Event('input', {{ bubbles: true }}));
       iframeBody.dispatchEvent(new Event('change', {{ bubbles: true }}));
       iframeBody.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true }}));
-      return true;
+      await wait(250);
+      return bodyContentLooksComplete(iframeBody.innerHTML || '');
     }}
 
     const editable = Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor')).find(visible);
@@ -5056,7 +5117,8 @@ def build_tistory_editor_automation_script(
       editable.focus();
       editable.innerHTML = composedHtml;
       fire(editable);
-      return true;
+      await wait(250);
+      return bodyContentLooksComplete(editable.innerHTML || '');
     }}
     return false;
   }};
@@ -5325,6 +5387,12 @@ def build_tistory_editor_automation_script(
     publicPublishOk: false,
     closeTabOk: false,
     thumbnailPrepared: Boolean(thumbnailContentUrl || thumbnailDataUrl),
+    expectedBodyTextLength,
+    htmlBodyTextLength: 0,
+    richBodyTextLength: 0,
+    bodyVerified: false,
+    bodyRecoveryUsed: false,
+    completionBlocked: false,
     modeOnly,
     inputMode
   }};
@@ -5353,6 +5421,7 @@ def build_tistory_editor_automation_script(
     }}
     if (action === 'set_body') {{
       results.bodyOk = modeOnly ? false : await setHtmlBody();
+      results.htmlBodyTextLength = bodyTextLength(currentHtmlEditorContent());
       return results.bodyOk;
     }}
     if (action === 'switch_basic') {{
@@ -5361,7 +5430,11 @@ def build_tistory_editor_automation_script(
       return results.basicModeOk;
     }}
     if (action === 'set_rich_body') {{
-      results.richBodyOk = modeOnly ? false : setRichBody();
+      const beforeLength = bodyTextLength(currentRichEditorContent());
+      results.richBodyOk = modeOnly ? false : await setRichBody();
+      results.richBodyTextLength = bodyTextLength(currentRichEditorContent());
+      results.bodyRecoveryUsed = !modeOnly && beforeLength < minimumBodyTextLength && results.richBodyOk;
+      results.bodyVerified = modeOnly ? false : results.richBodyOk && results.richBodyTextLength >= minimumBodyTextLength;
       return results.richBodyOk;
     }}
     if (action === 'set_tags') {{
@@ -5404,8 +5477,17 @@ def build_tistory_editor_automation_script(
 
   await wait(1200);
   for (const action of automationActions) {{
+    if (action === 'click_complete' && !modeOnly && !results.bodyVerified) {{
+      results.completionBlocked = true;
+      break;
+    }}
     await runAction(action);
     await wait(250);
+  }}
+
+  if (!modeOnly && !automationActions.includes('set_rich_body')) {{
+    results.richBodyTextLength = bodyTextLength(currentRichEditorContent());
+    results.bodyVerified = results.richBodyTextLength >= minimumBodyTextLength;
   }}
 
   window.clearInterval(dialogGuard);
@@ -6291,6 +6373,172 @@ def find_tistory_public_publish_button_rect(page) -> dict | None:
 }
 """
     )
+
+
+def _tistory_public_origin(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if not normalized.startswith(("http://", "https://")):
+        normalized = "https://" + normalized
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _is_invalid_tistory_entry_path(path: str) -> bool:
+    decoded_path = unquote(str(path or ""))
+    slug = decoded_path.split("/entry/", 1)[-1].strip("/ ")
+    compact = re.sub(r"[\s\-_/]+", "", slug)
+    if len(compact) < 2:
+        return True
+
+    variants = [compact]
+    try:
+        # macOS accessibility text can expose CP949 bytes as MacRoman glyphs.
+        recovered = compact.encode("mac_roman").decode("cp949")
+        if recovered not in variants:
+            variants.append(recovered)
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+
+    action_labels = {
+        "삭제취소공개",
+        "취소공개",
+        "현재예약",
+        "취소확인",
+        "공개발행",
+        "임시저장공개발행",
+    }
+    return any(value in action_labels for value in variants)
+
+
+def normalize_tistory_entry_url(value: str, base_url: str = "") -> str:
+    """Return a UTF-8 entry URL using the configured public Tistory origin."""
+    decoded = unescape(str(value or "")).replace("\\/", "/").strip()
+    if not decoded:
+        return ""
+
+    public_origin = _tistory_public_origin(base_url)
+    public_host = urlparse(public_origin).netloc.lower() if public_origin else ""
+    candidates = re.findall(
+        r"https?://[^\s\"'<>]+/entry/[^\s\"'<>]+|/entry/[^\s\"'<>]+",
+        decoded,
+        flags=re.I,
+    )
+    for candidate in candidates:
+        candidate = candidate.rstrip(".,;:!?)>]}'\"")
+        if candidate.startswith("/entry/"):
+            candidate = urljoin(public_origin or base_url, candidate)
+        parsed = urlparse(candidate)
+        candidate_host = parsed.netloc.lower()
+        allowed_host = candidate_host.endswith("tistory.com") or (
+            public_host and candidate_host == public_host
+        )
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not allowed_host
+            or "/entry/" not in parsed.path
+            or _is_invalid_tistory_entry_path(parsed.path)
+        ):
+            continue
+
+        encoded_path = quote(
+            unquote(parsed.path),
+            safe="/-._~!$&'()*+,;=:@",
+        )
+        origin = public_origin or f"{parsed.scheme}://{parsed.netloc}"
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{origin}{encoded_path}{query}"
+    return ""
+
+
+def build_tistory_entry_url_from_title(public_blog_url: str, title: str) -> str:
+    """Build a safe final fallback for title-address Tistory blogs."""
+    origin = _tistory_public_origin(public_blog_url)
+    clean_title = plain_text_from_html(str(title or ""), limit=240)
+    clean_title = re.sub(r"[\\/?#%<>:{}|\[\]^`]+", " ", clean_title)
+    clean_title = re.sub(r"\s+", "-", clean_title).strip("-._ ")
+    if not origin or not clean_title:
+        return ""
+    return f"{origin}/entry/{quote(clean_title, safe='-._~')}"
+
+
+def find_tistory_entry_url_in_values(values: list[str], base_url: str = "") -> str:
+    for value in values:
+        entry_url = normalize_tistory_entry_url(value, base_url)
+        if entry_url:
+            return entry_url
+    return ""
+
+
+def find_tistory_published_entry_url(
+    page,
+    base_url: str = "",
+    expected_title: str = "",
+) -> str:
+    """Read a direct final entry URL without parsing publish-sheet button text."""
+    values: list[str] = [str(getattr(page, "url", "") or "")]
+    try:
+        expected_title_json = json.dumps(str(expected_title or ""), ensure_ascii=False)
+        extraction_script = r"""
+() => {
+  const expectedTitle = __BLOG_HELPER_EXPECTED_TITLE__;
+  const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const values = [String(window.location.href || '')];
+  const add = (value, first = false) => {
+    const text = String(value || '').trim();
+    if (!text || values.includes(text)) return;
+    if (first) values.unshift(text);
+    else values.push(text);
+  };
+  const selectors = [
+    '.ReactModal__Content--after-open input[value*="/entry/"]',
+    '.ReactModal__Content--after-open a[href*="/entry/"]',
+    '.ReactModal__Content--after-open [data-url*="/entry/"]',
+    '.ReactModal__Content--after-open [data-link*="/entry/"]',
+    'link[rel="canonical"][href*="/entry/"]',
+    'meta[property="og:url"][content*="/entry/"]'
+  ];
+  for (const selector of selectors) {
+    for (const node of Array.from(document.querySelectorAll(selector))) {
+      for (const value of [
+        node.href,
+        node.value,
+        node.content,
+        node.getAttribute?.('href'),
+        node.getAttribute?.('content'),
+        node.getAttribute?.('data-url'),
+        node.getAttribute?.('data-link')
+      ]) {
+        add(value);
+      }
+    }
+  }
+  if (expectedTitle) {
+    const normalizedExpected = normalizeText(expectedTitle);
+    for (const anchor of Array.from(document.querySelectorAll('a[href*="/entry/"]'))) {
+      const anchorTitle = normalizeText(anchor.innerText || anchor.textContent || anchor.title);
+      if (anchorTitle && (anchorTitle === normalizedExpected || anchorTitle.includes(normalizedExpected))) {
+        add(anchor.href || anchor.getAttribute('href'), true);
+      }
+    }
+  }
+  return values.slice(0, 120);
+}
+"""
+        extraction_script = extraction_script.replace(
+            "__BLOG_HELPER_EXPECTED_TITLE__",
+            expected_title_json,
+        )
+        page_values = page.evaluate(extraction_script)
+        values.extend(str(value or "") for value in (page_values or []))
+    except Exception:
+        pass
+
+    effective_base_url = base_url or values[0]
+    return find_tistory_entry_url_in_values(values, effective_base_url)
 
 
 def click_tistory_publish_now_native(page, result_queue: queue.Queue | None = None) -> bool:
@@ -8410,7 +8658,9 @@ def run_tistory_playwright_automation(
     login_timeout_seconds: int = 300,
     native_image_files: dict[str, str] | None = None,
     representative_image_path: str = "",
-) -> tuple[bool, str]:
+    public_blog_url: str = "",
+    expected_title: str = "",
+) -> tuple[bool, str | dict[str, str]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -8520,10 +8770,23 @@ def run_tistory_playwright_automation(
                 result_payload = json.loads(result_text)
             except (TypeError, json.JSONDecodeError):
                 result_payload = {}
+            expected_body_length = int(result_payload.get("expectedBodyTextLength") or 0)
+            html_body_length = int(result_payload.get("htmlBodyTextLength") or 0)
+            rich_body_length = int(result_payload.get("richBodyTextLength") or 0)
+            body_verified = bool(result_payload.get("bodyVerified"))
+            body_diagnostic = (
+                f"본문 검증: 원문 {expected_body_length}자 / HTML {html_body_length}자 / "
+                f"기본모드 {rich_body_length}자"
+            )
+            append_runtime_log("TISTORY", body_diagnostic)
+            result_queue.put(("tistory_progress", body_diagnostic))
             if not result_payload.get("titleOk") and not result_payload.get("modeOnly"):
                 raise RuntimeError("티스토리 제목 입력 요소를 찾지 못했습니다.")
-            if not (result_payload.get("bodyOk") or result_payload.get("richBodyOk")) and not result_payload.get("modeOnly"):
-                raise RuntimeError("티스토리 본문 입력 요소를 찾지 못했습니다.")
+            if not result_payload.get("modeOnly") and not body_verified:
+                raise RuntimeError(
+                    "티스토리 본문이 실제 편집기에 반영되지 않아 사진만 발행되는 것을 막고 중단했습니다. "
+                    f"{body_diagnostic}. 편집기 화면을 닫지 말고 다시 시도해 주세요."
+                )
             if publish_after_input:
                 if representative_image_path:
                     attach_tistory_representative_image_file(
@@ -8531,12 +8794,92 @@ def run_tistory_playwright_automation(
                         representative_image_path,
                         result_queue,
                     )
-                published = click_tistory_public_publish_native(page, result_queue)
-                if not published:
-                    raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
-                page.wait_for_timeout(5000)
+                published_url = ""
+                publish_response_values: list[str] = []
+
+                def capture_publish_response(response) -> None:
+                    try:
+                        response_url = str(response.url or "")
+                        request_method = str(response.request.method or "").upper()
+                        if "/entry/" in response_url:
+                            publish_response_values.append(response_url)
+                        if request_method != "POST" or not re.search(
+                            r"(?:post|entry|publish|manage)",
+                            response_url,
+                            flags=re.I,
+                        ):
+                            return
+                        response_text = str(response.text() or "")
+                        if response_text and len(response_text) <= 500_000:
+                            publish_response_values.append(response_text)
+                    except Exception:
+                        pass
+
+                page.on("response", capture_publish_response)
+                try:
+                    published = click_tistory_public_publish_native(page, result_queue)
+                    if not published:
+                        raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
+                    deadline = time.time() + 18
+                    while time.time() < deadline:
+                        page.wait_for_timeout(500)
+                        published_url = find_tistory_entry_url_in_values(
+                            publish_response_values,
+                            public_blog_url,
+                        )
+                        if not published_url:
+                            published_url = find_tistory_published_entry_url(
+                                page,
+                                public_blog_url,
+                                expected_title,
+                            )
+                        if published_url:
+                            break
+                finally:
+                    try:
+                        page.remove_listener("response", capture_publish_response)
+                    except Exception:
+                        pass
+
+                if not published_url and _tistory_public_origin(public_blog_url):
+                    lookup_page = None
+                    try:
+                        result_queue.put(("tistory_progress", "발행된 글의 정식 주소를 공개 블로그에서 확인하고 있습니다..."))
+                        lookup_page = context.new_page()
+                        lookup_page.set_default_timeout(12_000)
+                        lookup_page.goto(
+                            _tistory_public_origin(public_blog_url),
+                            wait_until="domcontentloaded",
+                        )
+                        lookup_page.wait_for_timeout(1500)
+                        published_url = find_tistory_published_entry_url(
+                            lookup_page,
+                            public_blog_url,
+                            expected_title,
+                        )
+                    except Exception:
+                        pass
+                    finally:
+                        if lookup_page is not None:
+                            try:
+                                lookup_page.close()
+                            except Exception:
+                                pass
+
+                if not published_url:
+                    published_url = build_tistory_entry_url_from_title(
+                        public_blog_url,
+                        expected_title,
+                    )
                 mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
-                return True, f"Playwright {mode_label} 모드로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
+                message = f"Playwright {mode_label} 모드로 티스토리 프롬프트 절차와 현재 공개발행을 완료했습니다."
+                if published_url:
+                    result_queue.put(("tistory_progress", f"발행된 티스토리 글 주소를 확인했습니다: {published_url}"))
+                    append_runtime_log("TISTORY", f"발행 글 정식 URL 확인: {published_url}")
+                return True, {
+                    "message": message,
+                    "published_url": published_url,
+                }
             mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
             return True, f"Playwright {mode_label} 모드로 티스토리 제목·본문 자동입력을 완료했습니다."
         except PlaywrightTimeoutError as exc:
@@ -11836,6 +12179,7 @@ class TistoryAutomationWorker(threading.Thread):
         publish_after_input: bool = False,
         close_after_publish: bool = False,
         write_url: str = "",
+        public_blog_url: str = "",
         reference_image_protection_mode: bool = True,
         input_mode: str = TEXT_INPUT_MODE_FAST,
     ) -> None:
@@ -11851,6 +12195,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.publish_after_input = publish_after_input
         self.close_after_publish = close_after_publish
         self.write_url = write_url
+        self.public_blog_url = public_blog_url
         self.reference_image_protection_mode = reference_image_protection_mode
         self.input_mode = normalize_text_input_mode(input_mode)
 
@@ -11953,9 +12298,21 @@ class TistoryAutomationWorker(threading.Thread):
                 publish_after_input=self.publish_after_input,
                 native_image_files=native_image_files,
                 representative_image_path=self.thumbnail_path if self.publish_after_input else "",
+                public_blog_url=self.public_blog_url,
+                expected_title=self.title,
             )
             if success:
-                self.result_queue.put(("tistory_automation_done", message))
+                if isinstance(message, dict):
+                    done_payload = {
+                        "message": str(message.get("message") or "티스토리 자동화를 완료했습니다."),
+                        "published_url": str(message.get("published_url") or "").strip(),
+                    }
+                else:
+                    done_payload = {
+                        "message": str(message or "티스토리 자동화를 완료했습니다."),
+                        "published_url": "",
+                    }
+                self.result_queue.put(("tistory_automation_done", done_payload))
             else:
                 self.result_queue.put(("tistory_automation_error", message))
         except Exception as exc:  # pragma: no cover - runtime handling
@@ -12271,6 +12628,7 @@ class PublishPipelineWorker(threading.Thread):
                     "status": "ready",
                     "message": "티스토리 글쓰기 화면을 열고 제목/본문/태그/대표이미지/공개발행 자동입력을 준비했습니다.",
                     "write_url": write_url,
+                    "public_blog_url": self.settings.tistory_blog_url,
                     "draft_file": str(TISTORY_DRAFT_FILE),
                     "title": self.title,
                     "html": prepared_article_html,
@@ -12516,6 +12874,7 @@ class KeywordApp(ctk.CTk):
         self.generated_article_title = ""
         self.generated_article_html = ""
         self.last_published_url = ""
+        self.last_published_urls: dict[str, str] = {}
         self.automation_queue = list(self.wordpress_settings.automation_queue or [])
         self.password_visible = False
         self.current_page = "writing"
@@ -12935,8 +13294,26 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14),
         ).pack(padx=24, pady=(0, 18))
 
+        action_row = ctk.CTkFrame(card, fg_color="transparent")
+        action_row.pack(padx=24, pady=(0, 18))
+
+        published_urls = self._completed_published_post_urls()
+        view_button = ctk.CTkButton(
+            action_row,
+            text="보러가기",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#1faa4a",
+            hover_color="#16913e",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            state="normal" if published_urls else "disabled",
+            command=self._open_completed_published_posts,
+        )
+        view_button.grid(row=0, column=0, padx=(0, 10))
+
         confirm_button = ctk.CTkButton(
-            card,
+            action_row,
             text="확인",
             width=170,
             height=44,
@@ -12946,7 +13323,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
             command=self._close_writing_complete_dialog_and_reset,
         )
-        confirm_button.pack(padx=24, pady=(0, 18))
+        confirm_button.grid(row=0, column=1)
 
         dialog.update_idletasks()
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
@@ -25292,6 +25669,7 @@ class KeywordApp(ctk.CTk):
         self.keyword_status_label.configure(text="썸네일 완료 후 자동 업로드 파이프라인 실행 중...")
         self.publish_status_label.configure(text="업로드 작업을 시작했습니다. 잠시만 기다려 주세요.", text_color="#6dadff")
         self.last_published_url = ""
+        self.last_published_urls = {}
         if hasattr(self, "open_published_post_button"):
             self.open_published_post_button.configure(state="disabled")
         self.publish_progress_bar.configure(mode="indeterminate")
@@ -25362,6 +25740,10 @@ class KeywordApp(ctk.CTk):
         )
         self.publish_progress_bar.configure(mode="indeterminate")
         self.publish_progress_bar.start()
+        self.last_published_url = ""
+        self.last_published_urls = {}
+        if hasattr(self, "open_published_post_button"):
+            self.open_published_post_button.configure(state="disabled")
         self.tistory_automation_worker = TistoryAutomationWorker(
             title=title,
             article_html=article_html,
@@ -25373,6 +25755,7 @@ class KeywordApp(ctk.CTk):
             tag_names=tag_names,
             publish_after_input=True,
             write_url=write_url,
+            public_blog_url=settings.tistory_blog_url,
             reference_image_protection_mode=settings.tistory_reference_image_protection_mode,
             input_mode=settings.tistory_input_mode,
         )
@@ -25894,14 +26277,25 @@ class KeywordApp(ctk.CTk):
                     self.publish_progress_bar.start()
                     self.publish_status_label.configure(text=payload, text_color="#6dadff")
                 elif event_type == "tistory_automation_done":
+                    if isinstance(payload, dict):
+                        tistory_message = str(payload.get("message") or "티스토리 자동화를 완료했습니다.")
+                        tistory_published_url = str(payload.get("published_url") or "").strip()
+                    else:
+                        tistory_message = str(payload or "티스토리 자동화를 완료했습니다.")
+                        tistory_published_url = ""
+                    if tistory_published_url:
+                        self._remember_published_post_url("tistory", tistory_published_url)
                     self._stop_writing_auto_progress()
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(1.0)
                     self.publish_status_label.configure(text="티스토리 전용 Chrome 자동입력과 공개발행을 완료했습니다.", text_color="#48d980")
                     self.keyword_status_label.configure(text="티스토리 Playwright 자동화 완료")
-                    self._update_quick_status("티스토리 자동화 완료", payload, "#48d980")
+                    self._update_quick_status("티스토리 자동화 완료", tistory_message, "#48d980")
                     if self.active_automation_upload_item_id and self.active_automation_tistory_pending:
+                        item = self._find_automation_queue_item(self.active_automation_upload_item_id)
+                        if item is not None and tistory_published_url:
+                            item["published_url"] = tistory_published_url
                         self._finalize_active_automation_publish(success=True, status_message="티스토리 공개발행 완료")
                     else:
                         if self.pending_upload_cleanup_paths:
@@ -26251,9 +26645,13 @@ class KeywordApp(ctk.CTk):
             published_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
         if not published_url and blogspot:
             published_url = str(blogspot.get("link") or "").strip()
-        self.last_published_url = published_url
-        if hasattr(self, "open_published_post_button"):
-            self.open_published_post_button.configure(state="normal" if published_url else "disabled")
+        if wordpress:
+            self._remember_published_post_url(
+                "wordpress",
+                str(wordpress.get("link") or wordpress.get("post_url") or "").strip(),
+            )
+        if blogspot:
+            self._remember_published_post_url("blogspot", str(blogspot.get("link") or "").strip())
         message = []
         if wordpress:
             message.append("워드프레스 업로드 완료")
@@ -26296,6 +26694,11 @@ class KeywordApp(ctk.CTk):
                         publish_after_input=True,
                         close_after_publish=False,
                         write_url=write_url,
+                        public_blog_url=str(
+                            tistory.get("public_blog_url")
+                            or self.wordpress_settings.tistory_blog_url
+                            or ""
+                        ),
                         reference_image_protection_mode=bool(
                             self.tistory_reference_image_protection_var.get()
                         ),
@@ -26369,6 +26772,11 @@ class KeywordApp(ctk.CTk):
                         publish_after_input=True,
                         close_after_publish=False,
                         write_url=write_url,
+                        public_blog_url=str(
+                            tistory.get("public_blog_url")
+                            or self.wordpress_settings.tistory_blog_url
+                            or ""
+                        ),
                         reference_image_protection_mode=bool(
                             self.tistory_reference_image_protection_var.get()
                         ),
@@ -26545,6 +26953,35 @@ class KeywordApp(ctk.CTk):
     def _update_quick_status(self, title: str, detail: str, color: str) -> None:
         self.quick_status_label.configure(text=title, text_color=color)
         self.quick_status_detail.configure(text=detail)
+
+    def _remember_published_post_url(self, platform: str, published_url: str) -> None:
+        published_url = str(published_url or "").strip()
+        if not published_url.startswith(("http://", "https://")):
+            return
+        platform_key = str(platform or "blog").strip().lower() or "blog"
+        self.last_published_urls[platform_key] = published_url
+        self.last_published_url = published_url
+        if hasattr(self, "open_published_post_button"):
+            self.open_published_post_button.configure(state="normal")
+
+    def _completed_published_post_urls(self) -> list[str]:
+        urls: list[str] = []
+        for published_url in self.last_published_urls.values():
+            clean_url = str(published_url or "").strip()
+            if clean_url.startswith(("http://", "https://")) and clean_url not in urls:
+                urls.append(clean_url)
+        if not urls and self.last_published_url.startswith(("http://", "https://")):
+            urls.append(self.last_published_url)
+        return urls
+
+    def _open_completed_published_posts(self) -> None:
+        published_urls = self._completed_published_post_urls()
+        if not published_urls:
+            messagebox.showinfo("링크 없음", "아직 열 수 있는 발행 글 링크가 없습니다.")
+            return
+        self._close_writing_complete_dialog_and_reset()
+        for published_url in published_urls:
+            self._open_source_url(published_url)
 
     def _open_last_published_post(self) -> None:
         if not self.last_published_url:
