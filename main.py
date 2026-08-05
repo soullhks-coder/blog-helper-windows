@@ -112,12 +112,23 @@ TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
 TEXT_INPUT_MODE_FAST = "빠른 입력"
 TEXT_INPUT_MODE_TYPING = "직접 타이핑"
 TEXT_INPUT_MODE_OPTIONS = (TEXT_INPUT_MODE_FAST, TEXT_INPUT_MODE_TYPING)
+TISTORY_AD_POSITION_ABOVE = "이미지 위"
+TISTORY_AD_POSITION_BELOW = "이미지 아래"
+TISTORY_AD_POSITION_OPTIONS = (
+    TISTORY_AD_POSITION_ABOVE,
+    TISTORY_AD_POSITION_BELOW,
+)
+DEFAULT_TISTORY_AD_CODE = (
+    '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7920445775975888"\n'
+    '     crossorigin="anonymous"></script>'
+)
 TISTORY_ADSENSE_MIDDLE_MARKER = "BLOG_HELPER_TISTORY_ADSENSE_MIDDLE"
 TISTORY_ADSENSE_MIDDLE_HTML = (
     f"\n<!-- {TISTORY_ADSENSE_MIDDLE_MARKER} -->\n"
-    '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7920445775975888"\n'
-    '     crossorigin="anonymous"></script>\n'
+    f"{DEFAULT_TISTORY_AD_CODE}\n"
 )
+TISTORY_ADSENSE_IMAGE_BLOCK_START = "BLOG_HELPER_TISTORY_ADSENSE_IMAGE_START"
+TISTORY_ADSENSE_IMAGE_BLOCK_END = "BLOG_HELPER_TISTORY_ADSENSE_IMAGE_END"
 TISTORY_PROTECTION_OFF_MIGRATION = "1.1.23:tistory-reference-image-protection-off"
 # The running app only follows GitHub's tiny latest-release redirect. Five
 # minutes keeps long-running, multi-PC installations responsive without
@@ -887,6 +898,81 @@ def insert_tistory_adsense_script(article_html: str) -> str:
     return insert_html_near_middle(content, TISTORY_ADSENSE_MIDDLE_HTML)
 
 
+def normalize_tistory_ad_position(value: str) -> str:
+    return (
+        value
+        if value in TISTORY_AD_POSITION_OPTIONS
+        else TISTORY_AD_POSITION_ABOVE
+    )
+
+
+def normalize_tistory_ad_count(value: object) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = 1
+    return max(0, min(count, 10))
+
+
+def _remove_blog_helper_tistory_ads(article_html: str) -> str:
+    content = (article_html or "").replace(TISTORY_ADSENSE_MIDDLE_HTML, "")
+    block_pattern = re.compile(
+        rf"\s*<!--\s*{re.escape(TISTORY_ADSENSE_IMAGE_BLOCK_START)}\s*-->"
+        rf".*?<!--\s*{re.escape(TISTORY_ADSENSE_IMAGE_BLOCK_END)}\s*-->\s*",
+        flags=re.I | re.S,
+    )
+    return block_pattern.sub("\n", content).strip()
+
+
+def insert_tistory_ads_near_images(
+    article_html: str,
+    ad_code: str,
+    position: str,
+    count: int,
+    randomizer: random.Random | None = None,
+) -> tuple[str, int]:
+    """Insert ads beside distinct body images without changing image markup."""
+
+    content = _remove_blog_helper_tistory_ads(article_html)
+    code = (ad_code or "").strip()
+    requested_count = normalize_tistory_ad_count(count)
+    if not content or not code or requested_count <= 0:
+        return content, 0
+
+    # Prefer the complete figure so captions and native-upload placeholders stay
+    # together. The img alternative covers images that are not wrapped in figure.
+    image_pattern = re.compile(
+        r"<figure\b(?=[^>]*(?:blog-helper-inline-image|data-blog-helper-inline-image-path))[^>]*>.*?</figure\s*>"
+        r"|<figure\b[^>]*>.*?<img\b[^>]*>.*?</figure\s*>"
+        r"|<img\b[^>]*>",
+        flags=re.I | re.S,
+    )
+    image_blocks = list(image_pattern.finditer(content))
+    if not image_blocks:
+        return content, 0
+
+    insert_count = min(requested_count, len(image_blocks))
+    picker = randomizer or random
+    selected_indices = picker.sample(range(len(image_blocks)), insert_count)
+    normalized_position = normalize_tistory_ad_position(position)
+
+    for sequence, image_index in enumerate(sorted(selected_indices, reverse=True), start=1):
+        image_match = image_blocks[image_index]
+        insertion_point = (
+            image_match.start()
+            if normalized_position == TISTORY_AD_POSITION_ABOVE
+            else image_match.end()
+        )
+        ad_html = (
+            f"\n<!-- {TISTORY_ADSENSE_IMAGE_BLOCK_START} -->\n"
+            f"<!-- {TISTORY_ADSENSE_MIDDLE_MARKER}:{sequence} -->\n"
+            f"{code}\n"
+            f"<!-- {TISTORY_ADSENSE_IMAGE_BLOCK_END} -->\n"
+        )
+        content = content[:insertion_point] + ad_html + content[insertion_point:]
+    return content, insert_count
+
+
 def append_external_link_buttons(article_html: str, links: list[dict]) -> str:
     article_html = (article_html or "").strip()
     if not article_html or CUSTOM_LINK_BUTTON_MARKER in article_html:
@@ -1341,6 +1427,10 @@ class WordPressSettings:
     tistory_write_url: str = ""
     tistory_input_mode: str = TEXT_INPUT_MODE_FAST
     tistory_reference_image_protection_mode: bool = False
+    tistory_ads_enabled: bool = True
+    tistory_ads_code: str = DEFAULT_TISTORY_AD_CODE
+    tistory_ads_position: str = TISTORY_AD_POSITION_ABOVE
+    tistory_ads_count: int = 1
     applied_settings_migrations: list[str] = field(
         default_factory=lambda: [TISTORY_PROTECTION_OFF_MIGRATION]
     )
@@ -1787,6 +1877,17 @@ class AppStateStore:
             tistory_reference_image_protection_mode=payload.get(
                 "tistory_reference_image_protection_mode",
                 False,
+            ),
+            tistory_ads_enabled=bool(payload.get("tistory_ads_enabled", True)),
+            tistory_ads_code=str(
+                payload.get("tistory_ads_code", DEFAULT_TISTORY_AD_CODE)
+                or ""
+            ),
+            tistory_ads_position=normalize_tistory_ad_position(
+                str(payload.get("tistory_ads_position", TISTORY_AD_POSITION_ABOVE))
+            ),
+            tistory_ads_count=normalize_tistory_ad_count(
+                payload.get("tistory_ads_count", 1)
             ),
             applied_settings_migrations=payload.get(
                 "applied_settings_migrations",
@@ -12165,6 +12266,10 @@ class TistoryAutomationWorker(threading.Thread):
         public_blog_url: str = "",
         reference_image_protection_mode: bool = True,
         input_mode: str = TEXT_INPUT_MODE_FAST,
+        ads_enabled: bool = True,
+        ads_code: str = DEFAULT_TISTORY_AD_CODE,
+        ads_position: str = TISTORY_AD_POSITION_ABOVE,
+        ads_count: int = 1,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -12181,6 +12286,10 @@ class TistoryAutomationWorker(threading.Thread):
         self.public_blog_url = public_blog_url
         self.reference_image_protection_mode = reference_image_protection_mode
         self.input_mode = normalize_text_input_mode(input_mode)
+        self.ads_enabled = bool(ads_enabled)
+        self.ads_code = str(ads_code or "")
+        self.ads_position = normalize_tistory_ad_position(ads_position)
+        self.ads_count = normalize_tistory_ad_count(ads_count)
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -12248,13 +12357,24 @@ class TistoryAutomationWorker(threading.Thread):
                         )
                     )
 
-            article_html = insert_tistory_adsense_script(article_html)
-            self.result_queue.put(
-                (
-                    "tistory_progress",
-                    "애드센스 광고 스크립트를 HTML 본문 중간에 삽입했습니다.",
+            inserted_ad_count = 0
+            if self.ads_enabled:
+                article_html, inserted_ad_count = insert_tistory_ads_near_images(
+                    article_html,
+                    self.ads_code,
+                    self.ads_position,
+                    self.ads_count,
                 )
-            )
+            if inserted_ad_count:
+                ad_message = (
+                    f"본문 이미지 {inserted_ad_count}곳의 {self.ads_position}에 "
+                    "Google 광고 코드를 삽입했습니다."
+                )
+            elif self.ads_enabled and self.ads_count > 0 and self.ads_code.strip():
+                ad_message = "본문에 첨부 이미지가 없어 Google 광고 삽입을 생략했습니다."
+            else:
+                ad_message = "티스토리 Google 광고 삽입 설정이 꺼져 있어 광고를 생략했습니다."
+            self.result_queue.put(("tistory_progress", ad_message))
             prepared_article_html, article_native_files = prepare_tistory_native_attachment_html(
                 article_html,
                 self.title,
@@ -19405,6 +19525,128 @@ class KeywordApp(ctk.CTk):
             sticky="ew",
         )
 
+        ads_frame = ctk.CTkFrame(
+            self.tistory_card,
+            corner_radius=16,
+            fg_color=("#e8eff9", "#111b2b"),
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        ads_frame.grid(row=7, column=0, padx=24, pady=(0, 16), sticky="ew")
+        ads_frame.grid_columnconfigure(0, weight=1)
+        ads_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            ads_frame,
+            text="Google 광고 코드",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, padx=16, pady=(14, 8), sticky="w")
+        self.tistory_ads_enabled_var = tk.BooleanVar(value=True)
+        self.tistory_ads_enabled_switch = ctk.CTkSwitch(
+            ads_frame,
+            text="본문 광고 적용 ON",
+            variable=self.tistory_ads_enabled_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=48,
+            switch_height=24,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_tistory_ads_enabled_changed,
+        )
+        self.tistory_ads_enabled_switch.grid(
+            row=0,
+            column=1,
+            padx=16,
+            pady=(14, 8),
+            sticky="e",
+        )
+        self.tistory_ads_code_box = ctk.CTkTextbox(
+            ads_frame,
+            height=108,
+            corner_radius=12,
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+            fg_color=("#f7f9fc", "#0c1525"),
+            font=ctk.CTkFont(family="Menlo", size=13),
+            wrap="word",
+        )
+        self.tistory_ads_code_box.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 12),
+            sticky="ew",
+        )
+        self.tistory_ads_code_box.insert("1.0", DEFAULT_TISTORY_AD_CODE)
+
+        placement_frame = ctk.CTkFrame(ads_frame, fg_color="transparent")
+        placement_frame.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 8),
+            sticky="ew",
+        )
+        placement_frame.grid_columnconfigure(1, weight=1)
+        placement_frame.grid_columnconfigure(3, weight=1)
+        ctk.CTkLabel(
+            placement_frame,
+            text="광고 위치",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 10), sticky="w")
+        self.tistory_ads_position_menu = ctk.CTkOptionMenu(
+            placement_frame,
+            values=list(TISTORY_AD_POSITION_OPTIONS),
+            height=38,
+            corner_radius=12,
+            fg_color=("#f7f9fc", "#263247"),
+            button_color=("#dce7f6", "#314761"),
+            button_hover_color=("#cbd8ea", "#3b526f"),
+            text_color=("#172033", "#e7eef9"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.tistory_ads_position_menu.grid(row=0, column=1, padx=(0, 18), sticky="ew")
+        self.tistory_ads_position_menu.set(TISTORY_AD_POSITION_ABOVE)
+        ctk.CTkLabel(
+            placement_frame,
+            text="삽입 개수",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=2, padx=(0, 10), sticky="w")
+        self.tistory_ads_count_menu = ctk.CTkOptionMenu(
+            placement_frame,
+            values=[str(value) for value in range(1, 11)],
+            height=38,
+            corner_radius=12,
+            fg_color=("#f7f9fc", "#263247"),
+            button_color=("#dce7f6", "#314761"),
+            button_hover_color=("#cbd8ea", "#3b526f"),
+            text_color=("#172033", "#e7eef9"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.tistory_ads_count_menu.grid(row=0, column=3, sticky="ew")
+        self.tistory_ads_count_menu.set("1")
+        ctk.CTkLabel(
+            ads_frame,
+            text=(
+                "본문 이미지 중 설정한 개수만큼 서로 다른 이미지를 무작위로 선택합니다. "
+                "예: 이미지 3장·광고 2개이면 서로 다른 이미지 2곳에 배치합니다."
+            ),
+            anchor="w",
+            justify="left",
+            text_color=("#607089", "#9aa7bb"),
+            wraplength=850,
+            font=ctk.CTkFont(size=13),
+        ).grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 14),
+            sticky="ew",
+        )
+
         self.tistory_reference_image_protection_var = tk.BooleanVar(value=False)
         self.tistory_reference_protection_switch = ctk.CTkSwitch(
             self.tistory_card,
@@ -19418,7 +19660,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_tistory_reference_image_mode_changed,
         )
         self.tistory_reference_protection_switch.grid(
-            row=7,
+            row=8,
             column=0,
             padx=24,
             pady=(0, 18),
@@ -19426,7 +19668,7 @@ class KeywordApp(ctk.CTk):
         )
 
         button_row = ctk.CTkFrame(self.tistory_card, fg_color="transparent")
-        button_row.grid(row=8, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=9, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -19473,7 +19715,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.tistory_status_label.grid(row=9, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.tistory_status_label.grid(row=10, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_threads_card(self) -> None:
         ctk.CTkLabel(
@@ -22859,6 +23101,19 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.tistory_reference_image_protection_mode
         )
         self._on_tistory_reference_image_mode_changed(save=False)
+        self.tistory_ads_enabled_var.set(self.wordpress_settings.tistory_ads_enabled)
+        self.tistory_ads_code_box.delete("1.0", "end")
+        self.tistory_ads_code_box.insert(
+            "1.0",
+            self.wordpress_settings.tistory_ads_code or DEFAULT_TISTORY_AD_CODE,
+        )
+        self.tistory_ads_position_menu.set(
+            normalize_tistory_ad_position(self.wordpress_settings.tistory_ads_position)
+        )
+        self.tistory_ads_count_menu.set(
+            str(normalize_tistory_ad_count(self.wordpress_settings.tistory_ads_count) or 1)
+        )
+        self._on_tistory_ads_enabled_changed(save=False)
         self.blogspot_blog_id_entry.insert(0, self.wordpress_settings.blogspot_blog_id)
         self.blogspot_client_id_entry.insert(0, self.wordpress_settings.blogspot_client_id)
         self.blogspot_redirect_uri_entry.insert(0, self.wordpress_settings.blogspot_redirect_uri or "http://localhost")
@@ -23606,6 +23861,14 @@ class KeywordApp(ctk.CTk):
             tistory_reference_image_protection_mode=bool(
                 self.tistory_reference_image_protection_var.get()
             ),
+            tistory_ads_enabled=bool(self.tistory_ads_enabled_var.get()),
+            tistory_ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+            tistory_ads_position=normalize_tistory_ad_position(
+                self.tistory_ads_position_menu.get()
+            ),
+            tistory_ads_count=normalize_tistory_ad_count(
+                self.tistory_ads_count_menu.get()
+            ),
             naver_blog_profiles=self._current_naver_blog_profiles() if hasattr(self, "naver_blog_profile_vars") else list(self.wordpress_settings.naver_blog_profiles or []),
             naver_blog_active_profile=(
                 self.naver_blog_active_profile_var.get()
@@ -24086,10 +24349,20 @@ class KeywordApp(ctk.CTk):
         if not settings.tistory_blog_url and not settings.tistory_write_url:
             messagebox.showerror("입력 오류", "티스토리 블로그 주소 또는 글쓰기 URL을 입력해 주세요.")
             return
+        if settings.tistory_ads_enabled and not settings.tistory_ads_code.strip():
+            messagebox.showerror(
+                "입력 오류",
+                "본문 광고 적용이 켜져 있습니다. Google 광고 코드를 입력하거나 광고 적용을 꺼 주세요.",
+            )
+            return
         self.wordpress_settings = settings
         AppStateStore.save(settings)
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
-        self._update_quick_status("티스토리 저장됨", "글쓰기 화면 연결 정보를 저장했습니다.", "#48d980")
+        self._update_quick_status(
+            "티스토리 저장됨",
+            "글쓰기 연결과 본문 Google 광고 배치 설정을 저장했습니다.",
+            "#48d980",
+        )
 
     def _on_tistory_input_mode_changed(
         self,
@@ -24128,6 +24401,15 @@ class KeywordApp(ctk.CTk):
             if widget is not None:
                 widget.configure(text=text)
         self.wordpress_settings.tistory_reference_image_protection_mode = enabled
+        if save:
+            self._save_ui_state()
+
+    def _on_tistory_ads_enabled_changed(self, save: bool = True) -> None:
+        enabled = bool(self.tistory_ads_enabled_var.get())
+        self.tistory_ads_enabled_switch.configure(
+            text="본문 광고 적용 ON" if enabled else "본문 광고 적용 OFF"
+        )
+        self.wordpress_settings.tistory_ads_enabled = enabled
         if save:
             self._save_ui_state()
 
@@ -24213,12 +24495,22 @@ class KeywordApp(ctk.CTk):
         self.tistory_write_url_entry.delete(0, "end")
         self.tistory_input_mode_var.set(TEXT_INPUT_MODE_FAST)
         self.tistory_reference_image_protection_var.set(False)
+        self.tistory_ads_enabled_var.set(True)
+        self.tistory_ads_code_box.delete("1.0", "end")
+        self.tistory_ads_code_box.insert("1.0", DEFAULT_TISTORY_AD_CODE)
+        self.tistory_ads_position_menu.set(TISTORY_AD_POSITION_ABOVE)
+        self.tistory_ads_count_menu.set("1")
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
         self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
         self.wordpress_settings.tistory_reference_image_protection_mode = False
+        self.wordpress_settings.tistory_ads_enabled = True
+        self.wordpress_settings.tistory_ads_code = DEFAULT_TISTORY_AD_CODE
+        self.wordpress_settings.tistory_ads_position = TISTORY_AD_POSITION_ABOVE
+        self.wordpress_settings.tistory_ads_count = 1
         self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
+        self._on_tistory_ads_enabled_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
         self.tistory_status_label.configure(text="● 티스토리 초기화 완료", text_color="#9aa7bb")
         self._update_quick_status("티스토리 초기화", "새로운 티스토리 주소를 입력해 주세요.", "#9aa7bb")
@@ -25741,6 +26033,10 @@ class KeywordApp(ctk.CTk):
             public_blog_url=settings.tistory_blog_url,
             reference_image_protection_mode=settings.tistory_reference_image_protection_mode,
             input_mode=settings.tistory_input_mode,
+            ads_enabled=settings.tistory_ads_enabled,
+            ads_code=settings.tistory_ads_code,
+            ads_position=settings.tistory_ads_position,
+            ads_count=settings.tistory_ads_count,
         )
         self.tistory_automation_worker.start()
 
@@ -26688,6 +26984,14 @@ class KeywordApp(ctk.CTk):
                         input_mode=normalize_text_input_mode(
                             self.tistory_input_mode_var.get()
                         ),
+                        ads_enabled=bool(self.tistory_ads_enabled_var.get()),
+                        ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+                        ads_position=normalize_tistory_ad_position(
+                            self.tistory_ads_position_menu.get()
+                        ),
+                        ads_count=normalize_tistory_ad_count(
+                            self.tistory_ads_count_menu.get()
+                        ),
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
@@ -26765,6 +27069,14 @@ class KeywordApp(ctk.CTk):
                         ),
                         input_mode=normalize_text_input_mode(
                             self.tistory_input_mode_var.get()
+                        ),
+                        ads_enabled=bool(self.tistory_ads_enabled_var.get()),
+                        ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+                        ads_position=normalize_tistory_ad_position(
+                            self.tistory_ads_position_menu.get()
+                        ),
+                        ads_count=normalize_tistory_ad_count(
+                            self.tistory_ads_count_menu.get()
                         ),
                     )
                     self.active_automation_tistory_pending = True

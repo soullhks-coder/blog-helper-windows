@@ -246,6 +246,91 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertEqual(inserted_again.count(main.TISTORY_ADSENSE_MIDDLE_MARKER), 1)
         self.assertEqual(inserted_again.count("ca-pub-7920445775975888"), 1)
 
+    def test_tistory_ads_are_inserted_above_distinct_random_images(self) -> None:
+        article = "".join(
+            f'<figure id="image-{index}"><img src="image-{index}.png"></figure>'
+            for index in range(1, 4)
+        )
+
+        inserted, inserted_count = main.insert_tistory_ads_near_images(
+            article,
+            "<script>custom-ad</script>",
+            main.TISTORY_AD_POSITION_ABOVE,
+            2,
+            randomizer=main.random.Random(7),
+        )
+
+        self.assertEqual(inserted_count, 2)
+        self.assertEqual(inserted.count(main.TISTORY_ADSENSE_IMAGE_BLOCK_START), 2)
+        self.assertEqual(inserted.count("<script>custom-ad</script>"), 2)
+        self.assertEqual(
+            len(
+                main.re.findall(
+                    rf"{main.TISTORY_ADSENSE_IMAGE_BLOCK_END}\s*-->\s*<figure",
+                    inserted,
+                    flags=main.re.S,
+                )
+            ),
+            2,
+        )
+
+    def test_tistory_ads_are_inserted_below_images_and_clamped_to_image_count(self) -> None:
+        article = (
+            '<figure id="one"><img src="one.png"></figure>'
+            '<figure id="two"><img src="two.png"></figure>'
+        )
+
+        inserted, inserted_count = main.insert_tistory_ads_near_images(
+            article,
+            "<script>custom-ad</script>",
+            main.TISTORY_AD_POSITION_BELOW,
+            8,
+            randomizer=main.random.Random(3),
+        )
+
+        self.assertEqual(inserted_count, 2)
+        self.assertEqual(inserted.count(main.TISTORY_ADSENSE_IMAGE_BLOCK_START), 2)
+        self.assertEqual(
+            len(
+                main.re.findall(
+                    rf"</figure>\s*<!--\s*{main.TISTORY_ADSENSE_IMAGE_BLOCK_START}",
+                    inserted,
+                    flags=main.re.S,
+                )
+            ),
+            2,
+        )
+
+    def test_tistory_image_ad_insertion_is_idempotent_and_skips_when_no_image(self) -> None:
+        article = '<figure><img src="one.png"></figure>'
+        inserted, first_count = main.insert_tistory_ads_near_images(
+            article,
+            "<script>custom-ad</script>",
+            main.TISTORY_AD_POSITION_ABOVE,
+            1,
+            randomizer=main.random.Random(1),
+        )
+        inserted_again, second_count = main.insert_tistory_ads_near_images(
+            inserted,
+            "<script>custom-ad</script>",
+            main.TISTORY_AD_POSITION_BELOW,
+            1,
+            randomizer=main.random.Random(2),
+        )
+        no_image_html, no_image_count = main.insert_tistory_ads_near_images(
+            "<p>이미지 없는 본문</p>",
+            "<script>custom-ad</script>",
+            main.TISTORY_AD_POSITION_ABOVE,
+            2,
+        )
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 1)
+        self.assertEqual(inserted_again.count(main.TISTORY_ADSENSE_IMAGE_BLOCK_START), 1)
+        self.assertEqual(inserted_again.count("<script>custom-ad</script>"), 1)
+        self.assertEqual(no_image_count, 0)
+        self.assertEqual(no_image_html, "<p>이미지 없는 본문</p>")
+
     def test_web_image_search_removes_license_filter_only_when_protection_is_off(self) -> None:
         collector = main.GoogleImageCollageCollector()
 
@@ -395,6 +480,28 @@ class TistoryNativeImageTests(unittest.TestCase):
                 loaded = main.AppStateStore.load()
 
             self.assertEqual(loaded.tistory_input_mode, main.TEXT_INPUT_MODE_TYPING)
+
+    def test_tistory_ad_settings_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            settings = main.WordPressSettings(
+                tistory_ads_enabled=True,
+                tistory_ads_code="<script>saved-ad-code</script>",
+                tistory_ads_position=main.TISTORY_AD_POSITION_BELOW,
+                tistory_ads_count=4,
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+
+            self.assertTrue(loaded.tistory_ads_enabled)
+            self.assertEqual(loaded.tistory_ads_code, "<script>saved-ad-code</script>")
+            self.assertEqual(loaded.tistory_ads_position, main.TISTORY_AD_POSITION_BELOW)
+            self.assertEqual(loaded.tistory_ads_count, 4)
 
     def test_reference_image_is_inserted_in_article_middle(self) -> None:
         article = "".join(f"<p>본문 {index}</p>" for index in range(1, 7))
