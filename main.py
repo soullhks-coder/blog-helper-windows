@@ -122,6 +122,7 @@ DEFAULT_TISTORY_AD_CODE = (
     '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7920445775975888"\n'
     '     crossorigin="anonymous"></script>'
 )
+DEFAULT_TISTORY_AD_SLOT_ID = "5295351254"
 TISTORY_ADSENSE_MIDDLE_MARKER = "BLOG_HELPER_TISTORY_ADSENSE_MIDDLE"
 TISTORY_ADSENSE_MIDDLE_HTML = (
     f"\n<!-- {TISTORY_ADSENSE_MIDDLE_MARKER} -->\n"
@@ -914,6 +915,38 @@ def normalize_tistory_ad_count(value: object) -> int:
     return max(0, min(count, 10))
 
 
+def normalize_tistory_ad_slot_id(value: object) -> str:
+    return re.sub(r"\D", "", str(value or ""))[:20]
+
+
+def build_tistory_ad_placement_code(ad_code: str, ad_slot_id: str = "") -> str:
+    """Turn an AdSense loader-only snippet into a visible responsive ad unit."""
+
+    code = (ad_code or "").strip()
+    if not code or "adsbygoogle" not in code.lower():
+        return code
+    if re.search(r"<ins\b[^>]*\badsbygoogle\b", code, flags=re.I):
+        return code
+
+    client_match = re.search(
+        r"(?:client=|data-ad-client=['\"])(ca-pub-\d+)",
+        code,
+        flags=re.I,
+    )
+    slot_id = normalize_tistory_ad_slot_id(ad_slot_id)
+    if not client_match or not slot_id:
+        return code
+
+    client_id = client_match.group(1)
+    ad_unit = (
+        "\n<ins class=\"adsbygoogle\" style=\"display:block\" "
+        f"data-ad-client=\"{client_id}\" data-ad-slot=\"{slot_id}\" "
+        "data-ad-format=\"auto\" data-full-width-responsive=\"true\"></ins>\n"
+        "<script>(adsbygoogle = window.adsbygoogle || []).push({});</script>"
+    )
+    return f"{code}{ad_unit}"
+
+
 def _remove_blog_helper_tistory_ads(article_html: str) -> str:
     content = (article_html or "").replace(TISTORY_ADSENSE_MIDDLE_HTML, "")
     block_pattern = re.compile(
@@ -930,11 +963,12 @@ def insert_tistory_ads_near_images(
     position: str,
     count: int,
     randomizer: random.Random | None = None,
+    ad_slot_id: str = "",
 ) -> tuple[str, int]:
     """Insert ads beside distinct body images without changing image markup."""
 
     content = _remove_blog_helper_tistory_ads(article_html)
-    code = (ad_code or "").strip()
+    code = build_tistory_ad_placement_code(ad_code, ad_slot_id)
     requested_count = normalize_tistory_ad_count(count)
     if not content or not code or requested_count <= 0:
         return content, 0
@@ -1429,6 +1463,7 @@ class WordPressSettings:
     tistory_reference_image_protection_mode: bool = False
     tistory_ads_enabled: bool = True
     tistory_ads_code: str = DEFAULT_TISTORY_AD_CODE
+    tistory_ads_slot_id: str = DEFAULT_TISTORY_AD_SLOT_ID
     tistory_ads_position: str = TISTORY_AD_POSITION_ABOVE
     tistory_ads_count: int = 1
     applied_settings_migrations: list[str] = field(
@@ -1882,6 +1917,9 @@ class AppStateStore:
             tistory_ads_code=str(
                 payload.get("tistory_ads_code", DEFAULT_TISTORY_AD_CODE)
                 or ""
+            ),
+            tistory_ads_slot_id=normalize_tistory_ad_slot_id(
+                payload.get("tistory_ads_slot_id", DEFAULT_TISTORY_AD_SLOT_ID)
             ),
             tistory_ads_position=normalize_tistory_ad_position(
                 str(payload.get("tistory_ads_position", TISTORY_AD_POSITION_ABOVE))
@@ -12268,6 +12306,7 @@ class TistoryAutomationWorker(threading.Thread):
         input_mode: str = TEXT_INPUT_MODE_FAST,
         ads_enabled: bool = True,
         ads_code: str = DEFAULT_TISTORY_AD_CODE,
+        ads_slot_id: str = DEFAULT_TISTORY_AD_SLOT_ID,
         ads_position: str = TISTORY_AD_POSITION_ABOVE,
         ads_count: int = 1,
     ) -> None:
@@ -12288,6 +12327,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.input_mode = normalize_text_input_mode(input_mode)
         self.ads_enabled = bool(ads_enabled)
         self.ads_code = str(ads_code or "")
+        self.ads_slot_id = normalize_tistory_ad_slot_id(ads_slot_id)
         self.ads_position = normalize_tistory_ad_position(ads_position)
         self.ads_count = normalize_tistory_ad_count(ads_count)
 
@@ -12364,6 +12404,7 @@ class TistoryAutomationWorker(threading.Thread):
                     self.ads_code,
                     self.ads_position,
                     self.ads_count,
+                    ad_slot_id=self.ads_slot_id,
                 )
             if inserted_ad_count:
                 ad_message = (
@@ -12375,9 +12416,32 @@ class TistoryAutomationWorker(threading.Thread):
             else:
                 ad_message = "티스토리 Google 광고 삽입 설정이 꺼져 있어 광고를 생략했습니다."
             self.result_queue.put(("tistory_progress", ad_message))
+            append_runtime_log(
+                "TISTORY",
+                (
+                    f"본문 광고 준비: enabled={self.ads_enabled}, requested={self.ads_count}, "
+                    f"inserted={inserted_ad_count}, position={self.ads_position}, "
+                    f"slot={self.ads_slot_id or '없음'}"
+                ),
+            )
             prepared_article_html, article_native_files = prepare_tistory_native_attachment_html(
                 article_html,
                 self.title,
+            )
+            final_ad_unit_count = len(
+                re.findall(
+                    r"<ins\b[^>]*\badsbygoogle\b",
+                    prepared_article_html,
+                    flags=re.I,
+                )
+            )
+            append_runtime_log(
+                "TISTORY",
+                (
+                    "발행 직전 광고 단위 확인: "
+                    f"markers={prepared_article_html.count(TISTORY_ADSENSE_IMAGE_BLOCK_START)}, "
+                    f"units={final_ad_unit_count}"
+                ),
             )
             native_image_files.update(article_native_files)
             script = build_tistory_editor_automation_script(
@@ -19580,9 +19644,37 @@ class KeywordApp(ctk.CTk):
         )
         self.tistory_ads_code_box.insert("1.0", DEFAULT_TISTORY_AD_CODE)
 
+        slot_frame = ctk.CTkFrame(ads_frame, fg_color="transparent")
+        slot_frame.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 10),
+            sticky="ew",
+        )
+        slot_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            slot_frame,
+            text="광고 슬롯 ID",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 12), sticky="w")
+        self.tistory_ads_slot_entry = ctk.CTkEntry(
+            slot_frame,
+            height=38,
+            corner_radius=12,
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+            fg_color=("#f7f9fc", "#0c1525"),
+            placeholder_text="AdSense 광고 단위의 data-ad-slot 숫자",
+            font=ctk.CTkFont(size=14),
+        )
+        self.tistory_ads_slot_entry.grid(row=0, column=1, sticky="ew")
+        self.tistory_ads_slot_entry.insert(0, DEFAULT_TISTORY_AD_SLOT_ID)
+
         placement_frame = ctk.CTkFrame(ads_frame, fg_color="transparent")
         placement_frame.grid(
-            row=2,
+            row=3,
             column=0,
             columnspan=2,
             padx=16,
@@ -19631,7 +19723,7 @@ class KeywordApp(ctk.CTk):
             ads_frame,
             text=(
                 "본문 이미지 중 설정한 개수만큼 서로 다른 이미지를 무작위로 선택합니다. "
-                "예: 이미지 3장·광고 2개이면 서로 다른 이미지 2곳에 배치합니다."
+                "로더 코드만 입력해도 슬롯 ID를 이용해 실제 표시되는 반응형 광고 단위를 함께 만듭니다."
             ),
             anchor="w",
             justify="left",
@@ -19639,7 +19731,7 @@ class KeywordApp(ctk.CTk):
             wraplength=850,
             font=ctk.CTkFont(size=13),
         ).grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=2,
             padx=16,
@@ -23107,6 +23199,11 @@ class KeywordApp(ctk.CTk):
             "1.0",
             self.wordpress_settings.tistory_ads_code or DEFAULT_TISTORY_AD_CODE,
         )
+        self.tistory_ads_slot_entry.delete(0, "end")
+        self.tistory_ads_slot_entry.insert(
+            0,
+            self.wordpress_settings.tistory_ads_slot_id or DEFAULT_TISTORY_AD_SLOT_ID,
+        )
         self.tistory_ads_position_menu.set(
             normalize_tistory_ad_position(self.wordpress_settings.tistory_ads_position)
         )
@@ -23863,6 +23960,9 @@ class KeywordApp(ctk.CTk):
             ),
             tistory_ads_enabled=bool(self.tistory_ads_enabled_var.get()),
             tistory_ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+            tistory_ads_slot_id=normalize_tistory_ad_slot_id(
+                self.tistory_ads_slot_entry.get()
+            ),
             tistory_ads_position=normalize_tistory_ad_position(
                 self.tistory_ads_position_menu.get()
             ),
@@ -24355,6 +24455,17 @@ class KeywordApp(ctk.CTk):
                 "본문 광고 적용이 켜져 있습니다. Google 광고 코드를 입력하거나 광고 적용을 꺼 주세요.",
             )
             return
+        if (
+            settings.tistory_ads_enabled
+            and "adsbygoogle" in settings.tistory_ads_code.lower()
+            and "<ins" not in settings.tistory_ads_code.lower()
+            and not settings.tistory_ads_slot_id
+        ):
+            messagebox.showerror(
+                "입력 오류",
+                "현재 코드는 AdSense 로더 코드만 포함합니다. 실제 광고 표시를 위해 광고 슬롯 ID를 입력해 주세요.",
+            )
+            return
         self.wordpress_settings = settings
         AppStateStore.save(settings)
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
@@ -24498,6 +24609,8 @@ class KeywordApp(ctk.CTk):
         self.tistory_ads_enabled_var.set(True)
         self.tistory_ads_code_box.delete("1.0", "end")
         self.tistory_ads_code_box.insert("1.0", DEFAULT_TISTORY_AD_CODE)
+        self.tistory_ads_slot_entry.delete(0, "end")
+        self.tistory_ads_slot_entry.insert(0, DEFAULT_TISTORY_AD_SLOT_ID)
         self.tistory_ads_position_menu.set(TISTORY_AD_POSITION_ABOVE)
         self.tistory_ads_count_menu.set("1")
         self.wordpress_settings.tistory_blog_url = ""
@@ -24506,6 +24619,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_reference_image_protection_mode = False
         self.wordpress_settings.tistory_ads_enabled = True
         self.wordpress_settings.tistory_ads_code = DEFAULT_TISTORY_AD_CODE
+        self.wordpress_settings.tistory_ads_slot_id = DEFAULT_TISTORY_AD_SLOT_ID
         self.wordpress_settings.tistory_ads_position = TISTORY_AD_POSITION_ABOVE
         self.wordpress_settings.tistory_ads_count = 1
         self._on_tistory_input_mode_changed(save=False)
@@ -26035,6 +26149,7 @@ class KeywordApp(ctk.CTk):
             input_mode=settings.tistory_input_mode,
             ads_enabled=settings.tistory_ads_enabled,
             ads_code=settings.tistory_ads_code,
+            ads_slot_id=settings.tistory_ads_slot_id,
             ads_position=settings.tistory_ads_position,
             ads_count=settings.tistory_ads_count,
         )
@@ -26986,6 +27101,9 @@ class KeywordApp(ctk.CTk):
                         ),
                         ads_enabled=bool(self.tistory_ads_enabled_var.get()),
                         ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+                        ads_slot_id=normalize_tistory_ad_slot_id(
+                            self.tistory_ads_slot_entry.get()
+                        ),
                         ads_position=normalize_tistory_ad_position(
                             self.tistory_ads_position_menu.get()
                         ),
@@ -27072,6 +27190,9 @@ class KeywordApp(ctk.CTk):
                         ),
                         ads_enabled=bool(self.tistory_ads_enabled_var.get()),
                         ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+                        ads_slot_id=normalize_tistory_ad_slot_id(
+                            self.tistory_ads_slot_entry.get()
+                        ),
                         ads_position=normalize_tistory_ad_position(
                             self.tistory_ads_position_menu.get()
                         ),

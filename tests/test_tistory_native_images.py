@@ -274,6 +274,43 @@ class TistoryNativeImageTests(unittest.TestCase):
             2,
         )
 
+    def test_tistory_loader_only_code_builds_visible_ad_unit_with_slot(self) -> None:
+        article = '<figure><img src="one.png"></figure>'
+
+        inserted, inserted_count = main.insert_tistory_ads_near_images(
+            article,
+            main.DEFAULT_TISTORY_AD_CODE,
+            main.TISTORY_AD_POSITION_ABOVE,
+            1,
+            randomizer=main.random.Random(1),
+            ad_slot_id="5295351254",
+        )
+
+        self.assertEqual(inserted_count, 1)
+        self.assertIn('class="adsbygoogle"', inserted)
+        self.assertIn('data-ad-client="ca-pub-7920445775975888"', inserted)
+        self.assertIn('data-ad-slot="5295351254"', inserted)
+        self.assertIn("(adsbygoogle = window.adsbygoogle || []).push({});", inserted)
+
+    def test_tistory_complete_ad_unit_is_not_duplicated(self) -> None:
+        article = '<figure><img src="one.png"></figure>'
+        complete_code = (
+            main.DEFAULT_TISTORY_AD_CODE
+            + '\n<ins class="adsbygoogle" data-ad-client="ca-pub-1" data-ad-slot="123"></ins>'
+            + '\n<script>(adsbygoogle = window.adsbygoogle || []).push({});</script>'
+        )
+
+        inserted, _ = main.insert_tistory_ads_near_images(
+            article,
+            complete_code,
+            main.TISTORY_AD_POSITION_ABOVE,
+            1,
+            ad_slot_id="999",
+        )
+
+        self.assertEqual(inserted.count('class="adsbygoogle"'), 1)
+        self.assertNotIn('data-ad-slot="999"', inserted)
+
     def test_tistory_ads_are_inserted_below_images_and_clamped_to_image_count(self) -> None:
         article = (
             '<figure id="one"><img src="one.png"></figure>'
@@ -487,6 +524,7 @@ class TistoryNativeImageTests(unittest.TestCase):
             settings = main.WordPressSettings(
                 tistory_ads_enabled=True,
                 tistory_ads_code="<script>saved-ad-code</script>",
+                tistory_ads_slot_id="9876543210",
                 tistory_ads_position=main.TISTORY_AD_POSITION_BELOW,
                 tistory_ads_count=4,
             )
@@ -500,6 +538,7 @@ class TistoryNativeImageTests(unittest.TestCase):
 
             self.assertTrue(loaded.tistory_ads_enabled)
             self.assertEqual(loaded.tistory_ads_code, "<script>saved-ad-code</script>")
+            self.assertEqual(loaded.tistory_ads_slot_id, "9876543210")
             self.assertEqual(loaded.tistory_ads_position, main.TISTORY_AD_POSITION_BELOW)
             self.assertEqual(loaded.tistory_ads_count, 4)
 
