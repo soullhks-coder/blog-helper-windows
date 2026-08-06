@@ -12,12 +12,14 @@ from pathlib import Path
 
 from app_updater import (
     APP_VERSION,
+    ReleaseCatalogWorker,
     ReleaseVersionProbeWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
     _windows_restart_environment,
     _write_macos_update_script,
     _write_windows_update_script,
+    archived_version_target,
     delta_asset_name,
     is_newer_version,
     platform_asset_name,
@@ -94,6 +96,46 @@ class _ReleaseServer:
                     self.end_headers()
                     self.wfile.write(encoded)
                     return
+                if self.path == "/releases":
+                    payload = [
+                        {
+                            "tag_name": "v9.9.9",
+                            "name": "최신 테스트 릴리스",
+                            "published_at": "2026-08-07T00:00:00Z",
+                            "draft": False,
+                            "prerelease": False,
+                            "assets": [
+                                {
+                                    "name": platform_asset_name(),
+                                    "size": len(binary),
+                                    "digest": f"sha256:{hashlib.sha256(binary).hexdigest()}",
+                                    "browser_download_url": f"http://127.0.0.1:{port_getter()}/asset",
+                                }
+                            ],
+                        },
+                        {
+                            "tag_name": "v9.8.0",
+                            "name": "이전 테스트 릴리스",
+                            "published_at": "2026-08-06T00:00:00Z",
+                            "draft": False,
+                            "prerelease": False,
+                            "assets": [
+                                {
+                                    "name": platform_asset_name(),
+                                    "size": len(binary),
+                                    "digest": f"sha256:{hashlib.sha256(binary).hexdigest()}",
+                                    "browser_download_url": f"http://127.0.0.1:{port_getter()}/asset",
+                                }
+                            ],
+                        },
+                    ]
+                    encoded = json.dumps(payload).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                    return
                 if self.path == "/asset":
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
@@ -131,6 +173,10 @@ class _ReleaseServer:
     @property
     def latest_url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/latest"
+
+    @property
+    def releases_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/releases"
 
 
 class AppUpdaterTests(unittest.TestCase):
@@ -193,6 +239,57 @@ class AppUpdaterTests(unittest.TestCase):
             event_type, payload = result_queue.get(timeout=2)
             self.assertEqual(event_type, "update_probe_none")
             self.assertEqual(payload, "9.9.9")
+
+    def test_release_catalog_lists_full_platform_assets_in_version_order(self):
+        result_queue: queue.Queue = queue.Queue()
+        with _ReleaseServer(b"temporary release") as release_server:
+            worker = ReleaseCatalogWorker(
+                result_queue,
+                current_version=APP_VERSION,
+                api_url=release_server.releases_url,
+            )
+            worker.run()
+            event_type, payload = result_queue.get(timeout=2)
+            self.assertEqual(event_type, "version_catalog_done")
+            self.assertEqual([item["version"] for item in payload], ["9.9.9", "9.8.0"])
+            self.assertTrue(all(item["asset_name"] == platform_asset_name() for item in payload))
+
+    def test_download_worker_supports_isolated_version_manager_events(self):
+        binary = b"archived Blog Helper" * 1000
+        result_queue: queue.Queue = queue.Queue()
+        with _ReleaseServer(binary) as release_server, tempfile.TemporaryDirectory() as temp_dir:
+            payload = {
+                "version": "9.8.0",
+                "asset_name": platform_asset_name(),
+                "download_url": f"http://127.0.0.1:{release_server.server.server_address[1]}/asset",
+                "size": len(binary),
+                "digest": f"sha256:{hashlib.sha256(binary).hexdigest()}",
+                "update_kind": "archive",
+            }
+            worker = UpdateDownloadWorker(
+                result_queue,
+                payload,
+                Path(temp_dir),
+                progress_event="version_archive_progress",
+                success_event="version_archive_downloaded",
+                error_event="version_archive_error",
+            )
+            worker.run()
+            events = []
+            while not result_queue.empty():
+                events.append(result_queue.get_nowait())
+            self.assertTrue(any(event[0] == "version_archive_progress" for event in events))
+            completed = [event for event in events if event[0] == "version_archive_downloaded"]
+            self.assertEqual(len(completed), 1)
+            self.assertEqual(Path(completed[0][1]["local_path"]).read_bytes(), binary)
+
+    def test_archived_version_target_keeps_each_release_side_by_side(self):
+        root = Path("versions")
+        first = archived_version_target(root, "1.1.32")
+        second = archived_version_target(root, "v1.1.33")
+        self.assertNotEqual(first, second)
+        self.assertIn("v1.1.32", str(first))
+        self.assertIn("v1.1.33", str(second))
 
     def test_install_scripts_preserve_quoted_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

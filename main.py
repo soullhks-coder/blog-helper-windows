@@ -54,14 +54,19 @@ except ImportError:  # pragma: no cover - runtime handling
 from app_updater import (
     APP_VERSION,
     UPDATE_REPOSITORY,
+    ArchivedVersionPrepareWorker,
+    ReleaseCatalogWorker,
     ReleaseVersionProbeWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
+    archived_version_target,
     cleanup_old_downloads,
     is_frozen_app,
+    launch_archived_version,
     launch_update_installer,
     platform_asset_name,
     prepare_delta_update,
+    version_key,
 )
 from remote_control import (
     RemoteAgentConfig,
@@ -12973,6 +12978,18 @@ class KeywordApp(ctk.CTk):
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_probe_worker: ReleaseVersionProbeWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
+        self.version_catalog_worker: ReleaseCatalogWorker | None = None
+        self.version_archive_download_worker: UpdateDownloadWorker | None = None
+        self.version_archive_prepare_worker: ArchivedVersionPrepareWorker | None = None
+        self.version_catalog: dict[str, dict] = {}
+        self.pending_version_payload: dict | None = None
+        self.latest_available_version = (
+            os.environ.get("BLOG_HELPER_LATEST_CONTROLLER_VERSION", "").strip().lstrip("v")
+            or APP_VERSION
+        )
+        self.temporary_version_mode = bool(
+            os.environ.get("BLOG_HELPER_TEMPORARY_VERSION", "").strip()
+        )
         self._update_probe_job = None
         self._app_closing = False
         self.update_dialog: ctk.CTkToplevel | None = None
@@ -14329,7 +14346,11 @@ class KeywordApp(ctk.CTk):
 
         self.sidebar_version_label = ctk.CTkLabel(
             self.sidebar_frame,
-            text=f"현재 버전  v{APP_VERSION}",
+            text=(
+                f"현재 적용  v{APP_VERSION} · 임시"
+                if self.temporary_version_mode
+                else f"현재 적용  v{APP_VERSION}"
+            ),
             text_color="#77869a",
             font=ctk.CTkFont(size=11),
         )
@@ -14573,7 +14594,8 @@ class KeywordApp(ctk.CTk):
 
         self.basic_scroll = ctk.CTkScrollableFrame(self.settings_page, fg_color="transparent")
         self.basic_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
-        self.basic_scroll.grid_columnconfigure(0, weight=1)
+        self.basic_scroll.grid_columnconfigure(0, weight=4)
+        self.basic_scroll.grid_columnconfigure(1, weight=2)
         self._build_basic_settings_card()
 
         self.theme_scroll = ctk.CTkScrollableFrame(self.settings_page, fg_color="transparent")
@@ -14737,7 +14759,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#334760",
         )
-        card.grid(row=0, column=0, sticky="ew")
+        card.grid(row=0, column=0, sticky="nsew")
         card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
@@ -14938,6 +14960,319 @@ class KeywordApp(ctk.CTk):
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
         ).grid(row=5, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
+
+        self._build_version_manager_card()
+
+    def _build_version_manager_card(self) -> None:
+        palette = self._theme_palette()
+        card = ctk.CTkFrame(
+            self.basic_scroll,
+            fg_color=palette["card"],
+            corner_radius=28,
+            border_width=1,
+            border_color=palette["border"],
+            width=300,
+        )
+        card.grid(row=0, column=1, padx=(16, 0), sticky="nsew")
+        card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            card,
+            text="버전 관리",
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).grid(row=0, column=0, padx=22, pady=(26, 18), sticky="w")
+
+        latest_box = ctk.CTkFrame(
+            card,
+            fg_color=palette["input"],
+            corner_radius=16,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        latest_box.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
+        ctk.CTkLabel(
+            latest_box,
+            text="최신 버전",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=16, pady=(12, 2))
+        self.latest_version_value_label = ctk.CTkLabel(
+            latest_box,
+            text=f"v{self.latest_available_version}",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=20, weight="bold"),
+        )
+        self.latest_version_value_label.pack(anchor="w", padx=16, pady=(0, 12))
+
+        applied_box = ctk.CTkFrame(
+            card,
+            fg_color=palette["input"],
+            corner_radius=16,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        applied_box.grid(row=2, column=0, padx=20, pady=(0, 18), sticky="ew")
+        ctk.CTkLabel(
+            applied_box,
+            text="현재 적용 버전",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=16, pady=(12, 2))
+        self.applied_version_value_label = ctk.CTkLabel(
+            applied_box,
+            text=f"v{APP_VERSION}{' · 임시 실행' if self.temporary_version_mode else ''}",
+            text_color="#ffb84d" if self.temporary_version_mode else "#48d980",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        self.applied_version_value_label.pack(anchor="w", padx=16, pady=(0, 12))
+
+        ctk.CTkLabel(
+            card,
+            text="임시로 사용할 버전",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=3, column=0, padx=22, pady=(0, 7), sticky="w")
+        self.version_choice_menu = ctk.CTkOptionMenu(
+            card,
+            values=[f"v{APP_VERSION}"],
+            height=42,
+            corner_radius=13,
+            fg_color=palette["input"],
+            button_color=palette["selected"],
+            button_hover_color=palette["hover"],
+            text_color=palette["text"],
+            dropdown_fg_color=palette["card"],
+            dropdown_text_color=palette["text"],
+            dropdown_hover_color=palette["hover"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.version_choice_menu.grid(row=4, column=0, padx=20, pady=(0, 10), sticky="ew")
+        self.version_choice_menu.set(f"v{APP_VERSION}")
+
+        self.version_launch_button = ctk.CTkButton(
+            card,
+            text="선택 버전 임시 실행",
+            height=44,
+            corner_radius=14,
+            fg_color="#2f6df6",
+            hover_color="#255dcc",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self._start_temporary_version,
+        )
+        self.version_launch_button.grid(row=5, column=0, padx=20, pady=(0, 12), sticky="ew")
+
+        self.version_download_progress = ctk.CTkProgressBar(
+            card,
+            height=10,
+            corner_radius=5,
+            mode="determinate",
+            progress_color="#2f6df6",
+            fg_color=palette["divider"],
+        )
+        self.version_download_progress.grid(row=6, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self.version_download_progress.set(0)
+
+        self.version_manager_status_label = ctk.CTkLabel(
+            card,
+            text="이전 버전 목록은 기본설정을 열면 자동으로 확인합니다.",
+            text_color=palette["muted"],
+            wraplength=250,
+            justify="left",
+            font=ctk.CTkFont(size=12),
+        )
+        self.version_manager_status_label.grid(row=7, column=0, padx=22, pady=(0, 12), sticky="w")
+
+        ctk.CTkLabel(
+            card,
+            text=(
+                "선택한 과거 버전은 별도 폴더에서 한 번만 임시 실행됩니다. "
+                "자동 업데이트가 꺼지므로 실행 중 최신 버전으로 강제 변경되지 않으며, "
+                "현재 설치된 최신 앱은 삭제되지 않습니다."
+            ),
+            text_color=palette["muted"],
+            wraplength=250,
+            justify="left",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=8, column=0, padx=22, pady=(0, 24), sticky="nw")
+
+    def _load_version_catalog(self, force: bool = False) -> None:
+        if not hasattr(self, "version_manager_status_label"):
+            return
+        if self.version_catalog and not force:
+            return
+        if self.version_catalog_worker and self.version_catalog_worker.is_alive():
+            return
+        if not platform_asset_name():
+            self.version_manager_status_label.configure(text="현재 운영체제에서는 버전 전환을 지원하지 않습니다.")
+            self.version_launch_button.configure(state="disabled")
+            return
+        self.version_manager_status_label.configure(text="사용 가능한 이전 버전을 확인하고 있습니다...")
+        self.version_launch_button.configure(state="disabled")
+        self.version_catalog_worker = ReleaseCatalogWorker(
+            self.result_queue,
+            repository=UPDATE_REPOSITORY,
+            current_version=APP_VERSION,
+        )
+        self.version_catalog_worker.start()
+
+    def _handle_version_catalog(self, releases: list[dict]) -> None:
+        self.version_catalog = {
+            str(item.get("version") or "").strip().lstrip("v"): dict(item)
+            for item in releases
+            if str(item.get("version") or "").strip()
+        }
+        versions = sorted(self.version_catalog, key=version_key, reverse=True)
+        if versions:
+            self.latest_available_version = versions[0]
+        if hasattr(self, "latest_version_value_label"):
+            self.latest_version_value_label.configure(text=f"v{self.latest_available_version}")
+
+        # A newer release is handled by the normal updater. The temporary
+        # launcher only exposes the running version and older stable releases.
+        selectable = [version for version in versions if version_key(version) <= version_key(APP_VERSION)]
+        if APP_VERSION not in selectable:
+            selectable.insert(0, APP_VERSION)
+        values = [
+            f"v{version}{' (현재)' if version == APP_VERSION else ''}"
+            for version in selectable
+        ]
+        self.version_choice_menu.configure(values=values)
+        self.version_choice_menu.set(next((value for value in values if value.startswith(f"v{APP_VERSION}")), values[0]))
+        self.version_launch_button.configure(state="normal")
+        older_count = sum(1 for version in selectable if version_key(version) < version_key(APP_VERSION))
+        self.version_manager_status_label.configure(
+            text=f"이전 버전 {older_count}개를 불러왔습니다. 사용할 버전을 선택해 주세요."
+        )
+
+    def _handle_version_catalog_error(self, message: str) -> None:
+        if hasattr(self, "version_manager_status_label"):
+            self.version_manager_status_label.configure(
+                text=f"버전 목록을 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.\n{message}",
+                text_color="#e05252",
+            )
+        if hasattr(self, "version_launch_button"):
+            self.version_launch_button.configure(state="normal", text="목록 다시 불러오기")
+
+    def _selected_temporary_version(self) -> str:
+        if not hasattr(self, "version_choice_menu"):
+            return ""
+        match = re.search(r"v(\d+(?:\.\d+){1,3})", self.version_choice_menu.get())
+        return match.group(1) if match else ""
+
+    def _start_temporary_version(self) -> None:
+        if not self.version_catalog:
+            self._load_version_catalog(force=True)
+            return
+        version = self._selected_temporary_version()
+        if not version:
+            messagebox.showwarning("버전 선택", "임시로 실행할 버전을 선택해 주세요.", parent=self)
+            return
+        if version == APP_VERSION and not self.temporary_version_mode:
+            messagebox.showinfo(
+                "현재 버전 사용 중",
+                f"현재 이미 v{APP_VERSION} 버전을 사용하고 있습니다.",
+                parent=self,
+            )
+            return
+        payload = dict(self.version_catalog.get(version) or {})
+        if not payload:
+            self._load_version_catalog(force=True)
+            return
+        if not messagebox.askyesno(
+            "이전 버전 임시 실행",
+            (
+                f"v{version} 버전을 임시로 실행할까요?\n\n"
+                f"• 최신 설치본 v{APP_VERSION}은 그대로 보관됩니다.\n"
+                "• 임시 버전에서는 자동 업데이트가 실행되지 않습니다.\n"
+                "• 임시 버전을 종료한 뒤 기존 Blog Helper를 다시 열면 최신 버전으로 돌아옵니다."
+            ),
+            parent=self,
+        ):
+            return
+        self.pending_version_payload = payload
+        cached_target = archived_version_target(DATA_DIR / "Version Archives", version)
+        if cached_target.exists():
+            self._launch_temporary_version(cached_target, version)
+            return
+
+        self.version_launch_button.configure(state="disabled", text="다운로드 중...")
+        self.version_download_progress.set(0)
+        self.version_manager_status_label.configure(
+            text=f"v{version} 전체 실행파일을 처음 한 번만 다운로드합니다."
+        )
+        self.version_archive_download_worker = UpdateDownloadWorker(
+            self.result_queue,
+            payload,
+            DATA_DIR / "Version Downloads",
+            progress_event="version_archive_progress",
+            success_event="version_archive_downloaded",
+            error_event="version_archive_error",
+        )
+        self.version_archive_download_worker.start()
+
+    def _handle_version_archive_progress(self, payload: dict) -> None:
+        downloaded = int(payload.get("downloaded") or 0)
+        total = int(payload.get("total") or 0)
+        ratio = min(1.0, downloaded / total) if total else 0.0
+        if total:
+            self.version_download_progress.configure(mode="determinate")
+            self.version_download_progress.set(ratio)
+            self.version_manager_status_label.configure(
+                text=(
+                    f"v{payload.get('version', '')} 다운로드 {int(ratio * 100)}%\n"
+                    f"{downloaded / (1024 * 1024):.1f}MB / {total / (1024 * 1024):.1f}MB"
+                )
+            )
+        else:
+            self.version_download_progress.configure(mode="indeterminate")
+            self.version_download_progress.start()
+
+    def _handle_version_archive_downloaded(self, payload: dict) -> None:
+        self.version_download_progress.stop()
+        self.version_download_progress.configure(mode="determinate")
+        self.version_download_progress.set(1)
+        self.version_manager_status_label.configure(text="다운로드 완료. 임시 실행파일을 준비하고 있습니다...")
+        self.version_archive_prepare_worker = ArchivedVersionPrepareWorker(
+            self.result_queue,
+            payload,
+            DATA_DIR / "Version Archives",
+        )
+        self.version_archive_prepare_worker.start()
+
+    def _handle_version_archive_ready(self, payload: dict) -> None:
+        local_path = Path(str(payload.get("local_path") or ""))
+        try:
+            local_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._launch_temporary_version(
+            Path(str(payload.get("archive_target") or "")),
+            str(payload.get("version") or ""),
+        )
+
+    def _handle_version_archive_error(self, message: str) -> None:
+        self.version_download_progress.stop()
+        self.version_download_progress.configure(mode="determinate", progress_color="#e05252")
+        self.version_download_progress.set(0)
+        self.version_launch_button.configure(state="normal", text="선택 버전 임시 실행")
+        self.version_manager_status_label.configure(
+            text=f"임시 버전을 준비하지 못했습니다.\n{message}",
+            text_color="#e05252",
+        )
+
+    def _launch_temporary_version(self, target: Path, version: str) -> None:
+        try:
+            launch_archived_version(target, version)
+        except Exception as exc:
+            self._handle_version_archive_error(str(exc))
+            return
+        self.version_manager_status_label.configure(
+            text=f"v{version} 임시 버전을 실행했습니다. 현재 창을 종료합니다.",
+            text_color="#48d980",
+        )
+        self.version_launch_button.configure(text="임시 버전 실행 완료")
+        self.after(700, self._on_app_close)
 
     def _save_remote_agent_settings(self) -> None:
         pairing_password = self.remote_pairing_password_entry.get().strip()
@@ -23402,6 +23737,7 @@ class KeywordApp(ctk.CTk):
         if self.settings_section == "basic":
             self.basic_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
             self._update_quick_status("기본설정", "프로그램 공통 설정을 저장합니다.", palette["accent"])
+            self._load_version_catalog()
         elif self.settings_section == "theme":
             self.theme_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
             self._update_quick_status("테마 설정", "블랙/화이트 테마를 선택하고 자동 저장합니다.", palette["accent"])
@@ -26329,6 +26665,18 @@ class KeywordApp(ctk.CTk):
                     except OSError:
                         pass
                     self._schedule_update_probe(UPDATE_PROBE_RETRY_MS)
+                elif event_type == "version_catalog_done":
+                    self._handle_version_catalog(payload)
+                elif event_type == "version_catalog_error":
+                    self._handle_version_catalog_error(str(payload))
+                elif event_type == "version_archive_progress":
+                    self._handle_version_archive_progress(payload)
+                elif event_type == "version_archive_downloaded":
+                    self._handle_version_archive_downloaded(payload)
+                elif event_type == "version_archive_ready":
+                    self._handle_version_archive_ready(payload)
+                elif event_type == "version_archive_error":
+                    self._handle_version_archive_error(str(payload))
                 elif event_type == "remote_agent_status":
                     self._handle_remote_agent_status(
                         str(payload.get("status") or ""),

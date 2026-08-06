@@ -231,11 +231,23 @@ class UpdateCheckWorker(threading.Thread):
 
 
 class UpdateDownloadWorker(threading.Thread):
-    def __init__(self, result_queue, payload: dict, download_dir: Path) -> None:
+    def __init__(
+        self,
+        result_queue,
+        payload: dict,
+        download_dir: Path,
+        *,
+        progress_event: str = "update_progress",
+        success_event: str = "update_downloaded",
+        error_event: str = "update_download_error",
+    ) -> None:
         super().__init__(daemon=True)
         self.result_queue = result_queue
         self.payload = dict(payload)
         self.download_dir = Path(download_dir)
+        self.progress_event = progress_event
+        self.success_event = success_event
+        self.error_event = error_event
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def run(self) -> None:
@@ -262,7 +274,7 @@ class UpdateDownloadWorker(threading.Thread):
                     downloaded += len(chunk)
                     self.result_queue.put(
                         (
-                            "update_progress",
+                            self.progress_event,
                             {
                                 "downloaded": downloaded,
                                 "total": total,
@@ -282,11 +294,192 @@ class UpdateDownloadWorker(threading.Thread):
             temp_path.replace(final_path)
             result = dict(self.payload)
             result.update({"local_path": str(final_path), "downloaded": downloaded, "sha256": actual_digest})
-            self.result_queue.put(("update_downloaded", result))
+            self.result_queue.put((self.success_event, result))
         except Exception as exc:  # pragma: no cover - network/runtime handling
             if temp_path:
                 temp_path.unlink(missing_ok=True)
-            self.result_queue.put(("update_download_error", str(exc)))
+            self.result_queue.put((self.error_event, str(exc)))
+
+
+class ReleaseCatalogWorker(threading.Thread):
+    """Loads full release assets that can be launched as temporary versions."""
+
+    def __init__(
+        self,
+        result_queue,
+        repository: str = UPDATE_REPOSITORY,
+        current_version: str = APP_VERSION,
+        api_url: str = "",
+        limit: int = 20,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+        self.repository = repository
+        self.current_version = current_version
+        self.api_url = api_url or f"https://api.github.com/repos/{repository}/releases?per_page={max(1, min(limit, 50))}"
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    def run(self) -> None:
+        try:
+            request = Request(
+                self.api_url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": f"BlogHelper/{self.current_version}",
+                },
+            )
+            with urlopen(request, timeout=18, context=self.ssl_context) as response:
+                releases = json.loads(response.read().decode("utf-8"))
+            if not isinstance(releases, list):
+                raise RuntimeError("GitHub 릴리스 목록 형식이 올바르지 않습니다.")
+
+            expected_name = platform_asset_name()
+            catalog: list[dict] = []
+            for release in releases:
+                if release.get("draft") or release.get("prerelease"):
+                    continue
+                version = str(release.get("tag_name") or "").strip().lstrip("v")
+                if not version:
+                    continue
+                asset = next(
+                    (
+                        candidate
+                        for candidate in release.get("assets", [])
+                        if str(candidate.get("name") or "") == expected_name
+                    ),
+                    None,
+                )
+                if not asset:
+                    continue
+                catalog.append(
+                    {
+                        "version": version,
+                        "release_name": str(release.get("name") or f"v{version}"),
+                        "published_at": str(release.get("published_at") or ""),
+                        "asset_name": expected_name,
+                        "download_url": str(asset.get("browser_download_url") or ""),
+                        "size": int(asset.get("size") or 0),
+                        "digest": str(asset.get("digest") or ""),
+                        "update_kind": "archive",
+                    }
+                )
+            catalog.sort(key=lambda item: version_key(item["version"]), reverse=True)
+            if not catalog:
+                raise RuntimeError(f"{expected_name or '현재 운영체제'}용 과거 버전을 찾지 못했습니다.")
+            self.result_queue.put(("version_catalog_done", catalog))
+        except Exception as exc:  # pragma: no cover - network/runtime handling
+            self.result_queue.put(("version_catalog_error", str(exc)))
+
+
+def archived_version_target(archive_root: Path, version: str) -> Path:
+    version_directory = Path(archive_root) / f"v{str(version).strip().lstrip('v')}"
+    if os.name == "nt":
+        return version_directory / "BlogHelper.exe"
+    if sys.platform == "darwin":
+        return version_directory / "BlogHelper.app"
+    return version_directory / "BlogHelper"
+
+
+def install_archived_version(downloaded_file: Path, archive_root: Path, version: str) -> Path:
+    """Installs a full release beside the main app without replacing it."""
+
+    source = Path(downloaded_file).resolve()
+    target = archived_version_target(archive_root, version).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if os.name == "nt":
+        staged = target.with_suffix(".exe.installing")
+        staged.unlink(missing_ok=True)
+        shutil.copy2(source, staged)
+        staged.replace(target)
+        return target
+
+    if sys.platform == "darwin":
+        staging_root = Path(tempfile.mkdtemp(prefix="version-", dir=target.parent))
+        try:
+            subprocess.run(
+                ["/usr/bin/ditto", "-x", "-k", str(source), str(staging_root)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            staged_app = next(staging_root.rglob("BlogHelper.app"), None)
+            if staged_app is None or not staged_app.is_dir():
+                raise RuntimeError("다운로드한 macOS 버전에서 BlogHelper.app을 찾지 못했습니다.")
+            shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(staged_app), str(target))
+            subprocess.run(
+                ["/usr/bin/xattr", "-cr", str(target)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return target
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+    raise RuntimeError("현재 운영체제는 과거 버전 임시 실행을 지원하지 않습니다.")
+
+
+class ArchivedVersionPrepareWorker(threading.Thread):
+    def __init__(self, result_queue, payload: dict, archive_root: Path) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+        self.payload = dict(payload)
+        self.archive_root = Path(archive_root)
+
+    def run(self) -> None:
+        try:
+            target = install_archived_version(
+                Path(str(self.payload["local_path"])),
+                self.archive_root,
+                str(self.payload["version"]),
+            )
+            result = dict(self.payload)
+            result["archive_target"] = str(target)
+            self.result_queue.put(("version_archive_ready", result))
+        except Exception as exc:  # pragma: no cover - platform/runtime handling
+            self.result_queue.put(("version_archive_error", str(exc)))
+
+
+def launch_archived_version(target: Path, version: str) -> subprocess.Popen:
+    """Launches an archived release with all automatic updates disabled."""
+
+    target = Path(target).resolve()
+    if not target.exists():
+        raise RuntimeError("임시 실행할 버전 파일이 없습니다. 다시 다운로드해 주세요.")
+    environment = dict(os.environ)
+    environment["BLOG_HELPER_DISABLE_UPDATES"] = "1"
+    environment["BLOG_HELPER_TEMPORARY_VERSION"] = str(version).strip().lstrip("v")
+    environment["BLOG_HELPER_LATEST_CONTROLLER_VERSION"] = APP_VERSION
+
+    if os.name == "nt":
+        environment = _windows_restart_environment(environment)
+        return subprocess.Popen(
+            [str(target)],
+            cwd=str(target.parent),
+            env=environment,
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+
+    if sys.platform == "darwin":
+        executable = target / "Contents" / "MacOS" / "BlogHelper"
+        if not executable.is_file():
+            raise RuntimeError("임시 macOS 앱의 실행파일을 찾지 못했습니다.")
+        return subprocess.Popen(
+            [str(executable)],
+            cwd=str(target.parent),
+            env=environment,
+            close_fds=True,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    raise RuntimeError("현재 운영체제는 과거 버전 임시 실행을 지원하지 않습니다.")
 
 
 def find_macos_app_root(executable: Path | None = None) -> Path | None:
