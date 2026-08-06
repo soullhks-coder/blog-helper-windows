@@ -181,11 +181,17 @@ class RemoteControlAgent:
         *,
         job_id: str = "",
         queue_id: str = "",
-        published_url: str,
+        published_url: str = "",
+        published_urls: dict[str, str] | None = None,
         title: str = "",
     ) -> None:
         url = str(published_url or "").strip()
-        if not url:
+        urls = {
+            str(platform): str(value or "").strip()
+            for platform, value in dict(published_urls or {}).items()
+            if str(value or "").strip()
+        }
+        if not url and not urls:
             return
         self._send(
             {
@@ -193,6 +199,7 @@ class RemoteControlAgent:
                 "jobId": str(job_id or "").strip(),
                 "queueId": str(queue_id or "").strip(),
                 "publishedUrl": url,
+                "publishedUrls": urls,
                 "title": str(title or "").strip(),
                 "updatedAt": int(time.time() * 1000),
             }

@@ -39,16 +39,22 @@
           </div>
         </header>
 
-        <section class="compose-card">
+        <section id="deviceSection" class="compose-card device-section">
           <div class="section-heading">
             <div>
               <span class="step">01</span>
               <h2>작업할 PC 선택</h2>
             </div>
-            <button id="refreshButton" class="text-button" type="button">새로고침</button>
+            <div class="section-actions">
+              <button id="refreshButton" class="text-button" type="button">새로고침</button>
+              <button id="toggleDeviceSectionButton" class="text-button" type="button" aria-expanded="true">접기</button>
+            </div>
           </div>
-          <div id="deviceGrid" class="device-grid" aria-live="polite"></div>
-          <p class="privacy-note">Mac과 Windows를 여러 대 연결할 수 있습니다. Blog Helper가 실행 중인 PC만 선택할 수 있고, 작업 중인 PC는 완료될 때까지 자동 잠금됩니다.</p>
+          <button id="selectedDeviceSummary" class="selected-device-summary" type="button" hidden></button>
+          <div id="deviceSectionBody">
+            <div id="deviceGrid" class="device-grid" aria-live="polite"></div>
+            <p class="privacy-note">Mac과 Windows를 여러 대 연결할 수 있습니다. Blog Helper가 실행 중인 PC만 선택할 수 있고, 작업 중인 PC는 완료될 때까지 자동 잠금됩니다.</p>
+          </div>
         </section>
 
         <section class="compose-card">
@@ -75,8 +81,11 @@
               <label class="check"><input type="checkbox" name="target" value="tistory" /><span>티스토리</span></label>
               <label class="check"><input type="checkbox" name="target" value="blogspot" /><span>블로그스팟</span></label>
             </fieldset>
-            <p class="privacy-note">선택한 PC의 저장된 프롬프트, AI, 썸네일, 카드뉴스 설정으로 글을 완성해 자동화 대기열에 넣습니다.</p>
-            <button id="submitJob" class="primary" type="submit" disabled>PC를 먼저 선택해 주세요</button>
+            <p class="privacy-note">선택한 PC의 저장된 프롬프트, AI, 썸네일, 카드뉴스 설정으로 글을 완성합니다. 대기열에 담거나 곧바로 발행할 수 있습니다.</p>
+            <div class="job-submit-actions">
+              <button id="submitJob" class="primary" type="submit" disabled>PC를 먼저 선택해 주세요</button>
+              <button id="publishNowJob" class="primary publish-job-now" type="button" disabled>지금 바로 발행</button>
+            </div>
             <p id="jobError" class="error" role="alert"></p>
           </form>
         </section>

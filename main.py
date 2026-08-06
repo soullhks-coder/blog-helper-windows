@@ -11591,6 +11591,7 @@ class RemoteKeywordQueueWorker(threading.Thread):
                 "allow_duplicate": True,
                 "target_platforms": list(self.job.get("targets") or ["wordpress"]),
                 "remote_job_id": job_id,
+                "remote_action": "publish" if self.job.get("action") == "publish" else "queue",
             }
             self.result_queue.put(
                 (
@@ -15519,15 +15520,24 @@ class KeywordApp(ctk.CTk):
             self.remote_agent.fail(job_id, "완성된 글을 자동화 대기열에 추가하지 못했습니다.")
         else:
             item = self.automation_queue[-1]
-            self.remote_agent.complete(
-                job_id,
-                {
-                    "queueId": item.get("id"),
-                    "title": item.get("title"),
-                    "status": item.get("status"),
-                },
-                "글, 썸네일, 카드뉴스를 완성해 자동화 대기열에 추가했습니다.",
-            )
+            if str(payload.get("remote_action") or "queue") == "publish":
+                self.remote_agent.progress(job_id, 0.9, "글과 이미지를 완성했습니다. 지금 바로 블로그 발행을 시작합니다.")
+                started = self._publish_next_automation_queue_item(
+                    scheduled=False,
+                    item_id=str(item.get("id") or ""),
+                )
+                if not started:
+                    self.remote_agent.fail(job_id, "글은 준비했지만 즉시발행을 시작하지 못했습니다. PC의 블로그 연결 설정을 확인해 주세요.")
+            else:
+                self.remote_agent.complete(
+                    job_id,
+                    {
+                        "queueId": item.get("id"),
+                        "title": item.get("title"),
+                        "status": item.get("status"),
+                    },
+                    "글, 썸네일, 카드뉴스를 완성해 자동화 대기열에 추가했습니다.",
+                )
         self.remote_active_job_id = ""
         self.remote_keyword_worker = None
 
@@ -25834,6 +25844,7 @@ class KeywordApp(ctk.CTk):
             "categories": payload.get("categories", []),
             "provider": payload.get("provider", ""),
             "remote_job_id": str(payload.get("remote_job_id") or "").strip(),
+            "remote_action": str(payload.get("remote_action") or "queue").strip(),
         }
         if self._should_apply_automation_cardnews(settings):
             self.automation_status_label.configure(
@@ -27038,6 +27049,9 @@ class KeywordApp(ctk.CTk):
                         item = self._find_automation_queue_item(self.active_automation_upload_item_id)
                         if item is not None and tistory_published_url:
                             item["published_url"] = tistory_published_url
+                            published_urls = dict(item.get("published_urls") or {})
+                            published_urls["tistory"] = tistory_published_url
+                            item["published_urls"] = published_urls
                         self._finalize_active_automation_publish(success=True, status_message="티스토리 공개발행 완료")
                     else:
                         if self.pending_upload_cleanup_paths:
@@ -27493,12 +27507,15 @@ class KeywordApp(ctk.CTk):
             item["cleanup_paths"] = list(payload.get("cleanup_paths") or [])
             wordpress = payload.get("wordpress") or {}
             blogspot = payload.get("blogspot") or {}
-            published_url = str(
-                wordpress.get("link")
-                or wordpress.get("post_url")
-                or blogspot.get("link")
-                or ""
-            ).strip()
+            wordpress_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
+            blogspot_url = str(blogspot.get("link") or "").strip()
+            published_urls = dict(item.get("published_urls") or {})
+            if wordpress_url:
+                published_urls["wordpress"] = wordpress_url
+            if blogspot_url:
+                published_urls["blogspot"] = blogspot_url
+            item["published_urls"] = published_urls
+            published_url = wordpress_url or blogspot_url
             if published_url:
                 item["published_url"] = published_url
             if (
@@ -27561,11 +27578,14 @@ class KeywordApp(ctk.CTk):
     def _handle_automation_publish_error(self, error_message: str) -> None:
         item = self._find_automation_queue_item(self.active_automation_upload_item_id)
         title = str(item.get("title") or "자동화 글") if item else "자동화 글"
+        remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
         if item:
             item["status"] = "업로드 실패"
             item["upload_error"] = str(error_message)
             item["upload_failed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             item["scheduled_at"] = self._next_automation_schedule_timestamp()
+        if remote_job_id and self.remote_agent is not None:
+            self.remote_agent.fail(remote_job_id, f"즉시발행에 실패했습니다: {error_message}")
         self.active_automation_upload_item_id = ""
         self.active_automation_tistory_pending = False
         self.tistory_automation_worker = None
@@ -27587,13 +27607,15 @@ class KeywordApp(ctk.CTk):
         cleanup_tistory_automation_files()
         if success:
             published_url = str(item.get("published_url") or "").strip() if item else ""
+            published_urls = dict(item.get("published_urls") or {}) if item else {}
             remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
             remote_agent = getattr(self, "remote_agent", None)
-            if published_url and remote_agent is not None:
+            if (published_url or published_urls) and remote_agent is not None:
                 remote_agent.notify_published(
                     job_id=remote_job_id,
                     queue_id=str(completed_item_id or ""),
                     published_url=published_url,
+                    published_urls=published_urls,
                     title=title,
                 )
             deleted_count = self._cleanup_uploaded_generated_images(
@@ -27612,11 +27634,14 @@ class KeywordApp(ctk.CTk):
                 text += f" 임시 이미지 {deleted_count}개도 삭제했습니다."
             color = "#48d980"
         else:
+            remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
             if item:
                 item["status"] = "업로드 실패"
                 item["upload_error"] = status_message or "티스토리 자동입력 실패"
                 item["upload_failed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 item["scheduled_at"] = self._next_automation_schedule_timestamp()
+            if remote_job_id and self.remote_agent is not None:
+                self.remote_agent.fail(remote_job_id, status_message or "티스토리 자동입력에 실패했습니다.")
             text = f"'{title}' {status_message or '자동등록 실패'}. 다음 등록을 예약합니다."
             color = "#ff6b6b"
         self.active_automation_upload_item_id = ""

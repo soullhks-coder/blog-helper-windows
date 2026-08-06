@@ -527,7 +527,11 @@ export class ControlRoom {
     const deviceKey = `device:${deviceId}`;
     const device = (await this.ctx.storage.get(deviceKey)) || attachment;
     if (payload.type === "ready" || payload.type === "pong") {
-      await this.ctx.storage.put(deviceKey, { ...device, ...attachment, lastSeen: Date.now() });
+      await this.ctx.storage.put(deviceKey, {
+        ...device,
+        ...attachment,
+        lastSeen: Date.now(),
+      });
       return;
     }
     if (payload.type === "queue.snapshot") {
@@ -580,7 +584,8 @@ export class ControlRoom {
       return;
     }
     if (payload.type === "queue.published") {
-      const publishedUrl = cleanHttpUrl(payload.publishedUrl);
+      const publishedUrls = normalizePublishedUrls(payload.publishedUrls);
+      const publishedUrl = cleanHttpUrl(payload.publishedUrl) || Object.values(publishedUrls)[0] || "";
       const queueId = cleanText(payload.queueId, 100);
       let jobId = cleanText(payload.jobId, 80);
       let job = jobId ? await this.ctx.storage.get(`job:${jobId}`) : null;
@@ -604,12 +609,18 @@ export class ControlRoom {
             ...(job.result || {}),
             queueId,
             publishedUrl,
+            publishedUrls,
             title: cleanText(payload.title, 300) || cleanText(job.result && job.result.title, 300),
           },
           updatedAt: Date.now(),
         });
       }
-      await this.ctx.storage.put(deviceKey, { ...device, ...attachment, lastSeen: Date.now() });
+      await this.ctx.storage.put(deviceKey, {
+        ...device,
+        ...attachment,
+        busyJobId: jobId && device.busyJobId === jobId ? "" : device.busyJobId,
+        lastSeen: Date.now(),
+      });
       return;
     }
     if (!String(payload.type || "").startsWith("job.")) {
@@ -684,6 +695,20 @@ function normalizeTargets(value) {
   const allowed = new Set(["wordpress", "tistory", "blogspot"]);
   const targets = Array.isArray(value) ? value.filter((item) => allowed.has(item)) : [];
   return targets.length ? [...new Set(targets)] : ["wordpress"];
+}
+
+function normalizePublishedUrls(value) {
+  const urls = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return urls;
+  }
+  for (const platform of ["wordpress", "tistory", "blogspot"]) {
+    const url = cleanHttpUrl(value[platform]);
+    if (url) {
+      urls[platform] = url;
+    }
+  }
+  return urls;
 }
 
 function normalizeQueueSnapshot(value) {

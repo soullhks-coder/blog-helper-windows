@@ -3,6 +3,7 @@ if (window.location.protocol === "file:") {
 }
 
 const TARGET_PREFERENCE_KEY = "blog-helper-remote-targets";
+const SELECTED_DEVICE_KEY = "blog-helper-remote-selected-device";
 const ALLOWED_TARGETS = new Set(["wordpress", "tistory", "blogspot"]);
 
 const state = {
@@ -12,6 +13,7 @@ const state = {
   queueUpdatedAt: 0,
   queueRenderSignature: "",
   selectedDeviceId: "",
+  deviceSectionCollapsed: false,
   daumTrends: [],
   jobSubmitting: false,
   pollTimer: null,
@@ -22,6 +24,7 @@ const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
 const jobForm = document.querySelector("#jobForm");
 const submitJob = document.querySelector("#submitJob");
+const publishNowJob = document.querySelector("#publishNowJob");
 const deviceGrid = document.querySelector("#deviceGrid");
 const jobList = document.querySelector("#jobList");
 const queueList = document.querySelector("#queueList");
@@ -55,10 +58,17 @@ loginForm.addEventListener("submit", async (event) => {
 
 jobForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  await submitKeywordJob(document.querySelector("#keyword").value);
+  await submitKeywordJob(document.querySelector("#keyword").value, "queue");
+});
+publishNowJob.addEventListener("click", async () => {
+  const keyword = String(document.querySelector("#keyword").value || "").trim();
+  if (keyword && !window.confirm(`'${keyword}' 글을 완성한 뒤 대기 없이 바로 발행할까요?`)) {
+    return;
+  }
+  await submitKeywordJob(keyword, "publish");
 });
 
-async function submitKeywordJob(rawKeyword) {
+async function submitKeywordJob(rawKeyword, action = "queue") {
   setText("#jobError", "");
   const keyword = String(rawKeyword || "").trim();
   const targets = selectedTargets();
@@ -81,14 +91,17 @@ async function submitKeywordJob(rawKeyword) {
   saveTargetPreferences();
   state.jobSubmitting = true;
   submitJob.disabled = true;
-  submitJob.textContent = "PC로 전달 중...";
+  publishNowJob.disabled = true;
+  const isImmediate = action === "publish";
+  submitJob.textContent = isImmediate ? "즉시발행 준비 중..." : "PC로 전달 중...";
+  publishNowJob.textContent = isImmediate ? "즉시발행 준비 중..." : "지금 바로 발행";
   const response = await api("/api/jobs", {
     method: "POST",
     body: JSON.stringify({
       deviceId: state.selectedDeviceId,
       keyword,
       targets,
-      action: "queue",
+      action: isImmediate ? "publish" : "queue",
     }),
   });
   if (!response.ok) {
@@ -103,6 +116,12 @@ async function submitKeywordJob(rawKeyword) {
 }
 
 document.querySelector("#refreshButton").addEventListener("click", refreshDashboard);
+document.querySelector("#toggleDeviceSectionButton").addEventListener("click", () => {
+  setDeviceSectionCollapsed(!state.deviceSectionCollapsed);
+});
+document.querySelector("#selectedDeviceSummary").addEventListener("click", () => {
+  setDeviceSectionCollapsed(false);
+});
 document.querySelector("#refreshQueueButton").addEventListener("click", async () => {
   setQueueMessage("PC에서 최신 대기열을 불러오는 중입니다.");
   await refreshQueue(true);
@@ -143,13 +162,23 @@ async function refreshDashboard() {
   }
   state.devices = devicesResponse.data.devices || [];
   state.jobs = jobsResponse.data.jobs || [];
+  if (!state.selectedDeviceId) {
+    const savedDeviceId = loadSelectedDeviceId();
+    if (state.devices.some((device) => device.deviceId === savedDeviceId && device.online)) {
+      state.selectedDeviceId = savedDeviceId;
+      state.deviceSectionCollapsed = true;
+    }
+  }
   if (!state.devices.some((device) => device.deviceId === state.selectedDeviceId && device.online)) {
+    saveSelectedDeviceId("");
     state.selectedDeviceId = "";
+    state.deviceSectionCollapsed = false;
     state.queue = [];
     state.queueUpdatedAt = 0;
     state.queueRenderSignature = "";
   }
   renderDevices();
+  renderDeviceSection();
   renderJobs();
   updateSubmitButton();
   await refreshQueue(false);
@@ -189,11 +218,14 @@ function renderDevices() {
   deviceGrid.querySelectorAll(".device-select:not(:disabled)").forEach((button) => {
     button.addEventListener("click", async () => {
       state.selectedDeviceId = button.dataset.deviceId || "";
+      saveSelectedDeviceId(state.selectedDeviceId);
+      state.deviceSectionCollapsed = true;
       state.queue = [];
       state.queueUpdatedAt = 0;
       state.queueRenderSignature = "";
       setQueueMessage("선택한 PC의 대기열을 불러오는 중입니다.");
       renderDevices();
+      renderDeviceSection();
       updateSubmitButton();
       await refreshQueue(true);
       setQueueMessage("선택한 PC의 대기열을 불러왔습니다.");
@@ -222,16 +254,63 @@ async function deleteDevice(deviceId) {
     return;
   }
   if (state.selectedDeviceId === deviceId) {
+    saveSelectedDeviceId("");
     state.selectedDeviceId = "";
+    state.deviceSectionCollapsed = false;
     state.queue = [];
     state.queueUpdatedAt = 0;
     state.queueRenderSignature = "";
   }
   state.devices = state.devices.filter((item) => item.deviceId !== deviceId);
   renderDevices();
+  renderDeviceSection();
   updateSubmitButton();
   await refreshDashboard();
   window.alert(response.data.message || "PC를 목록에서 삭제했습니다.");
+}
+
+function loadSelectedDeviceId() {
+  try {
+    return String(window.localStorage.getItem(SELECTED_DEVICE_KEY) || "");
+  } catch {
+    return "";
+  }
+}
+
+function saveSelectedDeviceId(deviceId) {
+  try {
+    if (deviceId) {
+      window.localStorage.setItem(SELECTED_DEVICE_KEY, deviceId);
+    } else {
+      window.localStorage.removeItem(SELECTED_DEVICE_KEY);
+    }
+  } catch {
+    // Private browsing can disable local storage; selection still works for this session.
+  }
+}
+
+function setDeviceSectionCollapsed(collapsed) {
+  state.deviceSectionCollapsed = Boolean(collapsed && state.selectedDeviceId);
+  renderDeviceSection();
+}
+
+function renderDeviceSection() {
+  const section = document.querySelector("#deviceSection");
+  const body = document.querySelector("#deviceSectionBody");
+  const toggle = document.querySelector("#toggleDeviceSectionButton");
+  const summary = document.querySelector("#selectedDeviceSummary");
+  const device = state.devices.find((item) => item.deviceId === state.selectedDeviceId);
+  const collapsed = Boolean(device && state.deviceSectionCollapsed);
+  section.classList.toggle("collapsed", collapsed);
+  body.hidden = collapsed;
+  summary.hidden = !collapsed;
+  toggle.hidden = !device;
+  toggle.textContent = collapsed ? "PC 변경" : "접기";
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  if (device) {
+    const status = device.status === "busy" ? "작업 중" : device.online ? "사용 가능" : "오프라인";
+    summary.textContent = `${device.name || "선택한 PC"} · ${status}  (눌러서 PC 변경)`;
+  }
 }
 
 function selectedTargets() {
@@ -634,15 +713,16 @@ function renderJobs() {
     .map((job) => {
       const progress = Math.round(Number(job.progress || 0) * 100);
       const failedClass = ["failed", "cancelled"].includes(job.status) ? "failed" : "";
-      const publishedUrl = job.status === "completed"
-        ? safeExternalUrl(job.result && job.result.publishedUrl)
-        : "";
-      const openingTag = publishedUrl
-        ? `<a class="job job-link" href="${escapeHtml(publishedUrl)}" target="_blank" rel="noopener noreferrer">`
-        : `<article class="job">`;
-      const closingTag = publishedUrl ? "</a>" : "</article>";
+      const publishedUrls = job.status === "completed" ? normalizedPublishedUrls(job.result) : {};
+      const platformLabels = { wordpress: "워드프레스", tistory: "티스토리", blogspot: "블로그스팟" };
+      const publishedLinks = Object.entries(publishedUrls)
+        .map(([platform, url]) => (
+          `<a class="job-open-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">`
+          + `${escapeHtml(platformLabels[platform] || "발행 글")} 보러가기 →</a>`
+        ))
+        .join("");
       return `
-        ${openingTag}
+        <article class="job">
           <div class="job-head">
             <div>
               <h3>${escapeHtml(job.keyword)}</h3>
@@ -651,26 +731,55 @@ function renderJobs() {
             <span class="job-state ${failedClass}">${statusLabel[job.status] || job.status}</span>
           </div>
           <div class="progress-track"><div class="progress-value" style="width:${progress}%"></div></div>
-          ${publishedUrl ? '<span class="job-open-hint">발행된 블로그 글 보러가기 →</span>' : ""}
-        ${closingTag}`;
+          ${publishedLinks ? `<div class="job-open-links">${publishedLinks}</div>` : ""}
+        </article>`;
     })
     .join("");
 }
 
 function updateSubmitButton() {
+  if (state.jobSubmitting) {
+    submitJob.disabled = true;
+    publishNowJob.disabled = true;
+    return;
+  }
   const device = state.devices.find((item) => item.deviceId === state.selectedDeviceId);
   if (!device) {
     submitJob.disabled = true;
+    publishNowJob.disabled = true;
     submitJob.textContent = "PC를 먼저 선택해 주세요";
+    publishNowJob.textContent = "지금 바로 발행";
     return;
   }
   if (device.status !== "online") {
     submitJob.disabled = true;
+    publishNowJob.disabled = true;
     submitJob.textContent = device.status === "busy" ? "선택한 PC가 작업 중입니다" : "선택한 PC가 오프라인입니다";
+    publishNowJob.textContent = "지금 바로 발행";
     return;
   }
   submitJob.disabled = false;
-  submitJob.textContent = `${device.name}에서 글 작성 시작`;
+  publishNowJob.disabled = false;
+  submitJob.textContent = `${device.name} 대기열에 추가`;
+  publishNowJob.textContent = "지금 바로 발행";
+}
+
+function normalizedPublishedUrls(result) {
+  const urls = {};
+  const raw = result && result.publishedUrls && typeof result.publishedUrls === "object"
+    ? result.publishedUrls
+    : {};
+  for (const platform of ALLOWED_TARGETS) {
+    const url = safeExternalUrl(raw[platform]);
+    if (url) {
+      urls[platform] = url;
+    }
+  }
+  const legacyUrl = safeExternalUrl(result && result.publishedUrl);
+  if (legacyUrl && !Object.keys(urls).length) {
+    urls.wordpress = legacyUrl;
+  }
+  return urls;
 }
 
 async function api(path, options = {}) {

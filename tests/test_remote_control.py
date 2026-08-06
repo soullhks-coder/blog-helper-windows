@@ -176,6 +176,10 @@ class RemoteAgentConfigTests(unittest.TestCase):
             job_id="job-1",
             queue_id="queue-1",
             published_url="https://blog.example.com/published-post",
+            published_urls={
+                "wordpress": "https://blog.example.com/published-post",
+                "tistory": "https://sample.tistory.com/entry/post",
+            },
             title="발행된 글",
         )
 
@@ -184,6 +188,7 @@ class RemoteAgentConfigTests(unittest.TestCase):
         self.assertEqual(payload["jobId"], "job-1")
         self.assertEqual(payload["queueId"], "queue-1")
         self.assertEqual(payload["publishedUrl"], "https://blog.example.com/published-post")
+        self.assertEqual(payload["publishedUrls"]["tistory"], "https://sample.tistory.com/entry/post")
 
 
 if __name__ == "__main__":

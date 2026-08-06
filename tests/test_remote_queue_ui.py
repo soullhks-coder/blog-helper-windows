@@ -20,10 +20,15 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn('data-action="preview"', script)
         self.assertIn('id="daumTrendButton"', html)
         self.assertIn('id="clearJobsButton"', html)
+        self.assertIn('id="toggleDeviceSectionButton"', html)
+        self.assertIn('id="publishNowJob"', html)
+        self.assertIn("지금 바로 발행", html)
         self.assertIn("/api/trends/daum", script)
         self.assertIn('method: "DELETE"', script)
         self.assertIn("publishedUrl", script)
         self.assertIn("TARGET_PREFERENCE_KEY", script)
+        self.assertIn("SELECTED_DEVICE_KEY", script)
+        self.assertIn("publishedUrls", script)
         self.assertIn("restoreTargetPreferences", script)
         self.assertIn("saveTargetPreferences", script)
         self.assertIn("window.localStorage.setItem", script)
@@ -46,7 +51,37 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn('url.pathname === "/"', worker)
         self.assertIn('indexUrl.pathname = "/index.html"', worker)
         self.assertNotIn('STATIC_ASSETS = ["/",', service_worker)
-        self.assertIn("blog-helper-remote-v1.3.2", service_worker)
+        self.assertIn("blog-helper-remote-v1.3.3", service_worker)
+
+    def test_new_remote_immediate_job_starts_exact_queue_item_publish(self) -> None:
+        agent = MagicMock()
+        publish = MagicMock(return_value=True)
+        queue_item = {"id": "remote-now-1", "title": "즉시발행 글", "status": "글 작성 완료"}
+        app = SimpleNamespace(
+            remote_agent=agent,
+            remote_active_job_id="job-now-1",
+            remote_keyword_worker=object(),
+            automation_queue=[],
+            _handle_automation_keyword_item_collected=MagicMock(),
+            _publish_next_automation_queue_item=publish,
+        )
+        app._handle_automation_keyword_item_collected.side_effect = lambda _payload: (
+            app.automation_queue.append(queue_item) or True
+        )
+
+        main.KeywordApp._handle_remote_job_generated(
+            app,
+            {
+                "remote_job_id": "job-now-1",
+                "remote_action": "publish",
+                "title": "즉시발행 글",
+            },
+        )
+
+        publish.assert_called_once_with(scheduled=False, item_id="remote-now-1")
+        agent.complete.assert_not_called()
+        agent.fail.assert_not_called()
+        self.assertEqual(app.remote_active_job_id, "")
 
     def test_schedule_command_updates_exact_queue_item(self) -> None:
         first = {"id": "first", "status": "대기 중", "scheduled_at": 100}
