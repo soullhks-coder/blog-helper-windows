@@ -81,11 +81,19 @@
               <label class="check"><input type="checkbox" name="target" value="tistory" /><span>티스토리</span></label>
               <label class="check"><input type="checkbox" name="target" value="blogspot" /><span>블로그스팟</span></label>
             </fieldset>
-            <p class="privacy-note">선택한 PC의 저장된 프롬프트, AI, 썸네일, 카드뉴스 설정으로 글을 완성합니다. 대기열에 담거나 곧바로 발행할 수 있습니다.</p>
-            <div class="job-submit-actions">
-              <button id="submitJob" class="primary" type="submit" disabled>PC를 먼저 선택해 주세요</button>
-              <button id="publishNowJob" class="primary publish-job-now" type="button" disabled>지금 바로 발행</button>
+            <p class="privacy-note">선택한 PC의 저장된 프롬프트, AI, 썸네일, 카드뉴스 설정으로 글을 완성합니다.</p>
+            <div class="publish-mode-card">
+              <div>
+                <strong>대기 없이 즉시 발행</strong>
+                <span>ON이면 자동화 대기열에 담지 않고 글 완성 후 바로 발행합니다.</span>
+              </div>
+              <label class="publish-toggle" for="publishImmediatelyToggle">
+                <input id="publishImmediatelyToggle" type="checkbox" role="switch" />
+                <span class="publish-toggle-track" aria-hidden="true"><span></span></span>
+                <b id="publishImmediatelyLabel">OFF</b>
+              </label>
             </div>
+            <button id="submitJob" class="primary queue-job-button" type="submit" disabled>PC를 먼저 선택해 주세요</button>
             <p id="jobError" class="error" role="alert"></p>
           </form>
         </section>

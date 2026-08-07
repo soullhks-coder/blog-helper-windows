@@ -4,6 +4,7 @@ if (window.location.protocol === "file:") {
 
 const TARGET_PREFERENCE_KEY = "blog-helper-remote-targets";
 const SELECTED_DEVICE_KEY = "blog-helper-remote-selected-device";
+const PUBLISH_IMMEDIATELY_KEY = "blog-helper-remote-publish-immediately";
 const ALLOWED_TARGETS = new Set(["wordpress", "tistory", "blogspot"]);
 
 const state = {
@@ -24,7 +25,8 @@ const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
 const jobForm = document.querySelector("#jobForm");
 const submitJob = document.querySelector("#submitJob");
-const publishNowJob = document.querySelector("#publishNowJob");
+const publishImmediatelyToggle = document.querySelector("#publishImmediatelyToggle");
+const publishImmediatelyLabel = document.querySelector("#publishImmediatelyLabel");
 const deviceGrid = document.querySelector("#deviceGrid");
 const jobList = document.querySelector("#jobList");
 const queueList = document.querySelector("#queueList");
@@ -37,8 +39,14 @@ const clearJobsButton = document.querySelector("#clearJobsButton");
 const targetInputs = [...document.querySelectorAll("input[name='target']")];
 
 restoreTargetPreferences();
+restorePublishMode();
 targetInputs.forEach((input) => {
   input.addEventListener("change", saveTargetPreferences);
+});
+publishImmediatelyToggle.addEventListener("change", () => {
+  savePublishMode();
+  updatePublishModeUI();
+  updateSubmitButton();
 });
 
 loginForm.addEventListener("submit", async (event) => {
@@ -58,14 +66,7 @@ loginForm.addEventListener("submit", async (event) => {
 
 jobForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  await submitKeywordJob(document.querySelector("#keyword").value, "queue");
-});
-publishNowJob.addEventListener("click", async () => {
-  const keyword = String(document.querySelector("#keyword").value || "").trim();
-  if (keyword && !window.confirm(`'${keyword}' 글을 완성한 뒤 대기 없이 바로 발행할까요?`)) {
-    return;
-  }
-  await submitKeywordJob(keyword, "publish");
+  await submitKeywordJob(document.querySelector("#keyword").value, selectedPublishAction());
 });
 
 async function submitKeywordJob(rawKeyword, action = "queue") {
@@ -91,10 +92,9 @@ async function submitKeywordJob(rawKeyword, action = "queue") {
   saveTargetPreferences();
   state.jobSubmitting = true;
   submitJob.disabled = true;
-  publishNowJob.disabled = true;
+  publishImmediatelyToggle.disabled = true;
   const isImmediate = action === "publish";
   submitJob.textContent = isImmediate ? "즉시발행 준비 중..." : "PC로 전달 중...";
-  publishNowJob.textContent = isImmediate ? "즉시발행 준비 중..." : "지금 바로 발행";
   const response = await api("/api/jobs", {
     method: "POST",
     body: JSON.stringify({
@@ -398,7 +398,7 @@ async function handleDaumTrendSelection(event) {
     input.disabled = true;
   });
   setText("#daumTrendStatus", `'${keyword}' 작업을 선택한 PC로 보내고 있습니다.`);
-  const sent = await submitKeywordJob(keyword);
+  const sent = await submitKeywordJob(keyword, selectedPublishAction());
   daumTrendList.querySelectorAll("input").forEach((input) => {
     input.disabled = false;
   });
@@ -740,28 +740,52 @@ function renderJobs() {
 function updateSubmitButton() {
   if (state.jobSubmitting) {
     submitJob.disabled = true;
-    publishNowJob.disabled = true;
+    publishImmediatelyToggle.disabled = true;
     return;
   }
+  publishImmediatelyToggle.disabled = false;
   const device = state.devices.find((item) => item.deviceId === state.selectedDeviceId);
   if (!device) {
     submitJob.disabled = true;
-    publishNowJob.disabled = true;
     submitJob.textContent = "PC를 먼저 선택해 주세요";
-    publishNowJob.textContent = "지금 바로 발행";
     return;
   }
   if (device.status !== "online") {
     submitJob.disabled = true;
-    publishNowJob.disabled = true;
     submitJob.textContent = device.status === "busy" ? "선택한 PC가 작업 중입니다" : "선택한 PC가 오프라인입니다";
-    publishNowJob.textContent = "지금 바로 발행";
     return;
   }
   submitJob.disabled = false;
-  publishNowJob.disabled = false;
-  submitJob.textContent = `${device.name} 대기열에 추가`;
-  publishNowJob.textContent = "지금 바로 발행";
+  submitJob.textContent = publishImmediatelyToggle.checked
+    ? `${device.name}에서 지금 바로 발행`
+    : `${device.name} 대기열에 추가`;
+}
+
+function selectedPublishAction() {
+  return publishImmediatelyToggle.checked ? "publish" : "queue";
+}
+
+function restorePublishMode() {
+  try {
+    publishImmediatelyToggle.checked = window.localStorage.getItem(PUBLISH_IMMEDIATELY_KEY) === "true";
+  } catch (_error) {
+    publishImmediatelyToggle.checked = false;
+  }
+  updatePublishModeUI();
+}
+
+function savePublishMode() {
+  try {
+    window.localStorage.setItem(PUBLISH_IMMEDIATELY_KEY, publishImmediatelyToggle.checked ? "true" : "false");
+  } catch (_error) {
+    // Private browsing may block local storage; the current selection still works for this session.
+  }
+}
+
+function updatePublishModeUI() {
+  const enabled = publishImmediatelyToggle.checked;
+  publishImmediatelyLabel.textContent = enabled ? "ON" : "OFF";
+  publishImmediatelyToggle.closest(".publish-mode-card")?.classList.toggle("enabled", enabled);
 }
 
 function normalizedPublishedUrls(result) {

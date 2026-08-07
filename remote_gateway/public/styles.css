@@ -275,15 +275,102 @@ textarea:focus {
   text-align: left;
 }
 
-.job-submit-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(170px, 0.42fr);
-  gap: 12px;
+.publish-mode-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 17px;
+  border: 1px solid var(--line);
+  border-radius: 18px 6px 18px 6px;
+  background: rgba(255, 255, 255, 0.7);
+  transition: border-color 160ms ease, background 160ms ease;
 }
 
-.publish-job-now {
-  background: var(--coral);
-  box-shadow: 0 10px 24px rgba(240, 108, 79, 0.2);
+.publish-mode-card.enabled {
+  border-color: #7eb7a9;
+  background: var(--teal-soft);
+}
+
+.publish-mode-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.publish-mode-card strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.publish-mode-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.publish-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.publish-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.publish-toggle-track {
+  position: relative;
+  width: 52px;
+  height: 30px;
+  border-radius: 99px;
+  background: #aeb6b3;
+  transition: background 160ms ease;
+}
+
+.publish-toggle-track > span {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 2px 6px rgba(20, 40, 36, 0.24);
+  transition: transform 160ms ease;
+}
+
+.publish-toggle input:checked + .publish-toggle-track {
+  background: var(--teal);
+}
+
+.publish-toggle input:checked + .publish-toggle-track > span {
+  transform: translateX(22px);
+}
+
+.publish-toggle input:focus-visible + .publish-toggle-track {
+  box-shadow: 0 0 0 4px rgba(13, 79, 74, 0.16);
+}
+
+.publish-toggle input:disabled + .publish-toggle-track {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.publish-toggle b {
+  min-width: 28px;
+  color: var(--teal);
+  font-size: 12px;
+  text-align: center;
+}
+
+.queue-job-button {
+  width: 100%;
 }
 
 .section-heading h2 {
@@ -897,8 +984,13 @@ legend {
     grid-template-columns: 1fr;
   }
 
-  .job-submit-actions {
-    grid-template-columns: 1fr;
+  .publish-mode-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .publish-toggle {
+    align-self: flex-end;
   }
 
   .compose-card {
