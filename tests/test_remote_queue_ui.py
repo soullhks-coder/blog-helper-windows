@@ -51,7 +51,7 @@ class RemoteQueueUITests(unittest.TestCase):
         self.assertIn('url.pathname === "/"', worker)
         self.assertIn('indexUrl.pathname = "/index.html"', worker)
         self.assertNotIn('STATIC_ASSETS = ["/",', service_worker)
-        self.assertIn("blog-helper-remote-v1.3.3", service_worker)
+        self.assertIn("blog-helper-remote-v1.3.4", service_worker)
 
     def test_new_remote_immediate_job_starts_exact_queue_item_publish(self) -> None:
         agent = MagicMock()

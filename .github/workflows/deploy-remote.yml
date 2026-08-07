@@ -37,10 +37,12 @@ jobs:
       - name: Validate Worker bundle
         run: npx wrangler deploy --dry-run --outdir .wrangler-dry-run
 
-      - name: Deploy Cloudflare Worker
-        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
-        run: npx wrangler deploy
+      - name: Require Cloudflare deployment credentials
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Cloudflare deployment credentials are missing. Validation alone must not be reported as a successful deployment."
+            exit 1
+          fi
 
-      - name: Explain skipped deployment
-        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
-        run: echo "Worker validation passed. Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets to enable deployment."
+      - name: Deploy Cloudflare Worker
+        run: npx wrangler deploy
