@@ -102,6 +102,20 @@ class WritingCompletionFlowTests(unittest.TestCase):
         self.assertIn("context.close()", daum_source)
         self.assertIn('"https://webmaster.daum.net/tool/collect"', self.source)
 
+    def test_daum_webmaster_uses_saved_site_and_pin_authentication(self) -> None:
+        auth_source = ast.get_source_segment(
+            self.source,
+            self.methods["_click_daum_webmaster_saved_authentication"],
+        )
+        wait_source = ast.get_source_segment(
+            self.source,
+            self.methods["_wait_for_daum_webmaster_collect_page"],
+        )
+        self.assertIn("populated_inputs < 2", auth_source)
+        self.assertIn('!= "인증하기"', auth_source)
+        self.assertIn("locator.click()", auth_source)
+        self.assertIn("_click_daum_webmaster_saved_authentication", wait_source)
+
     def test_automation_wordpress_publish_also_queues_crawl_request(self) -> None:
         method_source = ast.get_source_segment(
             self.source,

@@ -7331,6 +7331,50 @@ def _find_daum_webmaster_collect_button(page, url_input):
     return candidates[0][1]
 
 
+def _click_daum_webmaster_saved_authentication(page) -> bool:
+    """Submit the saved Daum site URL and PIN when Chrome restored both values."""
+    if "webmaster.daum.net/login" not in str(page.url or "").lower():
+        return False
+
+    inputs = page.locator("input:not([type='hidden'])")
+    populated_inputs = 0
+    for index in range(min(inputs.count(), 20)):
+        locator = inputs.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            if str(locator.input_value(timeout=800) or "").strip():
+                populated_inputs += 1
+        except Exception:
+            continue
+    if populated_inputs < 2:
+        return False
+
+    controls = page.locator(
+        "button, [role='button'], input[type='button'], input[type='submit']"
+    )
+    for index in range(min(controls.count(), 80)):
+        locator = controls.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            text = str(locator.inner_text(timeout=500) or "").strip()
+            if not text:
+                text = str(locator.get_attribute("value") or "").strip()
+            if re.sub(r"\s+", "", text) != "인증하기":
+                continue
+            locator.scroll_into_view_if_needed()
+            locator.click()
+            append_runtime_log(
+                "daum-webmaster",
+                "저장된 사이트 URL과 PIN으로 인증하기 버튼 클릭 완료",
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _wait_for_daum_webmaster_collect_page(
     context,
     page,
@@ -7341,6 +7385,7 @@ def _wait_for_daum_webmaster_collect_page(
     """Wait for manual login and return the authenticated collection page."""
     deadline = time.time() + max(30, int(login_timeout_seconds or 300))
     login_notice_sent = False
+    last_authentication_attempt_at = 0.0
     last_collect_navigation_at = time.time()
     while time.time() < deadline:
         active_pages = list(context.pages) or [page]
@@ -7373,12 +7418,33 @@ def _wait_for_daum_webmaster_collect_page(
                 (
                     "naver_search_advisor_progress",
                     {
-                        "message": "다음 웹마스터도구 전용 Chrome에서 사이트 URL과 PIN코드로 인증해 주세요. 인증 상태는 다음 실행에도 유지됩니다...",
+                        "message": "다음 웹마스터도구의 저장된 사이트 URL과 PIN을 확인하고 있습니다. 값이 비어 있으면 한 번만 입력해 주세요...",
                         "published_url": published_url,
                     },
                 )
             )
             login_notice_sent = True
+
+        if login_page_open and time.time() - last_authentication_attempt_at >= 5:
+            login_pages = [
+                candidate
+                for candidate in active_pages
+                if "webmaster.daum.net/login" in str(candidate.url or "").lower()
+            ]
+            for login_page in reversed(login_pages):
+                if _click_daum_webmaster_saved_authentication(login_page):
+                    result_queue.put(
+                        (
+                            "naver_search_advisor_progress",
+                            {
+                                "message": "저장된 다음 웹마스터 인증값으로 '인증하기'를 눌렀습니다. 수집 요청 화면을 기다리는 중입니다...",
+                                "published_url": published_url,
+                            },
+                        )
+                    )
+                    login_page.wait_for_timeout(1200)
+                    break
+            last_authentication_attempt_at = time.time()
 
         if not login_page_open and time.time() - last_collect_navigation_at >= 4:
             page = active_pages[-1]
