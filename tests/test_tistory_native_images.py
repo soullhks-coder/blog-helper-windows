@@ -216,6 +216,16 @@ class TistoryNativeImageTests(unittest.TestCase):
             main.WordPressSettings().tistory_input_mode,
             main.TEXT_INPUT_MODE_FAST,
         )
+
+    def test_tistory_save_mode_defaults_to_public_and_normalizes_unknown_values(self) -> None:
+        self.assertEqual(
+            main.WordPressSettings().tistory_save_mode,
+            main.TISTORY_SAVE_MODE_PUBLISH,
+        )
+        self.assertEqual(
+            main.normalize_tistory_save_mode("알 수 없는 저장 방식"),
+            main.TISTORY_SAVE_MODE_PUBLISH,
+        )
         self.assertEqual(
             main.normalize_text_input_mode("알 수 없는 모드"),
             main.TEXT_INPUT_MODE_FAST,
@@ -517,6 +527,25 @@ class TistoryNativeImageTests(unittest.TestCase):
                 loaded = main.AppStateStore.load()
 
             self.assertEqual(loaded.tistory_input_mode, main.TEXT_INPUT_MODE_TYPING)
+
+    def test_tistory_save_mode_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            settings = main.WordPressSettings(
+                tistory_save_mode=main.TISTORY_SAVE_MODE_DRAFT,
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+
+            self.assertEqual(
+                loaded.tistory_save_mode,
+                main.TISTORY_SAVE_MODE_DRAFT,
+            )
 
     def test_tistory_ad_settings_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -896,6 +925,65 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertIn("click_complete", actions_line)
         self.assertNotIn("attach_representative_image", actions_line)
         self.assertNotIn("click_public_publish", actions_line)
+
+    def test_draft_script_never_opens_publish_panel(self) -> None:
+        script = main.build_tistory_editor_automation_script(
+            "임시저장 제목",
+            "<p>본문</p>",
+            automation_actions=[
+                "set_title",
+                "set_body",
+                "set_tags",
+                "click_complete",
+                "attach_representative_image",
+                "set_publish_now",
+                "click_public_publish",
+            ],
+            publish_after_input=False,
+            save_mode=main.TISTORY_SAVE_MODE_DRAFT,
+        )
+
+        actions_start = script.index("const automationActions = ")
+        actions_end = script.index(";", actions_start)
+        actions_line = script[actions_start:actions_end]
+        self.assertIn("set_tags", actions_line)
+        self.assertNotIn("click_complete", actions_line)
+        self.assertNotIn("attach_representative_image", actions_line)
+        self.assertNotIn("set_publish_now", actions_line)
+        self.assertNotIn("click_public_publish", actions_line)
+
+    def test_draft_save_click_uses_editor_top_button(self) -> None:
+        class FakeMouse:
+            def move(self, _x: float, _y: float) -> None:
+                pass
+
+            def down(self) -> None:
+                pass
+
+            def up(self) -> None:
+                pass
+
+        class FakePage:
+            mouse = FakeMouse()
+
+            def evaluate(self, _script: str) -> dict:
+                return {
+                    "text": "임시저장 2",
+                    "x": 800,
+                    "y": 80,
+                    "left": 740,
+                    "top": 60,
+                    "width": 120,
+                    "height": 40,
+                }
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+        events: queue.Queue = queue.Queue()
+        self.assertTrue(main.click_tistory_draft_save_native(FakePage(), events))
+        messages = [events.get_nowait()[1] for _ in range(events.qsize())]
+        self.assertTrue(any("임시저장" in message for message in messages))
 
 
 if __name__ == "__main__":

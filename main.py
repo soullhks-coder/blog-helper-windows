@@ -117,6 +117,12 @@ TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
 TEXT_INPUT_MODE_FAST = "빠른 입력"
 TEXT_INPUT_MODE_TYPING = "직접 타이핑"
 TEXT_INPUT_MODE_OPTIONS = (TEXT_INPUT_MODE_FAST, TEXT_INPUT_MODE_TYPING)
+TISTORY_SAVE_MODE_PUBLISH = "공개발행"
+TISTORY_SAVE_MODE_DRAFT = "임시저장"
+TISTORY_SAVE_MODE_OPTIONS = (
+    TISTORY_SAVE_MODE_PUBLISH,
+    TISTORY_SAVE_MODE_DRAFT,
+)
 TISTORY_AD_POSITION_ABOVE = "이미지 위"
 TISTORY_AD_POSITION_BELOW = "이미지 아래"
 TISTORY_AD_POSITION_OPTIONS = (
@@ -1467,6 +1473,7 @@ class WordPressSettings:
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
     tistory_input_mode: str = TEXT_INPUT_MODE_FAST
+    tistory_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     tistory_reference_image_protection_mode: bool = False
     tistory_ads_enabled: bool = True
     tistory_ads_code: str = DEFAULT_TISTORY_AD_CODE
@@ -1915,6 +1922,9 @@ class AppStateStore:
                 payload.get("tistory_input_mode")
                 if payload.get("tistory_input_mode") in TEXT_INPUT_MODE_OPTIONS
                 else TEXT_INPUT_MODE_FAST
+            ),
+            tistory_save_mode=normalize_tistory_save_mode(
+                str(payload.get("tistory_save_mode", TISTORY_SAVE_MODE_PUBLISH))
             ),
             tistory_reference_image_protection_mode=payload.get(
                 "tistory_reference_image_protection_mode",
@@ -4836,6 +4846,14 @@ def normalize_text_input_mode(value: str) -> str:
     return value if value in TEXT_INPUT_MODE_OPTIONS else TEXT_INPUT_MODE_FAST
 
 
+def normalize_tistory_save_mode(value: str) -> str:
+    return (
+        value
+        if value in TISTORY_SAVE_MODE_OPTIONS
+        else TISTORY_SAVE_MODE_PUBLISH
+    )
+
+
 def build_tistory_editor_automation_script(
     title: str,
     article_html: str,
@@ -4848,6 +4866,7 @@ def build_tistory_editor_automation_script(
     tag_names: list[str] | None = None,
     thumbnail_file_name: str = "blog-helper-thumbnail.png",
     publish_after_input: bool = False,
+    save_mode: str = "",
     close_after_publish: bool = False,
 ) -> str:
     title_json = json.dumps(title, ensure_ascii=False)
@@ -4858,6 +4877,13 @@ def build_tistory_editor_automation_script(
     thumbnail_content_url_json = json.dumps(thumbnail_content_url)
     collage_images_json = json.dumps(collage_images or [], ensure_ascii=False)
     actions = list(automation_actions or parse_tistory_automation_prompt(DEFAULT_TISTORY_AUTOMATION_PROMPT))
+    normalized_save_mode = normalize_tistory_save_mode(
+        save_mode or (
+            TISTORY_SAVE_MODE_PUBLISH
+            if publish_after_input
+            else TISTORY_SAVE_MODE_DRAFT
+        )
+    )
     if publish_after_input:
         # 발행일/공개발행은 React UI가 synthetic JS click을 무시할 수 있어
         # run_tistory_playwright_automation()에서 Playwright 네이티브 클릭으로 처리합니다.
@@ -4871,6 +4897,19 @@ def build_tistory_editor_automation_script(
         for required_action in ("click_complete",):
             if required_action not in actions:
                 actions.append(required_action)
+    elif normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
+        # 임시저장은 발행 바텀시트와 캡차에 진입하지 않습니다. 태그까지 입력한 뒤
+        # Playwright가 편집기 상단의 임시저장 버튼을 네이티브 클릭으로 처리합니다.
+        actions = [
+            action
+            for action in actions
+            if action not in {
+                "click_complete",
+                "attach_representative_image",
+                "set_publish_now",
+                "click_public_publish",
+            }
+        ]
     if close_after_publish:
         # Disabled for safety: browser/tab closing during publishing can interrupt Tistory.
         pass
@@ -6437,6 +6476,113 @@ def find_tistory_public_publish_button_rect(page) -> dict | None:
 }
 """
     )
+
+
+def find_tistory_draft_save_button_rect(page) -> dict | None:
+    return page.evaluate(
+        """
+() => {
+  const visible = (node) => {
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const textOf = (node) => (
+    node.innerText || node.textContent || node.value ||
+    node.getAttribute?.('aria-label') || node.getAttribute?.('title') || ''
+  ).replace(/\\s+/g, ' ').trim();
+  const disabled = (node) => {
+    const aria = String(node.getAttribute?.('aria-disabled') || '').toLowerCase();
+    const cls = String(node.className || '');
+    return node.disabled || aria === 'true' || /disabled|inactive/.test(cls);
+  };
+  const candidates = Array.from(document.querySelectorAll(
+    'button, a, [role="button"], input[type="button"], input[type="submit"]'
+  ))
+    .filter((node) => visible(node) && !disabled(node))
+    .map((node) => ({ node, text: textOf(node), rect: node.getBoundingClientRect() }))
+    .filter((item) => /^임시\\s*저장(?:\\s*\\d+)?$/.test(item.text))
+    .filter((item) => item.rect.top < Math.max(360, window.innerHeight * 0.45))
+    .sort((a, b) => a.rect.top - b.rect.top || b.rect.left - a.rect.left);
+  const item = candidates[0];
+  if (!item) return null;
+  try { item.node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (error) {}
+  const rect = item.node.getBoundingClientRect();
+  return {
+    text: item.text,
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  };
+}
+"""
+    )
+
+
+def click_tistory_draft_save_native(
+    page,
+    result_queue: queue.Queue | None = None,
+) -> bool:
+    if result_queue:
+        result_queue.put(
+            (
+                "tistory_progress",
+                "공개발행과 캡차를 건너뛰고 티스토리 임시저장 버튼을 누르는 중입니다...",
+            )
+        )
+    page.wait_for_timeout(700)
+    for _attempt in range(30):
+        rect = find_tistory_draft_save_button_rect(page)
+        if rect:
+            page.mouse.move(rect["x"], rect["y"])
+            page.wait_for_timeout(100)
+            page.mouse.down()
+            page.wait_for_timeout(100)
+            page.mouse.up()
+            page.wait_for_timeout(1800)
+            append_runtime_log(
+                "TISTORY",
+                f"임시저장 버튼 클릭 완료: {rect.get('text') or '임시저장'}",
+            )
+            if result_queue:
+                result_queue.put(
+                    (
+                        "tistory_progress",
+                        "티스토리 글을 공개하지 않고 임시저장했습니다.",
+                    )
+                )
+            return True
+        page.wait_for_timeout(350)
+    return False
+
+
+def is_tistory_captcha_visible(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                r"""
+() => {
+  const visible = (node) => {
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const bodyText = String(document.body?.innerText || '').replace(/\s+/g, ' ');
+  const textMatched = /DKAPTCHA|정답을 입력해주세요|답변 제출|지도에 있는.+명칭을 입력/.test(bodyText);
+  const inputMatched = Array.from(document.querySelectorAll('input'))
+    .some((node) => visible(node) && /정답/.test(String(node.placeholder || node.getAttribute('aria-label') || '')));
+  return textMatched && inputMatched;
+}
+"""
+            )
+        )
+    except Exception:
+        return False
 
 
 def _tistory_public_origin(value: str) -> str:
@@ -9108,6 +9254,7 @@ def run_tistory_playwright_automation(
     representative_image_path: str = "",
     public_blog_url: str = "",
     expected_title: str = "",
+    save_mode: str = "",
 ) -> tuple[bool, str | dict[str, str]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -9222,6 +9369,13 @@ def run_tistory_playwright_automation(
                 raise RuntimeError("티스토리 제목 입력 요소를 찾지 못했습니다.")
             if not (result_payload.get("bodyOk") or result_payload.get("richBodyOk")) and not result_payload.get("modeOnly"):
                 raise RuntimeError("티스토리 본문 입력 요소를 찾지 못했습니다.")
+            normalized_save_mode = normalize_tistory_save_mode(
+                save_mode or (
+                    TISTORY_SAVE_MODE_PUBLISH
+                    if publish_after_input
+                    else TISTORY_SAVE_MODE_DRAFT
+                )
+            )
             if publish_after_input:
                 if representative_image_path:
                     attach_tistory_representative_image_file(
@@ -9256,8 +9410,24 @@ def run_tistory_playwright_automation(
                     if not published:
                         raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
                     deadline = time.time() + 18
+                    captcha_notice_sent = False
                     while time.time() < deadline:
                         page.wait_for_timeout(500)
+                        if is_tistory_captcha_visible(page):
+                            if not captcha_notice_sent:
+                                captcha_notice_sent = True
+                                deadline = max(deadline, time.time() + 300)
+                                result_queue.put(
+                                    (
+                                        "tistory_progress",
+                                        "티스토리 보안 캡차가 표시되었습니다. 자동으로 풀 수 없어 전용 Chrome에서 직접 정답을 입력해 주세요. 최대 5분간 기다립니다...",
+                                    )
+                                )
+                                append_runtime_log(
+                                    "TISTORY",
+                                    "공개발행 캡차 감지 - 사용자 직접 입력을 최대 5분간 대기",
+                                )
+                            continue
                         published_url = find_tistory_entry_url_in_values(
                             publish_response_values,
                             public_blog_url,
@@ -9337,6 +9507,19 @@ def run_tistory_playwright_automation(
                 return True, {
                     "message": message,
                     "published_url": published_url,
+                    "save_mode": TISTORY_SAVE_MODE_PUBLISH,
+                }
+            if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
+                if not click_tistory_draft_save_native(page, result_queue):
+                    raise RuntimeError(
+                        "티스토리 편집기 상단의 '임시저장' 버튼을 찾지 못했습니다. "
+                        "화면 구조가 바뀌었는지 확인해 주세요."
+                    )
+                mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
+                return True, {
+                    "message": f"Playwright {mode_label} 모드로 티스토리 글을 임시저장했습니다.",
+                    "published_url": "",
+                    "save_mode": TISTORY_SAVE_MODE_DRAFT,
                 }
             mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
             return True, f"Playwright {mode_label} 모드로 티스토리 제목·본문 자동입력을 완료했습니다."
@@ -12642,6 +12825,7 @@ class TistoryAutomationWorker(threading.Thread):
         automation_prompt: str = DEFAULT_TISTORY_AUTOMATION_PROMPT,
         tag_names: list[str] | None = None,
         publish_after_input: bool = False,
+        save_mode: str = "",
         close_after_publish: bool = False,
         write_url: str = "",
         public_blog_url: str = "",
@@ -12662,7 +12846,14 @@ class TistoryAutomationWorker(threading.Thread):
         self.thumbnail_path = thumbnail_path
         self.automation_prompt = automation_prompt
         self.tag_names = tag_names or []
-        self.publish_after_input = publish_after_input
+        self.save_mode = normalize_tistory_save_mode(
+            save_mode or (
+                TISTORY_SAVE_MODE_PUBLISH
+                if publish_after_input
+                else TISTORY_SAVE_MODE_DRAFT
+            )
+        )
+        self.publish_after_input = self.save_mode == TISTORY_SAVE_MODE_PUBLISH
         self.close_after_publish = close_after_publish
         self.write_url = write_url
         self.public_blog_url = public_blog_url
@@ -12687,7 +12878,7 @@ class TistoryAutomationWorker(threading.Thread):
                 native_image_files[thumbnail_content_url] = self.thumbnail_path
 
             article_html = self.article_html
-            if GOOGLE_IMAGE_COLLAGE_ENABLED and self.publish_after_input:
+            if GOOGLE_IMAGE_COLLAGE_ENABLED:
                 mode_message = (
                     "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다..."
                     if self.reference_image_protection_mode
@@ -12799,6 +12990,7 @@ class TistoryAutomationWorker(threading.Thread):
                 tag_names=self.tag_names,
                 thumbnail_file_name=Path(self.thumbnail_path).name if self.thumbnail_path else "blog-helper-thumbnail.png",
                 publish_after_input=self.publish_after_input,
+                save_mode=self.save_mode,
                 close_after_publish=self.close_after_publish,
             )
             success, message = run_tistory_playwright_automation(
@@ -12810,17 +13002,22 @@ class TistoryAutomationWorker(threading.Thread):
                 representative_image_path=self.thumbnail_path if self.publish_after_input else "",
                 public_blog_url=self.public_blog_url,
                 expected_title=self.title,
+                save_mode=self.save_mode,
             )
             if success:
                 if isinstance(message, dict):
                     done_payload = {
                         "message": str(message.get("message") or "티스토리 자동화를 완료했습니다."),
                         "published_url": str(message.get("published_url") or "").strip(),
+                        "save_mode": normalize_tistory_save_mode(
+                            str(message.get("save_mode") or self.save_mode)
+                        ),
                     }
                 else:
                     done_payload = {
                         "message": str(message or "티스토리 자동화를 완료했습니다."),
                         "published_url": "",
+                        "save_mode": self.save_mode,
                     }
                 self.result_queue.put(("tistory_automation_done", done_payload))
             else:
@@ -20270,6 +20467,51 @@ class KeywordApp(ctk.CTk):
             pady=(0, 13),
             sticky="ew",
         )
+        ctk.CTkLabel(
+            input_mode_frame,
+            text="저장 방식",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=2, column=0, padx=(16, 12), pady=(8, 8), sticky="w")
+        self.tistory_save_mode_var = tk.StringVar(
+            value=TISTORY_SAVE_MODE_PUBLISH
+        )
+        self.tistory_save_mode_selector = ctk.CTkSegmentedButton(
+            input_mode_frame,
+            values=list(TISTORY_SAVE_MODE_OPTIONS),
+            variable=self.tistory_save_mode_var,
+            height=38,
+            corner_radius=12,
+            selected_color="#1faa4a",
+            selected_hover_color="#16913e",
+            unselected_color=("#f7f9fc", "#263247"),
+            unselected_hover_color=("#dce7f6", "#314761"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_tistory_save_mode_changed,
+        )
+        self.tistory_save_mode_selector.grid(
+            row=2,
+            column=1,
+            padx=(0, 16),
+            pady=(8, 8),
+            sticky="ew",
+        )
+        self.tistory_save_mode_help_label = ctk.CTkLabel(
+            input_mode_frame,
+            text="공개발행 · 작성이 끝나면 발행 화면에서 즉시 공개합니다.",
+            anchor="w",
+            justify="left",
+            text_color=("#607089", "#9aa7bb"),
+            wraplength=850,
+            font=ctk.CTkFont(size=13),
+        )
+        self.tistory_save_mode_help_label.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 13),
+            sticky="ew",
+        )
 
         ads_frame = ctk.CTkFrame(
             self.tistory_card,
@@ -23871,6 +24113,10 @@ class KeywordApp(ctk.CTk):
             normalize_text_input_mode(self.wordpress_settings.tistory_input_mode)
         )
         self._on_tistory_input_mode_changed(save=False)
+        self.tistory_save_mode_var.set(
+            normalize_tistory_save_mode(self.wordpress_settings.tistory_save_mode)
+        )
+        self._on_tistory_save_mode_changed(save=False)
         self.tistory_reference_image_protection_var.set(
             self.wordpress_settings.tistory_reference_image_protection_mode
         )
@@ -24638,6 +24884,9 @@ class KeywordApp(ctk.CTk):
             tistory_input_mode=normalize_text_input_mode(
                 self.tistory_input_mode_var.get()
             ),
+            tistory_save_mode=normalize_tistory_save_mode(
+                self.tistory_save_mode_var.get()
+            ),
             tistory_reference_image_protection_mode=bool(
                 self.tistory_reference_image_protection_var.get()
             ),
@@ -25154,7 +25403,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
         self._update_quick_status(
             "티스토리 저장됨",
-            "글쓰기 연결과 본문 Google 광고 배치 설정을 저장했습니다.",
+            f"글쓰기 연결, {settings.tistory_save_mode}, 본문 Google 광고 배치 설정을 저장했습니다.",
             "#48d980",
         )
 
@@ -25177,6 +25426,30 @@ class KeywordApp(ctk.CTk):
             )
         self.tistory_input_mode_help_label.configure(text=help_text)
         self.wordpress_settings.tistory_input_mode = mode
+        if save:
+            self._save_ui_state()
+
+    def _on_tistory_save_mode_changed(
+        self,
+        value: str | None = None,
+        save: bool = True,
+    ) -> None:
+        mode = normalize_tistory_save_mode(
+            value or self.tistory_save_mode_var.get()
+        )
+        self.tistory_save_mode_var.set(mode)
+        if mode == TISTORY_SAVE_MODE_DRAFT:
+            help_text = (
+                "임시저장 · 제목·본문·태그·첨부 이미지를 입력한 뒤 편집기 상단의 임시저장 버튼으로 끝냅니다. "
+                "발행 화면과 캡차에는 진입하지 않습니다."
+            )
+        else:
+            help_text = (
+                "공개발행 · 작성이 끝나면 대표이미지를 설정하고 즉시 공개합니다. "
+                "티스토리가 캡차를 표시하면 사용자가 직접 확인해야 합니다."
+            )
+        self.tistory_save_mode_help_label.configure(text=help_text)
+        self.wordpress_settings.tistory_save_mode = mode
         if save:
             self._save_ui_state()
 
@@ -25288,6 +25561,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_blog_url_entry.delete(0, "end")
         self.tistory_write_url_entry.delete(0, "end")
         self.tistory_input_mode_var.set(TEXT_INPUT_MODE_FAST)
+        self.tistory_save_mode_var.set(TISTORY_SAVE_MODE_PUBLISH)
         self.tistory_reference_image_protection_var.set(False)
         self.tistory_ads_enabled_var.set(True)
         self.tistory_ads_code_box.delete("1.0", "end")
@@ -25299,6 +25573,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
         self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
+        self.wordpress_settings.tistory_save_mode = TISTORY_SAVE_MODE_PUBLISH
         self.wordpress_settings.tistory_reference_image_protection_mode = False
         self.wordpress_settings.tistory_ads_enabled = True
         self.wordpress_settings.tistory_ads_code = DEFAULT_TISTORY_AD_CODE
@@ -25306,6 +25581,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_ads_position = TISTORY_AD_POSITION_ABOVE
         self.wordpress_settings.tistory_ads_count = 1
         self._on_tistory_input_mode_changed(save=False)
+        self._on_tistory_save_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
@@ -26807,8 +27083,15 @@ class KeywordApp(ctk.CTk):
         )
         tag_names = tag_names[:8]
 
+        tistory_save_mode = normalize_tistory_save_mode(
+            settings.tistory_save_mode
+        )
         self.publish_status_label.configure(
-            text="전용 Chrome에서 티스토리 로그인 확인 후 제목/본문/태그/대표이미지와 공개발행을 진행합니다.",
+            text=(
+                "전용 Chrome에서 제목/본문/태그를 입력한 뒤 티스토리에 임시저장합니다."
+                if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT
+                else "전용 Chrome에서 티스토리 로그인 확인 후 제목/본문/태그/대표이미지와 공개발행을 진행합니다."
+            ),
             text_color="#6dadff",
         )
         self.publish_progress_bar.configure(mode="indeterminate")
@@ -26826,7 +27109,10 @@ class KeywordApp(ctk.CTk):
             thumbnail_path=str(thumbnail_path),
             automation_prompt=settings.tistory_automation_prompt,
             tag_names=tag_names,
-            publish_after_input=True,
+            publish_after_input=(
+                tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+            ),
+            save_mode=tistory_save_mode,
             write_url=write_url,
             public_blog_url=settings.tistory_blog_url,
             reference_image_protection_mode=settings.tistory_reference_image_protection_mode,
@@ -27370,17 +27656,29 @@ class KeywordApp(ctk.CTk):
                     if isinstance(payload, dict):
                         tistory_message = str(payload.get("message") or "티스토리 자동화를 완료했습니다.")
                         tistory_published_url = str(payload.get("published_url") or "").strip()
+                        tistory_save_mode = normalize_tistory_save_mode(
+                            str(payload.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
+                        )
                     else:
                         tistory_message = str(payload or "티스토리 자동화를 완료했습니다.")
                         tistory_published_url = ""
+                        tistory_save_mode = TISTORY_SAVE_MODE_PUBLISH
                     if tistory_published_url:
                         self._remember_published_post_url("tistory", tistory_published_url)
                     self._stop_writing_auto_progress()
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(1.0)
-                    self.publish_status_label.configure(text="티스토리 전용 Chrome 자동입력과 공개발행을 완료했습니다.", text_color="#48d980")
-                    self.keyword_status_label.configure(text="티스토리 Playwright 자동화 완료")
+                    completion_label = (
+                        "티스토리 임시저장 완료"
+                        if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT
+                        else "티스토리 공개발행 완료"
+                    )
+                    self.publish_status_label.configure(
+                        text=f"티스토리 전용 Chrome 자동입력과 {completion_label}를 완료했습니다.",
+                        text_color="#48d980",
+                    )
+                    self.keyword_status_label.configure(text=completion_label)
                     self._update_quick_status("티스토리 자동화 완료", tistory_message, "#48d980")
                     if self.active_automation_upload_item_id and self.active_automation_tistory_pending:
                         item = self._find_automation_queue_item(self.active_automation_upload_item_id)
@@ -27389,7 +27687,10 @@ class KeywordApp(ctk.CTk):
                             published_urls = dict(item.get("published_urls") or {})
                             published_urls["tistory"] = tistory_published_url
                             item["published_urls"] = published_urls
-                        self._finalize_active_automation_publish(success=True, status_message="티스토리 공개발행 완료")
+                        self._finalize_active_automation_publish(
+                            success=True,
+                            status_message=completion_label,
+                        )
                     else:
                         if self.pending_upload_cleanup_paths:
                             self._cleanup_uploaded_generated_images(
@@ -27775,6 +28076,9 @@ class KeywordApp(ctk.CTk):
                 )
         if tistory:
             write_url = tistory.get("write_url")
+            tistory_save_mode = normalize_tistory_save_mode(
+                self.tistory_save_mode_var.get()
+            )
             if write_url:
                 if not (self.tistory_automation_worker and self.tistory_automation_worker.is_alive()):
                     self.tistory_automation_worker = TistoryAutomationWorker(
@@ -27784,7 +28088,10 @@ class KeywordApp(ctk.CTk):
                         thumbnail_path=tistory.get("thumbnail_path", ""),
                         automation_prompt=self._current_tistory_automation_prompt(),
                         tag_names=list(tistory.get("tag_names") or []),
-                        publish_after_input=True,
+                        publish_after_input=(
+                            tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                        ),
+                        save_mode=tistory_save_mode,
                         close_after_publish=False,
                         write_url=write_url,
                         public_blog_url=str(
@@ -27813,7 +28120,10 @@ class KeywordApp(ctk.CTk):
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
             message.append("티스토리 글쓰기 준비 완료")
-            message.append("제목/본문/태그/대표이미지/공개발행까지 자동입력을 시도합니다.")
+            if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT:
+                message.append("제목/본문/태그/첨부 이미지를 입력한 뒤 임시저장합니다.")
+            else:
+                message.append("제목/본문/태그/대표이미지/공개발행까지 자동입력을 시도합니다.")
             if tistory.get("draft_file"):
                 message.append(f"티스토리 초안 파일: {tistory['draft_file']}")
         if blogspot:
@@ -27867,6 +28177,9 @@ class KeywordApp(ctk.CTk):
         tistory = payload.get("tistory") or {}
         if tistory:
             write_url = tistory.get("write_url")
+            tistory_save_mode = normalize_tistory_save_mode(
+                self.tistory_save_mode_var.get()
+            )
             if write_url:
                 if not (self.tistory_automation_worker and self.tistory_automation_worker.is_alive()):
                     self.tistory_automation_worker = TistoryAutomationWorker(
@@ -27876,7 +28189,10 @@ class KeywordApp(ctk.CTk):
                         thumbnail_path=tistory.get("thumbnail_path", ""),
                         automation_prompt=self._current_tistory_automation_prompt(),
                         tag_names=list(tistory.get("tag_names") or []),
-                        publish_after_input=True,
+                        publish_after_input=(
+                            tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                        ),
+                        save_mode=tistory_save_mode,
                         close_after_publish=False,
                         write_url=write_url,
                         public_blog_url=str(
@@ -27907,8 +28223,15 @@ class KeywordApp(ctk.CTk):
         if not tistory:
             self._finalize_active_automation_publish(success=True, status_message="자동등록 완료")
         else:
+            tistory_save_mode = normalize_tistory_save_mode(
+                self.tistory_save_mode_var.get()
+            )
             self.automation_status_label.configure(
-                text=f"'{title}' 티스토리 자동입력/공개발행 마무리 중입니다. 완료 후 다음 글을 예약합니다.",
+                text=(
+                    f"'{title}' 티스토리 자동입력/임시저장 마무리 중입니다. 완료 후 다음 글을 예약합니다."
+                    if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT
+                    else f"'{title}' 티스토리 자동입력/공개발행 마무리 중입니다. 완료 후 다음 글을 예약합니다."
+                ),
                 text_color="#6dadff",
             )
 
