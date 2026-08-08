@@ -952,7 +952,51 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertNotIn("set_publish_now", actions_line)
         self.assertNotIn("click_public_publish", actions_line)
 
-    def test_draft_save_click_uses_editor_top_button(self) -> None:
+    def test_draft_save_click_uses_bottom_button_and_waits_for_confirmation(self) -> None:
+        class FakeMouse:
+            def __init__(self) -> None:
+                self.clicks = 0
+
+            def move(self, _x: float, _y: float) -> None:
+                pass
+
+            def down(self) -> None:
+                pass
+
+            def up(self) -> None:
+                self.clicks += 1
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.mouse = FakeMouse()
+                self.confirmation_checks = 0
+
+            def evaluate(self, script: str) -> dict | bool:
+                if "작성 중인 글이 저장되었습니다." in script:
+                    self.confirmation_checks += 1
+                    return self.confirmation_checks >= 2
+                return {
+                    "text": "임시저장 2",
+                    "x": 800,
+                    "y": 780,
+                    "left": 740,
+                    "top": 760,
+                    "width": 120,
+                    "height": 40,
+                }
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+        page = FakePage()
+        events: queue.Queue = queue.Queue()
+        self.assertTrue(main.click_tistory_draft_save_native(page, events))
+        self.assertEqual(page.mouse.clicks, 1)
+        self.assertGreaterEqual(page.confirmation_checks, 2)
+        messages = [events.get_nowait()[1] for _ in range(events.qsize())]
+        self.assertTrue(any("작성 중인 글이 저장되었습니다." in message for message in messages))
+
+    def test_draft_save_is_not_successful_without_confirmation_message(self) -> None:
         class FakeMouse:
             def move(self, _x: float, _y: float) -> None:
                 pass
@@ -966,13 +1010,15 @@ class TistoryNativeImageTests(unittest.TestCase):
         class FakePage:
             mouse = FakeMouse()
 
-            def evaluate(self, _script: str) -> dict:
+            def evaluate(self, script: str) -> dict | bool:
+                if "작성 중인 글이 저장되었습니다." in script:
+                    return False
                 return {
-                    "text": "임시저장 2",
+                    "text": "임시저장 1",
                     "x": 800,
-                    "y": 80,
+                    "y": 780,
                     "left": 740,
-                    "top": 60,
+                    "top": 760,
                     "width": 120,
                     "height": 40,
                 }
@@ -980,10 +1026,8 @@ class TistoryNativeImageTests(unittest.TestCase):
             def wait_for_timeout(self, _milliseconds: int) -> None:
                 pass
 
-        events: queue.Queue = queue.Queue()
-        self.assertTrue(main.click_tistory_draft_save_native(FakePage(), events))
-        messages = [events.get_nowait()[1] for _ in range(events.qsize())]
-        self.assertTrue(any("임시저장" in message for message in messages))
+        with patch.object(main.time, "time", side_effect=[0, 0, 13]):
+            self.assertFalse(main.click_tistory_draft_save_native(FakePage()))
 
     def test_captcha_is_detected_inside_cross_origin_frame(self) -> None:
         class FakeFrame:

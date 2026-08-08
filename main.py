@@ -6504,8 +6504,10 @@ def find_tistory_draft_save_button_rect(page) -> dict | None:
     .filter((node) => visible(node) && !disabled(node))
     .map((node) => ({ node, text: textOf(node), rect: node.getBoundingClientRect() }))
     .filter((item) => /^임시\\s*저장(?:\\s*\\d+)?$/.test(item.text))
-    .filter((item) => item.rect.top < Math.max(360, window.innerHeight * 0.45))
-    .sort((a, b) => a.rect.top - b.rect.top || b.rect.left - a.rect.left);
+    // The current Tistory editor places the real draft button in the fixed
+    // bottom toolbar. Prefer the lowest/rightmost match so a similarly named
+    // control elsewhere in the editor cannot be clicked by mistake.
+    .sort((a, b) => b.rect.top - a.rect.top || b.rect.left - a.rect.left);
   const item = candidates[0];
   if (!item) return null;
   try { item.node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (error) {}
@@ -6522,6 +6524,33 @@ def find_tistory_draft_save_button_rect(page) -> dict | None:
 }
 """
     )
+
+
+def is_tistory_draft_save_confirmed(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                r"""
+() => {
+  const visible = (node) => {
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  return Array.from(document.querySelectorAll('body *')).some((node) => {
+    if (!visible(node)) return false;
+    const text = String(node.innerText || node.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text === '작성 중인 글이 저장되었습니다.';
+  });
+}
+"""
+            )
+        )
+    except Exception:
+        return False
 
 
 def click_tistory_draft_save_native(
@@ -6544,19 +6573,32 @@ def click_tistory_draft_save_native(
             page.mouse.down()
             page.wait_for_timeout(100)
             page.mouse.up()
-            page.wait_for_timeout(1800)
             append_runtime_log(
                 "TISTORY",
-                f"임시저장 버튼 클릭 완료: {rect.get('text') or '임시저장'}",
+                f"하단 임시저장 버튼 클릭: {rect.get('text') or '임시저장'}",
             )
-            if result_queue:
-                result_queue.put(
-                    (
-                        "tistory_progress",
-                        "티스토리 글을 공개하지 않고 임시저장했습니다.",
-                    )
+            confirmation_deadline = time.time() + 12
+            while time.time() < confirmation_deadline:
+                page.wait_for_timeout(150)
+                if not is_tistory_draft_save_confirmed(page):
+                    continue
+                append_runtime_log(
+                    "TISTORY",
+                    "임시저장 완료 문구 확인: 작성 중인 글이 저장되었습니다.",
                 )
-            return True
+                if result_queue:
+                    result_queue.put(
+                        (
+                            "tistory_progress",
+                            "'작성 중인 글이 저장되었습니다.' 문구를 확인했습니다. 임시저장이 완료되었습니다.",
+                        )
+                    )
+                return True
+            append_runtime_log(
+                "TISTORY",
+                "임시저장 버튼은 눌렀지만 저장 완료 문구를 확인하지 못함",
+            )
+            return False
         page.wait_for_timeout(350)
     return False
 
@@ -9599,8 +9641,9 @@ def run_tistory_playwright_automation(
             if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
                 if not click_tistory_draft_save_native(page, result_queue):
                     raise RuntimeError(
-                        "티스토리 편집기 상단의 '임시저장' 버튼을 찾지 못했습니다. "
-                        "화면 구조가 바뀌었는지 확인해 주세요."
+                        "티스토리 편집기 하단의 '임시저장' 버튼을 누르지 못했거나 "
+                        "'작성 중인 글이 저장되었습니다.' 문구를 확인하지 못했습니다. "
+                        "화면 구조와 저장 상태를 확인해 주세요."
                     )
                 mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
                 return True, {
