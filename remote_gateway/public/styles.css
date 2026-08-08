@@ -731,6 +731,12 @@ textarea:focus {
   gap: 12px;
 }
 
+.trend-source-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .trend-button {
   flex: none;
   min-height: 44px;
@@ -745,6 +751,14 @@ textarea:focus {
 .trend-button:disabled {
   cursor: wait;
   opacity: 0.55;
+}
+
+.trend-button.signal {
+  background: var(--teal);
+}
+
+.trend-button.newneek {
+  background: #3478dc;
 }
 
 .trend-status {
@@ -777,13 +791,52 @@ textarea:focus {
 
 .trend-item {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto auto minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   min-height: 50px;
   padding: 11px 14px;
   background: white;
   cursor: pointer;
+}
+
+.trend-item .trend-radio {
+  accent-color: var(--coral);
+}
+
+.trend-item .trend-checkbox {
+  accent-color: var(--teal);
+}
+
+.trend-batch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 14px 5px 14px 5px;
+  background: var(--teal-soft);
+}
+
+.trend-batch-actions[hidden] {
+  display: none;
+}
+
+.trend-batch-actions span {
+  margin-right: auto;
+  color: var(--teal);
+  font-weight: 800;
+}
+
+.batch-submit-button {
+  min-height: 40px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: 12px 4px 12px 4px;
+  color: white;
+  background: var(--teal);
+  font-weight: 800;
 }
 
 .trend-item:hover {
@@ -977,6 +1030,22 @@ legend {
   }
 
   .trend-button {
+    width: 100%;
+  }
+
+  .trend-source-buttons {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .trend-batch-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .trend-batch-actions .text-button,
+  .batch-submit-button {
     width: 100%;
   }
 

@@ -6,6 +6,32 @@ const TARGET_PREFERENCE_KEY = "blog-helper-remote-targets";
 const SELECTED_DEVICE_KEY = "blog-helper-remote-selected-device";
 const PUBLISH_IMMEDIATELY_KEY = "blog-helper-remote-publish-immediately";
 const ALLOWED_TARGETS = new Set(["wordpress", "tistory", "blogspot"]);
+const TREND_SOURCES = {
+  daum: {
+    button: "#daumTrendButton",
+    accordion: "#daumTrendAccordion",
+    list: "#daumTrendList",
+    endpoint: "/api/trends/daum",
+    buttonLabel: "다음 실시간",
+    loadingLabel: "다음 실시간 검색어 1~10위를 확인하고 있습니다.",
+  },
+  signal: {
+    button: "#signalTrendButton",
+    accordion: "#signalTrendAccordion",
+    list: "#signalTrendList",
+    endpoint: "/api/trends/signal",
+    buttonLabel: "시그널 키워드",
+    loadingLabel: "시그널 실시간 검색어 1~10위를 확인하고 있습니다.",
+  },
+  newneek: {
+    button: "#newneekTrendButton",
+    accordion: "#newneekTrendAccordion",
+    list: "#newneekTrendList",
+    endpoint: "/api/trends/newneek",
+    buttonLabel: "뉴닉 키워드",
+    loadingLabel: "뉴닉 최신 키워드 1~10위를 확인하고 있습니다.",
+  },
+};
 
 const state = {
   devices: [],
@@ -15,7 +41,7 @@ const state = {
   queueRenderSignature: "",
   selectedDeviceId: "",
   deviceSectionCollapsed: false,
-  daumTrends: [],
+  trends: { daum: [], signal: [], newneek: [] },
   jobSubmitting: false,
   pollTimer: null,
 };
@@ -33,8 +59,11 @@ const queueList = document.querySelector("#queueList");
 const previewDialog = document.querySelector("#previewDialog");
 const previewBody = document.querySelector("#previewBody");
 const daumTrendButton = document.querySelector("#daumTrendButton");
-const daumTrendAccordion = document.querySelector("#daumTrendAccordion");
-const daumTrendList = document.querySelector("#daumTrendList");
+const signalTrendButton = document.querySelector("#signalTrendButton");
+const newneekTrendButton = document.querySelector("#newneekTrendButton");
+const trendLists = [...document.querySelectorAll(".trend-list")];
+const submitTrendBatchButton = document.querySelector("#submitTrendBatchButton");
+const clearTrendSelectionButton = document.querySelector("#clearTrendSelectionButton");
 const clearJobsButton = document.querySelector("#clearJobsButton");
 const targetInputs = [...document.querySelectorAll("input[name='target']")];
 
@@ -69,7 +98,7 @@ jobForm.addEventListener("submit", async (event) => {
   await submitKeywordJob(document.querySelector("#keyword").value, selectedPublishAction());
 });
 
-async function submitKeywordJob(rawKeyword, action = "queue") {
+async function submitKeywordJob(rawKeyword, action = "queue", enqueue = false) {
   setText("#jobError", "");
   const keyword = String(rawKeyword || "").trim();
   const targets = selectedTargets();
@@ -102,6 +131,7 @@ async function submitKeywordJob(rawKeyword, action = "queue") {
       keyword,
       targets,
       action: isImmediate ? "publish" : "queue",
+      enqueue: Boolean(enqueue),
     }),
   });
   if (!response.ok) {
@@ -134,7 +164,11 @@ document.querySelector("#logoutButton").addEventListener("click", async () => {
   loginView.hidden = false;
 });
 daumTrendButton.addEventListener("click", loadDaumRealtimeTrends);
-daumTrendList.addEventListener("change", handleDaumTrendSelection);
+signalTrendButton.addEventListener("click", () => loadRemoteTrends("signal"));
+newneekTrendButton.addEventListener("click", () => loadRemoteTrends("newneek"));
+trendLists.forEach((list) => list.addEventListener("change", handleTrendSelection));
+submitTrendBatchButton.addEventListener("click", submitSelectedTrendBatch);
+clearTrendSelectionButton.addEventListener("click", clearTrendBatchSelection);
 clearJobsButton.addEventListener("click", clearRecentJobs);
 document.querySelector("#closePreviewButton").addEventListener("click", () => previewDialog.close());
 previewDialog.addEventListener("click", (event) => {
@@ -341,73 +375,175 @@ function saveTargetPreferences() {
 }
 
 async function loadDaumRealtimeTrends() {
-  setText("#jobError", "");
-  daumTrendButton.disabled = true;
-  daumTrendButton.textContent = "불러오는 중...";
-  setText("#daumTrendStatus", "다음 실시간 검색어 1~10위를 확인하고 있습니다.");
-  const response = await api("/api/trends/daum");
-  daumTrendButton.disabled = false;
-  daumTrendButton.textContent = "다음 실시간";
-  if (!response.ok) {
-    state.daumTrends = [];
-    daumTrendAccordion.hidden = true;
-    daumTrendList.innerHTML = "";
-    setText("#daumTrendStatus", response.data.error || "실시간 검색어를 불러오지 못했습니다.");
+  return loadRemoteTrends("daum");
+}
+
+async function loadRemoteTrends(source) {
+  const config = TREND_SOURCES[source];
+  if (!config) {
     return;
   }
-  state.daumTrends = Array.isArray(response.data.trends) ? response.data.trends.slice(0, 10) : [];
-  renderDaumTrends();
+  setText("#jobError", "");
+  const button = document.querySelector(config.button);
+  const accordion = document.querySelector(config.accordion);
+  const list = document.querySelector(config.list);
+  button.disabled = true;
+  button.textContent = "불러오는 중...";
+  setText("#trendStatus", config.loadingLabel);
+  const response = await api(config.endpoint);
+  button.disabled = false;
+  button.textContent = config.buttonLabel;
+  if (!response.ok) {
+    state.trends[source] = [];
+    accordion.hidden = true;
+    list.innerHTML = "";
+    setText("#trendStatus", response.data.error || "키워드를 불러오지 못했습니다.");
+    updateTrendBatchActions();
+    return;
+  }
+  state.trends[source] = Array.isArray(response.data.trends) ? response.data.trends.slice(0, 10) : [];
+  renderRemoteTrends(source);
   setText(
-    "#daumTrendStatus",
-    state.daumTrends.length
-      ? "키워드를 선택하면 선택한 PC에서 바로 글쓰기를 시작합니다."
-      : "표시할 실시간 검색어가 없습니다.",
+    "#trendStatus",
+    state.trends[source].length
+      ? "라디오는 즉시 작업, 체크박스는 여러 키워드를 선택한 뒤 일괄 작업합니다."
+      : "표시할 키워드가 없습니다.",
   );
 }
 
-function renderDaumTrends() {
-  daumTrendAccordion.hidden = !state.daumTrends.length;
-  daumTrendAccordion.open = true;
-  daumTrendList.innerHTML = state.daumTrends
+function renderRemoteTrends(source) {
+  const config = TREND_SOURCES[source];
+  const accordion = document.querySelector(config.accordion);
+  const list = document.querySelector(config.list);
+  const trends = state.trends[source] || [];
+  accordion.hidden = !trends.length;
+  accordion.open = true;
+  list.innerHTML = trends
     .map((trend, index) => {
       const rank = Number(trend.rank || index + 1);
       return `
         <label class="trend-item">
-          <input type="radio" name="daum-trend" value="${escapeHtml(trend.keyword)}" />
+          <input class="trend-radio" type="radio" name="trend-immediate" value="${escapeHtml(trend.keyword)}"
+            data-trend-source="${escapeHtml(source)}" aria-label="${escapeHtml(trend.keyword)} 즉시 작업" />
+          <input class="trend-checkbox" type="checkbox" value="${escapeHtml(trend.keyword)}"
+            data-trend-source="${escapeHtml(source)}" aria-label="${escapeHtml(trend.keyword)} 다중 선택" />
           <strong>${rank}위</strong>
           <span>${escapeHtml(trend.keyword)}</span>
         </label>`;
     })
     .join("");
+  updateTrendBatchActions();
 }
 
-async function handleDaumTrendSelection(event) {
-  const radio = event.target.closest("input[name='daum-trend']");
+async function handleTrendSelection(event) {
+  const checkbox = event.target.closest(".trend-checkbox");
+  if (checkbox) {
+    updateTrendBatchActions();
+    return;
+  }
+  const radio = event.target.closest(".trend-radio");
   if (!radio || !radio.checked) {
     return;
   }
   const keyword = String(radio.value || "").trim();
   document.querySelector("#keyword").value = keyword;
   if (!state.selectedDeviceId) {
-    setText("#jobError", "실시간 키워드를 보내려면 작업할 PC를 먼저 선택해 주세요.");
+    setText("#jobError", "키워드를 보내려면 작업할 PC를 먼저 선택해 주세요.");
     radio.checked = false;
     document.querySelector("#keyword").focus();
     return;
   }
-  daumTrendList.querySelectorAll("input").forEach((input) => {
+  trendLists.forEach((list) => list.querySelectorAll("input").forEach((input) => {
     input.disabled = true;
-  });
-  setText("#daumTrendStatus", `'${keyword}' 작업을 선택한 PC로 보내고 있습니다.`);
+  }));
+  setText("#trendStatus", `'${keyword}' 작업을 선택한 PC로 보내고 있습니다.`);
   const sent = await submitKeywordJob(keyword, selectedPublishAction());
-  daumTrendList.querySelectorAll("input").forEach((input) => {
+  trendLists.forEach((list) => list.querySelectorAll("input").forEach((input) => {
     input.disabled = false;
-  });
+  }));
   if (sent) {
-    setText("#daumTrendStatus", `'${keyword}' 글쓰기를 시작했습니다. 최근 작업에서 진행 상황을 확인해 주세요.`);
+    setText("#trendStatus", `'${keyword}' 글쓰기를 시작했습니다. 최근 작업에서 진행 상황을 확인해 주세요.`);
   } else {
     radio.checked = false;
-    setText("#daumTrendStatus", "작업을 시작하지 못했습니다. PC 상태와 발행 대상을 확인해 주세요.");
+    setText("#trendStatus", "작업을 시작하지 못했습니다. PC 상태와 발행 대상을 확인해 주세요.");
   }
+}
+
+function selectedTrendCheckboxes() {
+  return trendLists.flatMap((list) => [...list.querySelectorAll(".trend-checkbox:checked")]);
+}
+
+function updateTrendBatchActions() {
+  const selected = selectedTrendCheckboxes();
+  const actions = document.querySelector("#trendBatchActions");
+  actions.hidden = !selected.length;
+  setText("#trendBatchCount", `선택 키워드 ${selected.length}개`);
+  submitTrendBatchButton.disabled = !selected.length || state.jobSubmitting;
+}
+
+function clearTrendBatchSelection() {
+  selectedTrendCheckboxes().forEach((input) => {
+    input.checked = false;
+  });
+  updateTrendBatchActions();
+}
+
+async function submitSelectedTrendBatch() {
+  setText("#jobError", "");
+  const selected = selectedTrendCheckboxes();
+  const keywords = [...new Set(selected.map((input) => String(input.value || "").trim()).filter(Boolean))];
+  const targets = selectedTargets();
+  if (!state.selectedDeviceId) {
+    setText("#jobError", "다중 작업을 보낼 PC를 먼저 선택해 주세요.");
+    return;
+  }
+  if (!targets.length) {
+    setText("#jobError", "발행 대상을 하나 이상 선택해 주세요.");
+    return;
+  }
+  if (!keywords.length || state.jobSubmitting) {
+    return;
+  }
+  saveTargetPreferences();
+  state.jobSubmitting = true;
+  submitJob.disabled = true;
+  submitTrendBatchButton.disabled = true;
+  publishImmediatelyToggle.disabled = true;
+  const action = selectedPublishAction();
+  let accepted = 0;
+  const acceptedKeywords = new Set();
+  for (const keyword of keywords) {
+    setText("#trendStatus", `${keywords.length}개 중 ${accepted + 1}번째 '${keyword}' 작업을 접수하고 있습니다.`);
+    const response = await api("/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        deviceId: state.selectedDeviceId,
+        keyword,
+        targets,
+        action,
+        enqueue: true,
+      }),
+    });
+    if (!response.ok) {
+      setText("#jobError", `${accepted + 1}개 접수 후 중단: ${response.data.error || "작업을 전달하지 못했습니다."}`);
+      break;
+    }
+    accepted += 1;
+    acceptedKeywords.add(keyword);
+  }
+  state.jobSubmitting = false;
+  publishImmediatelyToggle.disabled = false;
+  if (accepted) {
+    selected.forEach((input) => {
+      if (acceptedKeywords.has(String(input.value || "").trim())) {
+        input.checked = false;
+      }
+    });
+    setText("#trendStatus", `${accepted}개 키워드를 접수했습니다. PC에서 순서대로 작업합니다.`);
+    await refreshDashboard();
+  }
+  updateTrendBatchActions();
+  updateSubmitButton();
 }
 
 async function clearRecentJobs() {
@@ -702,6 +838,7 @@ function renderJobs() {
     return;
   }
   const statusLabel = {
+    pending: "대기 중",
     sent: "전달됨",
     running: "작성 중",
     completed: "완료",

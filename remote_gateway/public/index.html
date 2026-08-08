@@ -68,13 +68,30 @@
             <label for="keyword">작성할 주제 또는 키워드</label>
             <textarea id="keyword" rows="3" maxlength="300" placeholder="예: 청년도약계좌 신청 조건과 준비 서류" required></textarea>
             <div class="trend-toolbar">
-              <button id="daumTrendButton" class="trend-button" type="button">다음 실시간</button>
-              <span id="daumTrendStatus" class="trend-status" role="status">실시간 검색어를 불러와 바로 작업할 수 있습니다.</span>
+              <div class="trend-source-buttons" aria-label="키워드 출처 선택">
+                <button id="daumTrendButton" class="trend-button" type="button">다음 실시간</button>
+                <button id="signalTrendButton" class="trend-button signal" type="button">시그널 키워드</button>
+                <button id="newneekTrendButton" class="trend-button newneek" type="button">뉴닉 키워드</button>
+              </div>
+              <span id="trendStatus" class="trend-status" role="status">키워드 출처를 선택해 1~10위를 불러올 수 있습니다.</span>
             </div>
             <details id="daumTrendAccordion" class="trend-accordion" hidden open>
               <summary>다음 실시간 검색어 1~10위</summary>
               <div id="daumTrendList" class="trend-list" aria-live="polite"></div>
             </details>
+            <details id="signalTrendAccordion" class="trend-accordion" hidden open>
+              <summary>시그널 실시간 검색어 1~10위</summary>
+              <div id="signalTrendList" class="trend-list" aria-live="polite"></div>
+            </details>
+            <details id="newneekTrendAccordion" class="trend-accordion" hidden open>
+              <summary>뉴닉 최신 키워드 1~10위</summary>
+              <div id="newneekTrendList" class="trend-list" aria-live="polite"></div>
+            </details>
+            <div id="trendBatchActions" class="trend-batch-actions" hidden>
+              <span id="trendBatchCount">선택 키워드 0개</span>
+              <button id="clearTrendSelectionButton" class="text-button" type="button">선택 해제</button>
+              <button id="submitTrendBatchButton" class="batch-submit-button" type="button">선택 키워드 일괄 작업</button>
+            </div>
             <fieldset>
               <legend>발행 대상</legend>
               <label class="check"><input type="checkbox" name="target" value="wordpress" checked /><span>워드프레스</span></label>

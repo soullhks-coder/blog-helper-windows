@@ -6,6 +6,8 @@ const DAUM_REALTIME_URL =
   + "&q=%EB%8B%A4%EC%9D%8C%20%EC%8B%A4%EC%8B%9C%EA%B0%84%20%EA%B2%80%EC%83%89%EC%96%B4%20%EC%88%9C%EC%9C%84"
   + "&nzq=%EB%8B%A4%EC%9D%8C%20%EC%8B%A4%EC%8B%9C%EA%B0%84%ED%8A%B8%EB%A0%8C%EB%93%9C"
   + "&DA=NSJ";
+const SIGNAL_REALTIME_URL = "https://api.signal.bz/news/realtime";
+const NEWNEEK_CATEGORY_URL = "https://api.newneek.co/product/v1/tags/articles/by-tags?&id=3&size=10";
 
 export default {
   async fetch(request, env) {
@@ -128,6 +130,12 @@ export class ControlRoom {
     if (url.pathname === "/api/trends/daum" && request.method === "GET") {
       return this.fetchDaumRealtimeTrends();
     }
+    if (url.pathname === "/api/trends/signal" && request.method === "GET") {
+      return this.fetchSignalRealtimeTrends();
+    }
+    if (url.pathname === "/api/trends/newneek" && request.method === "GET") {
+      return this.fetchNewneekTrends();
+    }
     if (url.pathname === "/api/queue" && request.method === "GET") {
       return this.listQueue(
         url.searchParams.get("deviceId"),
@@ -212,6 +220,7 @@ export class ControlRoom {
       lastSeen: Date.now(),
       connectedAt: Date.now(),
     });
+    await this.dispatchNextPendingJob(deviceId);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -220,6 +229,7 @@ export class ControlRoom {
     const deviceId = cleanText(payload.deviceId, 80);
     const keyword = cleanText(payload.keyword, 300);
     const targets = normalizeTargets(payload.targets);
+    const enqueue = payload.enqueue === true;
     if (!deviceId || !keyword) {
       return jsonResponse({ error: "PC와 키워드를 선택해 주세요." }, 400);
     }
@@ -230,7 +240,7 @@ export class ControlRoom {
     }
     const deviceKey = `device:${deviceId}`;
     const device = (await this.ctx.storage.get(deviceKey)) || {};
-    if (device.busyJobId) {
+    if (device.busyJobId && !enqueue) {
       return jsonResponse({ error: "선택한 PC는 다른 작업을 진행 중입니다." }, 409);
     }
 
@@ -243,13 +253,16 @@ export class ControlRoom {
       keyword,
       targets,
       action: payload.action === "publish" ? "publish" : "queue",
-      status: "sent",
+      status: device.busyJobId ? "pending" : "sent",
       progress: 0,
-      message: "PC로 작업을 전달했습니다.",
+      message: device.busyJobId ? "앞선 원격 작업이 끝나기를 기다리고 있습니다." : "PC로 작업을 전달했습니다.",
       createdAt: now,
       updatedAt: now,
     };
     await this.ctx.storage.put(`job:${jobId}`, job);
+    if (device.busyJobId) {
+      return jsonResponse({ job, queued: true }, 202);
+    }
     await this.ctx.storage.put(deviceKey, { ...device, busyJobId: jobId, lastSeen: now });
 
     try {
@@ -284,6 +297,7 @@ export class ControlRoom {
     const updated = { ...job, status: "cancelled", message: "사용자가 작업을 취소했습니다.", updatedAt: Date.now() };
     await this.ctx.storage.put(jobKey, updated);
     await this.releaseDevice(job.deviceId, jobId);
+    await this.dispatchNextPendingJob(job.deviceId);
     return jsonResponse({ job: updated });
   }
 
@@ -400,6 +414,65 @@ export class ControlRoom {
       fetchedAt: Date.now(),
       trends,
     });
+  }
+
+  async fetchSignalRealtimeTrends() {
+    const payload = await fetchJsonTrendSource(
+      SIGNAL_REALTIME_URL,
+      "https://signal.bz/",
+      "시그널 실시간 검색어",
+    );
+    if (payload.errorResponse) {
+      return payload.errorResponse;
+    }
+    const top10 = Array.isArray(payload.data && payload.data.top10) ? payload.data.top10 : [];
+    const trends = top10
+      .map((item, index) => ({
+        rank: Number(item && item.rank) || index + 1,
+        keyword: cleanText(item && item.keyword, 120),
+        url: cleanHttpUrl(item && item.summary) || `https://signal.bz/?q=${encodeURIComponent(cleanText(item && item.keyword, 120))}`,
+      }))
+      .filter((item) => item.keyword)
+      .slice(0, 10);
+    if (!trends.length) {
+      return jsonResponse({ error: "현재 시그널 실시간 검색어 1~10위를 찾지 못했습니다." }, 502);
+    }
+    return jsonResponse({ source: "시그널 키워드", fetchedAt: Date.now(), trends });
+  }
+
+  async fetchNewneekTrends() {
+    const payload = await fetchJsonTrendSource(
+      NEWNEEK_CATEGORY_URL,
+      "https://newneek.co/category/society",
+      "뉴닉 최신 키워드",
+      "https://newneek.co",
+    );
+    if (payload.errorResponse) {
+      return payload.errorResponse;
+    }
+    const articles = extractNewneekArticles(payload.data);
+    const trends = articles
+      .map((article, index) => {
+        const keyword = cleanNewneekKeyword(article && (article.headline || article.title));
+        const articleId = Number(article && article.id) || 0;
+        const handle = cleanText(
+          article && article.user && (article.user.handle || article.user.name),
+          80,
+        ).replace(/^@/, "") || "newneek";
+        return {
+          rank: index + 1,
+          keyword,
+          url: articleId
+            ? `https://newneek.co/@${encodeURIComponent(handle)}/article/${articleId}`
+            : "https://newneek.co/category/society",
+        };
+      })
+      .filter((item) => item.keyword)
+      .slice(0, 10);
+    if (!trends.length) {
+      return jsonResponse({ error: "현재 뉴닉 최신 키워드 1~10위를 찾지 못했습니다." }, 502);
+    }
+    return jsonResponse({ source: "뉴닉 키워드", fetchedAt: Date.now(), trends });
   }
 
   async listQueue(rawDeviceId, requestRefresh = false) {
@@ -532,6 +605,7 @@ export class ControlRoom {
         ...attachment,
         lastSeen: Date.now(),
       });
+      await this.dispatchNextPendingJob(deviceId);
       return;
     }
     if (payload.type === "queue.snapshot") {
@@ -621,6 +695,9 @@ export class ControlRoom {
         busyJobId: jobId && device.busyJobId === jobId ? "" : device.busyJobId,
         lastSeen: Date.now(),
       });
+      if (jobId && device.busyJobId === jobId) {
+        await this.dispatchNextPendingJob(deviceId);
+      }
       return;
     }
     if (!String(payload.type || "").startsWith("job.")) {
@@ -649,6 +726,9 @@ export class ControlRoom {
     };
     await this.ctx.storage.put(jobKey, updated);
     await this.ctx.storage.put(deviceKey, { ...device, lastSeen: Date.now(), busyJobId: isTerminal(status) ? "" : jobId });
+    if (isTerminal(status)) {
+      await this.dispatchNextPendingJob(deviceId);
+    }
   }
 
   async webSocketClose(socket) {
@@ -687,6 +767,47 @@ export class ControlRoom {
     const device = await this.ctx.storage.get(key);
     if (device && device.busyJobId === jobId) {
       await this.ctx.storage.put(key, { ...device, busyJobId: "", lastSeen: Date.now() });
+    }
+  }
+
+  async dispatchNextPendingJob(deviceId) {
+    const sockets = this.ctx.getWebSockets(`device:${deviceId}`);
+    if (!sockets.length) {
+      return false;
+    }
+    const deviceKey = `device:${deviceId}`;
+    const device = (await this.ctx.storage.get(deviceKey)) || {};
+    if (device.busyJobId) {
+      return false;
+    }
+    const entries = await this.ctx.storage.list({ prefix: "job:" });
+    const pending = [...entries.values()]
+      .filter((job) => job.deviceId === deviceId && job.status === "pending")
+      .sort((left, right) => Number(left.createdAt || 0) - Number(right.createdAt || 0));
+    const job = pending[0];
+    if (!job) {
+      return false;
+    }
+    const dispatched = {
+      ...job,
+      status: "sent",
+      message: "앞선 작업이 끝나 PC로 작업을 전달했습니다.",
+      updatedAt: Date.now(),
+    };
+    await this.ctx.storage.put(`job:${job.id}`, dispatched);
+    await this.ctx.storage.put(deviceKey, { ...device, busyJobId: job.id, lastSeen: Date.now() });
+    try {
+      sockets[0].send(JSON.stringify({ type: "job", ...dispatched }));
+      return true;
+    } catch {
+      await this.ctx.storage.put(`job:${job.id}`, {
+        ...dispatched,
+        status: "failed",
+        message: "PC 연결이 끊어져 대기 작업을 전달하지 못했습니다.",
+        updatedAt: Date.now(),
+      });
+      await this.ctx.storage.put(deviceKey, { ...device, busyJobId: "", lastSeen: Date.now() });
+      return false;
     }
   }
 }
@@ -796,6 +917,72 @@ function parseDaumRealtimeTrends(html) {
   return trends
     .sort((left, right) => left.rank - right.rank)
     .slice(0, 10);
+}
+
+async function fetchJsonTrendSource(url, referer, label, origin = "") {
+  let response;
+  try {
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/123.0 Safari/537.36",
+      "Accept": "application/json,text/plain,*/*",
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+      "Referer": referer,
+    };
+    if (origin) {
+      headers.Origin = origin;
+    }
+    response = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+  } catch {
+    return { errorResponse: jsonResponse({ error: `${label} 서버 응답이 늦어 불러오지 못했습니다.` }, 504) };
+  }
+  if (!response.ok) {
+    return { errorResponse: jsonResponse({ error: `${label}를 불러오지 못했습니다. (${response.status})` }, 502) };
+  }
+  try {
+    return { data: await response.json() };
+  } catch {
+    return { errorResponse: jsonResponse({ error: `${label} 응답 형식을 확인하지 못했습니다.` }, 502) };
+  }
+}
+
+function extractNewneekArticles(payload) {
+  const found = [];
+  const seen = new Set();
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    if (Array.isArray(value.articles)) {
+      for (const article of value.articles) {
+        if (!article || typeof article !== "object") {
+          continue;
+        }
+        const key = String(article.id || article.headline || article.title || "");
+        if (!key || seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        found.push(article);
+      }
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(payload);
+  return found;
+}
+
+function cleanNewneekKeyword(value) {
+  return cleanText(value, 120)
+    .replace(/[!?~…]+/g, " ")
+    .replace(/[^\w\s가-힣ㄱ-ㅎㅏ-ㅣA-Za-z0-9“”‘’·→%()~.,:;/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 52)
+    .trim();
 }
 
 function readHtmlAttribute(tag, name) {
