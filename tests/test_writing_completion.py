@@ -88,6 +88,20 @@ class WritingCompletionFlowTests(unittest.TestCase):
         )
         self.assertIn("수집 요청 내역 등록 확인 완료", method_source)
 
+    def test_wordpress_submission_continues_to_daum_webmaster(self) -> None:
+        daum_source = ast.get_source_segment(
+            self.source,
+            self.methods["run_daum_webmaster_playwright"],
+        )
+        self.assertIn("class NaverSearchAdvisorWorker", self.source)
+        self.assertIn("daum_success, daum_message = run_daum_webmaster_playwright", self.source)
+        self.assertIn("DAUM_WEBMASTER_COLLECT_URL", daum_source)
+        self.assertIn("DAUM_WEBMASTER_CHROME_PROFILE_DIR", daum_source)
+        self.assertIn("url_input.fill(published_url)", daum_source)
+        self.assertIn("collect_button.click()", daum_source)
+        self.assertIn("context.close()", daum_source)
+        self.assertIn('"https://webmaster.daum.net/tool/collect"', self.source)
+
     def test_automation_wordpress_publish_also_queues_crawl_request(self) -> None:
         method_source = ast.get_source_segment(
             self.source,

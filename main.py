@@ -151,6 +151,8 @@ NAVER_SEARCH_ADVISOR_CRAWL_URL = (
     "https://searchadvisor.naver.com/console/site/request/crawl"
     "?site=https%3A%2F%2Fblog.soullhk.kr"
 )
+DAUM_WEBMASTER_COLLECT_URL = "https://webmaster.daum.net/tool/collect"
+DAUM_WEBMASTER_CHROME_PROFILE_DIR = DATA_DIR / "Daum Webmaster Chrome Profile"
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
@@ -6938,7 +6940,10 @@ def _find_naver_search_advisor_url_input(page):
                 score -= 80
             if input_type in {"text", "url"}:
                 fallback_inputs.append(locator)
-            if score > 0:
+            # The /login page also contains a generic site URL input. Require
+            # explicit collection-page wording so it is never mistaken for
+            # the authenticated collection request field.
+            if score >= 100:
                 candidates.append((score, locator))
         except Exception:
             continue
@@ -7241,6 +7246,266 @@ def run_naver_search_advisor_playwright(
             save_naver_blog_storage_state(context)
             context.close()
             append_runtime_log("naver-search-advisor", "전용 Chrome 종료 완료")
+
+
+def _find_daum_webmaster_url_input(page):
+    """Find Daum Webmaster's visible URL collection input across DOM revisions."""
+    inputs = page.locator("input:not([type='hidden']), textarea")
+    candidates: list[tuple[int, object]] = []
+    for index in range(min(inputs.count(), 80)):
+        locator = inputs.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            placeholder = str(locator.get_attribute("placeholder") or "")
+            aria_label = str(locator.get_attribute("aria-label") or "")
+            input_type = str(locator.get_attribute("type") or "text").lower()
+            nearby_text = str(
+                locator.evaluate(
+                    """node => {
+                        const parts = [];
+                        let current = node;
+                        for (let depth = 0; depth < 8 && current; depth += 1) {
+                            current = current.parentElement;
+                            const text = (current?.innerText || '').replace(/\\s+/g, ' ').trim();
+                            if (text) parts.push(text);
+                            if (/수집을 원하는 사이트|수집요청/.test(text)) break;
+                        }
+                        return parts.join(' ').slice(0, 700);
+                    }"""
+                )
+                or ""
+            )
+            searchable = f"{placeholder} {aria_label} {nearby_text}".lower()
+            score = 0
+            if "수집을 원하는 사이트의 url" in searchable:
+                score += 150
+            if "수집" in searchable and "url" in searchable:
+                score += 100
+            if placeholder.lower().startswith(("http://", "https://")):
+                score += 70
+            if input_type == "url":
+                score += 60
+            if input_type in {"password", "search", "date", "time"}:
+                score -= 100
+            # The PIN authentication page also has an input[type=url].  Only
+            # accept controls whose surrounding UI explicitly identifies the
+            # collection request form so login can never be mistaken for a
+            # successful authentication.
+            if score >= 100:
+                candidates.append((score, locator))
+        except Exception:
+            continue
+    if not candidates:
+        raise RuntimeError(
+            "다음 웹마스터도구의 '수집을 원하는 사이트의 URL' 입력칸을 찾지 못했습니다."
+        )
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _find_daum_webmaster_collect_button(page, url_input):
+    """Find the enabled '수집요청' control nearest to the URL input."""
+    input_box = url_input.bounding_box() or {}
+    input_center_y = float(input_box.get("y", 0)) + (float(input_box.get("height", 0)) / 2)
+    controls = page.locator("button, [role='button'], input[type='button'], input[type='submit']")
+    candidates: list[tuple[float, object]] = []
+    for index in range(min(controls.count(), 120)):
+        locator = controls.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            text = str(locator.inner_text(timeout=500) or "").strip()
+            if not text:
+                text = str(locator.get_attribute("value") or "").strip()
+            if re.sub(r"\s+", "", text) != "수집요청":
+                continue
+            box = locator.bounding_box() or {}
+            center_y = float(box.get("y", 0)) + (float(box.get("height", 0)) / 2)
+            candidates.append((abs(center_y - input_center_y), locator))
+        except Exception:
+            continue
+    if not candidates:
+        raise RuntimeError("다음 웹마스터도구의 '수집요청' 버튼을 찾지 못했습니다.")
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _wait_for_daum_webmaster_collect_page(
+    context,
+    page,
+    result_queue: queue.Queue,
+    published_url: str,
+    login_timeout_seconds: int,
+):
+    """Wait for manual login and return the authenticated collection page."""
+    deadline = time.time() + max(30, int(login_timeout_seconds or 300))
+    login_notice_sent = False
+    last_collect_navigation_at = time.time()
+    while time.time() < deadline:
+        active_pages = list(context.pages) or [page]
+        collect_pages = [
+            candidate
+            for candidate in active_pages
+            if "webmaster.daum.net/tool/collect" in str(candidate.url or "").lower()
+        ]
+        for candidate in reversed(collect_pages):
+            try:
+                url_input = _find_daum_webmaster_url_input(candidate)
+                append_runtime_log("daum-webmaster", "수집 요청 입력칸 확인 완료")
+                return candidate, url_input
+            except RuntimeError:
+                continue
+
+        login_page_open = any(
+            any(
+                marker in str(candidate.url or "").lower()
+                for marker in (
+                    "accounts.kakao.com",
+                    "logins.daum.net",
+                    "webmaster.daum.net/login",
+                )
+            )
+            for candidate in active_pages
+        )
+        if login_page_open and not login_notice_sent:
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "다음 웹마스터도구 전용 Chrome에서 사이트 URL과 PIN코드로 인증해 주세요. 인증 상태는 다음 실행에도 유지됩니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            login_notice_sent = True
+
+        if not login_page_open and time.time() - last_collect_navigation_at >= 4:
+            page = active_pages[-1]
+            try:
+                page.goto(DAUM_WEBMASTER_COLLECT_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(900)
+            except Exception:
+                pass
+            last_collect_navigation_at = time.time()
+        time.sleep(1)
+    raise RuntimeError(
+        "5분 안에 다음 웹마스터도구 로그인 또는 수집 요청 화면을 확인하지 못했습니다. "
+        "전용 Chrome에서 로그인을 완료한 뒤 다시 시도해 주세요."
+    )
+
+
+def run_daum_webmaster_playwright(
+    published_url: str,
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+    submit_request: bool = True,
+) -> tuple[bool, str]:
+    """Persist Daum login and optionally submit a WordPress URL for collection."""
+    published_url = str(published_url or "").strip()
+    if submit_request:
+        parsed_url = urlparse(published_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise RuntimeError("다음 수집 요청에 사용할 워드프레스 발행 URL이 올바르지 않습니다.")
+
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 프로그램을 다시 설치하거나 업데이트해 주세요."
+        ) from exc
+
+    chrome_path = require_google_chrome_executable()
+    DAUM_WEBMASTER_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("daum-webmaster", f"수집 요청 시작: {published_url or '로그인 확인'}")
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(DAUM_WEBMASTER_CHROME_PROFILE_DIR),
+            executable_path=str(chrome_path),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        try:
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "네이버 수집 요청 완료. 다음 웹마스터도구 수집 요청 페이지로 이동 중입니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            page.goto(DAUM_WEBMASTER_COLLECT_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(1000)
+            page, url_input = _wait_for_daum_webmaster_collect_page(
+                context,
+                page,
+                result_queue,
+                published_url,
+                login_timeout_seconds,
+            )
+            if not submit_request:
+                return True, "다음 웹마스터도구 로그인을 확인하고 전용 Chrome 프로필에 저장했습니다."
+
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "발행한 워드프레스 URL을 다음 웹마스터도구에 입력하고 있습니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            url_input.scroll_into_view_if_needed()
+            url_input.fill(published_url)
+            if str(url_input.input_value() or "").strip() != published_url:
+                raise RuntimeError("다음 수집 요청 입력란에 워드프레스 발행 URL을 입력하지 못했습니다.")
+            append_runtime_log("daum-webmaster", f"발행 URL 입력 완료: {published_url}")
+
+            collect_button = _find_daum_webmaster_collect_button(page, url_input)
+            collect_button.scroll_into_view_if_needed()
+            collect_button.click()
+            append_runtime_log("daum-webmaster", "수집요청 버튼 클릭 완료")
+            page.wait_for_timeout(1800)
+
+            body_text = ""
+            try:
+                body_text = re.sub(r"\s+", " ", str(page.locator("body").inner_text(timeout=2500) or ""))
+            except Exception:
+                pass
+            error_message = next(
+                (
+                    message
+                    for message in (
+                        "올바른 URL을 입력",
+                        "수집 요청에 실패",
+                        "로그인이 필요",
+                        "등록된 사이트가 아닙니다",
+                    )
+                    if message in body_text
+                ),
+                "",
+            )
+            if error_message:
+                raise RuntimeError(f"다음 웹마스터도구가 요청을 거부했습니다: {error_message}")
+            return True, "다음 웹마스터도구에 워드프레스 글 수집 요청을 완료했습니다."
+        except PlaywrightTimeoutError as exc:
+            append_runtime_log("daum-webmaster", f"화면 응답 시간 초과: {exc}")
+            raise RuntimeError(f"다음 웹마스터도구 화면 응답 시간이 초과되었습니다: {exc}") from exc
+        finally:
+            context.close()
+            append_runtime_log("daum-webmaster", "전용 Chrome 종료 및 로그인 프로필 저장 완료")
 
 
 def run_naver_kin_playwright_bootstrap(
@@ -11861,19 +12126,25 @@ class NaverSearchAdvisorWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            success, message = run_naver_search_advisor_playwright(
+            naver_success, naver_message = run_naver_search_advisor_playwright(
                 self.published_url,
                 self.result_queue,
             )
+            if not naver_success:
+                raise RuntimeError(str(naver_message or "네이버 수집 요청에 실패했습니다."))
+            daum_success, daum_message = run_daum_webmaster_playwright(
+                self.published_url,
+                self.result_queue,
+            )
+            if not daum_success:
+                raise RuntimeError(str(daum_message or "다음 수집 요청에 실패했습니다."))
+            message = f"{naver_message}\n{daum_message}"
             payload = {
                 "message": message,
                 "published_url": self.published_url,
                 "show_feedback": self.show_feedback,
             }
-            if success:
-                self.result_queue.put(("naver_search_advisor_done", payload))
-            else:
-                self.result_queue.put(("naver_search_advisor_error", payload))
+            self.result_queue.put(("naver_search_advisor_done", payload))
         except Exception as exc:  # pragma: no cover - runtime handling
             append_runtime_log("naver-search-advisor", f"수집 요청 실패: {exc}")
             self.result_queue.put(
@@ -27428,7 +27699,7 @@ class KeywordApp(ctk.CTk):
                 message.append(f"태그: {', '.join(wordpress['tag_names'])}")
             message.append(f"본문 카드뉴스 이미지: {wordpress.get('cardnews_count', 0)}장")
             if published_url and str(wordpress.get("status") or "").lower() == "publish":
-                message.append("네이버 서치어드바이저 수집 요청 자동화를 시작했습니다.")
+                message.append("네이버·다음 웹마스터도구 수집 요청 자동화를 시작했습니다.")
                 self.after(
                     250,
                     lambda url=published_url: self._queue_naver_search_advisor_submission(
@@ -27820,31 +28091,31 @@ class KeywordApp(ctk.CTk):
         self.naver_search_advisor_worker.start()
 
     def _handle_naver_search_advisor_done(self, payload: dict) -> None:
-        message = str((payload or {}).get("message") or "네이버 수집 요청을 완료했습니다.")
+        message = str((payload or {}).get("message") or "네이버·다음 수집 요청을 완료했습니다.")
         show_feedback = bool((payload or {}).get("show_feedback", True))
         self.naver_search_advisor_worker = None
         if hasattr(self, "publish_status_label"):
             self.publish_status_label.configure(text=message, text_color="#48d980")
-        self._update_quick_status("네이버 수집 요청 완료", message, "#48d980")
+        self._update_quick_status("검색엔진 수집 요청 완료", message, "#48d980")
         if show_feedback:
-            messagebox.showinfo("네이버 서치어드바이저", message)
+            messagebox.showinfo("검색엔진 수집 요청 완료", message)
         self.after(350, self._start_next_naver_search_advisor_submission)
 
     def _handle_naver_search_advisor_error(self, payload: dict) -> None:
-        message = str((payload or {}).get("message") or "네이버 수집 요청에 실패했습니다.")
+        message = str((payload or {}).get("message") or "검색엔진 수집 요청에 실패했습니다.")
         show_feedback = bool((payload or {}).get("show_feedback", True))
         self.naver_search_advisor_worker = None
         if hasattr(self, "publish_status_label"):
             self.publish_status_label.configure(
-                text=f"글 발행은 완료됐지만 네이버 수집 요청은 실패했습니다: {message}",
+                text=f"글 발행은 완료됐지만 검색엔진 수집 요청은 실패했습니다: {message}",
                 text_color="#ffb86b",
             )
-        self._update_quick_status("네이버 수집 요청 실패", message, "#ffb86b")
+        self._update_quick_status("검색엔진 수집 요청 실패", message, "#ffb86b")
         if show_feedback:
             messagebox.showwarning(
-                "네이버 수집 요청 실패",
+                "검색엔진 수집 요청 실패",
                 "워드프레스 글 발행은 정상적으로 완료되었습니다.\n\n"
-                f"네이버 서치어드바이저 후속 요청만 실패했습니다.\n{message}",
+                f"네이버 또는 다음 웹마스터도구 후속 요청이 실패했습니다.\n{message}",
             )
         self.after(350, self._start_next_naver_search_advisor_submission)
 
