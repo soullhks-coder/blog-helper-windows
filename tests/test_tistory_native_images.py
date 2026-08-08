@@ -985,6 +985,77 @@ class TistoryNativeImageTests(unittest.TestCase):
         messages = [events.get_nowait()[1] for _ in range(events.qsize())]
         self.assertTrue(any("임시저장" in message for message in messages))
 
+    def test_captcha_is_detected_inside_cross_origin_frame(self) -> None:
+        class FakeFrame:
+            def __init__(self, url: str, detected: bool = False) -> None:
+                self.url = url
+                self.detected = detected
+
+            def evaluate(self, _script: str) -> bool:
+                return self.detected
+
+        main_frame = FakeFrame("https://soullhka.tistory.com/manage/newpost")
+        captcha_frame = FakeFrame("https://captcha.kakao.com/dkaptcha/challenge")
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.main_frame = main_frame
+                self.frames = [main_frame, captcha_frame]
+
+        self.assertTrue(main.is_tistory_captcha_visible(FakePage()))
+
+    def test_tistory_editor_page_is_kept_open_for_manual_publish(self) -> None:
+        class FakePage:
+            url = "https://soullhka.tistory.com/manage/newpost/?type=post"
+
+        self.assertTrue(main.is_tistory_editor_page_open(FakePage()))
+
+    def test_public_publish_is_clicked_once_without_followup_confirm_click(self) -> None:
+        class FakeMouse:
+            def __init__(self) -> None:
+                self.down_count = 0
+                self.up_count = 0
+                self.click_count = 0
+
+            def move(self, _x: float, _y: float) -> None:
+                pass
+
+            def down(self) -> None:
+                self.down_count += 1
+
+            def up(self) -> None:
+                self.up_count += 1
+
+            def click(self, _x: float, _y: float) -> None:
+                self.click_count += 1
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.mouse = FakeMouse()
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+        page = FakePage()
+        rect = {
+            "text": "공개 발행",
+            "x": 900,
+            "y": 800,
+            "left": 820,
+            "top": 780,
+            "width": 160,
+            "height": 40,
+        }
+        with (
+            patch.object(main, "click_tistory_publish_now_native", return_value=True),
+            patch.object(main, "find_tistory_public_publish_button_rect", return_value=rect),
+        ):
+            self.assertTrue(main.click_tistory_public_publish_native(page))
+
+        self.assertEqual(page.mouse.down_count, 1)
+        self.assertEqual(page.mouse.up_count, 1)
+        self.assertEqual(page.mouse.click_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

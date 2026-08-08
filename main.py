@@ -123,6 +123,7 @@ TISTORY_SAVE_MODE_OPTIONS = (
     TISTORY_SAVE_MODE_PUBLISH,
     TISTORY_SAVE_MODE_DRAFT,
 )
+TISTORY_MANUAL_PUBLISH_WAIT_SECONDS = 30 * 60
 TISTORY_AD_POSITION_ABOVE = "이미지 위"
 TISTORY_AD_POSITION_BELOW = "이미지 아래"
 TISTORY_AD_POSITION_OPTIONS = (
@@ -6560,10 +6561,13 @@ def click_tistory_draft_save_native(
     return False
 
 
-def is_tistory_captcha_visible(page) -> bool:
+def _is_tistory_captcha_visible_in_frame(frame) -> bool:
     try:
+        frame_url = str(getattr(frame, "url", "") or "")
+        if re.search(r"(?:d?kaptcha|captcha)", frame_url, flags=re.I):
+            return True
         return bool(
-            page.evaluate(
+            frame.evaluate(
                 r"""
 () => {
   const visible = (node) => {
@@ -6573,16 +6577,48 @@ def is_tistory_captcha_visible(page) -> bool:
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   };
   const bodyText = String(document.body?.innerText || '').replace(/\s+/g, ' ');
-  const textMatched = /DKAPTCHA|정답을 입력해주세요|답변 제출|지도에 있는.+명칭을 입력/.test(bodyText);
-  const inputMatched = Array.from(document.querySelectorAll('input'))
-    .some((node) => visible(node) && /정답/.test(String(node.placeholder || node.getAttribute('aria-label') || '')));
-  return textMatched && inputMatched;
+  const textMatched = /DKAPTCHA|캡차|정답을 입력|답변 제출|지도에 있는.+명칭을 입력|전체 명칭을 입력/.test(bodyText);
+  const inputMatched = Array.from(document.querySelectorAll('input, textarea'))
+    .some((node) => visible(node) && /정답|답변/.test(String(node.placeholder || node.getAttribute('aria-label') || '')));
+  const iframeMatched = Array.from(document.querySelectorAll('iframe'))
+    .some((node) => {
+      const marker = [node.src, node.title, node.name, node.id, node.className].join(' ');
+      return visible(node) && /d?kaptcha|captcha/i.test(marker);
+    });
+  return textMatched || inputMatched || iframeMatched;
 }
 """
             )
         )
     except Exception:
         return False
+
+
+def is_tistory_captcha_visible(page) -> bool:
+    frames = []
+    try:
+        main_frame = getattr(page, "main_frame", None)
+        if main_frame is not None:
+            frames.append(main_frame)
+        for frame in list(getattr(page, "frames", []) or []):
+            if frame not in frames:
+                frames.append(frame)
+    except Exception:
+        frames = []
+    if not frames:
+        frames = [page]
+    return any(_is_tistory_captcha_visible_in_frame(frame) for frame in frames)
+
+
+def is_tistory_editor_page_open(page) -> bool:
+    try:
+        current_url = str(getattr(page, "url", "") or "").lower()
+    except Exception:
+        return False
+    return bool(
+        re.search(r"tistory\.com/(?:manage/)?newpost", current_url)
+        or "/manage/newpost" in current_url
+    )
 
 
 def _tistory_public_origin(value: str) -> str:
@@ -6863,16 +6899,11 @@ def click_tistory_public_publish_native(page, result_queue: queue.Queue | None =
             page.mouse.down()
             page.wait_for_timeout(120)
             page.mouse.up()
-            page.wait_for_timeout(700)
-            page.mouse.click(rect["x"], rect["y"])
-            page.wait_for_timeout(1200)
-            try:
-                confirm_rect = find_visible_text_rect(page, [r"^확인$", r"^OK$", r"^예$", r"발행"], min_top=0, max_left_ratio=1.0)
-                if confirm_rect:
-                    page.mouse.click(confirm_rect["x"], confirm_rect["y"])
-                    page.wait_for_timeout(800)
-            except Exception:
-                pass
+            # One physical click is enough. A second click or a broad "확인"
+            # search can land on Tistory's CAPTCHA immediately after it opens.
+            # From this point the publish monitor owns the flow and performs no
+            # further clicks until manual verification has finished.
+            page.wait_for_timeout(1500)
             return True
         page.wait_for_timeout(400)
     return False
@@ -9409,25 +9440,28 @@ def run_tistory_playwright_automation(
                     published = click_tistory_public_publish_native(page, result_queue)
                     if not published:
                         raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
-                    deadline = time.time() + 18
+                    quick_deadline = time.time() + 18
+                    manual_deadline = time.time() + TISTORY_MANUAL_PUBLISH_WAIT_SECONDS
                     captcha_notice_sent = False
-                    while time.time() < deadline:
+                    captcha_completed_notice_sent = False
+                    manual_wait_notice_sent = False
+                    last_rss_check = 0.0
+                    while time.time() < manual_deadline:
                         page.wait_for_timeout(500)
-                        if is_tistory_captcha_visible(page):
+                        captcha_visible = is_tistory_captcha_visible(page)
+                        if captcha_visible:
                             if not captcha_notice_sent:
                                 captcha_notice_sent = True
-                                deadline = max(deadline, time.time() + 300)
                                 result_queue.put(
                                     (
                                         "tistory_progress",
-                                        "티스토리 보안 캡차가 표시되었습니다. 자동으로 풀 수 없어 전용 Chrome에서 직접 정답을 입력해 주세요. 최대 5분간 기다립니다...",
+                                        "티스토리 보안 캡차가 표시되었습니다. 전용 Chrome을 닫지 않고 최대 30분간 유지합니다. 직접 정답을 입력하고 '답변 제출'을 눌러 주세요.",
                                     )
                                 )
                                 append_runtime_log(
                                     "TISTORY",
-                                    "공개발행 캡차 감지 - 사용자 직접 입력을 최대 5분간 대기",
+                                    "공개발행 캡차 감지 - 사용자 직접 입력을 최대 30분간 대기",
                                 )
-                            continue
                         published_url = find_tistory_entry_url_in_values(
                             publish_response_values,
                             public_blog_url,
@@ -9440,6 +9474,59 @@ def run_tistory_playwright_automation(
                             )
                         if published_url:
                             break
+                        if captcha_visible:
+                            # Do not click, navigate, or close anything while the user is
+                            # solving Tistory's challenge in the dedicated Chrome window.
+                            continue
+                        if captcha_notice_sent and not captcha_completed_notice_sent:
+                            captcha_completed_notice_sent = True
+                            result_queue.put(
+                                (
+                                    "tistory_progress",
+                                    "캡차 입력 화면이 닫힌 것을 확인했습니다. 티스토리 발행 완료를 확인하고 있습니다...",
+                                )
+                            )
+                            append_runtime_log(
+                                "TISTORY",
+                                "공개발행 캡차 화면 종료 감지 - 발행 URL 확인 중",
+                            )
+
+                        now = time.time()
+                        if now < quick_deadline:
+                            continue
+                        if not is_tistory_editor_page_open(page):
+                            break
+                        if not manual_wait_notice_sent:
+                            manual_wait_notice_sent = True
+                            result_queue.put(
+                                (
+                                    "tistory_progress",
+                                    "티스토리 편집기에서 발행 완료를 기다리고 있습니다. 캡차나 확인 창이 보이면 직접 처리해 주세요. Chrome은 최대 30분간 유지됩니다...",
+                                )
+                            )
+                            append_runtime_log(
+                                "TISTORY",
+                                "공개발행 후 편집기 화면 유지 - 캡차 감지 여부와 관계없이 최대 30분간 대기",
+                            )
+
+                        # A successful AJAX publish can leave the editor URL unchanged.
+                        # Poll RSS occasionally so the browser closes as soon as the new
+                        # post is verifiably live, without interrupting manual CAPTCHA input.
+                        if (
+                            _tistory_public_origin(public_blog_url)
+                            and now - last_rss_check >= 5
+                        ):
+                            last_rss_check = now
+                            try:
+                                published_url = fetch_tistory_entry_url_from_rss(
+                                    public_blog_url,
+                                    expected_title,
+                                    timeout=4.0,
+                                )
+                            except (OSError, HTTPError, URLError, ValueError):
+                                published_url = ""
+                            if published_url:
+                                break
                 finally:
                     try:
                         page.remove_listener("response", capture_publish_response)
