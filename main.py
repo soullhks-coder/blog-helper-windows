@@ -134,6 +134,38 @@ CODEX_MODEL_OPTIONS = (
 DEFAULT_CODEX_CLI_PATH = ""
 DEFAULT_CODEX_CLI_EXTRA_ARGS = "--skip-git-repo-check"
 _CODEX_VERSION_CACHE: dict[str, tuple[str, tuple[int, int, int, int]]] = {}
+WRITING_MODEL_CODEX = "codex"
+WRITING_MODEL_GPT = "gpt"
+WRITING_MODEL_GEMINI = "gemini"
+WRITING_MODEL_OPTIONS = ("CLI", "GPT API", "제미나이 API")
+WRITING_MODEL_LABELS = {
+    WRITING_MODEL_CODEX: "CLI",
+    WRITING_MODEL_GPT: "GPT API",
+    WRITING_MODEL_GEMINI: "제미나이 API",
+}
+
+
+def normalize_writing_model(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "cli": WRITING_MODEL_CODEX,
+        "codex": WRITING_MODEL_CODEX,
+        "codex cli": WRITING_MODEL_CODEX,
+        "[cli] codex": WRITING_MODEL_CODEX,
+        "gpt": WRITING_MODEL_GPT,
+        "gpt api": WRITING_MODEL_GPT,
+        "openai": WRITING_MODEL_GPT,
+        "openai api": WRITING_MODEL_GPT,
+        "gemini": WRITING_MODEL_GEMINI,
+        "gemini api": WRITING_MODEL_GEMINI,
+        "제미나이": WRITING_MODEL_GEMINI,
+        "제미나이 api": WRITING_MODEL_GEMINI,
+    }
+    return aliases.get(normalized, WRITING_MODEL_CODEX)
+
+
+def writing_model_label(value: object) -> str:
+    return WRITING_MODEL_LABELS[normalize_writing_model(value)]
 
 
 def persist_design_asset(source_path: str | Path, role: str) -> str:
@@ -216,6 +248,7 @@ TISTORY_ADSENSE_MIDDLE_HTML = (
 TISTORY_ADSENSE_IMAGE_BLOCK_START = "BLOG_HELPER_TISTORY_ADSENSE_IMAGE_START"
 TISTORY_ADSENSE_IMAGE_BLOCK_END = "BLOG_HELPER_TISTORY_ADSENSE_IMAGE_END"
 TISTORY_PROTECTION_OFF_MIGRATION = "1.1.23:tistory-reference-image-protection-off"
+CODEX_DEFAULT_WRITING_MODEL_MIGRATION = "1.1.46:default-writing-model-codex"
 # The running app only follows GitHub's tiny latest-release redirect. Five
 # minutes keeps long-running, multi-PC installations responsive without
 # wasting API quota or network traffic.
@@ -1537,7 +1570,7 @@ class WordPressSettings:
     inline_images_enabled: bool = False
     inline_images_count: int = 2
     inline_images_provider: str = "Imagen API"
-    preferred_ai_provider: str = "gpt"
+    preferred_ai_provider: str = WRITING_MODEL_CODEX
     blogspot_blog_id: str = ""
     blogspot_client_id: str = ""
     blogspot_client_secret: str = ""
@@ -1555,7 +1588,10 @@ class WordPressSettings:
     tistory_ads_position: str = TISTORY_AD_POSITION_ABOVE
     tistory_ads_count: int = 1
     applied_settings_migrations: list[str] = field(
-        default_factory=lambda: [TISTORY_PROTECTION_OFF_MIGRATION]
+        default_factory=lambda: [
+            TISTORY_PROTECTION_OFF_MIGRATION,
+            CODEX_DEFAULT_WRITING_MODEL_MIGRATION,
+        ]
     )
     naver_blog_profiles: list[dict] = field(default_factory=list)
     naver_blog_active_profile: str = "블로그 1"
@@ -1884,15 +1920,18 @@ class AppStateStore:
         if not isinstance(migrations, list):
             migrations = []
         migrations = [str(item) for item in migrations if str(item).strip()]
-        if TISTORY_PROTECTION_OFF_MIGRATION in migrations:
-            return payload, False
-
-        payload["tistory_reference_image_protection_mode"] = False
-        payload["applied_settings_migrations"] = [
-            *migrations,
-            TISTORY_PROTECTION_OFF_MIGRATION,
-        ]
-        return payload, True
+        changed = False
+        if TISTORY_PROTECTION_OFF_MIGRATION not in migrations:
+            payload["tistory_reference_image_protection_mode"] = False
+            migrations.append(TISTORY_PROTECTION_OFF_MIGRATION)
+            changed = True
+        if CODEX_DEFAULT_WRITING_MODEL_MIGRATION not in migrations:
+            payload["preferred_ai_provider"] = WRITING_MODEL_CODEX
+            payload["codex_cli_enabled"] = True
+            migrations.append(CODEX_DEFAULT_WRITING_MODEL_MIGRATION)
+            changed = True
+        payload["applied_settings_migrations"] = migrations
+        return payload, changed
 
     @staticmethod
     def _write_payload(payload: dict) -> None:
@@ -1984,7 +2023,9 @@ class AppStateStore:
             inline_images_enabled=payload.get("inline_images_enabled", False),
             inline_images_count=payload.get("inline_images_count", 2),
             inline_images_provider=payload.get("inline_images_provider", "Imagen API"),
-            preferred_ai_provider=payload.get("preferred_ai_provider", "gpt"),
+            preferred_ai_provider=normalize_writing_model(
+                payload.get("preferred_ai_provider", WRITING_MODEL_CODEX)
+            ),
             blogspot_blog_id=payload.get("blogspot_blog_id", ""),
             blogspot_client_id=payload.get("blogspot_client_id", ""),
             blogspot_client_secret=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET) or blogspot_client_secret_fallback,
@@ -2021,7 +2062,10 @@ class AppStateStore:
             ),
             applied_settings_migrations=payload.get(
                 "applied_settings_migrations",
-                [TISTORY_PROTECTION_OFF_MIGRATION],
+                [
+                    TISTORY_PROTECTION_OFF_MIGRATION,
+                    CODEX_DEFAULT_WRITING_MODEL_MIGRATION,
+                ],
             ),
             naver_blog_profiles=naver_profiles,
             naver_blog_active_profile=payload.get("naver_blog_active_profile", "블로그 1"),
@@ -3184,10 +3228,7 @@ def build_threads_post_text(
     )
     generated = ""
     try:
-        if settings.preferred_ai_provider == "gemini" and settings.gemini_api_key:
-            generated = GeminiClient(settings.gemini_api_key).generate_article(settings.gemini_model, prompt)
-        elif settings.gpt_api_key:
-            generated = OpenAIClient(settings.gpt_api_key).generate_article(settings.gpt_model, prompt)
+        generated, _provider = generate_text_with_writing_model(settings, prompt)
     except Exception:
         generated = ""
     if not generated:
@@ -3245,10 +3286,7 @@ def build_naver_kin_answer_text(
     )
     generated = ""
     try:
-        if settings.preferred_ai_provider == "gemini" and settings.gemini_api_key:
-            generated = GeminiClient(settings.gemini_api_key).generate_article(settings.gemini_model, prompt)
-        elif settings.gpt_api_key:
-            generated = OpenAIClient(settings.gpt_api_key).generate_article(settings.gpt_model, prompt)
+        generated, _provider = generate_text_with_writing_model(settings, prompt)
     except Exception:
         generated = ""
     if not generated:
@@ -3463,7 +3501,9 @@ def build_codex_exec_command(
     if selected_model:
         command.extend(["--model", selected_model])
     command.extend(["--output-last-message", str(output_file)])
-    command.append(prompt)
+    # Long article prompts can exceed the Windows command-line limit. A dash
+    # tells Codex to read the prompt from stdin instead.
+    command.append("-")
     return command
 
 
@@ -3514,6 +3554,7 @@ def execute_codex_cli_text(
                     cwd=str(DATA_DIR),
                     capture_output=True,
                     text=True,
+                    input=prompt,
                     timeout=timeout or max(20, int(settings.codex_cli_timeout or 120)),
                     check=False,
                 )
@@ -3552,6 +3593,57 @@ def execute_codex_cli_text(
         path=resolved_cli,
         version=version_text,
         model=requested_model,
+    )
+
+
+def writing_model_validation_error(settings: WordPressSettings) -> str:
+    provider = normalize_writing_model(settings.preferred_ai_provider)
+    if provider == WRITING_MODEL_CODEX:
+        if not settings.codex_cli_enabled:
+            return "Codex CLI 사용이 꺼져 있습니다. 환경설정 > AI > Codex CLI에서 켜 주세요."
+        if not resolve_codex_cli_path(settings.codex_cli_path):
+            return "Codex CLI 실행 파일을 찾지 못했습니다. 환경설정 > AI > Codex CLI에서 자동 감지해 주세요."
+        return ""
+    if provider == WRITING_MODEL_GEMINI and not settings.gemini_api_key:
+        return "제미나이 API 키를 먼저 환경설정에 입력해 주세요."
+    if provider == WRITING_MODEL_GPT and not settings.gpt_api_key:
+        return "GPT API 키를 먼저 환경설정에 입력해 주세요."
+    return ""
+
+
+def generate_text_with_writing_model(
+    settings: WordPressSettings,
+    prompt: str,
+    on_retry: Callable[[str], None] | None = None,
+) -> tuple[str, str]:
+    provider = normalize_writing_model(settings.preferred_ai_provider)
+    if provider == WRITING_MODEL_CODEX:
+        validation_error = writing_model_validation_error(settings)
+        if validation_error:
+            raise RuntimeError(validation_error)
+        if on_retry is not None:
+            on_retry("Codex CLI로 글을 작성하고 있습니다...")
+        result = execute_codex_cli_text(settings, prompt)
+        if not result.success:
+            detail = result.error.strip() or "응답을 받지 못했습니다."
+            raise RuntimeError(f"Codex CLI 글 생성 실패: {detail}")
+        return result.output, "Codex CLI"
+    if provider == WRITING_MODEL_GEMINI:
+        return (
+            GeminiClient(settings.gemini_api_key).generate_article(
+                settings.gemini_model,
+                prompt,
+                on_retry=on_retry,
+            ),
+            "Gemini API",
+        )
+    return (
+        OpenAIClient(settings.gpt_api_key).generate_article(
+            settings.gpt_model,
+            prompt,
+            on_retry=on_retry,
+        ),
+        "GPT API",
     )
 
 
@@ -12434,15 +12526,7 @@ class AutomationKeywordQueueWorker(threading.Thread):
         ).strip()
 
     def _generate_with_provider(self, prompt: str) -> tuple[str, str]:
-        if self.settings.preferred_ai_provider == "gemini":
-            return (
-                GeminiClient(self.settings.gemini_api_key).generate_article(self.settings.gemini_model, prompt),
-                "Gemini",
-            )
-        return (
-            OpenAIClient(self.settings.gpt_api_key).generate_article(self.settings.gpt_model, prompt),
-            "GPT",
-        )
+        return generate_text_with_writing_model(self.settings, prompt)
 
     def _attach_inline_images(self, title: str, keyword: str, article_html: str) -> str:
         count = max(1, min(int(self.settings.inline_images_count or 2), 4))
@@ -13112,15 +13196,7 @@ class NaverKinAutomationWorker(threading.Thread):
             return fallback
 
     def _generate_with_provider(self, prompt: str) -> tuple[str, str]:
-        if self.settings.preferred_ai_provider == "gemini":
-            return (
-                GeminiClient(self.settings.gemini_api_key).generate_article(self.settings.gemini_model, prompt),
-                "Gemini",
-            )
-        return (
-            OpenAIClient(self.settings.gpt_api_key).generate_article(self.settings.gpt_model, prompt),
-            "GPT",
-        )
+        return generate_text_with_writing_model(self.settings, prompt)
 
 
 class ThumbnailAIWorker(threading.Thread):
@@ -13534,22 +13610,10 @@ class ArticleGenerationWorker(threading.Thread):
         def report_retry(message: str) -> None:
             self.result_queue.put(("article_progress", (progress, message)))
 
-        if self.settings.preferred_ai_provider == "gemini":
-            return (
-                GeminiClient(self.settings.gemini_api_key).generate_article(
-                    self.settings.gemini_model,
-                    prompt,
-                    on_retry=report_retry,
-                ),
-                "Gemini",
-            )
-        return (
-            OpenAIClient(self.settings.gpt_api_key).generate_article(
-                self.settings.gpt_model,
-                prompt,
-                on_retry=report_retry,
-            ),
-            "GPT",
+        return generate_text_with_writing_model(
+            self.settings,
+            prompt,
+            on_retry=report_retry,
         )
 
     def _attach_inline_images(self, title: str, article_html: str) -> str:
@@ -15762,6 +15826,59 @@ class KeywordApp(ctk.CTk):
             command=self._edit_app_title_dialog,
         ).grid(row=0, column=1, padx=(8, 8), pady=6, sticky="e")
 
+        writing_model_card = ctk.CTkFrame(
+            card,
+            fg_color="#1b2533",
+            corner_radius=20,
+            border_width=1,
+            border_color="#334760",
+        )
+        writing_model_card.grid(row=3, column=0, columnspan=2, padx=28, pady=(4, 18), sticky="ew")
+        writing_model_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            writing_model_card,
+            text="기본 작성 모델",
+            text_color="#6dadff",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).grid(row=0, column=0, padx=(18, 14), pady=(18, 8), sticky="w")
+
+        self.default_writing_model_var = tk.StringVar(
+            value=writing_model_label(self.wordpress_settings.preferred_ai_provider)
+        )
+        self.default_writing_model_menu = ctk.CTkOptionMenu(
+            writing_model_card,
+            values=list(WRITING_MODEL_OPTIONS),
+            variable=self.default_writing_model_var,
+            height=42,
+            corner_radius=13,
+            fg_color="#0b1220",
+            button_color="#314761",
+            button_hover_color="#3f5c7f",
+            dropdown_fg_color="#0b1220",
+            dropdown_hover_color="#3468e8",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_default_writing_model_changed,
+        )
+        self.default_writing_model_menu.grid(row=0, column=1, padx=(0, 18), pady=(18, 8), sticky="ew")
+
+        self.default_writing_model_help_label = ctk.CTkLabel(
+            writing_model_card,
+            text="CLI는 Codex 로그인 상태를 사용하므로 GPT API 토큰을 사용하지 않습니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13),
+            justify="left",
+            wraplength=760,
+        )
+        self.default_writing_model_help_label.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            padx=18,
+            pady=(2, 18),
+            sticky="w",
+        )
+
         remote_card = ctk.CTkFrame(
             card,
             fg_color="#1b2533",
@@ -15769,7 +15886,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#334760",
         )
-        remote_card.grid(row=3, column=0, columnspan=2, padx=28, pady=(4, 18), sticky="ew")
+        remote_card.grid(row=4, column=0, columnspan=2, padx=28, pady=(4, 18), sticky="ew")
         remote_card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
@@ -15864,7 +15981,7 @@ class KeywordApp(ctk.CTk):
         ).grid(row=0, column=1, padx=(12, 0), sticky="e")
 
         button_row = ctk.CTkFrame(card, fg_color="transparent")
-        button_row.grid(row=4, column=0, columnspan=2, padx=28, pady=(0, 12), sticky="ew")
+        button_row.grid(row=5, column=0, columnspan=2, padx=28, pady=(0, 12), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         self.basic_settings_status_label = ctk.CTkLabel(
@@ -15904,7 +16021,7 @@ class KeywordApp(ctk.CTk):
             text="저장하면 왼쪽 메뉴 상단 타이틀에 바로 반영되고, 다음 실행 때도 유지됩니다.",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
-        ).grid(row=5, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
+        ).grid(row=6, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
 
         self._build_version_manager_card()
 
@@ -16554,6 +16671,16 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "app_title_var") and self.app_title_var.get() != title:
             self.app_title_var.set(title)
         self.wordpress_settings.app_title = title
+        if hasattr(self, "default_writing_model_var"):
+            self.wordpress_settings.preferred_ai_provider = normalize_writing_model(
+                self.default_writing_model_var.get()
+            )
+            if self.wordpress_settings.preferred_ai_provider == WRITING_MODEL_CODEX:
+                self.wordpress_settings.codex_cli_enabled = True
+        if hasattr(self, "ai_provider_menu"):
+            self.ai_provider_menu.set(
+                writing_model_label(self.wordpress_settings.preferred_ai_provider)
+            )
         if hasattr(self, "app_title_display_label"):
             self.app_title_display_label.configure(text=title)
         if hasattr(self, "sidebar_title"):
@@ -16567,6 +16694,24 @@ class KeywordApp(ctk.CTk):
         if not silent:
             self._update_quick_status("기본설정 저장됨", f"타이틀명: {title}", "#48d980")
             self._finish_theme_paint()
+
+    def _on_default_writing_model_changed(self, model_name: str) -> None:
+        provider = normalize_writing_model(model_name)
+        self.wordpress_settings.preferred_ai_provider = provider
+        if provider == WRITING_MODEL_CODEX:
+            self.wordpress_settings.codex_cli_enabled = True
+            if hasattr(self, "codex_cli_enabled_var"):
+                self.codex_cli_enabled_var.set(True)
+        if hasattr(self, "ai_provider_menu"):
+            self.ai_provider_menu.set(writing_model_label(provider))
+        if hasattr(self, "default_writing_model_help_label"):
+            help_text = {
+                WRITING_MODEL_CODEX: "CLI는 Codex 로그인 상태를 사용하므로 GPT API 토큰을 사용하지 않습니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+                WRITING_MODEL_GPT: "GPT API 키와 선택한 GPT 모델을 사용합니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+                WRITING_MODEL_GEMINI: "제미나이 API 키와 선택한 제미나이 모델을 사용합니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+            }[provider]
+            self.default_writing_model_help_label.configure(text=help_text)
+        self._save_basic_settings(silent=True)
 
     def _edit_app_title_dialog(self) -> None:
         current_title = self.app_title_var.get().strip() if hasattr(self, "app_title_var") else ""
@@ -16600,6 +16745,12 @@ class KeywordApp(ctk.CTk):
         elif hasattr(self, "app_title_entry"):
             self.app_title_entry.delete(0, "end")
             self.app_title_entry.insert(0, "현기쿠")
+        if hasattr(self, "default_writing_model_var"):
+            self.default_writing_model_var.set("CLI")
+        self.wordpress_settings.preferred_ai_provider = WRITING_MODEL_CODEX
+        self.wordpress_settings.codex_cli_enabled = True
+        if hasattr(self, "codex_cli_enabled_var"):
+            self.codex_cli_enabled_var.set(True)
         self._save_basic_settings()
 
     def _build_writing_page(self) -> None:
@@ -18188,10 +18339,9 @@ class KeywordApp(ctk.CTk):
         try:
             settings = self._read_wordpress_settings()
             self._validate_wordpress_inputs(settings, allow_empty_password=False)
-            if settings.preferred_ai_provider == "gemini" and not settings.gemini_api_key:
-                raise RuntimeError("제미나이 API 키가 없습니다. 환경설정에서 API 키를 입력해 주세요.")
-            if settings.preferred_ai_provider == "gpt" and not settings.gpt_api_key:
-                raise RuntimeError("GPT API 키가 없습니다. 환경설정에서 API 키를 입력해 주세요.")
+            model_error = writing_model_validation_error(settings)
+            if model_error:
+                raise RuntimeError(model_error)
             settings.target_platforms = ["wordpress"]
             settings.post_mode = "공개발행"
             settings.naver_kin_answer_prompt = self._current_naver_kin_answer_prompt()
@@ -21525,7 +21675,7 @@ class KeywordApp(ctk.CTk):
 
         self.ai_provider_menu = ctk.CTkOptionMenu(
             options_row,
-            values=["gpt", "gemini"],
+            values=list(WRITING_MODEL_OPTIONS),
             height=44,
             corner_radius=14,
             fg_color="#3b4658",
@@ -24750,7 +24900,12 @@ class KeywordApp(ctk.CTk):
                 text=f"● 연결됨: @{self.wordpress_settings.threads_username or self.wordpress_settings.threads_user_id}",
                 text_color="#48d980",
             )
-        self.ai_provider_menu.set(self.wordpress_settings.preferred_ai_provider)
+        selected_writing_model = writing_model_label(
+            self.wordpress_settings.preferred_ai_provider
+        )
+        self.ai_provider_menu.set(selected_writing_model)
+        if hasattr(self, "default_writing_model_var"):
+            self.default_writing_model_var.set(selected_writing_model)
         self.topic_entry.insert(0, self.wordpress_settings.writing_topic)
         self.benchmark_mode_var.set(self.wordpress_settings.writing_benchmark_enabled)
         self.benchmark_url_entry.insert(0, self.wordpress_settings.writing_benchmark_url)
@@ -25043,7 +25198,21 @@ class KeywordApp(ctk.CTk):
         self._save_ui_state()
 
     def _on_ai_provider_changed(self, provider_name: str) -> None:
-        self.wordpress_settings.preferred_ai_provider = provider_name
+        provider = normalize_writing_model(provider_name)
+        self.wordpress_settings.preferred_ai_provider = provider
+        if provider == WRITING_MODEL_CODEX:
+            self.wordpress_settings.codex_cli_enabled = True
+            if hasattr(self, "codex_cli_enabled_var"):
+                self.codex_cli_enabled_var.set(True)
+        if hasattr(self, "default_writing_model_var"):
+            self.default_writing_model_var.set(writing_model_label(provider))
+        if hasattr(self, "default_writing_model_help_label"):
+            help_text = {
+                WRITING_MODEL_CODEX: "CLI는 Codex 로그인 상태를 사용하므로 GPT API 토큰을 사용하지 않습니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+                WRITING_MODEL_GPT: "GPT API 키와 선택한 GPT 모델을 사용합니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+                WRITING_MODEL_GEMINI: "제미나이 API 키와 선택한 제미나이 모델을 사용합니다. 블로그글쓰기, 블로그자동화, 원격글쓰기에 공통 적용됩니다.",
+            }[provider]
+            self.default_writing_model_help_label.configure(text=help_text)
         self._save_ui_state()
 
     def _category_names(self) -> list[str]:
@@ -25524,7 +25693,9 @@ class KeywordApp(ctk.CTk):
                 if hasattr(self, "writing_inline_images_provider_menu")
                 else self.inline_images_provider_menu.get()
             ),
-            preferred_ai_provider=self.ai_provider_menu.get(),
+            preferred_ai_provider=normalize_writing_model(
+                self.ai_provider_menu.get()
+            ),
             blogspot_blog_id=self.blogspot_blog_id_entry.get().strip(),
             blogspot_client_id=self.blogspot_client_id_entry.get().strip(),
             blogspot_client_secret=self.blogspot_client_secret_entry.get().strip(),
@@ -26829,13 +27000,10 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings = settings
         AppStateStore.save(settings)
 
-        if settings.preferred_ai_provider == "gemini" and not settings.gemini_api_key:
+        model_error = writing_model_validation_error(settings)
+        if model_error:
             self._stop_writing_auto_progress()
-            messagebox.showerror("API 키 필요", "제미나이 API 키를 먼저 환경설정에 입력해 주세요.")
-            return
-        if settings.preferred_ai_provider == "gpt" and not settings.gpt_api_key:
-            self._stop_writing_auto_progress()
-            messagebox.showerror("API 키 필요", "GPT API 키를 먼저 환경설정에 입력해 주세요.")
+            messagebox.showerror("작성 모델 확인", model_error)
             return
 
         message_prefix = f"{status_prefix} " if status_prefix else ""
@@ -27037,13 +27205,10 @@ class KeywordApp(ctk.CTk):
         settings = self._read_wordpress_settings()
         settings.target_platforms = list(automation_targets)
         settings.automation_target_platforms = list(automation_targets)
-        if settings.preferred_ai_provider == "gemini" and not settings.gemini_api_key:
+        model_error = writing_model_validation_error(settings)
+        if model_error:
             if not scheduled:
-                messagebox.showerror("API 키 필요", "제미나이 API 키를 먼저 환경설정에 입력해 주세요.")
-            return
-        if settings.preferred_ai_provider == "gpt" and not settings.gpt_api_key:
-            if not scheduled:
-                messagebox.showerror("API 키 필요", "GPT API 키를 먼저 환경설정에 입력해 주세요.")
+                messagebox.showerror("작성 모델 확인", model_error)
             return
 
         self.wordpress_settings = settings
