@@ -91,6 +91,7 @@ else:
 DATA_DIR = Path(os.environ.get("BLOG_HELPER_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_UPLOAD_DIR = DATA_DIR / "Generated Uploads"
+DESIGN_ASSET_DIR = DATA_DIR / "Design Assets"
 STATE_FILE = DATA_DIR / "app_state.json"
 DESKTOP_DIR = Path.home() / "Desktop"
 PROMPT_DIR = DESKTOP_DIR / "BlogHelper 프롬프트"
@@ -123,6 +124,68 @@ TISTORY_SAVE_MODE_OPTIONS = (
     TISTORY_SAVE_MODE_PUBLISH,
     TISTORY_SAVE_MODE_DRAFT,
 )
+
+
+def persist_design_asset(source_path: str | Path, role: str) -> str:
+    """Copy a user-selected design image into stable app storage."""
+    raw_path = str(source_path or "").strip()
+    if not raw_path:
+        return ""
+
+    source = Path(raw_path).expanduser()
+    try:
+        managed_dir = DESIGN_ASSET_DIR.expanduser().resolve()
+        if source.exists():
+            resolved_source = source.resolve()
+            if resolved_source.parent == managed_dir:
+                return str(resolved_source)
+
+            digest = hashlib.sha256()
+            with resolved_source.open("rb") as source_file:
+                for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            safe_role = re.sub(r"[^a-zA-Z0-9_-]+", "-", role).strip("-") or "design"
+            suffix = resolved_source.suffix.lower() or ".png"
+            managed_dir.mkdir(parents=True, exist_ok=True)
+            destination = managed_dir / f"{safe_role}-{digest.hexdigest()[:16]}{suffix}"
+            if not destination.exists():
+                temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+                shutil.copy2(resolved_source, temporary)
+                temporary.replace(destination)
+            return str(destination)
+
+        recovered = managed_dir / source.name
+        if source.name and recovered.exists():
+            return str(recovered.resolve())
+    except OSError:
+        pass
+    return raw_path
+
+
+def migrate_design_assets_payload(payload: dict) -> bool:
+    """Move legacy external image references to stable app-managed copies."""
+    changed = False
+    for key, role in (
+        ("thumbnail_background_image_path", "thumbnail-background"),
+        ("cardnews_background_image_path", "cardnews-background"),
+    ):
+        old_path = str(payload.get(key) or "")
+        new_path = persist_design_asset(old_path, role)
+        if new_path != old_path:
+            payload[key] = new_path
+            changed = True
+
+    slide_styles = payload.get("cardnews_slide_styles")
+    if isinstance(slide_styles, list):
+        for index, style in enumerate(slide_styles):
+            if not isinstance(style, dict):
+                continue
+            old_path = str(style.get("background_image_path") or "")
+            new_path = persist_design_asset(old_path, f"cardnews-slide-{index + 1}")
+            if new_path != old_path:
+                style["background_image_path"] = new_path
+                changed = True
+    return changed
 TISTORY_MANUAL_PUBLISH_WAIT_SECONDS = 30 * 60
 TISTORY_AD_POSITION_ABOVE = "이미지 위"
 TISTORY_AD_POSITION_BELOW = "이미지 아래"
@@ -1841,6 +1904,7 @@ class AppStateStore:
             return PromptFileStore.load_into(WordPressSettings())
 
         payload, migrated = AppStateStore._apply_settings_migrations(payload)
+        migrated = migrate_design_assets_payload(payload) or migrated
         if migrated:
             try:
                 AppStateStore._write_payload(payload)
@@ -21540,23 +21604,23 @@ class KeywordApp(ctk.CTk):
                 command=lambda value=provider_name: self._select_inline_images_provider(value),
             ).grid(row=0, column=column, padx=(0 if column == 0 else 8, 0), sticky="ew")
 
-        link_card = ctk.CTkFrame(keyword_card, fg_color="transparent")
-        link_card.grid(row=7, column=0, padx=24, pady=(0, 14), sticky="ew")
-        link_card.grid_columnconfigure(0, weight=1)
+        self.link_card = ctk.CTkFrame(keyword_card, fg_color="transparent")
+        self.link_card.grid(row=7, column=0, padx=24, pady=(0, 8), sticky="ew")
+        self.link_card.grid_columnconfigure(0, weight=1)
 
-        link_header = ctk.CTkFrame(link_card, fg_color="transparent")
-        link_header.grid(row=0, column=0, pady=(0, 8), sticky="ew")
-        link_header.grid_columnconfigure(0, weight=1)
+        self.link_header = ctk.CTkFrame(self.link_card, fg_color="transparent")
+        self.link_header.grid(row=0, column=0, sticky="ew")
+        self.link_header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            link_header,
+            self.link_header,
             text="본문 링크 버튼",
             anchor="w",
             font=ctk.CTkFont(size=15, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
 
         self.add_link_button = ctk.CTkButton(
-            link_header,
+            self.link_header,
             text="+ 추가",
             width=86,
             height=34,
@@ -21568,16 +21632,17 @@ class KeywordApp(ctk.CTk):
         )
         self.add_link_button.grid(row=0, column=1, sticky="e")
 
-        ctk.CTkLabel(
-            link_card,
+        self.link_hint_label = ctk.CTkLabel(
+            self.link_card,
             text="URL이 있는 항목만 본문에 버튼으로 들어갑니다. 위치는 본문상단/중간/하단 중 선택할 수 있어요.",
             anchor="w",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
-        ).grid(row=1, column=0, pady=(0, 8), sticky="w")
+        )
+        self.link_hint_label.grid(row=1, column=0, pady=(8, 8), sticky="w")
 
         self.link_rows: list[dict] = []
-        self.link_list_frame = ctk.CTkFrame(link_card, fg_color="transparent")
+        self.link_list_frame = ctk.CTkFrame(self.link_card, fg_color="transparent")
         self.link_list_frame.grid(row=2, column=0, sticky="ew")
         self.link_list_frame.grid_columnconfigure(0, weight=1)
 
@@ -22933,7 +22998,7 @@ class KeywordApp(ctk.CTk):
         )
         if not file_path:
             return
-        self.thumbnail_background_image_path = file_path
+        self.thumbnail_background_image_path = persist_design_asset(file_path, "thumbnail-background")
         self.thumbnail_selected_image_label_text.set(Path(file_path).name)
         self.thumbnail_background_mode_menu.set("선택 이미지 사용")
         self._on_thumbnail_control_changed()
@@ -22950,7 +23015,8 @@ class KeywordApp(ctk.CTk):
         )
         if not file_path:
             return
-        self.cardnews_background_image_path = file_path
+        slide_role = f"cardnews-slide-{getattr(self, 'active_cardnews_slide_index', 0) + 1}"
+        self.cardnews_background_image_path = persist_design_asset(file_path, slide_role)
         self.cardnews_selected_image_label_text.set(Path(file_path).name)
         self.cardnews_background_mode_menu.set("선택 이미지 사용")
         self._on_cardnews_control_changed()
@@ -22975,7 +23041,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("클립보드 가져오기 실패", "현재 클립보드에 이미지가 없거나 읽지 못했습니다.")
             return
 
-        self.thumbnail_background_image_path = str(clipboard_path)
+        self.thumbnail_background_image_path = persist_design_asset(clipboard_path, "thumbnail-background")
         self.thumbnail_selected_image_label_text.set("clipboard-thumbnail.png")
         self.thumbnail_background_mode_menu.set("선택 이미지 사용")
         self._on_thumbnail_control_changed()
@@ -23013,7 +23079,7 @@ class KeywordApp(ctk.CTk):
         if not image_path:
             messagebox.showerror("AI 썸네일 실패", "생성된 이미지 경로를 찾지 못했습니다.")
             return
-        self.thumbnail_background_image_path = image_path
+        self.thumbnail_background_image_path = persist_design_asset(image_path, "thumbnail-background")
         self.thumbnail_selected_image_label_text.set(Path(image_path).name)
         self.thumbnail_background_mode_menu.set("선택 이미지 사용")
         self.thumbnail_image_position_menu.set("가운데")
@@ -23191,8 +23257,7 @@ class KeywordApp(ctk.CTk):
             original = tk.PhotoImage(file=self.thumbnail_background_image_path)
         except tk.TclError:
             messagebox.showerror("이미지 열기 실패", "현재 배경 이미지는 열 수 없습니다. PNG 또는 GIF 파일을 사용해 주세요.")
-            self.thumbnail_background_image_path = ""
-            self.thumbnail_selected_image_label_text.set("선택된 파일 없음")
+            self.thumbnail_selected_image_label_text.set("이미지 파일을 찾을 수 없음")
             return None
 
         source_width = max(1, original.width())
@@ -23265,8 +23330,7 @@ class KeywordApp(ctk.CTk):
             original = tk.PhotoImage(file=self.cardnews_background_image_path)
         except tk.TclError:
             messagebox.showerror("이미지 열기 실패", "현재 카드뉴스 이미지는 열 수 없습니다. PNG 또는 GIF 파일을 사용해 주세요.")
-            self.cardnews_background_image_path = ""
-            self.cardnews_selected_image_label_text.set("선택된 파일 없음")
+            self.cardnews_selected_image_label_text.set("이미지 파일을 찾을 수 없음")
             return None
 
         source_width = max(1, original.width())
@@ -24950,7 +25014,14 @@ class KeywordApp(ctk.CTk):
             return
 
         link = link or {}
-        row_frame = ctk.CTkFrame(self.link_list_frame, fg_color="#111826", corner_radius=14)
+        palette = self._theme_palette()
+        row_frame = ctk.CTkFrame(
+            self.link_list_frame,
+            fg_color=palette["hover"],
+            corner_radius=14,
+            border_width=1,
+            border_color=palette["border"],
+        )
         row_frame.grid(row=len(self.link_rows), column=0, pady=(0, 8), sticky="ew")
         row_frame.grid_columnconfigure(0, weight=1)
         row_frame.grid_columnconfigure(1, weight=2)
@@ -24963,8 +25034,11 @@ class KeywordApp(ctk.CTk):
             row_frame,
             height=40,
             corner_radius=12,
-            fg_color="#0b1220",
-            border_width=0,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["text"],
+            placeholder_text_color=palette["muted"],
             placeholder_text="버튼명",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
@@ -24976,8 +25050,11 @@ class KeywordApp(ctk.CTk):
             row_frame,
             height=40,
             corner_radius=12,
-            fg_color="#0b1220",
-            border_width=0,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["text"],
+            placeholder_text_color=palette["muted"],
             placeholder_text="URL",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
@@ -24993,8 +25070,11 @@ class KeywordApp(ctk.CTk):
             height=40,
             width=88,
             corner_radius=12,
-            fg_color="#0b1220",
-            border_width=0,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["text"],
+            placeholder_text_color=palette["muted"],
             placeholder_text="크기",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
@@ -25013,6 +25093,7 @@ class KeywordApp(ctk.CTk):
             checkbox_height=18,
             corner_radius=5,
             width=68,
+            text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._save_ui_state,
         )
@@ -25024,9 +25105,12 @@ class KeywordApp(ctk.CTk):
             width=112,
             height=40,
             corner_radius=12,
-            fg_color="#243247",
-            button_color="#31445f",
-            button_hover_color="#3b5170",
+            fg_color=palette["button"],
+            button_color=palette["button"],
+            button_hover_color=palette["button_hover"],
+            dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["selected"],
+            text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
             command=lambda _value: self._save_ui_state(),
         )
@@ -25047,8 +25131,9 @@ class KeywordApp(ctk.CTk):
             width=64,
             height=40,
             corner_radius=12,
-            fg_color="#596579",
-            hover_color="#6a768b",
+            fg_color=palette["button"],
+            hover_color=palette["button_hover"],
+            text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
             command=lambda data=row_data: self._remove_link_row(data),
         )
@@ -25074,6 +25159,21 @@ class KeywordApp(ctk.CTk):
     def _update_add_link_button_state(self) -> None:
         if hasattr(self, "add_link_button"):
             self.add_link_button.configure(state="disabled" if len(self.link_rows) >= 5 else "normal")
+        self._update_link_rows_visibility()
+
+    def _update_link_rows_visibility(self) -> None:
+        if not all(hasattr(self, name) for name in ("link_card", "link_header", "link_hint_label", "link_list_frame")):
+            return
+        if self.link_rows:
+            self.link_hint_label.grid()
+            self.link_list_frame.grid()
+            self.link_header.grid_configure(pady=(0, 0))
+            self.link_card.grid_configure(pady=(0, 14))
+        else:
+            self.link_hint_label.grid_remove()
+            self.link_list_frame.grid_remove()
+            self.link_header.grid_configure(pady=(0, 0))
+            self.link_card.grid_configure(pady=(0, 8))
 
     def _load_link_rows(self, links: list[dict]) -> None:
         if not hasattr(self, "link_list_frame"):
@@ -25146,6 +25246,27 @@ class KeywordApp(ctk.CTk):
                 selected_title_prompt = nonempty_text(selected_prompt.get("title_prompt"), selected_title_prompt)
                 selected_article_prompt = nonempty_text(selected_prompt.get("article_prompt"), selected_article_prompt)
         current_writing_links = self._current_writing_links()
+        thumbnail_background_image_path = persist_design_asset(
+            self.thumbnail_background_image_path,
+            "thumbnail-background",
+        )
+        self.thumbnail_background_image_path = thumbnail_background_image_path
+        cardnews_background_image_path = persist_design_asset(
+            self.cardnews_background_image_path if hasattr(self, "cardnews_background_image_path") else self.wordpress_settings.cardnews_background_image_path,
+            f"cardnews-slide-{getattr(self, 'active_cardnews_slide_index', 0) + 1}",
+        )
+        self.cardnews_background_image_path = cardnews_background_image_path
+        cardnews_slide_styles = (
+            self._current_cardnews_slide_styles()
+            if hasattr(self, "cardnews_width_entry")
+            else list(self.wordpress_settings.cardnews_slide_styles or [])
+        )
+        for index, style in enumerate(cardnews_slide_styles):
+            if isinstance(style, dict):
+                style["background_image_path"] = persist_design_asset(
+                    style.get("background_image_path", ""),
+                    f"cardnews-slide-{index + 1}",
+                )
         settings = WordPressSettings(
             blog_url=self.blog_url_entry.get().strip(),
             username=self.username_entry.get().strip(),
@@ -25341,7 +25462,7 @@ class KeywordApp(ctk.CTk):
             thumbnail_height=self._safe_int(self.thumbnail_height_entry.get(), 400),
             thumbnail_ratio=self.thumbnail_ratio_menu.get(),
             thumbnail_background_mode=self.thumbnail_background_mode_menu.get(),
-            thumbnail_background_image_path=self.thumbnail_background_image_path,
+            thumbnail_background_image_path=thumbnail_background_image_path,
             thumbnail_image_position=self.thumbnail_image_position_menu.get(),
             thumbnail_image_scale=round(float(self.thumbnail_image_scale_var.get())),
             thumbnail_image_opacity=round(float(self.thumbnail_image_opacity_var.get())),
@@ -25356,7 +25477,7 @@ class KeywordApp(ctk.CTk):
             cardnews_height=self._safe_int(self.cardnews_height_entry.get(), 1024) if hasattr(self, "cardnews_height_entry") else self.wordpress_settings.cardnews_height,
             cardnews_ratio=self.cardnews_ratio_menu.get() if hasattr(self, "cardnews_ratio_menu") else self.wordpress_settings.cardnews_ratio,
             cardnews_background_mode=self.cardnews_background_mode_menu.get() if hasattr(self, "cardnews_background_mode_menu") else self.wordpress_settings.cardnews_background_mode,
-            cardnews_background_image_path=self.cardnews_background_image_path if hasattr(self, "cardnews_background_image_path") else self.wordpress_settings.cardnews_background_image_path,
+            cardnews_background_image_path=cardnews_background_image_path,
             cardnews_image_position=self.cardnews_image_position_menu.get() if hasattr(self, "cardnews_image_position_menu") else self.wordpress_settings.cardnews_image_position,
             cardnews_image_scale=round(float(self.cardnews_image_scale_var.get())) if hasattr(self, "cardnews_image_scale_var") else self.wordpress_settings.cardnews_image_scale,
             cardnews_image_opacity=round(float(self.cardnews_image_opacity_var.get())) if hasattr(self, "cardnews_image_opacity_var") else self.wordpress_settings.cardnews_image_opacity,
@@ -25368,7 +25489,7 @@ class KeywordApp(ctk.CTk):
             cardnews_font_size=self._safe_int(self.cardnews_font_size_entry.get(), 78) if hasattr(self, "cardnews_font_size_entry") else self.wordpress_settings.cardnews_font_size,
             cardnews_shadow=self.cardnews_shadow_menu.get() if hasattr(self, "cardnews_shadow_menu") else self.wordpress_settings.cardnews_shadow,
             cardnews_signature=self.cardnews_signature_entry.get().strip() if hasattr(self, "cardnews_signature_entry") else self.wordpress_settings.cardnews_signature,
-            cardnews_slide_styles=self._current_cardnews_slide_styles() if hasattr(self, "cardnews_width_entry") else list(self.wordpress_settings.cardnews_slide_styles or []),
+            cardnews_slide_styles=cardnews_slide_styles,
             automation_queue=list(self.automation_queue),
             automation_interval_hours=self._automation_interval_hours(),
             automation_sources=[source for source, var in self.automation_source_vars.items() if var.get()],
@@ -26167,14 +26288,6 @@ class KeywordApp(ctk.CTk):
         self.article_editor.insert("1.0", "생성된 글이 여기에 표시됩니다. 내용을 직접 수정한 뒤 업로드할 수 있습니다.")
         self.thumbnail_prompt_preview.delete("1.0", "end")
         self.thumbnail_prompt_preview.insert("1.0", "썸네일에 들어갈 메인 문구를 직접 입력하거나, 글 제목을 자동으로 가져올 수 있습니다.")
-        self.thumbnail_background_image_path = ""
-        self.thumbnail_selected_image_label_text.set("선택된 파일 없음")
-        self.thumbnail_background_mode_menu.set("단색 배경")
-        self.thumbnail_image_position_menu.set("오른쪽하단")
-        self.thumbnail_image_scale_var.set(100)
-        self.thumbnail_image_opacity_var.set(100)
-        self.thumbnail_image_grayscale_var.set(False)
-        self._on_thumbnail_image_adjust_changed()
         self.thumbnail_saved_path = ""
         self._generate_thumbnail_preview()
         self._open_writing_section("topic")
