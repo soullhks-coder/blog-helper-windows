@@ -124,6 +124,16 @@ TISTORY_SAVE_MODE_OPTIONS = (
     TISTORY_SAVE_MODE_PUBLISH,
     TISTORY_SAVE_MODE_DRAFT,
 )
+CODEX_MODEL_AUTO = "자동 (CLI 기본 모델, 권장)"
+CODEX_MODEL_OPTIONS = (
+    CODEX_MODEL_AUTO,
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
+DEFAULT_CODEX_CLI_PATH = ""
+DEFAULT_CODEX_CLI_EXTRA_ARGS = "--skip-git-repo-check"
+_CODEX_VERSION_CACHE: dict[str, tuple[str, tuple[int, int, int, int]]] = {}
 
 
 def persist_design_asset(source_path: str | Path, role: str) -> str:
@@ -1514,12 +1524,12 @@ class WordPressSettings:
     public_data_events: list[dict] = field(default_factory=list)
     public_data_selected_seq: str = ""
     codex_cli_enabled: bool = True
-    codex_cli_path: str = "/Applications/Codex.app/Contents/Resources/codex"
+    codex_cli_path: str = DEFAULT_CODEX_CLI_PATH
     codex_cli_model: str = ""
     codex_cli_purpose: str = "이미지 생성 프롬프트 설계"
     codex_cli_speed: str = "기본"
     codex_cli_display_name: str = "[CLI] Codex"
-    codex_cli_extra_args: str = "--skip-git-repo-check"
+    codex_cli_extra_args: str = DEFAULT_CODEX_CLI_EXTRA_ARGS
     codex_cli_login_args: str = "login"
     codex_cli_timeout: int = 120
     cardnews_enabled: bool = True
@@ -1961,12 +1971,12 @@ class AppStateStore:
             public_data_events=payload.get("public_data_events", []),
             public_data_selected_seq=payload.get("public_data_selected_seq", ""),
             codex_cli_enabled=payload.get("codex_cli_enabled", True),
-            codex_cli_path=payload.get("codex_cli_path", "/Applications/Codex.app/Contents/Resources/codex"),
+            codex_cli_path=payload.get("codex_cli_path", DEFAULT_CODEX_CLI_PATH),
             codex_cli_model=payload.get("codex_cli_model", ""),
             codex_cli_purpose=payload.get("codex_cli_purpose", "이미지 생성 프롬프트 설계"),
             codex_cli_speed=payload.get("codex_cli_speed", "기본"),
             codex_cli_display_name=payload.get("codex_cli_display_name", "[CLI] Codex"),
-            codex_cli_extra_args=payload.get("codex_cli_extra_args", "--skip-git-repo-check"),
+            codex_cli_extra_args=payload.get("codex_cli_extra_args", DEFAULT_CODEX_CLI_EXTRA_ARGS),
             codex_cli_login_args=payload.get("codex_cli_login_args", "login"),
             codex_cli_timeout=payload.get("codex_cli_timeout", 120),
             cardnews_enabled=payload.get("cardnews_enabled", True),
@@ -3268,45 +3278,161 @@ def build_cardnews_prompt(title: str, keyword: str, article_html: str, index: in
 def run_codex_cli_text(settings: WordPressSettings, prompt: str) -> str:
     if not settings.codex_cli_enabled:
         return ""
-    resolved_cli = resolve_codex_cli_path(settings.codex_cli_path)
-    if not resolved_cli:
+    result = execute_codex_cli_text(
+        settings,
+        prompt,
+        timeout=max(20, min(int(settings.codex_cli_timeout or 120), 60)),
+        temp_prefix="blog-helper-codex-inline-",
+    )
+    return result.output if result.success else ""
+
+
+@dataclass
+class CodexCLIExecutionResult:
+    success: bool
+    output: str = ""
+    error: str = ""
+    path: str = ""
+    version: str = ""
+    model: str = ""
+    fallback_used: bool = False
+
+
+def normalize_codex_cli_model(model_name: str = "") -> str:
+    normalized = str(model_name or "").strip()
+    if not normalized or normalized == CODEX_MODEL_AUTO or normalized.startswith("자동 ("):
         return ""
-    with tempfile.TemporaryDirectory(prefix="blog-helper-codex-inline-") as temp_dir:
-        output_file = Path(temp_dir) / "codex-output.txt"
-        command = build_codex_exec_command(settings, resolved_cli, output_file, prompt)
-        try:
-            subprocess.run(
-                command,
-                cwd=str(DATA_DIR),
-                capture_output=True,
-                text=True,
-                timeout=max(20, min(int(settings.codex_cli_timeout or 120), 60)),
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
-        if output_file.exists():
-            return output_file.read_text(encoding="utf-8", errors="ignore").strip()
-    return ""
+    return normalized
 
 
-def resolve_codex_cli_path(cli_path: str = "") -> str:
-    candidates = [
-        cli_path.strip(),
+def parse_codex_cli_version(version_text: str) -> tuple[int, int, int, int]:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)([^\s]*)", str(version_text or ""))
+    if not match:
+        return (0, 0, 0, 0)
+    suffix = match.group(4) or ""
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        0 if suffix.startswith("-") else 1,
+    )
+
+
+def codex_cli_command(cli_path: str, *args: str) -> list[str]:
+    if os.name == "nt" and Path(cli_path).suffix.lower() in {".cmd", ".bat"}:
+        command_shell = os.environ.get("COMSPEC", "cmd.exe")
+        return [command_shell, "/d", "/s", "/c", cli_path, *args]
+    return [cli_path, *args]
+
+
+def codex_cli_version(cli_path: str) -> tuple[str, tuple[int, int, int, int]]:
+    normalized_path = str(Path(cli_path).expanduser())
+    cached = _CODEX_VERSION_CACHE.get(normalized_path)
+    if cached:
+        return cached
+    try:
+        result = subprocess.run(
+            codex_cli_command(normalized_path, "--version"),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        version_text = (result.stdout or result.stderr or "").strip()
+        if result.returncode != 0:
+            return ("", (0, 0, 0, 0))
+        value = (version_text, parse_codex_cli_version(version_text))
+        _CODEX_VERSION_CACHE[normalized_path] = value
+        return value
+    except (OSError, subprocess.TimeoutExpired):
+        return ("", (0, 0, 0, 0))
+
+
+def codex_cli_candidates(cli_path: str = "") -> list[str]:
+    raw_candidates = [
+        os.environ.get("BLOG_HELPER_CODEX_CLI_PATH", ""),
+        os.environ.get("CODEX_CLI_PATH", ""),
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
         "/Applications/Codex.app/Contents/Resources/codex",
+        cli_path.strip(),
         shutil.which("codex") or "",
         "/opt/homebrew/bin/codex",
         "/usr/local/bin/codex",
+        str(Path.home() / ".local" / "bin" / "codex"),
     ]
-    for candidate in candidates:
+    if os.name == "nt":
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        app_data = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        raw_candidates.extend(
+            [
+                str(local_app_data / "Programs" / "ChatGPT" / "resources" / "codex.exe"),
+                str(app_data / "npm" / "codex.cmd"),
+                str(Path.home() / ".local" / "bin" / "codex.exe"),
+            ]
+        )
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw_candidate in raw_candidates:
+        candidate = str(raw_candidate or "").strip()
         if not candidate:
             continue
-        if Path(candidate).exists():
-            return str(Path(candidate))
-        resolved = shutil.which(candidate)
-        if resolved:
-            return resolved
-    return ""
+        expanded = str(Path(candidate).expanduser())
+        resolved = expanded if Path(expanded).exists() else (shutil.which(candidate) or "")
+        if not resolved:
+            continue
+        key = os.path.normcase(os.path.abspath(resolved))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(resolved)
+    return candidates
+
+
+def resolve_codex_cli_path(cli_path: str = "") -> str:
+    candidates = codex_cli_candidates(cli_path)
+    ranked: list[tuple[tuple[int, int, int, int], int, str]] = []
+    for index, candidate in enumerate(candidates):
+        _version_text, parsed_version = codex_cli_version(candidate)
+        if parsed_version != (0, 0, 0, 0):
+            ranked.append((parsed_version, -index, candidate))
+    if ranked:
+        return max(ranked)[2]
+    return candidates[0] if candidates else ""
+
+
+def sanitize_codex_cli_extra_args(raw_args: str = "") -> list[str]:
+    try:
+        tokens = shlex.split(raw_args or "")
+    except ValueError:
+        tokens = []
+    allowed_flags = {"--skip-git-repo-check", "--ephemeral", "--ignore-rules", "--ignore-user-config"}
+    allowed_value_flags = {"-c", "--config", "--enable", "--disable"}
+    discarded_value_flags = {
+        "--model", "-m", "--output-last-message", "-o", "--sandbox", "-s",
+        "--color", "--ask-for-approval", "-a", "--approval-policy",
+    }
+    sanitized: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"codex", "exec"}:
+            index += 1
+            continue
+        if token in discarded_value_flags:
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in discarded_value_flags):
+            index += 1
+            continue
+        if token in allowed_value_flags and index + 1 < len(tokens):
+            sanitized.extend([token, tokens[index + 1]])
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in allowed_value_flags) or token in allowed_flags:
+            sanitized.append(token)
+        index += 1
+    return sanitized
 
 
 def build_codex_exec_command(
@@ -3314,16 +3440,119 @@ def build_codex_exec_command(
     resolved_cli: str,
     output_file: Path,
     prompt: str,
+    model_override: str | None = None,
 ) -> list[str]:
-    command = [resolved_cli, "exec"]
-    extra_args = shlex.split(settings.codex_cli_extra_args or "--skip-git-repo-check")
+    command = codex_cli_command(
+        resolved_cli,
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--sandbox",
+        "read-only",
+        "--color",
+        "never",
+    )
+    extra_args = sanitize_codex_cli_extra_args(settings.codex_cli_extra_args or DEFAULT_CODEX_CLI_EXTRA_ARGS)
+    for flag in ("--skip-git-repo-check", "--ephemeral"):
+        while flag in extra_args:
+            extra_args.remove(flag)
     command.extend(extra_args)
-    if settings.codex_cli_model.strip() and "--model" not in extra_args and "-m" not in extra_args:
-        command.extend(["--model", settings.codex_cli_model.strip()])
-    if "--output-last-message" not in extra_args:
-        command.extend(["--output-last-message", str(output_file)])
+    selected_model = normalize_codex_cli_model(
+        settings.codex_cli_model if model_override is None else model_override
+    )
+    if selected_model:
+        command.extend(["--model", selected_model])
+    command.extend(["--output-last-message", str(output_file)])
     command.append(prompt)
     return command
+
+
+def is_codex_model_error(detail: str) -> bool:
+    normalized = str(detail or "").lower()
+    model_markers = (
+        "model metadata",
+        "invalid_model",
+        "model_not_found",
+        "unsupported model",
+        "model is not",
+        "model does not exist",
+    )
+    return any(marker in normalized for marker in model_markers) or (
+        "model" in normalized and "status\":400" in normalized
+    )
+
+
+def execute_codex_cli_text(
+    settings: WordPressSettings,
+    prompt: str,
+    *,
+    timeout: int | None = None,
+    temp_prefix: str = "blog-helper-codex-",
+) -> CodexCLIExecutionResult:
+    resolved_cli = resolve_codex_cli_path(settings.codex_cli_path)
+    if not resolved_cli:
+        return CodexCLIExecutionResult(False, error="Codex CLI 실행 파일을 찾지 못했습니다.")
+    version_text, _parsed_version = codex_cli_version(resolved_cli)
+    requested_model = normalize_codex_cli_model(settings.codex_cli_model)
+    model_attempts = [requested_model] if requested_model else [""]
+    if requested_model:
+        model_attempts.append("")
+    last_error = ""
+    for attempt_index, model_name in enumerate(model_attempts):
+        with tempfile.TemporaryDirectory(prefix=temp_prefix) as temp_dir:
+            output_file = Path(temp_dir) / "codex-output.txt"
+            command = build_codex_exec_command(
+                settings,
+                resolved_cli,
+                output_file,
+                prompt,
+                model_override=model_name,
+            )
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=str(DATA_DIR),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout or max(20, int(settings.codex_cli_timeout or 120)),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return CodexCLIExecutionResult(
+                    False,
+                    error=f"Codex CLI 응답 시간이 {timeout or settings.codex_cli_timeout}초를 초과했습니다.",
+                    path=resolved_cli,
+                    version=version_text,
+                    model=model_name,
+                )
+            except OSError as exc:
+                return CodexCLIExecutionResult(
+                    False,
+                    error=str(exc),
+                    path=resolved_cli,
+                    version=version_text,
+                    model=model_name,
+                )
+            output_text = output_file.read_text(encoding="utf-8", errors="ignore").strip() if output_file.exists() else ""
+            if result.returncode == 0 and output_text:
+                return CodexCLIExecutionResult(
+                    True,
+                    output=output_text,
+                    path=resolved_cli,
+                    version=version_text,
+                    model=model_name,
+                    fallback_used=attempt_index > 0,
+                )
+            last_error = (result.stderr or result.stdout or output_text or "Codex CLI 응답이 비어 있습니다.").strip()
+            if attempt_index + 1 >= len(model_attempts) or not is_codex_model_error(last_error):
+                break
+    return CodexCLIExecutionResult(
+        False,
+        error=last_error[:1200],
+        path=resolved_cli,
+        version=version_text,
+        model=requested_model,
+    )
 
 
 def build_inline_image_prompt(title: str, keyword: str, article_html: str, index: int, count: int) -> str:
@@ -12488,40 +12717,25 @@ class CodexCLITestWorker(threading.Thread):
             if not resolved_cli:
                 raise RuntimeError("Codex CLI 실행 파일을 찾지 못했습니다. 자동 감지 또는 찾아보기로 경로를 지정해 주세요.")
 
-            version_result = subprocess.run(
-                [resolved_cli, "--version"],
+            version_text, _parsed_version = codex_cli_version(resolved_cli)
+            if not version_text:
+                raise RuntimeError("Codex CLI 버전을 확인하지 못했습니다.")
+            auth_result = subprocess.run(
+                codex_cli_command(resolved_cli, "login", "status"),
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=10,
             )
-            version_text = (version_result.stdout or version_result.stderr or "").strip()
-            if version_result.returncode != 0:
-                raise RuntimeError(f"Codex CLI 버전 확인 실패: {version_text[:300]}")
-
-            with tempfile.TemporaryDirectory(prefix="blog-helper-codex-test-") as temp_dir:
-                output_file = Path(temp_dir) / "codex-test-output.txt"
-                test_settings = self.settings
-                command = build_codex_exec_command(
-                    test_settings,
-                    resolved_cli,
-                    output_file,
-                    "Reply with exactly: BLOG_HELPER_CODEX_OK",
-                )
-                result = subprocess.run(
-                    command,
-                    cwd=str(DATA_DIR),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=max(20, min(int(self.settings.codex_cli_timeout or 120), 90)),
-                )
-                output_text = output_file.read_text(encoding="utf-8", errors="ignore").strip() if output_file.exists() else ""
-                if result.returncode != 0:
-                    detail = (result.stderr or result.stdout or output_text).strip()
-                    raise RuntimeError(f"Codex CLI 실행 실패: {detail[:500]}")
-                if not output_text:
-                    raise RuntimeError("Codex CLI는 실행됐지만 응답 파일이 비어 있습니다. 로그인 상태 또는 생성 명령 인자를 확인해 주세요.")
+            auth_text = (auth_result.stdout or auth_result.stderr or "").strip()
+            execution = execute_codex_cli_text(
+                self.settings,
+                "Reply with exactly: BLOG_HELPER_CODEX_OK",
+                timeout=max(20, min(int(self.settings.codex_cli_timeout or 120), 90)),
+                temp_prefix="blog-helper-codex-test-",
+            )
+            if not execution.success:
+                raise RuntimeError(f"Codex CLI 실행 실패: {execution.error[:700]}")
 
             self.result_queue.put(
                 (
@@ -12529,7 +12743,10 @@ class CodexCLITestWorker(threading.Thread):
                     {
                         "path": resolved_cli,
                         "version": version_text,
-                        "output": output_text[:120],
+                        "output": execution.output[:120],
+                        "auth": auth_text,
+                        "model": execution.model or "CLI 기본 모델",
+                        "fallback_used": execution.fallback_used,
                     },
                 )
             )
@@ -12949,26 +13166,12 @@ class ThumbnailAIWorker(threading.Thread):
     def _run_codex_cli(self, prompt: str) -> str:
         if not self.settings.codex_cli_enabled:
             return ""
-        resolved_cli = resolve_codex_cli_path(self.settings.codex_cli_path)
-        if not resolved_cli:
-            return ""
-        with tempfile.TemporaryDirectory(prefix="blog-helper-codex-") as temp_dir:
-            output_file = Path(temp_dir) / "codex-output.txt"
-            command = build_codex_exec_command(self.settings, resolved_cli, output_file, prompt)
-            try:
-                subprocess.run(
-                    command,
-                    cwd=str(DATA_DIR),
-                    capture_output=True,
-                    text=True,
-                    timeout=max(20, int(self.settings.codex_cli_timeout or 120)),
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                return ""
-            if output_file.exists():
-                return output_file.read_text(encoding="utf-8", errors="ignore").strip()
-        return ""
+        result = execute_codex_cli_text(
+            self.settings,
+            prompt,
+            timeout=max(20, int(self.settings.codex_cli_timeout or 120)),
+        )
+        return result.output if result.success else ""
 
     def _build_codex_prompt(self) -> str:
         summary = plain_text_from_html(self.article_html, limit=900)
@@ -20433,7 +20636,7 @@ class KeywordApp(ctk.CTk):
             corner_radius=14,
             fg_color="#3b4658",
             border_width=0,
-            placeholder_text="/Applications/Codex.app/Contents/Resources/codex 또는 codex",
+            placeholder_text="자동감지를 누르면 ChatGPT 통합 CLI를 포함해 최신 버전을 찾습니다.",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         self.codex_cli_path_entry.grid(row=0, column=0, sticky="ew")
@@ -20467,14 +20670,17 @@ class KeywordApp(ctk.CTk):
         model_grid.grid_columnconfigure(1, weight=1)
         model_grid.grid_columnconfigure(2, weight=1)
 
-        self.codex_cli_model_entry = ctk.CTkEntry(
+        self.codex_cli_model_entry = ctk.CTkComboBox(
             model_grid,
+            values=list(CODEX_MODEL_OPTIONS),
             height=46,
             corner_radius=14,
             fg_color="#3b4658",
             border_width=0,
-            placeholder_text="모델명 예: gpt-5.3-codex-spark",
+            button_color="#3b4658",
+            button_hover_color="#4d5a70",
             font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda _value: self._sync_codex_display_name(),
         )
         self.codex_cli_model_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
         self.codex_cli_model_entry.bind("<KeyRelease>", lambda _event: self._sync_codex_display_name())
@@ -20508,7 +20714,7 @@ class KeywordApp(ctk.CTk):
             self.codex_card,
             row=5,
             label="생성 명령 인자",
-            placeholder="--skip-git-repo-check --output-last-message는 자동 보완됩니다.",
+            placeholder="추가 옵션만 입력하세요. exec/모델/출력/샌드박스 옵션은 자동 관리됩니다.",
         )
         self.codex_login_args_entry = self._labeled_entry(
             self.codex_card,
@@ -20521,7 +20727,8 @@ class KeywordApp(ctk.CTk):
             self.codex_card,
             text=(
                 "Codex CLI는 현재 썸네일/본문 이미지용 Imagen 프롬프트 설계에 사용됩니다. "
-                "연결확인은 실제 CLI 버전과 짧은 exec 응답까지 검사합니다."
+                "자동감지는 ChatGPT 통합 CLI를 포함해 설치된 후보 중 최신 버전을 선택합니다. "
+                "모델은 '자동' 사용을 권장하며, 연결확인은 로그인 상태와 실제 exec 응답까지 검사합니다."
             ),
             text_color="#c3cfdf",
             justify="left",
@@ -24478,8 +24685,10 @@ class KeywordApp(ctk.CTk):
         self.codex_cli_enabled_var.set(self.wordpress_settings.codex_cli_enabled)
         self.codex_purpose_menu.set(self.wordpress_settings.codex_cli_purpose)
         self.codex_speed_menu.set(self.wordpress_settings.codex_cli_speed)
+        detected_codex_path = resolve_codex_cli_path(self.wordpress_settings.codex_cli_path)
+        self.wordpress_settings.codex_cli_path = detected_codex_path or self.wordpress_settings.codex_cli_path
         self.codex_cli_path_entry.insert(0, self.wordpress_settings.codex_cli_path)
-        self.codex_cli_model_entry.insert(0, self.wordpress_settings.codex_cli_model)
+        self.codex_cli_model_entry.set(self.wordpress_settings.codex_cli_model or CODEX_MODEL_AUTO)
         self.codex_display_name_entry.insert(0, self.wordpress_settings.codex_cli_display_name)
         self.codex_extra_args_entry.insert(0, self.wordpress_settings.codex_cli_extra_args)
         self.codex_login_args_entry.insert(0, self.wordpress_settings.codex_cli_login_args)
@@ -24822,7 +25031,7 @@ class KeywordApp(ctk.CTk):
     def _sync_codex_display_name(self) -> None:
         if not hasattr(self, "codex_display_name_entry"):
             return
-        model = self.codex_cli_model_entry.get().strip() if hasattr(self, "codex_cli_model_entry") else ""
+        model = normalize_codex_cli_model(self.codex_cli_model_entry.get()) if hasattr(self, "codex_cli_model_entry") else ""
         speed = self.codex_speed_menu.get() if hasattr(self, "codex_speed_menu") else "기본"
         label = "[CLI] Codex"
         if model:
@@ -25296,7 +25505,7 @@ class KeywordApp(ctk.CTk):
             public_data_selected_seq=self.selected_public_event_var.get() if hasattr(self, "selected_public_event_var") else self.wordpress_settings.public_data_selected_seq,
             codex_cli_enabled=self.codex_cli_enabled_var.get(),
             codex_cli_path=self.codex_cli_path_entry.get().strip(),
-            codex_cli_model=self.codex_cli_model_entry.get().strip(),
+            codex_cli_model=normalize_codex_cli_model(self.codex_cli_model_entry.get()),
             codex_cli_purpose=self.codex_purpose_menu.get() if hasattr(self, "codex_purpose_menu") else self.wordpress_settings.codex_cli_purpose,
             codex_cli_speed=self.codex_speed_menu.get() if hasattr(self, "codex_speed_menu") else self.wordpress_settings.codex_cli_speed,
             codex_cli_display_name=self.codex_display_name_entry.get().strip() if hasattr(self, "codex_display_name_entry") else self.wordpress_settings.codex_cli_display_name,
@@ -25584,9 +25793,14 @@ class KeywordApp(ctk.CTk):
 
     def _save_codex_settings(self) -> None:
         settings = self._read_wordpress_settings()
-        if settings.codex_cli_enabled and not settings.codex_cli_path:
-            messagebox.showerror("입력 오류", "Codex CLI 경로를 입력해 주세요.")
-            return
+        if settings.codex_cli_enabled:
+            detected = resolve_codex_cli_path(settings.codex_cli_path)
+            if not detected:
+                messagebox.showerror("입력 오류", "Codex CLI를 찾지 못했습니다. 자동감지 또는 로그인을 먼저 진행해 주세요.")
+                return
+            settings.codex_cli_path = detected
+            self.codex_cli_path_entry.delete(0, "end")
+            self.codex_cli_path_entry.insert(0, detected)
         self.wordpress_settings = settings
         AppStateStore.save(settings)
         self.codex_status_label.configure(text="● Codex CLI 설정 저장 완료", text_color="#48d980")
@@ -25599,15 +25813,14 @@ class KeywordApp(ctk.CTk):
     def _auto_detect_codex_cli(self) -> None:
         detected = resolve_codex_cli_path(self.codex_cli_path_entry.get().strip())
         if not detected:
-            detected = resolve_codex_cli_path("codex")
-        if not detected:
             messagebox.showwarning("자동감지 실패", "Codex CLI 실행 파일을 찾지 못했습니다. 직접 찾아보기로 지정해 주세요.")
             self.codex_status_label.configure(text="● Codex CLI 자동감지 실패", text_color="#ffb86b")
             return
         self.codex_cli_path_entry.delete(0, "end")
         self.codex_cli_path_entry.insert(0, detected)
         self.codex_status_label.configure(text="● Codex CLI 자동감지 완료", text_color="#48d980")
-        self._update_quick_status("Codex CLI 감지", detected, "#48d980")
+        version_text, _parsed_version = codex_cli_version(detected)
+        self._update_quick_status("Codex CLI 감지", f"{detected}\n{version_text}", "#48d980")
         self._save_ui_state()
 
     def _browse_codex_cli_path(self) -> None:
@@ -25630,8 +25843,20 @@ class KeywordApp(ctk.CTk):
             return
         login_args = shlex.split(settings.codex_cli_login_args or "login")
         command = " ".join(shlex.quote(part) for part in [resolved_cli, *login_args])
-        script = f'tell application "Terminal" to do script {json.dumps(command)}'
-        subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
+        if sys.platform == "darwin":
+            script = f'tell application "Terminal" to do script {json.dumps(command)}'
+            subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
+        elif os.name == "nt":
+            subprocess.Popen(
+                [os.environ.get("COMSPEC", "cmd.exe"), "/k", resolved_cli, *login_args],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+        else:
+            terminal = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole")
+            if not terminal:
+                messagebox.showerror("터미널 없음", "로그인 명령을 실행할 터미널을 찾지 못했습니다.")
+                return
+            subprocess.Popen([terminal, "-e", resolved_cli, *login_args])
         self.wordpress_settings = settings
         AppStateStore.save(settings, save_secrets=False)
         self.codex_status_label.configure(text="● Codex 로그인 명령을 터미널에서 열었습니다.", text_color="#6dadff")
@@ -26126,8 +26351,9 @@ class KeywordApp(ctk.CTk):
         self.codex_purpose_menu.set("이미지 생성 프롬프트 설계")
         self.codex_speed_menu.set("기본")
         self.codex_cli_path_entry.delete(0, "end")
-        self.codex_cli_path_entry.insert(0, "/Applications/Codex.app/Contents/Resources/codex")
-        self.codex_cli_model_entry.delete(0, "end")
+        detected = resolve_codex_cli_path()
+        self.codex_cli_path_entry.insert(0, detected)
+        self.codex_cli_model_entry.set(CODEX_MODEL_AUTO)
         self.codex_display_name_entry.delete(0, "end")
         self.codex_display_name_entry.insert(0, "[CLI] Codex")
         self.codex_extra_args_entry.delete(0, "end")
@@ -26137,7 +26363,7 @@ class KeywordApp(ctk.CTk):
         self.codex_cli_timeout_entry.delete(0, "end")
         self.codex_cli_timeout_entry.insert(0, "120")
         self.wordpress_settings.codex_cli_enabled = True
-        self.wordpress_settings.codex_cli_path = "/Applications/Codex.app/Contents/Resources/codex"
+        self.wordpress_settings.codex_cli_path = detected
         self.wordpress_settings.codex_cli_model = ""
         self.wordpress_settings.codex_cli_purpose = "이미지 생성 프롬프트 설계"
         self.wordpress_settings.codex_cli_speed = "기본"
@@ -28289,9 +28515,19 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "codex_test_done":
                     self.codex_test_button.configure(state="normal", text="연결확인")
                     self.codex_status_label.configure(text="● Codex CLI 연결 확인 완료", text_color="#48d980")
+                    detected_path = str(payload.get("path") or "").strip()
+                    if detected_path:
+                        self.codex_cli_path_entry.delete(0, "end")
+                        self.codex_cli_path_entry.insert(0, detected_path)
+                    if payload.get("fallback_used"):
+                        self.codex_cli_model_entry.set(CODEX_MODEL_AUTO)
+                    self.wordpress_settings = self._read_wordpress_settings(include_prompts=False)
+                    AppStateStore.save(self.wordpress_settings, save_secrets=False)
                     self._update_quick_status(
                         "Codex CLI 연결 성공",
-                        f"경로: {payload.get('path')}\n버전: {payload.get('version')}\n응답: {payload.get('output')}",
+                        f"경로: {payload.get('path')}\n버전: {payload.get('version')}\n"
+                        f"로그인: {payload.get('auth') or 'exec 호출로 확인'}\n"
+                        f"모델: {payload.get('model')}\n응답: {payload.get('output')}",
                         "#48d980",
                     )
                     messagebox.showinfo("Codex CLI 연결 성공", "Codex CLI 실행과 짧은 응답 생성에 성공했습니다.")
