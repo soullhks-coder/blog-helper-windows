@@ -14514,7 +14514,7 @@ class KeywordApp(ctk.CTk):
             }
         return {
             "shell": "#05080e",
-            "sidebar": "#04070c",
+            "sidebar": "#0a111b",
             "card": "#222c3b",
             "panel": "#1b2533",
             "input": "#0b1220",
@@ -14808,7 +14808,6 @@ class KeywordApp(ctk.CTk):
             self.sidebar_frame.configure(fg_color=palette["sidebar"])
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
             self.sidebar_version_label.configure(text_color=palette["muted"])
-            self.sidebar_divider.configure(fg_color=palette["divider"])
             self._retint_widget_tree(self.sidebar_frame, palette)
             active_page = self._current_page_frame()
             if active_page is not None:
@@ -14817,7 +14816,6 @@ class KeywordApp(ctk.CTk):
             self.sidebar_frame.configure(fg_color=palette["sidebar"])
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
             self.sidebar_version_label.configure(text_color=palette["muted"])
-            self.sidebar_divider.configure(fg_color=palette["divider"])
             scroll_names_by_page = {
                 "writing": ("writing_scroll", "keyword_choice_frame"),
                 "automation": ("automation_scroll", "automation_list"),
@@ -14969,12 +14967,18 @@ class KeywordApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self.shell_frame = ctk.CTkFrame(self, fg_color="#05080e", corner_radius=0)
+        palette = self._theme_palette()
+        self.shell_frame = ctk.CTkFrame(self, fg_color=palette["shell"], corner_radius=0)
         self.shell_frame.grid(row=0, column=0, sticky="nsew")
         self.shell_frame.grid_columnconfigure(1, weight=1)
         self.shell_frame.grid_rowconfigure(0, weight=1)
 
-        self.sidebar_frame = ctk.CTkFrame(self.shell_frame, fg_color="#04070c", corner_radius=0, width=250)
+        self.sidebar_frame = ctk.CTkFrame(
+            self.shell_frame,
+            fg_color=palette["sidebar"],
+            corner_radius=0,
+            width=250,
+        )
         self.sidebar_frame.grid(row=0, column=0, sticky="nsw")
         self.sidebar_frame.grid_propagate(False)
         self.sidebar_frame.grid_columnconfigure(0, weight=1)
@@ -15096,9 +15100,6 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
         )
         self.sidebar_version_label.place(relx=0.12, rely=0.975, anchor="sw")
-
-        self.sidebar_divider = ctk.CTkFrame(self.sidebar_frame, fg_color="#6e7480", width=1, corner_radius=0)
-        self.sidebar_divider.place(relx=0.995, rely=0.06, relheight=0.88, anchor="ne")
 
         self.main_area = ctk.CTkFrame(self.shell_frame, fg_color="transparent")
         self.main_area.grid(row=0, column=1, sticky="nsew")

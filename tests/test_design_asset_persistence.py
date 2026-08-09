@@ -106,6 +106,15 @@ class WritingUiRegressionTests(unittest.TestCase):
         self.assertIn("self.link_hint_label.grid_remove()", visibility_source)
         self.assertIn("self.link_list_frame.grid_remove()", visibility_source)
 
+    def test_sidebar_uses_theme_contrast_without_vertical_divider(self) -> None:
+        layout_source = self._method_source("_build_layout")
+        palette_source = self._method_source("_theme_palette")
+
+        self.assertNotIn("sidebar_divider", self.source)
+        self.assertIn('fg_color=palette["sidebar"]', layout_source)
+        self.assertIn('"shell": "#05080e"', palette_source)
+        self.assertIn('"sidebar": "#0a111b"', palette_source)
+
 
 if __name__ == "__main__":
     unittest.main()
