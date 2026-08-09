@@ -115,6 +115,13 @@ class WritingUiRegressionTests(unittest.TestCase):
         self.assertIn('"shell": "#05080e"', palette_source)
         self.assertIn('"sidebar": "#0a111b"', palette_source)
 
+    def test_automation_publish_interval_supports_three_and_five_minutes(self) -> None:
+        automation_source = self._method_source("_build_automation_page")
+        interval_source = self._method_source("_next_automation_schedule_timestamp")
+
+        self.assertIn('values=["3분", "5분", "10분"', automation_source)
+        self.assertIn("self._automation_publish_interval_minutes()) * 60", interval_source)
+
 
 if __name__ == "__main__":
     unittest.main()
