@@ -62,10 +62,8 @@ class WritingCompletionFlowTests(unittest.TestCase):
             self.source,
             self.methods["_handle_publish_pipeline_success"],
         )
-        self.assertIn("self._queue_naver_search_advisor_submission", method_source)
-        self.assertIn("published_url", method_source)
-        self.assertIn('wordpress.get("status")', method_source)
-        self.assertIn('== "publish"', method_source)
+        self.assertIn("self._queue_published_wordpress_webmaster_submission", method_source)
+        self.assertIn('source_label="블로그글쓰기"', method_source)
 
     def test_naver_search_advisor_uses_crawl_request_url(self) -> None:
         method_source = ast.get_source_segment(
@@ -121,8 +119,20 @@ class WritingCompletionFlowTests(unittest.TestCase):
             self.source,
             self.methods["_handle_automation_publish_success"],
         )
-        self.assertIn("self._queue_naver_search_advisor_submission", method_source)
+        self.assertIn("self._queue_published_wordpress_webmaster_submission", method_source)
         self.assertIn("show_feedback=False", method_source)
+        self.assertIn('source_label="블로그자동화"', method_source)
+
+    def test_all_wordpress_publishers_share_one_webmaster_queue_gate(self) -> None:
+        method_source = ast.get_source_segment(
+            self.source,
+            self.methods["_queue_published_wordpress_webmaster_submission"],
+        )
+        self.assertIn('wordpress.get("link")', method_source)
+        self.assertIn('wordpress.get("post_url")', method_source)
+        self.assertIn('!= "publish"', method_source)
+        self.assertIn("self._queue_naver_search_advisor_submission", method_source)
+        self.assertIn("show_feedback=feedback", method_source)
 
     def test_reset_returns_to_topic_section(self) -> None:
         method_source = ast.get_source_segment(

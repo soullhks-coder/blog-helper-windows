@@ -28971,15 +28971,12 @@ class KeywordApp(ctk.CTk):
             if wordpress.get("tag_names"):
                 message.append(f"태그: {', '.join(wordpress['tag_names'])}")
             message.append(f"본문 카드뉴스 이미지: {wordpress.get('cardnews_count', 0)}장")
-            if published_url and str(wordpress.get("status") or "").lower() == "publish":
+            if self._queue_published_wordpress_webmaster_submission(
+                wordpress,
+                show_feedback=True,
+                source_label="블로그글쓰기",
+            ):
                 message.append("네이버·다음 웹마스터도구 수집 요청 자동화를 시작했습니다.")
-                self.after(
-                    250,
-                    lambda url=published_url: self._queue_naver_search_advisor_submission(
-                        url,
-                        show_feedback=True,
-                    ),
-                )
         if tistory:
             write_url = tistory.get("write_url")
             tistory_save_mode = normalize_tistory_save_mode(
@@ -29056,12 +29053,12 @@ class KeywordApp(ctk.CTk):
         completed_item_id = self.active_automation_upload_item_id
         item = self._find_automation_queue_item(completed_item_id)
         title = str(item.get("title") or "자동화 글") if item else "자동화 글"
+        wordpress = payload.get("wordpress") or {}
+        blogspot = payload.get("blogspot") or {}
+        wordpress_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
+        blogspot_url = str(blogspot.get("link") or "").strip()
         if item is not None:
             item["cleanup_paths"] = list(payload.get("cleanup_paths") or [])
-            wordpress = payload.get("wordpress") or {}
-            blogspot = payload.get("blogspot") or {}
-            wordpress_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
-            blogspot_url = str(blogspot.get("link") or "").strip()
             published_urls = dict(item.get("published_urls") or {})
             if wordpress_url:
                 published_urls["wordpress"] = wordpress_url
@@ -29071,15 +29068,11 @@ class KeywordApp(ctk.CTk):
             published_url = wordpress_url or blogspot_url
             if published_url:
                 item["published_url"] = published_url
-            if (
-                published_url
-                and wordpress
-                and str(wordpress.get("status") or "").lower() == "publish"
-            ):
-                self._queue_naver_search_advisor_submission(
-                    published_url,
-                    show_feedback=False,
-                )
+        self._queue_published_wordpress_webmaster_submission(
+            wordpress,
+            show_feedback=False,
+            source_label="블로그자동화",
+        )
         tistory = payload.get("tistory") or {}
         if tistory:
             write_url = tistory.get("write_url")
@@ -29370,6 +29363,35 @@ class KeywordApp(ctk.CTk):
             }
         )
         self._start_next_naver_search_advisor_submission()
+
+    def _queue_published_wordpress_webmaster_submission(
+        self,
+        wordpress: dict | None,
+        show_feedback: bool = True,
+        source_label: str = "블로그글쓰기",
+    ) -> str:
+        """Queue the same Naver -> Daum webmaster flow for every WP publisher."""
+        wordpress = wordpress or {}
+        published_url = str(
+            wordpress.get("link") or wordpress.get("post_url") or ""
+        ).strip()
+        if (
+            not published_url.startswith(("http://", "https://"))
+            or str(wordpress.get("status") or "").strip().lower() != "publish"
+        ):
+            return ""
+        append_runtime_log(
+            "webmaster-queue",
+            f"{source_label} 워드프레스 공개발행 완료 - 네이버·다음 수집 요청 대기열 추가: {published_url}",
+        )
+        self.after(
+            250,
+            lambda url=published_url, feedback=show_feedback: self._queue_naver_search_advisor_submission(
+                url,
+                show_feedback=feedback,
+            ),
+        )
+        return published_url
 
     def _start_next_naver_search_advisor_submission(self) -> None:
         if self.naver_search_advisor_worker and self.naver_search_advisor_worker.is_alive():
