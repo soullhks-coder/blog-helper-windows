@@ -7612,7 +7612,8 @@ def _find_naver_search_advisor_confirm_button(page, url_input):
 
 def _naver_search_advisor_submission_visible(page, published_url: str) -> bool:
     """Confirm that the submitted WordPress URL is present in the request history."""
-    parsed_url = urlparse(str(published_url or "").strip())
+    published_url = str(published_url or "").strip()
+    parsed_url = urlparse(published_url)
     expected = {
         "host": str(parsed_url.hostname or "").lower(),
         "path": unquote(str(parsed_url.path or "")).rstrip("/"),
@@ -7620,7 +7621,7 @@ def _naver_search_advisor_submission_visible(page, published_url: str) -> bool:
     if not expected["host"] or not expected["path"]:
         return False
     try:
-        return bool(
+        link_found = bool(
             page.locator("table a[href]").evaluate_all(
                 """(links, expected) => links.some((link) => {
                     try {
@@ -7635,8 +7636,35 @@ def _naver_search_advisor_submission_visible(page, published_url: str) -> bool:
                 expected,
             )
         )
+        if link_found:
+            return True
+    except Exception:
+        pass
+
+    # Windows Chrome sometimes renders the submitted URL as plain table text
+    # instead of an anchor. Compare both encoded and decoded forms so that a
+    # successful submission is not mistaken for a failure.
+    try:
+        body_text = str(page.locator("body").inner_text(timeout=2000) or "")
     except Exception:
         return False
+    compact_body = re.sub(r"\s+", "", body_text).lower().rstrip("/")
+    decoded_url = unquote(unquote(published_url))
+    raw_path = str(parsed_url.path or "").rstrip("/")
+    decoded_path = unquote(unquote(raw_path)).rstrip("/")
+    candidates = {
+        published_url.rstrip("/"),
+        decoded_url.rstrip("/"),
+        f"{expected['host']}{raw_path}",
+        f"{expected['host']}{decoded_path}",
+        raw_path,
+        decoded_path,
+    }
+    return any(
+        len(candidate) >= 8
+        and re.sub(r"\s+", "", candidate).lower().rstrip("/") in compact_body
+        for candidate in candidates
+    )
 
 
 def run_naver_search_advisor_playwright(
@@ -7828,9 +7856,11 @@ def run_naver_search_advisor_playwright(
                 "수집 요청에 실패",
                 "요청 처리 중 오류",
             )
-            submission_deadline = time.time() + 25
+            submission_verified = False
+            submission_deadline = time.time() + 30
             while time.time() < submission_deadline:
                 if _naver_search_advisor_submission_visible(page, published_url):
+                    submission_verified = True
                     break
                 page_text = ""
                 try:
@@ -7847,16 +7877,23 @@ def run_naver_search_advisor_playwright(
                         f"네이버 서치어드바이저가 요청을 거부했습니다: {matched_error}"
                     )
                 page.wait_for_timeout(400)
-            else:
-                raise RuntimeError(
-                    "확인 버튼은 눌렀지만 수집 요청 내역에서 발행 URL을 확인하지 못했습니다."
+
+            if submission_verified:
+                append_runtime_log(
+                    "naver-search-advisor",
+                    f"수집 요청 내역 등록 확인 완료: {published_url}",
                 )
+                return True, "네이버 서치어드바이저에 워드프레스 글 수집 요청을 완료했습니다."
 
             append_runtime_log(
                 "naver-search-advisor",
-                f"수집 요청 내역 등록 확인 완료: {published_url}",
+                f"확인 버튼 클릭 완료 - 수집 내역 반영 확인 지연, 다음 단계 계속: {published_url}",
             )
-            return True, "네이버 서치어드바이저에 워드프레스 글 수집 요청을 완료했습니다."
+            return (
+                True,
+                "네이버 서치어드바이저 확인 버튼을 눌렀습니다. "
+                "수집 요청 내역 반영이 늦을 수 있어 다음 단계도 계속 진행합니다.",
+            )
         except PlaywrightTimeoutError as exc:
             append_runtime_log("naver-search-advisor", f"화면 응답 시간 초과: {exc}")
             raise RuntimeError(f"네이버 서치어드바이저 화면 응답 시간이 초과되었습니다: {exc}") from exc
@@ -8125,7 +8162,7 @@ def run_daum_webmaster_playwright(
                 (
                     "naver_search_advisor_progress",
                     {
-                        "message": "네이버 수집 요청 완료. 다음 웹마스터도구 수집 요청 페이지로 이동 중입니다...",
+                        "message": "다음 웹마스터도구 수집 요청 페이지로 이동 중입니다...",
                         "published_url": published_url,
                     },
                 )
@@ -12883,38 +12920,63 @@ class NaverSearchAdvisorWorker(threading.Thread):
         self.show_feedback = bool(show_feedback)
 
     def run(self) -> None:
+        completed_messages: list[str] = []
+        failed_messages: list[str] = []
         try:
             naver_success, naver_message = run_naver_search_advisor_playwright(
                 self.published_url,
                 self.result_queue,
             )
-            if not naver_success:
-                raise RuntimeError(str(naver_message or "네이버 수집 요청에 실패했습니다."))
+            if naver_success:
+                completed_messages.append(str(naver_message or "네이버 수집 요청을 완료했습니다."))
+            else:
+                failed_messages.append(str(naver_message or "네이버 수집 요청에 실패했습니다."))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            message = f"네이버: {exc}"
+            failed_messages.append(message)
+            append_runtime_log("naver-search-advisor", f"네이버 수집 요청 실패, 다음 단계 계속: {exc}")
+
+        # Search engines are independent. A delayed or failed Naver result must
+        # never prevent the Daum collection request from being attempted.
+        try:
             daum_success, daum_message = run_daum_webmaster_playwright(
                 self.published_url,
                 self.result_queue,
             )
-            if not daum_success:
-                raise RuntimeError(str(daum_message or "다음 수집 요청에 실패했습니다."))
-            message = f"{naver_message}\n{daum_message}"
+            if daum_success:
+                completed_messages.append(str(daum_message or "다음 수집 요청을 완료했습니다."))
+            else:
+                failed_messages.append(str(daum_message or "다음 수집 요청에 실패했습니다."))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            message = f"다음: {exc}"
+            failed_messages.append(message)
+            append_runtime_log("daum-webmaster", f"다음 수집 요청 실패: {exc}")
+
+        if completed_messages:
+            message_parts = list(completed_messages)
+            if failed_messages:
+                message_parts.append("확인이 필요한 항목:\n" + "\n".join(failed_messages))
             payload = {
-                "message": message,
+                "message": "\n".join(message_parts),
                 "published_url": self.published_url,
                 "show_feedback": self.show_feedback,
+                "partial": bool(failed_messages),
             }
             self.result_queue.put(("naver_search_advisor_done", payload))
-        except Exception as exc:  # pragma: no cover - runtime handling
-            append_runtime_log("naver-search-advisor", f"수집 요청 실패: {exc}")
-            self.result_queue.put(
-                (
-                    "naver_search_advisor_error",
-                    {
-                        "message": str(exc),
-                        "published_url": self.published_url,
-                        "show_feedback": self.show_feedback,
-                    },
-                )
+            return
+
+        message = "\n".join(failed_messages) or "네이버·다음 수집 요청에 실패했습니다."
+        append_runtime_log("naver-search-advisor", f"수집 요청 전체 실패: {message}")
+        self.result_queue.put(
+            (
+                "naver_search_advisor_error",
+                {
+                    "message": message,
+                    "published_url": self.published_url,
+                    "show_feedback": self.show_feedback,
+                },
             )
+        )
 
 
 class NaverKinBootstrapWorker(threading.Thread):
@@ -29424,12 +29486,18 @@ class KeywordApp(ctk.CTk):
     def _handle_naver_search_advisor_done(self, payload: dict) -> None:
         message = str((payload or {}).get("message") or "네이버·다음 수집 요청을 완료했습니다.")
         show_feedback = bool((payload or {}).get("show_feedback", True))
+        partial = bool((payload or {}).get("partial", False))
+        status_title = "검색엔진 수집 요청 일부 완료" if partial else "검색엔진 수집 요청 완료"
+        status_color = "#ffb86b" if partial else "#48d980"
         self.naver_search_advisor_worker = None
         if hasattr(self, "publish_status_label"):
-            self.publish_status_label.configure(text=message, text_color="#48d980")
-        self._update_quick_status("검색엔진 수집 요청 완료", message, "#48d980")
+            self.publish_status_label.configure(text=message, text_color=status_color)
+        self._update_quick_status(status_title, message, status_color)
         if show_feedback:
-            messagebox.showinfo("검색엔진 수집 요청 완료", message)
+            if partial:
+                messagebox.showwarning(status_title, message)
+            else:
+                messagebox.showinfo(status_title, message)
         self.after(350, self._start_next_naver_search_advisor_submission)
 
     def _handle_naver_search_advisor_error(self, payload: dict) -> None:
