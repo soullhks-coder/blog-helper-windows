@@ -3373,6 +3373,8 @@ def codex_cli_version(cli_path: str) -> tuple[str, tuple[int, int, int, int]]:
             codex_cli_command(normalized_path, "--version"),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=5,
         )
@@ -3507,6 +3509,15 @@ def build_codex_exec_command(
     return command
 
 
+def codex_cli_process_environment(platform_name: str | None = None) -> dict[str, str]:
+    """Return an isolated environment with Windows CLI streams forced to UTF-8."""
+    environment = os.environ.copy()
+    if (platform_name or os.name) == "nt":
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
 def is_codex_model_error(detail: str) -> bool:
     normalized = str(detail or "").lower()
     model_markers = (
@@ -3554,7 +3565,10 @@ def execute_codex_cli_text(
                     cwd=str(DATA_DIR),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     input=prompt,
+                    env=codex_cli_process_environment(),
                     timeout=timeout or max(20, int(settings.codex_cli_timeout or 120)),
                     check=False,
                 )
@@ -3574,7 +3588,7 @@ def execute_codex_cli_text(
                     version=version_text,
                     model=model_name,
                 )
-            output_text = output_file.read_text(encoding="utf-8", errors="ignore").strip() if output_file.exists() else ""
+            output_text = output_file.read_text(encoding="utf-8", errors="replace").strip() if output_file.exists() else ""
             if result.returncode == 0 and output_text:
                 return CodexCLIExecutionResult(
                     True,

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import main
 
@@ -45,6 +46,44 @@ class CodexCLICompatibilityTests(unittest.TestCase):
         self.assertNotIn("old.txt", command)
         self.assertIn("read-only", command)
         self.assertIn("model_reasoning_effort=medium", command)
+
+    def test_windows_codex_environment_forces_utf8_without_changing_macos(self) -> None:
+        with patch.dict(main.os.environ, {"BLOG_HELPER_TEST": "kept"}, clear=True):
+            windows_environment = main.codex_cli_process_environment("nt")
+            macos_environment = main.codex_cli_process_environment("posix")
+
+        self.assertEqual(windows_environment["PYTHONUTF8"], "1")
+        self.assertEqual(windows_environment["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(windows_environment["BLOG_HELPER_TEST"], "kept")
+        self.assertNotIn("PYTHONUTF8", macos_environment)
+        self.assertNotIn("PYTHONIOENCODING", macos_environment)
+
+    def test_codex_prompt_and_response_streams_use_utf8(self) -> None:
+        settings = main.WordPressSettings(codex_cli_model=main.CODEX_MODEL_AUTO)
+
+        def fake_run(command, **kwargs):
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text("한글 응답", encoding="utf-8")
+            self.assertEqual(kwargs["input"], "한글 프롬프트")
+            self.assertEqual(kwargs["encoding"], "utf-8")
+            self.assertEqual(kwargs["errors"], "replace")
+            self.assertEqual(kwargs["env"]["PYTHONUTF8"], "1")
+            self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with (
+            patch("main.resolve_codex_cli_path", return_value="C:/codex.cmd"),
+            patch("main.codex_cli_version", return_value=("codex-cli 0.147.0", (0, 147, 0, 1))),
+            patch(
+                "main.codex_cli_process_environment",
+                return_value={"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            ),
+            patch("main.subprocess.run", side_effect=fake_run),
+        ):
+            result = main.execute_codex_cli_text(settings, "한글 프롬프트")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output, "한글 응답")
 
 
 if __name__ == "__main__":
