@@ -12386,36 +12386,26 @@ class PublicDataEventWorker(threading.Thread):
 
 
 class AutomationKeywordQueueWorker(threading.Thread):
-    def __init__(self, settings: WordPressSettings, sources: list[str], result_queue: queue.Queue) -> None:
+    def __init__(
+        self,
+        settings: WordPressSettings,
+        sources: list[str],
+        result_queue: queue.Queue,
+        selected_payloads: list[dict] | None = None,
+    ) -> None:
         super().__init__(daemon=True)
         self.settings = settings
         self.sources = sources
         self.result_queue = result_queue
+        self.selected_payloads = [dict(payload) for payload in selected_payloads] if selected_payloads is not None else None
 
     def run(self) -> None:
         try:
-            payloads: list[dict] = []
-            if "daum" in self.sources:
-                self.result_queue.put(("automation_collect_progress", "다음 실시간 검색어 1~10위를 가져오는 중..."))
-                daum_worker = DaumRealtimeKeywordWorker(queue.Queue())
-                daum_html = daum_worker._fetch_html(daum_worker.DAUM_REALTIME_URL)
-                insights, reference_map = daum_worker._build_daum_payload(daum_html)
-                payloads.extend(self._build_queue_payloads("다음 실시간", insights[:10], reference_map))
-
-            if "signal" in self.sources:
-                self.result_queue.put(("automation_collect_progress", "시그널 실시간 검색어 1~10위를 가져오는 중..."))
-                signal_worker = SignalKeywordWorker(queue.Queue())
-                signal_payload = signal_worker._fetch_json(signal_worker.SIGNAL_API_URL)
-                insights, reference_map = signal_worker._build_signal_payload(signal_payload)
-                payloads.extend(self._build_queue_payloads("시그널", insights[:10], reference_map))
-
-            if "newneek" in self.sources:
-                self.result_queue.put(("automation_collect_progress", "뉴닉 사회 카테고리 1~10위 뉴스를 가져오는 중..."))
-                newneek_worker = NewneekKeywordWorker(queue.Queue())
-                payload = newneek_worker._fetch_json(newneek_worker.CATEGORY_API_URL, newneek_worker.CATEGORY_URL)
-                articles = newneek_worker._extract_articles(payload)
-                insights, reference_map = newneek_worker._build_newneek_payload(articles[:10])
-                payloads.extend(self._build_queue_payloads("뉴닉", insights[:10], reference_map))
+            payloads = (
+                [dict(payload) for payload in self.selected_payloads]
+                if self.selected_payloads is not None
+                else self._fetch_keyword_payloads()
+            )
 
             if not payloads:
                 raise RuntimeError("대기열에 담을 키워드를 찾지 못했습니다.")
@@ -12456,6 +12446,31 @@ class AutomationKeywordQueueWorker(threading.Thread):
             self.result_queue.put(("automation_collect_done", {"count": completed_count, "total": len(payloads)}))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("automation_collect_error", str(exc)))
+
+    def _fetch_keyword_payloads(self) -> list[dict]:
+        payloads: list[dict] = []
+        if "daum" in self.sources:
+            self.result_queue.put(("automation_collect_progress", "다음 실시간 검색어 1~10위를 가져오는 중..."))
+            daum_worker = DaumRealtimeKeywordWorker(queue.Queue())
+            daum_html = daum_worker._fetch_html(daum_worker.DAUM_REALTIME_URL)
+            insights, reference_map = daum_worker._build_daum_payload(daum_html)
+            payloads.extend(self._build_queue_payloads("다음 실시간", insights[:10], reference_map))
+
+        if "signal" in self.sources:
+            self.result_queue.put(("automation_collect_progress", "시그널 실시간 검색어 1~10위를 가져오는 중..."))
+            signal_worker = SignalKeywordWorker(queue.Queue())
+            signal_payload = signal_worker._fetch_json(signal_worker.SIGNAL_API_URL)
+            insights, reference_map = signal_worker._build_signal_payload(signal_payload)
+            payloads.extend(self._build_queue_payloads("시그널", insights[:10], reference_map))
+
+        if "newneek" in self.sources:
+            self.result_queue.put(("automation_collect_progress", "뉴닉 사회 카테고리 1~10위 뉴스를 가져오는 중..."))
+            newneek_worker = NewneekKeywordWorker(queue.Queue())
+            payload = newneek_worker._fetch_json(newneek_worker.CATEGORY_API_URL, newneek_worker.CATEGORY_URL)
+            articles = newneek_worker._extract_articles(payload)
+            insights, reference_map = newneek_worker._build_newneek_payload(articles[:10])
+            payloads.extend(self._build_queue_payloads("뉴닉", insights[:10], reference_map))
+        return payloads
 
     def _generate_article_payload(self, payload: dict) -> tuple[str, str, str]:
         topic = str(payload.get("source_name") or "자동수집 키워드")
@@ -12618,6 +12633,31 @@ class AutomationKeywordQueueWorker(threading.Thread):
                 }
             )
         return items
+
+
+class AutomationKeywordDiscoveryWorker(threading.Thread):
+    """Load automation candidates without spending AI tokens or creating posts."""
+
+    def __init__(self, settings: WordPressSettings, source: str, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.settings = settings
+        self.source = source
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            helper = AutomationKeywordQueueWorker(self.settings, [self.source], self.result_queue)
+            payloads = helper._fetch_keyword_payloads()
+            if not payloads:
+                raise RuntimeError("추천 키워드를 찾지 못했습니다.")
+            self.result_queue.put(
+                (
+                    "automation_keyword_candidates_done",
+                    {"source": self.source, "items": payloads[:10]},
+                )
+            )
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("automation_keyword_candidates_error", str(exc)))
 
 
 class RemoteKeywordQueueWorker(threading.Thread):
@@ -14102,6 +14142,7 @@ class KeywordApp(ctk.CTk):
         self.newneek_worker: NewneekKeywordWorker | None = None
         self.public_data_worker: PublicDataEventWorker | None = None
         self.automation_keyword_worker: AutomationKeywordQueueWorker | None = None
+        self.automation_keyword_discovery_worker: AutomationKeywordDiscoveryWorker | None = None
         self.reference_collection_worker: ReferenceCollectionWorker | None = None
         self.pending_reference_keyword = ""
         self.tistory_automation_worker: TistoryAutomationWorker | None = None
@@ -14113,6 +14154,8 @@ class KeywordApp(ctk.CTk):
         self.automation_source_vars: dict[str, ctk.BooleanVar] = {}
         self.automation_target_platform_vars: dict[str, tk.BooleanVar] = {}
         self.automation_selection_vars: dict[str, tk.BooleanVar] = {}
+        self.automation_keyword_candidates: list[dict] = []
+        self.automation_keyword_candidate_vars: dict[str, tk.BooleanVar] = {}
         self.current_keyword = ""
         self.current_insights: list[KeywordInsight] = []
         self.daum_reference_map: dict[str, str] = {}
@@ -15240,6 +15283,7 @@ class KeywordApp(ctk.CTk):
         self.automation_source_vars = {}
         self.automation_target_platform_vars = {}
         self.automation_selection_vars = {}
+        self.automation_keyword_candidate_vars = {}
         self.writing_section_cards = {}
         self.writing_section_bodies = {}
         self.writing_section_toggle_buttons = {}
@@ -18888,18 +18932,6 @@ class KeywordApp(ctk.CTk):
             )
             checkbox.grid(row=0, column=column, padx=(0, 10), pady=16, sticky="w")
 
-        self.automation_collect_button = ctk.CTkButton(
-            control_card,
-            text="글 작성 후 대기열 추가",
-            height=40,
-            corner_radius=14,
-            fg_color="#19a957",
-            hover_color="#168f4b",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._collect_automation_keywords,
-        )
-        self.automation_collect_button.grid(row=0, column=5, padx=(0, 12), pady=16, sticky="w")
-
         self.automation_schedule_button = ctk.CTkButton(
             control_card,
             text="자동수집 시작",
@@ -18915,15 +18947,112 @@ class KeywordApp(ctk.CTk):
 
         self.automation_status_label = ctk.CTkLabel(
             control_card,
-            text="선택한 소스의 1~10위 키워드를 가져와 AI 글 작성까지 완료한 뒤 대기열에 담습니다.",
+            text="추천 소스 버튼을 누른 뒤 필요한 키워드만 체크해 대기열에 추가하세요.",
             text_color="#aab7c8",
             font=ctk.CTkFont(size=13),
             anchor="w",
         )
         self.automation_status_label.grid(row=1, column=0, columnspan=7, padx=18, pady=(0, 14), sticky="ew")
 
+        candidate_source_row = ctk.CTkFrame(control_card, fg_color="transparent")
+        candidate_source_row.grid(row=2, column=0, columnspan=7, padx=18, pady=(0, 12), sticky="ew")
+        candidate_source_row.grid_columnconfigure(4, weight=1)
+        ctk.CTkLabel(
+            candidate_source_row,
+            text="추천 키워드 선택",
+            text_color="#dce6f3",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 12), sticky="w")
+
+        self.automation_keyword_source_buttons: dict[str, ctk.CTkButton] = {}
+        source_button_specs = (
+            ("daum", "다음 실시간", "#3468e8", "#2d5cd0"),
+            ("signal", "시그널 키워드", "#45bfc8", "#36a9b1"),
+            ("newneek", "뉴닉 키워드", "#ff8538", "#e8742d"),
+        )
+        for column, (source_key, label, color, hover_color) in enumerate(source_button_specs, start=1):
+            button = ctk.CTkButton(
+                candidate_source_row,
+                text=label,
+                width=126,
+                height=38,
+                corner_radius=13,
+                fg_color=color,
+                hover_color=hover_color,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                command=lambda selected_source=source_key: self._load_automation_keyword_candidates(selected_source),
+            )
+            button.grid(row=0, column=column, padx=(0, 10), sticky="w")
+            self.automation_keyword_source_buttons[source_key] = button
+
+        self.automation_keyword_candidate_frame = ctk.CTkFrame(
+            control_card,
+            fg_color="#121a28",
+            corner_radius=16,
+            border_width=1,
+            border_color="#273a54",
+        )
+        self.automation_keyword_candidate_frame.grid(
+            row=3,
+            column=0,
+            columnspan=7,
+            padx=18,
+            pady=(0, 12),
+            sticky="ew",
+        )
+        self.automation_keyword_candidate_frame.grid_columnconfigure(0, weight=1, uniform="candidate")
+        self.automation_keyword_candidate_frame.grid_columnconfigure(1, weight=1, uniform="candidate")
+        self._render_automation_keyword_candidates()
+
+        candidate_action_row = ctk.CTkFrame(control_card, fg_color="transparent")
+        candidate_action_row.grid(row=4, column=0, columnspan=7, padx=18, pady=(0, 14), sticky="ew")
+        candidate_action_row.grid_columnconfigure(3, weight=1)
+        self.automation_candidate_select_all_button = ctk.CTkButton(
+            candidate_action_row,
+            text="전체 선택",
+            width=92,
+            height=36,
+            corner_radius=12,
+            fg_color="#314761",
+            hover_color="#3f5c7f",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._set_all_automation_keyword_candidates(True),
+        )
+        self.automation_candidate_select_all_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
+        self.automation_candidate_clear_button = ctk.CTkButton(
+            candidate_action_row,
+            text="선택 해제",
+            width=92,
+            height=36,
+            corner_radius=12,
+            fg_color="#314761",
+            hover_color="#3f5c7f",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._set_all_automation_keyword_candidates(False),
+        )
+        self.automation_candidate_clear_button.grid(row=0, column=1, padx=(0, 8), sticky="w")
+        self.automation_candidate_count_label = ctk.CTkLabel(
+            candidate_action_row,
+            text="선택 0개",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.automation_candidate_count_label.grid(row=0, column=2, padx=(4, 12), sticky="w")
+        self.automation_collect_button = ctk.CTkButton(
+            candidate_action_row,
+            text="선택 키워드 글 작성 후 대기열 추가",
+            width=250,
+            height=40,
+            corner_radius=14,
+            fg_color="#19a957",
+            hover_color="#168f4b",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._collect_automation_keywords,
+        )
+        self.automation_collect_button.grid(row=0, column=4, sticky="e")
+
         management_row = ctk.CTkFrame(control_card, fg_color="transparent")
-        management_row.grid(row=2, column=0, columnspan=7, padx=18, pady=(0, 16), sticky="ew")
+        management_row.grid(row=5, column=0, columnspan=7, padx=18, pady=(0, 16), sticky="ew")
         management_row.grid_columnconfigure(6, weight=1)
 
         self.automation_select_all_var = tk.BooleanVar(value=False)
@@ -18997,7 +19126,7 @@ class KeywordApp(ctk.CTk):
         ).grid(row=0, column=5, sticky="w")
 
         target_card = ctk.CTkFrame(control_card, fg_color="#121a28", corner_radius=16)
-        target_card.grid(row=3, column=0, columnspan=7, padx=18, pady=(0, 16), sticky="ew")
+        target_card.grid(row=6, column=0, columnspan=7, padx=18, pady=(0, 16), sticky="ew")
         target_card.grid_columnconfigure(4, weight=1)
 
         ctk.CTkLabel(
@@ -27262,16 +27391,206 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
         self._send_remote_queue_snapshot()
 
+    @staticmethod
+    def _automation_keyword_identity(keyword: str) -> str:
+        return re.sub(r"[^0-9a-z가-힣]+", "", str(keyword or "").casefold())
+
+    def _automation_candidate_key(self, payload: dict) -> str:
+        source_name = str(payload.get("source_name") or "자동수집").strip()
+        rank = str(payload.get("rank") or "")
+        keyword = self._automation_keyword_identity(str(payload.get("keyword") or ""))
+        return f"{source_name}::{rank}::{keyword}"
+
+    def _existing_automation_keyword_identities(self) -> set[str]:
+        return {
+            identity
+            for item in self.automation_queue
+            if (identity := self._automation_keyword_identity(str(item.get("keyword") or "")))
+        }
+
+    def _set_automation_keyword_source_buttons_state(self, state: str) -> None:
+        for button in getattr(self, "automation_keyword_source_buttons", {}).values():
+            try:
+                button.configure(state=state)
+            except (tk.TclError, AttributeError):
+                continue
+
+    def _load_automation_keyword_candidates(self, source: str) -> None:
+        if self.automation_keyword_discovery_worker and self.automation_keyword_discovery_worker.is_alive():
+            messagebox.showinfo("불러오는 중", "추천 키워드를 불러오는 중입니다. 잠시만 기다려 주세요.")
+            return
+        if self.automation_keyword_worker and self.automation_keyword_worker.is_alive():
+            messagebox.showinfo("글 작성 중", "선택한 키워드의 글을 작성하고 있습니다. 완료 후 다시 불러와 주세요.")
+            return
+
+        source_labels = {
+            "daum": "다음 실시간",
+            "signal": "시그널 키워드",
+            "newneek": "뉴닉 키워드",
+        }
+        if source not in source_labels:
+            return
+        self._set_automation_keyword_source_buttons_state("disabled")
+        self.automation_status_label.configure(
+            text=f"{source_labels[source]} 1~10위를 불러오는 중입니다...",
+            text_color="#6dadff",
+        )
+        self.automation_keyword_discovery_worker = AutomationKeywordDiscoveryWorker(
+            self._read_wordpress_settings(include_prompts=False),
+            source,
+            self.result_queue,
+        )
+        self.automation_keyword_discovery_worker.start()
+
+    def _render_automation_keyword_candidates(self) -> None:
+        frame = getattr(self, "automation_keyword_candidate_frame", None)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+
+        candidates = list(getattr(self, "automation_keyword_candidates", []) or [])
+        self.automation_keyword_candidate_vars = {}
+        if not candidates:
+            ctk.CTkLabel(
+                frame,
+                text="위의 다음 실시간, 시그널 키워드, 뉴닉 키워드 버튼을 눌러 추천 목록을 불러오세요.",
+                text_color="#8f9db2",
+                font=ctk.CTkFont(size=13),
+                anchor="w",
+            ).grid(row=0, column=0, columnspan=2, padx=16, pady=16, sticky="ew")
+            self._update_automation_keyword_candidate_count()
+            return
+
+        existing_keywords = self._existing_automation_keyword_identities()
+        for index, payload in enumerate(candidates):
+            keyword = str(payload.get("keyword") or "").strip()
+            rank = int(payload.get("rank") or index + 1)
+            candidate_key = self._automation_candidate_key(payload)
+            already_queued = self._automation_keyword_identity(keyword) in existing_keywords
+            variable = tk.BooleanVar(value=False)
+            self.automation_keyword_candidate_vars[candidate_key] = variable
+
+            item_frame = ctk.CTkFrame(
+                frame,
+                fg_color="#182233" if not already_queued else "#202735",
+                corner_radius=11,
+            )
+            row = index // 2
+            column = index % 2
+            item_frame.grid(
+                row=row,
+                column=column,
+                padx=(10 if column == 0 else 5, 10 if column == 1 else 5),
+                pady=(10 if row == 0 else 4, 8),
+                sticky="ew",
+            )
+            item_frame.grid_columnconfigure(0, weight=1)
+            checkbox = ctk.CTkCheckBox(
+                item_frame,
+                text=f"{rank}. {keyword}",
+                variable=variable,
+                command=self._update_automation_keyword_candidate_count,
+                checkbox_width=21,
+                checkbox_height=21,
+                fg_color="#3468e8",
+                hover_color="#2d5cd0",
+                text_color="#7f8b9e" if already_queued else "#e8eef8",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                state="disabled" if already_queued else "normal",
+            )
+            checkbox.grid(row=0, column=0, padx=12, pady=10, sticky="w")
+            if already_queued:
+                ctk.CTkLabel(
+                    item_frame,
+                    text="대기열에 있음",
+                    text_color="#ffb86b",
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                ).grid(row=0, column=1, padx=(6, 12), pady=10, sticky="e")
+        self._update_automation_keyword_candidate_count()
+        self._finish_theme_paint()
+
+    def _set_all_automation_keyword_candidates(self, selected: bool) -> None:
+        existing_keywords = self._existing_automation_keyword_identities()
+        for payload in self.automation_keyword_candidates:
+            if self._automation_keyword_identity(str(payload.get("keyword") or "")) in existing_keywords:
+                continue
+            variable = self.automation_keyword_candidate_vars.get(self._automation_candidate_key(payload))
+            if variable is not None:
+                variable.set(selected)
+        self._update_automation_keyword_candidate_count()
+
+    def _update_automation_keyword_candidate_count(self) -> None:
+        selected_count = sum(
+            1 for variable in getattr(self, "automation_keyword_candidate_vars", {}).values() if variable.get()
+        )
+        label = getattr(self, "automation_candidate_count_label", None)
+        if label is not None:
+            label.configure(text=f"선택 {selected_count}개")
+
+    def _handle_automation_keyword_candidates_loaded(self, payload: dict) -> None:
+        self._set_automation_keyword_source_buttons_state("normal")
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        self.automation_keyword_candidates = [dict(item) for item in items if str(item.get("keyword") or "").strip()]
+        self._render_automation_keyword_candidates()
+        source_labels = {"daum": "다음 실시간", "signal": "시그널", "newneek": "뉴닉"}
+        source_label = source_labels.get(str(payload.get("source") or ""), "추천") if isinstance(payload, dict) else "추천"
+        self.automation_status_label.configure(
+            text=f"{source_label} 추천 키워드 {len(self.automation_keyword_candidates)}개를 불러왔습니다. 필요한 항목만 체크해 주세요.",
+            text_color="#48d980",
+        )
+
     def _collect_automation_keywords(self, scheduled: bool = False) -> None:
         if self.automation_keyword_worker and self.automation_keyword_worker.is_alive():
             if not scheduled:
                 messagebox.showinfo("진행 중", "자동화 키워드를 수집하는 중입니다.")
             return
-        sources = [source for source, var in self.automation_source_vars.items() if var.get()]
-        if not sources:
-            if not scheduled:
-                messagebox.showwarning("소스 선택 필요", "다음 실시간, 시그널 키워드, 뉴닉 키워드 중 최소 1개를 선택해 주세요.")
-            return
+        selected_payloads: list[dict] | None = None
+        if scheduled:
+            sources = [source for source, var in self.automation_source_vars.items() if var.get()]
+            if not sources:
+                return
+        else:
+            sources = []
+            selected_payloads = [
+                dict(payload)
+                for payload in self.automation_keyword_candidates
+                if (
+                    self.automation_keyword_candidate_vars.get(self._automation_candidate_key(payload)) is not None
+                    and self.automation_keyword_candidate_vars[self._automation_candidate_key(payload)].get()
+                )
+            ]
+            if not self.automation_keyword_candidates:
+                messagebox.showwarning(
+                    "추천 키워드 필요",
+                    "먼저 다음 실시간, 시그널 키워드, 뉴닉 키워드 버튼 중 하나를 눌러 목록을 불러와 주세요.",
+                )
+                return
+            if not selected_payloads:
+                messagebox.showwarning("키워드 선택 필요", "대기열에 추가할 추천 키워드를 체크해 주세요.")
+                return
+
+            existing_keywords = self._existing_automation_keyword_identities()
+            unique_payloads: list[dict] = []
+            selected_identities: set[str] = set()
+            skipped_count = 0
+            for payload in selected_payloads:
+                identity = self._automation_keyword_identity(str(payload.get("keyword") or ""))
+                if not identity or identity in existing_keywords or identity in selected_identities:
+                    skipped_count += 1
+                    continue
+                selected_identities.add(identity)
+                unique_payloads.append(payload)
+            selected_payloads = unique_payloads
+            if not selected_payloads:
+                messagebox.showinfo("중복 키워드", "선택한 키워드가 모두 현재 대기열에 이미 있습니다.")
+                self._render_automation_keyword_candidates()
+                return
+            if skipped_count:
+                self.automation_status_label.configure(
+                    text=f"중복 {skipped_count}개를 제외하고 {len(selected_payloads)}개 키워드의 글 작성을 시작합니다.",
+                    text_color="#ffcc66",
+                )
         automation_targets = self._automation_target_platforms()
         if not automation_targets:
             if not scheduled:
@@ -27289,12 +27608,21 @@ class KeywordApp(ctk.CTk):
 
         self.wordpress_settings = settings
         self._save_automation_settings()
-        self.automation_collect_button.configure(state="disabled", text="불러오는 중...")
+        self.automation_collect_button.configure(state="disabled", text="글 작성 중...")
         self.automation_status_label.configure(
-            text=f"{self._automation_interval_hours()}시간 간격 설정 저장됨. 참고내용 수집, 글 작성, 썸네일/카드뉴스 준비까지 진행합니다...",
+            text=(
+                f"{self._automation_interval_hours()}시간 간격 예약 자동수집을 진행합니다..."
+                if scheduled
+                else f"선택한 {len(selected_payloads or [])}개 키워드의 참고내용과 글을 작성합니다..."
+            ),
             text_color="#6dadff",
         )
-        self.automation_keyword_worker = AutomationKeywordQueueWorker(settings, sources, self.result_queue)
+        self.automation_keyword_worker = AutomationKeywordQueueWorker(
+            settings,
+            sources,
+            self.result_queue,
+            selected_payloads=selected_payloads,
+        )
         self.automation_keyword_worker.start()
 
     def _toggle_automation_schedule(self) -> None:
@@ -27391,9 +27719,10 @@ class KeywordApp(ctk.CTk):
         return True
 
     def _handle_automation_keywords_collected(self, payload: dict) -> None:
-        self.automation_collect_button.configure(state="normal", text="글 작성 후 대기열 추가")
+        self.automation_collect_button.configure(state="normal", text="선택 키워드 글 작성 후 대기열 추가")
         added_count = payload.get("count", 0) if isinstance(payload, dict) else 0
         total_count = payload.get("total", added_count) if isinstance(payload, dict) else added_count
+        self._render_automation_keyword_candidates()
         self.automation_status_label.configure(
             text=f"자동화 수집 완료: {total_count}개 중 {added_count}개가 참고내용/글/썸네일/카드뉴스 준비 후 대기열에 추가되었습니다.",
             text_color="#48d980",
@@ -28422,13 +28751,23 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "automation_collect_progress":
                     if hasattr(self, "automation_status_label"):
                         self.automation_status_label.configure(text=payload, text_color="#6dadff")
+                elif event_type == "automation_keyword_candidates_done":
+                    self._handle_automation_keyword_candidates_loaded(payload)
+                elif event_type == "automation_keyword_candidates_error":
+                    self._set_automation_keyword_source_buttons_state("normal")
+                    if hasattr(self, "automation_status_label"):
+                        self.automation_status_label.configure(text="추천 키워드 불러오기 실패", text_color="#ff6b6b")
+                    messagebox.showerror("추천 키워드 불러오기 실패", payload)
                 elif event_type == "automation_collect_item_done":
                     self._handle_automation_keyword_item_collected(payload)
                 elif event_type == "automation_collect_done":
                     self._handle_automation_keywords_collected(payload)
                 elif event_type == "automation_collect_error":
                     if hasattr(self, "automation_collect_button"):
-                        self.automation_collect_button.configure(state="normal", text="글 작성 후 대기열 추가")
+                        self.automation_collect_button.configure(
+                            state="normal",
+                            text="선택 키워드 글 작성 후 대기열 추가",
+                        )
                     if hasattr(self, "automation_status_label"):
                         self.automation_status_label.configure(text="자동화 키워드 수집 실패", text_color="#ff6b6b")
                     self._schedule_next_automation_collection()
