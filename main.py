@@ -15405,6 +15405,14 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._switch_page("automation"),
         )
         self.automation_nav_button.grid(row=2, column=0, padx=26, pady=(0, 10), sticky="ew")
+        if os.name == "nt":
+            # CTkButton 6 can miss its hover-enter state on Windows dark mode,
+            # which makes a valid release look like it happened outside.
+            self.automation_nav_button.bind(
+                "<ButtonRelease-1>",
+                self._recover_windows_dark_automation_navigation,
+                add="+",
+            )
 
         self.naver_blog_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25248,11 +25256,33 @@ class KeywordApp(ctk.CTk):
                 fg_color=palette["selected"] if name == page_name else "transparent",
                 hover_color=palette["hover"],
             )
-        if page_name == "automation":
-            self._refresh_automation_queue()
         self._show_only_page_frame(page_name)
+        if page_name == "automation":
+            if self._is_windows_dark_theme():
+                # Make navigation visible before rebuilding a potentially long
+                # queue. This keeps the Windows UI responsive at display scale.
+                self.after_idle(self._refresh_automation_queue)
+            else:
+                self._refresh_automation_queue()
         if hasattr(self, "shell_frame"):
             self._finish_theme_paint()
+
+    def _is_windows_dark_theme(self) -> bool:
+        return (
+            os.name == "nt"
+            and self._normalize_app_theme(getattr(self.wordpress_settings, "app_theme", "블랙테마"))
+            == "블랙테마"
+        )
+
+    def _recover_windows_dark_automation_navigation(self, _event=None) -> None:
+        if not self._is_windows_dark_theme() or getattr(self, "current_page", "") == "automation":
+            return
+
+        def open_automation_page() -> None:
+            if getattr(self, "current_page", "") != "automation":
+                self._switch_page("automation")
+
+        self.after_idle(open_automation_page)
 
     def _switch_settings_section(self, section_name: str) -> None:
         self.settings_section = section_name if section_name in {"basic", "theme", "ai"} else "ai"
