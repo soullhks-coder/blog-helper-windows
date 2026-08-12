@@ -100,6 +100,39 @@ class WritingCompletionFlowTests(unittest.TestCase):
         self.assertIn("context.close()", daum_source)
         self.assertIn('"https://webmaster.daum.net/tool/collect"', self.source)
 
+    def test_wordpress_submission_continues_to_google_search_console(self) -> None:
+        google_source = ast.get_source_segment(
+            self.source,
+            self.methods["run_google_search_console_playwright"],
+        )
+        property_source = ast.get_source_segment(
+            self.source,
+            self.methods["_google_search_console_property_url"],
+        )
+        worker_source = ast.get_source_segment(
+            self.source,
+            next(
+                node
+                for node in ast.walk(self.tree)
+                if isinstance(node, ast.ClassDef) and node.name == "NaverSearchAdvisorWorker"
+            ),
+        )
+        self.assertIn("run_google_search_console_playwright", worker_source)
+        self.assertIn("GOOGLE_SEARCH_CONSOLE_BASE_URL", property_source)
+        self.assertIn("GOOGLE_SEARCH_CONSOLE_CHROME_PROFILE_DIR", google_source)
+        self.assertIn("inspection_input.fill(published_url)", google_source)
+        self.assertIn('"색인 생성 요청"', google_source)
+        self.assertIn('"색인 생성 요청됨"', google_source)
+        self.assertIn('"닫기"', google_source)
+        self.assertIn("context.close()", google_source)
+
+    def test_google_search_console_property_follows_published_domain(self) -> None:
+        site_root, console_url = __import__("main")._google_search_console_property_url(
+            "https://example.com/article/post"
+        )
+        self.assertEqual(site_root, "https://example.com/")
+        self.assertIn("resource_id=https%3A%2F%2Fexample.com%2F", console_url)
+
     def test_daum_webmaster_uses_saved_site_and_pin_authentication(self) -> None:
         auth_source = ast.get_source_segment(
             self.source,

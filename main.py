@@ -314,6 +314,8 @@ NAVER_SEARCH_ADVISOR_CRAWL_URL = (
 )
 DAUM_WEBMASTER_COLLECT_URL = "https://webmaster.daum.net/tool/collect"
 DAUM_WEBMASTER_CHROME_PROFILE_DIR = DATA_DIR / "Daum Webmaster Chrome Profile"
+GOOGLE_SEARCH_CONSOLE_BASE_URL = "https://search.google.com/search-console"
+GOOGLE_SEARCH_CONSOLE_CHROME_PROFILE_DIR = DATA_DIR / "Google Search Console Chrome Profile"
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
@@ -7576,7 +7578,7 @@ def _find_naver_search_advisor_url_input(page):
             aria_label = str(locator.get_attribute("aria-label") or "")
             nearby_text = str(
                 locator.evaluate(
-                    """node => {
+                    r"""node => {
                         const parts = [];
                         let current = node;
                         for (let depth = 0; depth < 10 && current; depth += 1) {
@@ -7965,7 +7967,7 @@ def _find_daum_webmaster_url_input(page):
             input_type = str(locator.get_attribute("type") or "text").lower()
             nearby_text = str(
                 locator.evaluate(
-                    """node => {
+                    r"""node => {
                         const parts = [];
                         let current = node;
                         for (let depth = 0; depth < 8 && current; depth += 1) {
@@ -8275,6 +8277,343 @@ def run_daum_webmaster_playwright(
         finally:
             context.close()
             append_runtime_log("daum-webmaster", "전용 Chrome 종료 및 로그인 프로필 저장 완료")
+
+
+def _google_search_console_property_url(published_url: str) -> tuple[str, str]:
+    """Build the Search Console URL-prefix property URL for a published post."""
+    parsed_url = urlparse(str(published_url or "").strip())
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise RuntimeError("Google 색인 요청에 사용할 워드프레스 발행 URL이 올바르지 않습니다.")
+    site_root = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+    console_url = GOOGLE_SEARCH_CONSOLE_BASE_URL + "?" + urlencode(
+        {"resource_id": site_root, "hl": "ko"}
+    )
+    return site_root, console_url
+
+
+def _find_google_search_console_inspection_input(page, site_root: str):
+    """Find Search Console's top URL inspection input across UI revisions."""
+    inputs = page.locator("input:not([type='hidden']), textarea, [contenteditable='true']")
+    candidates: list[tuple[int, object]] = []
+    normalized_root = str(site_root or "").strip().lower().rstrip("/")
+    for index in range(min(inputs.count(), 100)):
+        locator = inputs.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            placeholder = str(locator.get_attribute("placeholder") or "")
+            aria_label = str(locator.get_attribute("aria-label") or "")
+            title = str(locator.get_attribute("title") or "")
+            nearby_text = str(
+                locator.evaluate(
+                    r"""node => {
+                        const parts = [];
+                        let current = node;
+                        for (let depth = 0; depth < 7 && current; depth += 1) {
+                            const text = (current.innerText || '').replace(/\s+/g, ' ').trim();
+                            if (text) parts.push(text);
+                            current = current.parentElement;
+                        }
+                        return parts.join(' ').slice(0, 900);
+                    }"""
+                )
+                or ""
+            )
+            searchable = f"{placeholder} {aria_label} {title} {nearby_text}".lower()
+            score = 0
+            if "모든 url 검사" in searchable:
+                score += 220
+            if "url 검사" in searchable or "inspect any url" in searchable:
+                score += 180
+            if "검사할 url" in searchable:
+                score += 160
+            if normalized_root and normalized_root in searchable.rstrip("/"):
+                score += 90
+            if str(locator.get_attribute("role") or "").lower() in {"combobox", "searchbox"}:
+                score += 30
+            if any(term in searchable for term in ("이메일", "비밀번호", "password")):
+                score -= 300
+            if score >= 150:
+                candidates.append((score, locator))
+        except Exception:
+            continue
+    if not candidates:
+        raise RuntimeError(
+            "Google Search Console 상단의 '모든 URL 검사' 검색창을 찾지 못했습니다."
+        )
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _google_search_console_page_text(page, timeout: int = 2000) -> str:
+    try:
+        return re.sub(r"\s+", " ", str(page.locator("body").inner_text(timeout=timeout) or ""))
+    except Exception:
+        return ""
+
+
+def _find_google_search_console_button(page, label: str, dialog_only: bool = False):
+    """Find an exact visible Search Console button, optionally inside a dialog."""
+    root = page.locator("[role='dialog']").last if dialog_only else page.locator("body")
+    controls = root.locator("button, [role='button'], input[type='button'], input[type='submit']")
+    expected = re.sub(r"\s+", "", str(label or ""))
+    for index in range(min(controls.count(), 160)):
+        locator = controls.nth(index)
+        try:
+            if not locator.is_visible() or not locator.is_enabled():
+                continue
+            text = str(locator.inner_text(timeout=500) or "").strip()
+            if not text:
+                text = str(locator.get_attribute("aria-label") or locator.get_attribute("value") or "").strip()
+            if re.sub(r"\s+", "", text) == expected:
+                return locator
+        except Exception:
+            continue
+    raise RuntimeError(f"Google Search Console의 '{label}' 버튼을 찾지 못했습니다.")
+
+
+def _wait_for_google_search_console_inspection_page(
+    context,
+    page,
+    site_root: str,
+    console_url: str,
+    result_queue: queue.Queue,
+    published_url: str,
+    login_timeout_seconds: int,
+):
+    deadline = time.time() + max(30, int(login_timeout_seconds or 300))
+    login_notice_sent = False
+    last_console_navigation_at = time.time()
+    while time.time() < deadline:
+        active_pages = list(context.pages) or [page]
+        console_pages = [
+            candidate
+            for candidate in active_pages
+            if "search.google.com/search-console" in str(candidate.url or "").lower()
+        ]
+        for candidate in reversed(console_pages):
+            try:
+                inspection_input = _find_google_search_console_inspection_input(candidate, site_root)
+                return candidate, inspection_input
+            except RuntimeError:
+                continue
+
+        login_pages = [
+            candidate
+            for candidate in active_pages
+            if "accounts.google.com" in str(candidate.url or "").lower()
+        ]
+        if login_pages:
+            page = login_pages[-1]
+            if not login_notice_sent:
+                result_queue.put(
+                    (
+                        "naver_search_advisor_progress",
+                        {
+                            "message": "전용 Chrome에서 Google 로그인을 완료해 주세요. 로그인 완료까지 기다립니다...",
+                            "published_url": published_url,
+                        },
+                    )
+                )
+                login_notice_sent = True
+            time.sleep(1)
+            continue
+
+        if time.time() - last_console_navigation_at >= 5:
+            page = active_pages[-1]
+            try:
+                page.goto(console_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(1200)
+            except Exception:
+                pass
+            last_console_navigation_at = time.time()
+        if not login_notice_sent:
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "Google Search Console 로그인 또는 URL 검사 화면을 기다리고 있습니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            login_notice_sent = True
+        time.sleep(1)
+    raise RuntimeError(
+        "5분 안에 Google 로그인 또는 Search Console URL 검사 화면을 확인하지 못했습니다. "
+        "전용 Chrome에서 로그인과 사이트 권한을 확인한 뒤 다시 시도해 주세요."
+    )
+
+
+def run_google_search_console_playwright(
+    published_url: str,
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+) -> tuple[bool, str]:
+    """Inspect a published WordPress URL and request Google indexing."""
+    published_url = str(published_url or "").strip()
+    site_root, console_url = _google_search_console_property_url(published_url)
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 프로그램을 다시 설치하거나 업데이트해 주세요."
+        ) from exc
+
+    chrome_path = require_google_chrome_executable()
+    GOOGLE_SEARCH_CONSOLE_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("google-search-console", f"색인 요청 시작: {published_url}")
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(GOOGLE_SEARCH_CONSOLE_CHROME_PROFILE_DIR),
+            executable_path=str(chrome_path),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        try:
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "Google Search Console URL 검사 페이지로 이동 중입니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            page.goto(console_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(1200)
+            page, inspection_input = _wait_for_google_search_console_inspection_page(
+                context,
+                page,
+                site_root,
+                console_url,
+                result_queue,
+                published_url,
+                login_timeout_seconds,
+            )
+
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "발행한 워드프레스 URL의 Google 색인 상태를 검사하고 있습니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+            inspection_input.scroll_into_view_if_needed()
+            inspection_input.click()
+            try:
+                inspection_input.fill(published_url)
+            except Exception:
+                page.keyboard.press("ControlOrMeta+A")
+                page.keyboard.type(published_url)
+            inspection_input.press("Enter")
+            append_runtime_log("google-search-console", f"URL 검사 입력 완료: {published_url}")
+
+            result_deadline = time.time() + 120
+            request_button = None
+            already_indexed = False
+            while time.time() < result_deadline:
+                body_text = _google_search_console_page_text(page)
+                if any(
+                    message in body_text
+                    for message in (
+                        "URL이 Google에 등록되어 있음",
+                        "URL이 Google에 등록됨",
+                    )
+                ):
+                    already_indexed = True
+                try:
+                    request_button = _find_google_search_console_button(page, "색인 생성 요청")
+                    break
+                except RuntimeError:
+                    pass
+                rejected = next(
+                    (
+                        message
+                        for message in (
+                            "URL이 속성에 없음",
+                            "현재 속성에서 URL을 검사하세요",
+                            "URL을 검사할 수 없음",
+                        )
+                        if message in body_text
+                    ),
+                    "",
+                )
+                if rejected:
+                    raise RuntimeError(f"Google Search Console이 URL 검사를 거부했습니다: {rejected}")
+                if already_indexed and "색인 생성 요청" not in body_text:
+                    append_runtime_log("google-search-console", "이미 Google에 등록된 URL로 확인")
+                    return True, "발행한 워드프레스 URL은 이미 Google에 등록되어 있습니다."
+                page.wait_for_timeout(700)
+            if request_button is None:
+                raise RuntimeError(
+                    "Google URL 검사 결과에서 '색인 생성 요청' 버튼을 찾지 못했습니다."
+                )
+
+            request_button.scroll_into_view_if_needed()
+            request_button.click()
+            append_runtime_log("google-search-console", "색인 생성 요청 버튼 클릭 완료")
+            result_queue.put(
+                (
+                    "naver_search_advisor_progress",
+                    {
+                        "message": "Google이 실제 URL의 색인 생성 가능 여부를 테스트하고 있습니다...",
+                        "published_url": published_url,
+                    },
+                )
+            )
+
+            request_deadline = time.time() + 180
+            while time.time() < request_deadline:
+                body_text = _google_search_console_page_text(page, timeout=2500)
+                if "색인 생성 요청됨" in body_text:
+                    try:
+                        close_button = _find_google_search_console_button(
+                            page,
+                            "닫기",
+                            dialog_only=True,
+                        )
+                    except RuntimeError:
+                        close_button = _find_google_search_console_button(page, "닫기")
+                    close_button.click()
+                    append_runtime_log("google-search-console", "색인 생성 요청 완료 및 닫기 클릭")
+                    return True, "Google Search Console에 워드프레스 글 색인 생성을 요청했습니다."
+                request_error = next(
+                    (
+                        message
+                        for message in (
+                            "할당량이 초과",
+                            "요청을 제출하는 중에 문제가 발생",
+                            "색인 생성 요청이 거부",
+                            "실시간 테스트 중에 URL 문제가 감지",
+                        )
+                        if message in body_text
+                    ),
+                    "",
+                )
+                if request_error:
+                    raise RuntimeError(f"Google 색인 생성 요청에 실패했습니다: {request_error}")
+                page.wait_for_timeout(900)
+            raise RuntimeError("3분 안에 Google의 '색인 생성 요청됨' 완료 메시지를 확인하지 못했습니다.")
+        except PlaywrightTimeoutError as exc:
+            append_runtime_log("google-search-console", f"화면 응답 시간 초과: {exc}")
+            raise RuntimeError(f"Google Search Console 화면 응답 시간이 초과되었습니다: {exc}") from exc
+        finally:
+            context.close()
+            append_runtime_log("google-search-console", "전용 Chrome 종료 및 로그인 프로필 저장 완료")
 
 
 def run_naver_kin_playwright_bootstrap(
@@ -13024,8 +13363,8 @@ class NaverSearchAdvisorWorker(threading.Thread):
             failed_messages.append(message)
             append_runtime_log("naver-search-advisor", f"네이버 수집 요청 실패, 다음 단계 계속: {exc}")
 
-        # Search engines are independent. A delayed or failed Naver result must
-        # never prevent the Daum collection request from being attempted.
+        # Search engines are independent. One delayed or failed request must
+        # never prevent the remaining collection requests from being attempted.
         try:
             daum_success, daum_message = run_daum_webmaster_playwright(
                 self.published_url,
@@ -13038,7 +13377,21 @@ class NaverSearchAdvisorWorker(threading.Thread):
         except Exception as exc:  # pragma: no cover - runtime handling
             message = f"다음: {exc}"
             failed_messages.append(message)
-            append_runtime_log("daum-webmaster", f"다음 수집 요청 실패: {exc}")
+            append_runtime_log("daum-webmaster", f"다음 수집 요청 실패, Google 단계 계속: {exc}")
+
+        try:
+            google_success, google_message = run_google_search_console_playwright(
+                self.published_url,
+                self.result_queue,
+            )
+            if google_success:
+                completed_messages.append(str(google_message or "Google 색인 요청을 완료했습니다."))
+            else:
+                failed_messages.append(str(google_message or "Google 색인 요청에 실패했습니다."))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            message = f"Google: {exc}"
+            failed_messages.append(message)
+            append_runtime_log("google-search-console", f"Google 색인 요청 실패: {exc}")
 
         if completed_messages:
             message_parts = list(completed_messages)
@@ -13053,7 +13406,7 @@ class NaverSearchAdvisorWorker(threading.Thread):
             self.result_queue.put(("naver_search_advisor_done", payload))
             return
 
-        message = "\n".join(failed_messages) or "네이버·다음 수집 요청에 실패했습니다."
+        message = "\n".join(failed_messages) or "네이버·다음·Google 수집 요청에 실패했습니다."
         append_runtime_log("naver-search-advisor", f"수집 요청 전체 실패: {message}")
         self.result_queue.put(
             (
@@ -29483,7 +29836,7 @@ class KeywordApp(ctk.CTk):
                 show_feedback=True,
                 source_label="블로그글쓰기",
             ):
-                message.append("네이버·다음 웹마스터도구 수집 요청 자동화를 시작했습니다.")
+                message.append("네이버·다음·Google 검색엔진 수집 요청 자동화를 시작했습니다.")
         if tistory:
             write_url = tistory.get("write_url")
             tistory_save_mode = normalize_tistory_save_mode(
@@ -29877,7 +30230,7 @@ class KeywordApp(ctk.CTk):
         show_feedback: bool = True,
         source_label: str = "블로그글쓰기",
     ) -> str:
-        """Queue the same Naver -> Daum webmaster flow for every WP publisher."""
+        """Queue the same Naver -> Daum -> Google flow for every WP publisher."""
         wordpress = wordpress or {}
         published_url = str(
             wordpress.get("link") or wordpress.get("post_url") or ""
@@ -29889,7 +30242,7 @@ class KeywordApp(ctk.CTk):
             return ""
         append_runtime_log(
             "webmaster-queue",
-            f"{source_label} 워드프레스 공개발행 완료 - 네이버·다음 수집 요청 대기열 추가: {published_url}",
+            f"{source_label} 워드프레스 공개발행 완료 - 네이버·다음·Google 수집 요청 대기열 추가: {published_url}",
         )
         self.after(
             250,
@@ -29915,7 +30268,7 @@ class KeywordApp(ctk.CTk):
         self.naver_search_advisor_worker.start()
 
     def _handle_naver_search_advisor_done(self, payload: dict) -> None:
-        message = str((payload or {}).get("message") or "네이버·다음 수집 요청을 완료했습니다.")
+        message = str((payload or {}).get("message") or "네이버·다음·Google 수집 요청을 완료했습니다.")
         show_feedback = bool((payload or {}).get("show_feedback", True))
         partial = bool((payload or {}).get("partial", False))
         status_title = "검색엔진 수집 요청 일부 완료" if partial else "검색엔진 수집 요청 완료"
@@ -29945,7 +30298,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showwarning(
                 "검색엔진 수집 요청 실패",
                 "워드프레스 글 발행은 정상적으로 완료되었습니다.\n\n"
-                f"네이버 또는 다음 웹마스터도구 후속 요청이 실패했습니다.\n{message}",
+                f"네이버·다음·Google 검색엔진 후속 요청이 실패했습니다.\n{message}",
             )
         self.after(350, self._start_next_naver_search_advisor_submission)
 
