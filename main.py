@@ -81,6 +81,54 @@ ctk.set_widget_scaling(0.82)
 ctk.set_window_scaling(0.82)
 
 
+def _pointer_is_inside_widget(widget, event=None) -> bool:
+    """Return whether the current pointer is inside a widget's real bounds."""
+    try:
+        if event is not None and hasattr(event, "x_root") and hasattr(event, "y_root"):
+            pointer_x = int(event.x_root)
+            pointer_y = int(event.y_root)
+        else:
+            pointer_x, pointer_y = widget.winfo_pointerxy()
+        left = int(widget.winfo_rootx())
+        top = int(widget.winfo_rooty())
+        width = max(0, int(widget.winfo_width()))
+        height = max(0, int(widget.winfo_height()))
+        return left <= pointer_x < left + width and top <= pointer_y < top + height
+    except (AttributeError, TypeError, ValueError, tk.TclError):
+        return False
+
+
+def _install_windows_dark_ctk_button_release_fix(button_class=None) -> bool:
+    """Fix missed CTkButton releases on Windows dark mode for all app pages."""
+    if os.name != "nt":
+        return False
+    target_class = button_class or ctk.CTkButton
+    if getattr(target_class, "_blog_helper_windows_dark_release_fix", False):
+        return False
+
+    original_on_release = target_class._on_release
+
+    def on_release_with_pointer_check(button, event=None):
+        try:
+            dark_mode = str(ctk.get_appearance_mode()).strip().lower() == "dark"
+        except Exception:
+            dark_mode = False
+        if dark_mode and getattr(button, "_state", tk.NORMAL) != tk.DISABLED:
+            # CustomTkinter 6 relies on a cached <Enter>/<Leave> flag. Windows
+            # can clear that flag during a dark-theme redraw even while the
+            # pointer is still over the button, so validate the real bounds.
+            button._mouse_inside = _pointer_is_inside_widget(button, event)
+        return original_on_release(button, event)
+
+    target_class._on_release = on_release_with_pointer_check
+    target_class._blog_helper_windows_dark_release_fix = True
+    target_class._blog_helper_original_on_release = original_on_release
+    return True
+
+
+_install_windows_dark_ctk_button_release_fix()
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 APP_ICON_PATH = RESOURCE_DIR / "assets" / "blog_helper_icon.png"
@@ -14244,7 +14292,7 @@ class KeywordApp(ctk.CTk):
         self.bind("<Configure>", self._on_window_configure)
         self.bind_all("<KeyPress>", self._mark_text_input_activity, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
-        self.after(180, self._poll_queue)
+        self.after(220, self._poll_queue)
         self.after(1200, self._automation_publish_scheduler_tick)
         self.after(2200, self._start_update_check)
         self.after(600, self._start_remote_agent_if_enabled)
@@ -15414,14 +15462,6 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._switch_page("automation"),
         )
         self.automation_nav_button.grid(row=2, column=0, padx=26, pady=(0, 10), sticky="ew")
-        if os.name == "nt":
-            # CTkButton 6 can miss its hover-enter state on Windows dark mode,
-            # which makes a valid release look like it happened outside.
-            self.automation_nav_button.bind(
-                "<ButtonRelease-1>",
-                self._recover_windows_dark_automation_navigation,
-                add="+",
-            )
 
         self.naver_blog_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -15553,7 +15593,6 @@ class KeywordApp(ctk.CTk):
         self.prompts_page.grid_rowconfigure(1, weight=1)
         self._build_prompts_page()
 
-        self._install_windows_dark_button_compatibility(self.automation_page)
         self._switch_page("writing")
 
     def _build_settings_page(self) -> None:
@@ -19238,7 +19277,6 @@ class KeywordApp(ctk.CTk):
             render_signature == self._automation_queue_render_signature
             and self.automation_list.winfo_children()
         ):
-            self._install_windows_dark_button_compatibility(self.automation_page)
             self._finish_theme_paint()
             return
         self._automation_queue_render_signature = render_signature
@@ -19263,7 +19301,6 @@ class KeywordApp(ctk.CTk):
                 justify="left",
                 font=ctk.CTkFont(size=14),
             ).grid(row=1, column=0, padx=22, pady=(0, 22), sticky="w")
-            self._install_windows_dark_button_compatibility(self.automation_page)
             self._finish_theme_paint()
             return
 
@@ -19392,7 +19429,6 @@ class KeywordApp(ctk.CTk):
                     entry.get(),
                 ),
             ).grid(row=0, column=2, sticky="e")
-        self._install_windows_dark_button_compatibility(self.automation_page)
         self._finish_theme_paint()
 
     def _configure_public_data_table_columns(self, frame) -> None:
@@ -25271,7 +25307,6 @@ class KeywordApp(ctk.CTk):
             )
         self._show_only_page_frame(page_name)
         if page_name == "automation":
-            self._install_windows_dark_button_compatibility(self.automation_page)
             if self._is_windows_dark_theme():
                 # Make navigation visible before rebuilding a potentially long
                 # queue. This keeps the Windows UI responsive at display scale.
@@ -25287,52 +25322,6 @@ class KeywordApp(ctk.CTk):
             and self._normalize_app_theme(getattr(self.wordpress_settings, "app_theme", "블랙테마"))
             == "블랙테마"
         )
-
-    def _recover_windows_dark_automation_navigation(self, _event=None) -> None:
-        if not self._is_windows_dark_theme() or getattr(self, "current_page", "") == "automation":
-            return
-
-        def open_automation_page() -> None:
-            if getattr(self, "current_page", "") != "automation":
-                self._switch_page("automation")
-
-        self.after_idle(open_automation_page)
-
-    def _prime_windows_dark_ctk_button(self, button) -> None:
-        """Restore CTkButton's missed hover state before its release handler."""
-        if not self._is_windows_dark_theme():
-            return
-        if getattr(button, "_state", "normal") == "disabled":
-            return
-        try:
-            button._mouse_inside = True
-        except Exception:
-            pass
-
-    def _install_windows_dark_button_compatibility(self, root) -> None:
-        if not self._is_windows_dark_theme() or root is None:
-            return
-        pending = [root]
-        while pending:
-            widget = pending.pop()
-            if isinstance(widget, ctk.CTkButton) and not getattr(
-                widget,
-                "_blog_helper_windows_press_fix",
-                False,
-            ):
-                try:
-                    widget.bind(
-                        "<ButtonPress-1>",
-                        lambda _event, target=widget: self._prime_windows_dark_ctk_button(target),
-                        add="+",
-                    )
-                    widget._blog_helper_windows_press_fix = True
-                except Exception:
-                    pass
-            try:
-                pending.extend(widget.winfo_children())
-            except Exception:
-                pass
 
     def _schedule_automation_queue_refresh(self, delay_ms: int = 60) -> None:
         refresh_job = getattr(self, "_automation_queue_refresh_job", None)
@@ -27558,7 +27547,6 @@ class KeywordApp(ctk.CTk):
                 anchor="w",
             ).grid(row=0, column=0, columnspan=2, padx=16, pady=16, sticky="ew")
             self._update_automation_keyword_candidate_count()
-            self._install_windows_dark_button_compatibility(self.automation_page)
             return
 
         existing_keywords = self._existing_automation_keyword_identities()
@@ -27607,7 +27595,6 @@ class KeywordApp(ctk.CTk):
                     font=ctk.CTkFont(size=11, weight="bold"),
                 ).grid(row=0, column=1, padx=(6, 12), pady=10, sticky="e")
         self._update_automation_keyword_candidate_count()
-        self._install_windows_dark_button_compatibility(self.automation_page)
         self._finish_theme_paint()
 
     def _set_all_automation_keyword_candidates(self, selected: bool) -> None:
@@ -28605,7 +28592,7 @@ class KeywordApp(ctk.CTk):
     def _poll_queue(self) -> None:
         processed_events = 0
         try:
-            while processed_events < 40:
+            while processed_events < 24:
                 event_type, payload = self.result_queue.get_nowait()
                 processed_events += 1
                 if event_type == "update_available":
@@ -29268,7 +29255,12 @@ class KeywordApp(ctk.CTk):
         except queue.Empty:
             pass
         finally:
-            next_delay = 70 if not self.result_queue.empty() else 260
+            if not self.result_queue.empty():
+                next_delay = 60
+            elif processed_events:
+                next_delay = 140
+            else:
+                next_delay = 420
             self.after(next_delay, self._poll_queue)
 
     def _handle_wordpress_test_success(self, payload: dict) -> None:
