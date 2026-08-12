@@ -14230,6 +14230,7 @@ class KeywordApp(ctk.CTk):
         self._theme_paint_last_run = 0.0
         self._theme_painted_widgets = weakref.WeakSet()
         self._automation_queue_render_signature = None
+        self._automation_queue_refresh_job = None
         self._last_remote_queue_snapshot_signature = None
         self._thumbnail_background_cache = None
         self._cardnews_background_cache = None
@@ -14837,6 +14838,7 @@ class KeywordApp(ctk.CTk):
             "_thumbnail_slider_preview_job",
             "_cardnews_slider_preview_job",
             "_theme_paint_refresh_job",
+            "_automation_queue_refresh_job",
         ):
             job_id = getattr(self, job_attr, None)
             if job_id is not None:
@@ -15273,6 +15275,13 @@ class KeywordApp(ctk.CTk):
                 frame.grid_remove()
 
     def _reset_widget_state_for_rebuild(self) -> None:
+        refresh_job = getattr(self, "_automation_queue_refresh_job", None)
+        if refresh_job is not None:
+            try:
+                self.after_cancel(refresh_job)
+            except Exception:
+                pass
+        self._automation_queue_refresh_job = None
         self._theme_painted_widgets = weakref.WeakSet()
         self._automation_queue_render_signature = None
         self._thumbnail_background_cache = None
@@ -15544,6 +15553,7 @@ class KeywordApp(ctk.CTk):
         self.prompts_page.grid_rowconfigure(1, weight=1)
         self._build_prompts_page()
 
+        self._install_windows_dark_button_compatibility(self.automation_page)
         self._switch_page("writing")
 
     def _build_settings_page(self) -> None:
@@ -19228,6 +19238,7 @@ class KeywordApp(ctk.CTk):
             render_signature == self._automation_queue_render_signature
             and self.automation_list.winfo_children()
         ):
+            self._install_windows_dark_button_compatibility(self.automation_page)
             self._finish_theme_paint()
             return
         self._automation_queue_render_signature = render_signature
@@ -19252,6 +19263,7 @@ class KeywordApp(ctk.CTk):
                 justify="left",
                 font=ctk.CTkFont(size=14),
             ).grid(row=1, column=0, padx=22, pady=(0, 22), sticky="w")
+            self._install_windows_dark_button_compatibility(self.automation_page)
             self._finish_theme_paint()
             return
 
@@ -19380,6 +19392,7 @@ class KeywordApp(ctk.CTk):
                     entry.get(),
                 ),
             ).grid(row=0, column=2, sticky="e")
+        self._install_windows_dark_button_compatibility(self.automation_page)
         self._finish_theme_paint()
 
     def _configure_public_data_table_columns(self, frame) -> None:
@@ -25258,10 +25271,11 @@ class KeywordApp(ctk.CTk):
             )
         self._show_only_page_frame(page_name)
         if page_name == "automation":
+            self._install_windows_dark_button_compatibility(self.automation_page)
             if self._is_windows_dark_theme():
                 # Make navigation visible before rebuilding a potentially long
                 # queue. This keeps the Windows UI responsive at display scale.
-                self.after_idle(self._refresh_automation_queue)
+                self._schedule_automation_queue_refresh()
             else:
                 self._refresh_automation_queue()
         if hasattr(self, "shell_frame"):
@@ -25283,6 +25297,60 @@ class KeywordApp(ctk.CTk):
                 self._switch_page("automation")
 
         self.after_idle(open_automation_page)
+
+    def _prime_windows_dark_ctk_button(self, button) -> None:
+        """Restore CTkButton's missed hover state before its release handler."""
+        if not self._is_windows_dark_theme():
+            return
+        if getattr(button, "_state", "normal") == "disabled":
+            return
+        try:
+            button._mouse_inside = True
+        except Exception:
+            pass
+
+    def _install_windows_dark_button_compatibility(self, root) -> None:
+        if not self._is_windows_dark_theme() or root is None:
+            return
+        pending = [root]
+        while pending:
+            widget = pending.pop()
+            if isinstance(widget, ctk.CTkButton) and not getattr(
+                widget,
+                "_blog_helper_windows_press_fix",
+                False,
+            ):
+                try:
+                    widget.bind(
+                        "<ButtonPress-1>",
+                        lambda _event, target=widget: self._prime_windows_dark_ctk_button(target),
+                        add="+",
+                    )
+                    widget._blog_helper_windows_press_fix = True
+                except Exception:
+                    pass
+            try:
+                pending.extend(widget.winfo_children())
+            except Exception:
+                pass
+
+    def _schedule_automation_queue_refresh(self, delay_ms: int = 60) -> None:
+        refresh_job = getattr(self, "_automation_queue_refresh_job", None)
+        if refresh_job is not None:
+            try:
+                self.after_cancel(refresh_job)
+            except Exception:
+                pass
+        self._automation_queue_refresh_job = self.after(
+            max(1, int(delay_ms)),
+            self._run_scheduled_automation_queue_refresh,
+        )
+
+    def _run_scheduled_automation_queue_refresh(self) -> None:
+        self._automation_queue_refresh_job = None
+        if getattr(self, "_app_closing", False):
+            return
+        self._refresh_automation_queue()
 
     def _switch_settings_section(self, section_name: str) -> None:
         self.settings_section = section_name if section_name in {"basic", "theme", "ai"} else "ai"
@@ -27490,6 +27558,7 @@ class KeywordApp(ctk.CTk):
                 anchor="w",
             ).grid(row=0, column=0, columnspan=2, padx=16, pady=16, sticky="ew")
             self._update_automation_keyword_candidate_count()
+            self._install_windows_dark_button_compatibility(self.automation_page)
             return
 
         existing_keywords = self._existing_automation_keyword_identities()
@@ -27538,6 +27607,7 @@ class KeywordApp(ctk.CTk):
                     font=ctk.CTkFont(size=11, weight="bold"),
                 ).grid(row=0, column=1, padx=(6, 12), pady=10, sticky="e")
         self._update_automation_keyword_candidate_count()
+        self._install_windows_dark_button_compatibility(self.automation_page)
         self._finish_theme_paint()
 
     def _set_all_automation_keyword_candidates(self, selected: bool) -> None:

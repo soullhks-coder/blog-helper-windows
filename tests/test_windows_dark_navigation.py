@@ -10,6 +10,20 @@ class _ButtonStub:
         pass
 
 
+class _CompatButtonStub:
+    def __init__(self, *, state: str = "normal", children=None) -> None:
+        self._state = state
+        self._mouse_inside = False
+        self._children = list(children or [])
+        self.bindings = []
+
+    def bind(self, sequence, callback, add=None) -> None:
+        self.bindings.append((sequence, callback, add))
+
+    def winfo_children(self):
+        return list(self._children)
+
+
 class WindowsDarkNavigationTests(unittest.TestCase):
     def _app_stub(self, current_page: str = "writing"):
         app = SimpleNamespace(
@@ -53,12 +67,45 @@ class WindowsDarkNavigationTests(unittest.TestCase):
             setattr(app, name, _ButtonStub())
         app._show_only_page_frame = lambda page: events.append(("show", page))
         app._refresh_automation_queue = lambda: events.append(("refresh", "automation"))
+        app.automation_page = object()
+        app._install_windows_dark_button_compatibility = lambda _root: None
+        app._schedule_automation_queue_refresh = lambda: app._refresh_automation_queue()
         app.after_idle = lambda callback: callback()
 
         with patch.object(main.os, "name", "nt"):
             main.KeywordApp._switch_page(app, "automation")
 
         self.assertEqual(events, [("show", "automation"), ("refresh", "automation")])
+
+    def test_windows_dark_button_press_restores_mouse_inside_state(self) -> None:
+        app = self._app_stub()
+        button = _CompatButtonStub()
+
+        with patch.object(main.os, "name", "nt"):
+            main.KeywordApp._prime_windows_dark_ctk_button(app, button)
+
+        self.assertTrue(button._mouse_inside)
+
+    def test_windows_dark_button_compatibility_binds_existing_and_dynamic_buttons_once(self) -> None:
+        app = self._app_stub()
+        first_button = _CompatButtonStub()
+        second_button = _CompatButtonStub()
+        root = _CompatButtonStub(children=[first_button, second_button])
+        app._prime_windows_dark_ctk_button = main.KeywordApp._prime_windows_dark_ctk_button.__get__(app)
+
+        with (
+            patch.object(main.os, "name", "nt"),
+            patch.object(main.ctk, "CTkButton", _CompatButtonStub),
+        ):
+            main.KeywordApp._install_windows_dark_button_compatibility(app, root)
+            main.KeywordApp._install_windows_dark_button_compatibility(app, root)
+            for button in (root, first_button, second_button):
+                self.assertEqual(len(button.bindings), 1)
+                sequence, callback, add = button.bindings[0]
+                self.assertEqual(sequence, "<ButtonPress-1>")
+                self.assertEqual(add, "+")
+                callback(None)
+                self.assertTrue(button._mouse_inside)
 
 
 if __name__ == "__main__":
