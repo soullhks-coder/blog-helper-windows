@@ -316,6 +316,19 @@ DAUM_WEBMASTER_COLLECT_URL = "https://webmaster.daum.net/tool/collect"
 DAUM_WEBMASTER_CHROME_PROFILE_DIR = DATA_DIR / "Daum Webmaster Chrome Profile"
 GOOGLE_SEARCH_CONSOLE_BASE_URL = "https://search.google.com/search-console"
 GOOGLE_SEARCH_CONSOLE_CHROME_PROFILE_DIR = DATA_DIR / "Google Search Console Chrome Profile"
+WEBMASTER_TOOL_NAVER = "naver"
+WEBMASTER_TOOL_DAUM = "daum"
+WEBMASTER_TOOL_GOOGLE = "google"
+WEBMASTER_TOOL_KEYS = (
+    WEBMASTER_TOOL_NAVER,
+    WEBMASTER_TOOL_DAUM,
+    WEBMASTER_TOOL_GOOGLE,
+)
+WEBMASTER_TOOL_LABELS = {
+    WEBMASTER_TOOL_NAVER: "네이버",
+    WEBMASTER_TOOL_DAUM: "다음",
+    WEBMASTER_TOOL_GOOGLE: "Google",
+}
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
@@ -1593,6 +1606,9 @@ class WordPressSettings:
     category_names: list[str] = field(default_factory=list)
     category_ids: list[int] = field(default_factory=list)
     post_mode: str = "임시저장"
+    webmaster_submit_naver: bool = True
+    webmaster_submit_daum: bool = True
+    webmaster_submit_google: bool = True
     categories: list[dict] = field(default_factory=list)
     gpt_api_key: str = ""
     gpt_model: str = "gpt-4.1-mini"
@@ -2046,6 +2062,9 @@ class AppStateStore:
             category_names=payload.get("category_names", []),
             category_ids=payload.get("category_ids", []),
             post_mode=payload.get("post_mode", "임시저장"),
+            webmaster_submit_naver=bool(payload.get("webmaster_submit_naver", True)),
+            webmaster_submit_daum=bool(payload.get("webmaster_submit_daum", True)),
+            webmaster_submit_google=bool(payload.get("webmaster_submit_google", True)),
             categories=payload.get("categories", []),
             gpt_api_key=KeychainStore.load_secret(KEYCHAIN_GPT_ACCOUNT) or gpt_fallback,
             gpt_model=payload.get("gpt_model", "gpt-4.1-mini"),
@@ -13340,58 +13359,82 @@ class NaverSearchAdvisorWorker(threading.Thread):
         published_url: str,
         result_queue: queue.Queue,
         show_feedback: bool = True,
+        enabled_tools: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.published_url = str(published_url or "").strip()
         self.result_queue = result_queue
         self.show_feedback = bool(show_feedback)
+        requested_tools = WEBMASTER_TOOL_KEYS if enabled_tools is None else enabled_tools
+        self.enabled_tools = tuple(
+            tool for tool in WEBMASTER_TOOL_KEYS if tool in set(requested_tools)
+        )
 
     def run(self) -> None:
         completed_messages: list[str] = []
         failed_messages: list[str] = []
-        try:
-            naver_success, naver_message = run_naver_search_advisor_playwright(
-                self.published_url,
-                self.result_queue,
-            )
-            if naver_success:
-                completed_messages.append(str(naver_message or "네이버 수집 요청을 완료했습니다."))
-            else:
-                failed_messages.append(str(naver_message or "네이버 수집 요청에 실패했습니다."))
-        except Exception as exc:  # pragma: no cover - runtime handling
-            message = f"네이버: {exc}"
-            failed_messages.append(message)
-            append_runtime_log("naver-search-advisor", f"네이버 수집 요청 실패, 다음 단계 계속: {exc}")
+        if WEBMASTER_TOOL_NAVER in self.enabled_tools:
+            try:
+                naver_success, naver_message = run_naver_search_advisor_playwright(
+                    self.published_url,
+                    self.result_queue,
+                )
+                if naver_success:
+                    completed_messages.append(str(naver_message or "네이버 수집 요청을 완료했습니다."))
+                else:
+                    failed_messages.append(str(naver_message or "네이버 수집 요청에 실패했습니다."))
+            except Exception as exc:  # pragma: no cover - runtime handling
+                message = f"네이버: {exc}"
+                failed_messages.append(message)
+                append_runtime_log("naver-search-advisor", f"네이버 수집 요청 실패, 다음 단계 계속: {exc}")
 
         # Search engines are independent. One delayed or failed request must
         # never prevent the remaining collection requests from being attempted.
-        try:
-            daum_success, daum_message = run_daum_webmaster_playwright(
-                self.published_url,
-                self.result_queue,
-            )
-            if daum_success:
-                completed_messages.append(str(daum_message or "다음 수집 요청을 완료했습니다."))
-            else:
-                failed_messages.append(str(daum_message or "다음 수집 요청에 실패했습니다."))
-        except Exception as exc:  # pragma: no cover - runtime handling
-            message = f"다음: {exc}"
-            failed_messages.append(message)
-            append_runtime_log("daum-webmaster", f"다음 수집 요청 실패, Google 단계 계속: {exc}")
+        if WEBMASTER_TOOL_DAUM in self.enabled_tools:
+            try:
+                daum_success, daum_message = run_daum_webmaster_playwright(
+                    self.published_url,
+                    self.result_queue,
+                )
+                if daum_success:
+                    completed_messages.append(str(daum_message or "다음 수집 요청을 완료했습니다."))
+                else:
+                    failed_messages.append(str(daum_message or "다음 수집 요청에 실패했습니다."))
+            except Exception as exc:  # pragma: no cover - runtime handling
+                message = f"다음: {exc}"
+                failed_messages.append(message)
+                append_runtime_log("daum-webmaster", f"다음 수집 요청 실패, Google 단계 계속: {exc}")
 
-        try:
-            google_success, google_message = run_google_search_console_playwright(
-                self.published_url,
-                self.result_queue,
+        if WEBMASTER_TOOL_GOOGLE in self.enabled_tools:
+            try:
+                google_success, google_message = run_google_search_console_playwright(
+                    self.published_url,
+                    self.result_queue,
+                )
+                if google_success:
+                    completed_messages.append(str(google_message or "Google 색인 요청을 완료했습니다."))
+                else:
+                    failed_messages.append(str(google_message or "Google 색인 요청에 실패했습니다."))
+            except Exception as exc:  # pragma: no cover - runtime handling
+                message = f"Google: {exc}"
+                failed_messages.append(message)
+                append_runtime_log("google-search-console", f"Google 색인 요청 실패: {exc}")
+
+        selected_labels = "·".join(WEBMASTER_TOOL_LABELS[tool] for tool in self.enabled_tools)
+        if not self.enabled_tools:
+            self.result_queue.put(
+                (
+                    "naver_search_advisor_done",
+                    {
+                        "message": "선택된 웹마스터도구가 없어 수집 요청을 건너뛰었습니다.",
+                        "published_url": self.published_url,
+                        "show_feedback": self.show_feedback,
+                        "partial": False,
+                        "selected_labels": "",
+                    },
+                )
             )
-            if google_success:
-                completed_messages.append(str(google_message or "Google 색인 요청을 완료했습니다."))
-            else:
-                failed_messages.append(str(google_message or "Google 색인 요청에 실패했습니다."))
-        except Exception as exc:  # pragma: no cover - runtime handling
-            message = f"Google: {exc}"
-            failed_messages.append(message)
-            append_runtime_log("google-search-console", f"Google 색인 요청 실패: {exc}")
+            return
 
         if completed_messages:
             message_parts = list(completed_messages)
@@ -13402,11 +13445,12 @@ class NaverSearchAdvisorWorker(threading.Thread):
                 "published_url": self.published_url,
                 "show_feedback": self.show_feedback,
                 "partial": bool(failed_messages),
+                "selected_labels": selected_labels,
             }
             self.result_queue.put(("naver_search_advisor_done", payload))
             return
 
-        message = "\n".join(failed_messages) or "네이버·다음·Google 수집 요청에 실패했습니다."
+        message = "\n".join(failed_messages) or f"{selected_labels} 수집 요청에 실패했습니다."
         append_runtime_log("naver-search-advisor", f"수집 요청 전체 실패: {message}")
         self.result_queue.put(
             (
@@ -13415,6 +13459,7 @@ class NaverSearchAdvisorWorker(threading.Thread):
                     "message": message,
                     "published_url": self.published_url,
                     "show_feedback": self.show_feedback,
+                    "selected_labels": selected_labels,
                 },
             )
         )
@@ -20864,8 +20909,49 @@ class KeywordApp(ctk.CTk):
             command=self._on_post_mode_changed,
         )
 
+        webmaster_label = ctk.CTkLabel(
+            self.wp_card,
+            text="웹마스터도구 자동 등록",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        webmaster_label.grid(row=14, column=0, padx=24, pady=(18, 8), sticky="w")
+
+        webmaster_frame = ctk.CTkFrame(
+            self.wp_card,
+            height=72,
+            corner_radius=16,
+            fg_color="#111826",
+        )
+        webmaster_frame.grid(row=15, column=0, padx=24, sticky="ew")
+        for column in range(3):
+            webmaster_frame.grid_columnconfigure(column, weight=1)
+
+        self.webmaster_naver_var = ctk.BooleanVar(value=True)
+        self.webmaster_daum_var = ctk.BooleanVar(value=True)
+        self.webmaster_google_var = ctk.BooleanVar(value=True)
+        for column, (label, variable) in enumerate(
+            (
+                ("네이버", self.webmaster_naver_var),
+                ("다음", self.webmaster_daum_var),
+                ("Google", self.webmaster_google_var),
+            )
+        ):
+            ctk.CTkCheckBox(
+                webmaster_frame,
+                text=label,
+                variable=variable,
+                command=self._on_webmaster_tools_changed,
+                font=ctk.CTkFont(size=15, weight="bold"),
+            ).grid(row=0, column=column, padx=20, pady=(14, 4), sticky="w")
+        ctk.CTkLabel(
+            webmaster_frame,
+            text="체크한 검색엔진만 워드프레스 공개발행 후 등록합니다.",
+            text_color="#9da7ba",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, columnspan=3, padx=20, pady=(0, 12), sticky="w")
+
         button_row = ctk.CTkFrame(self.wp_card, fg_color="transparent")
-        button_row.grid(row=14, column=0, padx=24, pady=(18, 0), sticky="ew")
+        button_row.grid(row=16, column=0, padx=24, pady=(18, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         self.wp_save_button = ctk.CTkButton(
@@ -20915,7 +21001,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.wp_status_label.grid(row=15, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.wp_status_label.grid(row=17, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_gpt_card(self) -> None:
         title = ctk.CTkLabel(
@@ -25440,6 +25526,9 @@ class KeywordApp(ctk.CTk):
         self.category_menu.set(self.wordpress_settings.category_name or "카테고리 없음")
         self._refresh_category_checkboxes()
         self.post_mode_menu.set(self.wordpress_settings.post_mode)
+        self.webmaster_naver_var.set(self.wordpress_settings.webmaster_submit_naver)
+        self.webmaster_daum_var.set(self.wordpress_settings.webmaster_submit_daum)
+        self.webmaster_google_var.set(self.wordpress_settings.webmaster_submit_google)
         self.gpt_api_entry.insert(0, "OpenAI")
         self.gpt_secret_entry.insert(0, self.wordpress_settings.gpt_api_key)
         self.gpt_model_menu.set(self.wordpress_settings.gpt_model)
@@ -25946,6 +26035,12 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.post_mode = post_mode
         self._save_ui_state()
 
+    def _on_webmaster_tools_changed(self) -> None:
+        self.wordpress_settings.webmaster_submit_naver = bool(self.webmaster_naver_var.get())
+        self.wordpress_settings.webmaster_submit_daum = bool(self.webmaster_daum_var.get())
+        self.wordpress_settings.webmaster_submit_google = bool(self.webmaster_google_var.get())
+        self._save_ui_state()
+
     def _toggle_password_visibility(self) -> None:
         self.password_visible = not self.password_visible
         self.password_entry.configure(show="" if self.password_visible else "*")
@@ -26304,6 +26399,9 @@ class KeywordApp(ctk.CTk):
             ],
             category_ids=[category_id for category_id, variable in self.category_vars.items() if variable.get()],
             post_mode=self.post_mode_menu.get(),
+            webmaster_submit_naver=bool(self.webmaster_naver_var.get()),
+            webmaster_submit_daum=bool(self.webmaster_daum_var.get()),
+            webmaster_submit_google=bool(self.webmaster_google_var.get()),
             categories=self.wordpress_settings.categories,
             gpt_api_key=self.gpt_secret_entry.get().strip(),
             gpt_model=self.gpt_model_menu.get(),
@@ -26723,6 +26821,9 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.category_ids = []
         self._refresh_category_checkboxes()
         self.post_mode_menu.set("임시저장")
+        self.webmaster_naver_var.set(True)
+        self.webmaster_daum_var.set(True)
+        self.webmaster_google_var.set(True)
         AppStateStore.save(self.wordpress_settings)
         KeychainStore.delete_secret(f"{KEYCHAIN_WP_PREFIX}{previous_username}")
         self._set_wp_status("● 설정 초기화 완료", "#9da7ba")
@@ -30201,6 +30302,7 @@ class KeywordApp(ctk.CTk):
         self,
         published_url: str,
         show_feedback: bool = True,
+        enabled_tools: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         published_url = str(published_url or "").strip()
         if not published_url:
@@ -30220,6 +30322,7 @@ class KeywordApp(ctk.CTk):
             {
                 "published_url": published_url,
                 "show_feedback": bool(show_feedback),
+                "enabled_tools": list(WEBMASTER_TOOL_KEYS if enabled_tools is None else enabled_tools),
             }
         )
         self._start_next_naver_search_advisor_submission()
@@ -30240,15 +30343,32 @@ class KeywordApp(ctk.CTk):
             or str(wordpress.get("status") or "").strip().lower() != "publish"
         ):
             return ""
+        enabled_tools = [
+            tool
+            for tool, enabled in (
+                (WEBMASTER_TOOL_NAVER, self.wordpress_settings.webmaster_submit_naver),
+                (WEBMASTER_TOOL_DAUM, self.wordpress_settings.webmaster_submit_daum),
+                (WEBMASTER_TOOL_GOOGLE, self.wordpress_settings.webmaster_submit_google),
+            )
+            if enabled
+        ]
+        if not enabled_tools:
+            append_runtime_log(
+                "webmaster-queue",
+                f"{source_label} 워드프레스 공개발행 완료 - 선택된 웹마스터도구가 없어 후속 요청 생략: {published_url}",
+            )
+            return published_url
+        selected_labels = "·".join(WEBMASTER_TOOL_LABELS[tool] for tool in enabled_tools)
         append_runtime_log(
             "webmaster-queue",
-            f"{source_label} 워드프레스 공개발행 완료 - 네이버·다음·Google 수집 요청 대기열 추가: {published_url}",
+            f"{source_label} 워드프레스 공개발행 완료 - {selected_labels} 수집 요청 대기열 추가: {published_url}",
         )
         self.after(
             250,
-            lambda url=published_url, feedback=show_feedback: self._queue_naver_search_advisor_submission(
+            lambda url=published_url, feedback=show_feedback, tools=tuple(enabled_tools): self._queue_naver_search_advisor_submission(
                 url,
                 show_feedback=feedback,
+                enabled_tools=tools,
             ),
         )
         return published_url
@@ -30264,11 +30384,13 @@ class KeywordApp(ctk.CTk):
             str(pending.get("published_url") or ""),
             self.result_queue,
             show_feedback=bool(pending.get("show_feedback", True)),
+            enabled_tools=pending.get("enabled_tools"),
         )
         self.naver_search_advisor_worker.start()
 
     def _handle_naver_search_advisor_done(self, payload: dict) -> None:
-        message = str((payload or {}).get("message") or "네이버·다음·Google 수집 요청을 완료했습니다.")
+        selected_labels = str((payload or {}).get("selected_labels") or "선택한 검색엔진")
+        message = str((payload or {}).get("message") or f"{selected_labels} 수집 요청을 완료했습니다.")
         show_feedback = bool((payload or {}).get("show_feedback", True))
         partial = bool((payload or {}).get("partial", False))
         status_title = "검색엔진 수집 요청 일부 완료" if partial else "검색엔진 수집 요청 완료"
@@ -30286,6 +30408,7 @@ class KeywordApp(ctk.CTk):
 
     def _handle_naver_search_advisor_error(self, payload: dict) -> None:
         message = str((payload or {}).get("message") or "검색엔진 수집 요청에 실패했습니다.")
+        selected_labels = str((payload or {}).get("selected_labels") or "선택한 검색엔진")
         show_feedback = bool((payload or {}).get("show_feedback", True))
         self.naver_search_advisor_worker = None
         if hasattr(self, "publish_status_label"):
@@ -30298,7 +30421,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showwarning(
                 "검색엔진 수집 요청 실패",
                 "워드프레스 글 발행은 정상적으로 완료되었습니다.\n\n"
-                f"네이버·다음·Google 검색엔진 후속 요청이 실패했습니다.\n{message}",
+                f"{selected_labels} 검색엔진 후속 요청이 실패했습니다.\n{message}",
             )
         self.after(350, self._start_next_naver_search_advisor_submission)
 

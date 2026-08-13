@@ -99,6 +99,39 @@ class WebmasterSubmissionWorkerTests(unittest.TestCase):
         self.assertTrue(payload["partial"])
         self.assertIn("Google 색인 요청 완료", payload["message"])
 
+    def test_only_selected_webmaster_tool_runs(self) -> None:
+        result_queue: queue.Queue = queue.Queue()
+        worker = main.NaverSearchAdvisorWorker(
+            "https://blog.soullhk.kr/example-post",
+            result_queue,
+            show_feedback=False,
+            enabled_tools=[main.WEBMASTER_TOOL_DAUM],
+        )
+
+        with (
+            patch("main.run_naver_search_advisor_playwright") as naver_submit,
+            patch(
+                "main.run_daum_webmaster_playwright",
+                return_value=(True, "다음 수집 요청 완료"),
+            ) as daum_submit,
+            patch("main.run_google_search_console_playwright") as google_submit,
+        ):
+            worker.run()
+
+        naver_submit.assert_not_called()
+        daum_submit.assert_called_once_with(worker.published_url, result_queue)
+        google_submit.assert_not_called()
+        event_type, payload = result_queue.get_nowait()
+        self.assertEqual(event_type, "naver_search_advisor_done")
+        self.assertFalse(payload["partial"])
+        self.assertEqual(payload["selected_labels"], "다음")
+
+    def test_existing_settings_default_to_all_webmaster_tools(self) -> None:
+        settings = main.WordPressSettings()
+        self.assertTrue(settings.webmaster_submit_naver)
+        self.assertTrue(settings.webmaster_submit_daum)
+        self.assertTrue(settings.webmaster_submit_google)
+
 
 if __name__ == "__main__":
     unittest.main()
