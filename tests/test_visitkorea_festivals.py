@@ -194,6 +194,17 @@ class VisitKoreaFestivalTests(unittest.TestCase):
         self.assertIn("for position in self._selected_festival_link_positions()", method_source)
         self.assertIn("build_festival_official_link(event, position=position)", method_source)
 
+    def test_detail_apply_button_is_next_to_published_history_filter(self) -> None:
+        method_source = inspect.getsource(main.KeywordApp._build_visitkorea_festival_panel)
+
+        button_index = method_source.index("self.festival_apply_button = ctk.CTkButton")
+        lower_help_row_index = method_source.index("apply_row = ctk.CTkFrame")
+        self.assertLess(button_index, lower_help_row_index)
+        self.assertIn(
+            "self.festival_apply_button.grid(row=0, column=2, sticky=\"e\")",
+            method_source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

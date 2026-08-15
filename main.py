@@ -20656,7 +20656,19 @@ class KeywordApp(ctk.CTk):
             variable=self.hide_published_festivals_var,
             command=lambda: self._render_visitkorea_festivals(self.festival_events),
             font=ctk.CTkFont(size=13),
-        ).grid(row=0, column=1, padx=(12, 0), sticky="e")
+        ).grid(row=0, column=1, padx=(12, 10), sticky="e")
+        self.festival_apply_button = ctk.CTkButton(
+            history_row,
+            text="상세 수집 후 글쓰기에 반영",
+            width=210,
+            height=40,
+            corner_radius=12,
+            fg_color="#19a957",
+            hover_color="#168f4b",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._collect_selected_festival_detail,
+        )
+        self.festival_apply_button.grid(row=0, column=2, sticky="e")
 
         header_row = ctk.CTkFrame(table_card, fg_color=table_palette["header_fg"], corner_radius=14)
         header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -20683,18 +20695,6 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
             anchor="w",
         ).grid(row=0, column=0, sticky="ew")
-        self.festival_apply_button = ctk.CTkButton(
-            apply_row,
-            text="상세 수집 후 글쓰기에 반영",
-            width=210,
-            height=40,
-            corner_radius=12,
-            fg_color="#19a957",
-            hover_color="#168f4b",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._collect_selected_festival_detail,
-        )
-        self.festival_apply_button.grid(row=0, column=1, padx=(12, 0), sticky="e")
 
         self._set_festival_filter_options(self.festival_state.get("filter_options") or {})
         self._render_visitkorea_festivals(self.festival_events)
