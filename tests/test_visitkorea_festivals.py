@@ -126,6 +126,30 @@ class VisitKoreaFestivalTests(unittest.TestCase):
             )
         )
 
+    def test_builds_festival_link_for_each_selected_article_position(self) -> None:
+        event = {
+            "title": "수원 국가유산 야행",
+            "official_url": "https://www.swcf.or.kr/",
+        }
+
+        positions = [
+            main.build_festival_official_link(event, position=position)["position"]
+            for position in main.LINK_POSITION_OPTIONS
+        ]
+
+        self.assertEqual(positions, ["본문상단", "본문중간", "본문하단"])
+
+    def test_festival_link_position_settings_are_persistent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FestivalStateStore(Path(directory) / "festival-state.json")
+            state = store.load()
+            state["link_positions"] = ["본문상단", "본문하단"]
+            store.save(state)
+
+            restored = store.load()
+
+            self.assertEqual(restored["link_positions"], ["본문상단", "본문하단"])
+
     def test_transient_festival_link_is_used_in_article_but_not_saved(self) -> None:
         value = lambda text: SimpleNamespace(get=lambda: text)
         full_width = SimpleNamespace(get=lambda: True)
@@ -163,6 +187,12 @@ class VisitKoreaFestivalTests(unittest.TestCase):
 
         self.assertIn("self._start_auto_progress_with_collected_reference", method_source)
         self.assertIn("축제 공식정보와 포털 참고자료", method_source)
+
+    def test_applying_festival_adds_links_for_selected_positions(self) -> None:
+        method_source = inspect.getsource(main.KeywordApp._apply_visitkorea_festival_to_writing)
+
+        self.assertIn("for position in self._selected_festival_link_positions()", method_source)
+        self.assertIn("build_festival_official_link(event, position=position)", method_source)
 
 
 if __name__ == "__main__":

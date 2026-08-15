@@ -373,18 +373,20 @@ def visitkorea_festival_id(url: str) -> str:
         return ""
 
 
-def build_festival_official_link(event: dict) -> dict | None:
+def build_festival_official_link(event: dict, position: str = "본문중간") -> dict | None:
     """Build the temporary writing-page link for a festival homepage."""
     title = re.sub(r"\s+", " ", str(event.get("title") or "")).strip()
     official_url = normalize_external_url(str(event.get("official_url") or ""))
     if not title or not official_url:
         return None
+    if position not in LINK_POSITION_OPTIONS:
+        position = "본문중간"
     return {
         "button_text": f"{title}홈페이지 바로가기👆🏻",
         "url": official_url,
         "width": "",
         "full_width": True,
-        "position": "본문중간",
+        "position": position,
         "transient": True,
         "source": "festival",
     }
@@ -401,6 +403,7 @@ class FestivalStateStore:
         return {
             "filters": {"period": "", "region": "", "category": ""},
             "filter_options": {"period": [], "region": [], "category": []},
+            "link_positions": list(LINK_POSITION_OPTIONS),
             "events": [],
             "selected_id": "",
             "published": {},
@@ -15038,6 +15041,13 @@ class KeywordApp(ctk.CTk):
         self.selected_public_event_var = ctk.StringVar(value=self.wordpress_settings.public_data_selected_seq)
         self.selected_festival_var = ctk.StringVar(value=str(self.festival_state.get("selected_id") or ""))
         self.hide_published_festivals_var = tk.BooleanVar(value=True)
+        saved_festival_link_positions = self.festival_state.get("link_positions")
+        if not isinstance(saved_festival_link_positions, list):
+            saved_festival_link_positions = list(LINK_POSITION_OPTIONS)
+        self.festival_link_position_vars = {
+            position: tk.BooleanVar(value=position in saved_festival_link_positions)
+            for position in LINK_POSITION_OPTIONS
+        }
         self.selected_keyword_var = ctk.StringVar(value="")
         self.writing_auto_progress_var = tk.BooleanVar(
             value=self.wordpress_settings.writing_auto_progress
@@ -20558,8 +20568,30 @@ class KeywordApp(ctk.CTk):
         self.festival_region_menu = self._festival_filter_menu(filter_card, 2, 1, "지역")
         self.festival_category_menu = self._festival_filter_menu(filter_card, 2, 2, "카테고리")
 
+        link_position_row = ctk.CTkFrame(filter_card, fg_color="#111826", corner_radius=14)
+        link_position_row.grid(row=3, column=0, columnspan=3, padx=18, pady=(14, 0), sticky="ew")
+        link_position_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            link_position_row,
+            text="공식 홈페이지 버튼 위치",
+            text_color="#dce5f2",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=(14, 8), pady=12, sticky="w")
+        for column, position in enumerate(LINK_POSITION_OPTIONS, start=1):
+            ctk.CTkCheckBox(
+                link_position_row,
+                text=position,
+                variable=self.festival_link_position_vars[position],
+                checkbox_width=19,
+                checkbox_height=19,
+                corner_radius=5,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                command=self._save_festival_link_positions,
+            ).grid(row=0, column=column, padx=(8, 14), pady=12, sticky="e")
+
         action_row = ctk.CTkFrame(filter_card, fg_color="transparent")
-        action_row.grid(row=3, column=0, columnspan=3, padx=18, pady=(14, 18), sticky="ew")
+        action_row.grid(row=4, column=0, columnspan=3, padx=18, pady=(14, 18), sticky="ew")
         action_row.grid_columnconfigure(0, weight=1)
         self.festival_status_label = ctk.CTkLabel(
             action_row,
@@ -20852,6 +20884,20 @@ class KeywordApp(ctk.CTk):
         self.festival_state["selected_id"] = self.selected_festival_var.get()
         self.festival_store.save(self.festival_state)
 
+    def _selected_festival_link_positions(self) -> list[str]:
+        variables = getattr(self, "festival_link_position_vars", {})
+        if not variables:
+            return list(LINK_POSITION_OPTIONS)
+        return [
+            position
+            for position in LINK_POSITION_OPTIONS
+            if position in variables and bool(variables[position].get())
+        ]
+
+    def _save_festival_link_positions(self) -> None:
+        self.festival_state["link_positions"] = self._selected_festival_link_positions()
+        self.festival_store.save(self.festival_state)
+
     def _selected_visitkorea_festival(self) -> dict | None:
         selected_id = self.selected_festival_var.get()
         for event in self.festival_events:
@@ -20931,9 +20977,10 @@ class KeywordApp(ctk.CTk):
         self._render_results(self.current_insights)
 
         self._clear_transient_writing_links("festival")
-        festival_link = build_festival_official_link(event)
-        if festival_link:
-            self._add_link_row(festival_link)
+        for position in self._selected_festival_link_positions():
+            festival_link = build_festival_official_link(event, position=position)
+            if festival_link:
+                self._add_link_row(festival_link)
 
         self._switch_page("writing")
         self._reset_writing_section_completion()
@@ -27066,11 +27113,12 @@ class KeywordApp(ctk.CTk):
     def _add_link_row(self, link: dict | None = None) -> None:
         if not hasattr(self, "link_list_frame"):
             return
-        if len(self.link_rows) >= 5:
+        link = link or {}
+        persistent_link_count = sum(not row.get("transient") for row in self.link_rows)
+        if not link.get("transient") and persistent_link_count >= 5:
             messagebox.showinfo("링크 추가 제한", "본문 링크 버튼은 최대 5개까지 추가할 수 있습니다.")
             return
 
-        link = link or {}
         palette = self._theme_palette()
         row_frame = ctk.CTkFrame(
             self.link_list_frame,
@@ -27234,7 +27282,8 @@ class KeywordApp(ctk.CTk):
 
     def _update_add_link_button_state(self) -> None:
         if hasattr(self, "add_link_button"):
-            self.add_link_button.configure(state="disabled" if len(self.link_rows) >= 5 else "normal")
+            persistent_link_count = sum(not row.get("transient") for row in self.link_rows)
+            self.add_link_button.configure(state="disabled" if persistent_link_count >= 5 else "normal")
         self._update_link_rows_visibility()
 
     def _update_link_rows_visibility(self) -> None:
@@ -27285,7 +27334,7 @@ class KeywordApp(ctk.CTk):
                     "position": position if position in LINK_POSITION_OPTIONS else "본문하단",
                 }
             )
-        return links[:5]
+        return links
 
     def _read_wordpress_settings(self, include_prompts: bool = True) -> WordPressSettings:
         wordpress_title_prompt_template = self.wordpress_settings.wordpress_title_prompt_template
