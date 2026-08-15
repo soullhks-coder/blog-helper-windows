@@ -57,6 +57,13 @@ class WritingAutoProgressTests(unittest.TestCase):
         self.assertIn("self._go_to_thumbnail_section()", publish_source)
         self.assertIn("self._auto_publish_current_article", publish_source)
 
+    def test_collected_public_data_skips_duplicate_reference_collection(self) -> None:
+        source = self._method_source("_start_auto_progress_with_collected_reference")
+
+        self.assertIn("self._arm_writing_auto_progress()", source)
+        self.assertIn("self._auto_continue_after_reference", source)
+        self.assertNotIn("self._auto_collect_reference_for_keyword", source)
+
     def test_manual_reference_collection_shows_completion_dialog(self) -> None:
         queue_source = self._method_source("_poll_queue")
         self.assertIn("self._show_reference_collection_complete_dialog", queue_source)

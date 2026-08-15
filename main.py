@@ -18066,6 +18066,24 @@ class KeywordApp(ctk.CTk):
         self._refresh_writing_auto_progress_ui()
         self._generate_article_from_selection()
 
+    def _start_auto_progress_with_collected_reference(self, keyword: str, source_label: str) -> bool:
+        """Continue at article generation when a data page already supplied references."""
+        if not self.writing_auto_progress_var.get() or not self._arm_writing_auto_progress():
+            return False
+        self.keyword_status_label.configure(
+            text=f"{source_label} 수집 완료 · 자동진행으로 글 작성을 시작합니다."
+        )
+        self._set_writing_progress(
+            3,
+            f"{source_label}를 바탕으로 글 작성을 자동 진행합니다.",
+            0.0,
+        )
+        self.after(
+            260,
+            lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword),
+        )
+        return True
+
     def _auto_continue_after_article(self) -> None:
         if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
             return
@@ -20922,6 +20940,10 @@ class KeywordApp(ctk.CTk):
         self._open_writing_section("keyword", complete_previous=True)
         self.keyword_status_label.configure(text="축제 공식정보와 포털 참고자료를 블로그글쓰기에 반영했습니다.")
         self._save_ui_state()
+        self._start_auto_progress_with_collected_reference(
+            title,
+            "축제 공식정보와 포털 참고자료",
+        )
 
     def _clear_festival_writing_context(self) -> None:
         self._clear_transient_writing_links("festival")
@@ -21123,6 +21145,7 @@ class KeywordApp(ctk.CTk):
         self._open_writing_section("keyword", complete_previous=True)
         self.keyword_status_label.configure(text="공공데이터 행사정보를 블로그글쓰기에 반영했습니다.")
         self._save_ui_state()
+        self._start_auto_progress_with_collected_reference(title, "공공데이터 행사정보")
 
     def _event_value(self, event: dict, key: str) -> str:
         return re.sub(r"\s+", " ", str(event.get(key) or "").strip())

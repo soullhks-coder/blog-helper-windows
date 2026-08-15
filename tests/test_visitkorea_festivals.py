@@ -158,6 +158,12 @@ class VisitKoreaFestivalTests(unittest.TestCase):
         self.assertNotIn("self.thumbnail_image_scale_var.set", method_source)
         self.assertNotIn("self.thumbnail_image_opacity_var.set", method_source)
 
+    def test_applying_festival_starts_auto_progress_after_collected_reference(self) -> None:
+        method_source = inspect.getsource(main.KeywordApp._apply_visitkorea_festival_to_writing)
+
+        self.assertIn("self._start_auto_progress_with_collected_reference", method_source)
+        self.assertIn("축제 공식정보와 포털 참고자료", method_source)
+
 
 if __name__ == "__main__":
     unittest.main()
