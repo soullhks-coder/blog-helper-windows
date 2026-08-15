@@ -373,6 +373,23 @@ def visitkorea_festival_id(url: str) -> str:
         return ""
 
 
+def build_festival_official_link(event: dict) -> dict | None:
+    """Build the temporary writing-page link for a festival homepage."""
+    title = re.sub(r"\s+", " ", str(event.get("title") or "")).strip()
+    official_url = normalize_external_url(str(event.get("official_url") or ""))
+    if not title or not official_url:
+        return None
+    return {
+        "button_text": f"#{title}홈페이지 바로가기👆🏻",
+        "url": official_url,
+        "width": "",
+        "full_width": True,
+        "position": "본문중간",
+        "transient": True,
+        "source": "festival",
+    }
+
+
 class FestivalStateStore:
     """Persist VisitKorea filters, cached rows, and confirmed publish history."""
 
@@ -15508,6 +15525,7 @@ class KeywordApp(ctk.CTk):
             except tk.TclError:
                 pass
             dialog.destroy()
+        self._clear_festival_writing_context()
         self._reset_writing_accordion_state()
 
     def _show_reference_collection_complete_dialog(self, keyword: str, count: int) -> None:
@@ -20894,6 +20912,11 @@ class KeywordApp(ctk.CTk):
         self._render_keyword_choices(self.current_insights)
         self._render_results(self.current_insights)
 
+        self._clear_transient_writing_links("festival")
+        festival_link = build_festival_official_link(event)
+        if festival_link:
+            self._add_link_row(festival_link)
+
         poster_path = str(event.get("poster_path") or "").strip()
         if poster_path and Path(poster_path).exists():
             stable_poster_path = persist_design_asset(poster_path, "thumbnail-background")
@@ -20910,6 +20933,12 @@ class KeywordApp(ctk.CTk):
         self._open_writing_section("keyword", complete_previous=True)
         self.keyword_status_label.configure(text="축제 공식정보와 포털 참고자료를 블로그글쓰기에 반영했습니다.")
         self._save_ui_state()
+
+    def _clear_festival_writing_context(self) -> None:
+        self._clear_transient_writing_links("festival")
+        if self.festival_state.get("active"):
+            self.festival_state["active"] = {}
+            self.festival_store.save(self.festival_state)
 
     def _mark_festival_published(self, event: dict, published_urls: Iterable[str]) -> dict | None:
         if not event:
@@ -27140,6 +27169,8 @@ class KeywordApp(ctk.CTk):
             "width_entry": width_entry,
             "full_width_var": full_width_var,
             "position_menu": position_menu,
+            "transient": bool(link.get("transient", False)),
+            "source": str(link.get("source") or ""),
         }
         delete_button = ctk.CTkButton(
             row_frame,
@@ -27158,6 +27189,23 @@ class KeywordApp(ctk.CTk):
         self.link_rows.append(row_data)
         self._update_add_link_button_state()
         self._save_ui_state()
+
+    def _clear_transient_writing_links(self, source: str = "") -> None:
+        if not hasattr(self, "link_rows"):
+            return
+        source = str(source or "").strip()
+        removed = False
+        for row_data in list(self.link_rows):
+            if not row_data.get("transient"):
+                continue
+            if source and str(row_data.get("source") or "") != source:
+                continue
+            row_data["frame"].destroy()
+            self.link_rows.remove(row_data)
+            removed = True
+        if removed:
+            self._regrid_link_rows()
+            self._update_add_link_button_state()
 
     def _remove_link_row(self, row_data: dict) -> None:
         if row_data not in self.link_rows:
@@ -27202,11 +27250,13 @@ class KeywordApp(ctk.CTk):
                 self._add_link_row(link)
         self._update_add_link_button_state()
 
-    def _current_writing_links(self) -> list[dict]:
+    def _current_writing_links(self, include_transient: bool = True) -> list[dict]:
         links: list[dict] = []
         if not hasattr(self, "link_rows"):
             return list(self.wordpress_settings.writing_links or [])
         for row_data in self.link_rows:
+            if row_data.get("transient") and not include_transient:
+                continue
             button_text = row_data["button_entry"].get().strip()
             url = row_data["url_entry"].get().strip()
             width = row_data["width_entry"].get().strip()
@@ -27261,7 +27311,7 @@ class KeywordApp(ctk.CTk):
                 selected_prompt_id = str(selected_prompt.get("id") or "")
                 selected_title_prompt = nonempty_text(selected_prompt.get("title_prompt"), selected_title_prompt)
                 selected_article_prompt = nonempty_text(selected_prompt.get("article_prompt"), selected_article_prompt)
-        current_writing_links = self._current_writing_links()
+        current_writing_links = self._current_writing_links(include_transient=False)
         thumbnail_background_image_path = persist_design_asset(
             self.thumbnail_background_image_path,
             "thumbnail-background",

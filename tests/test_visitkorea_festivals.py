@@ -2,6 +2,7 @@ import queue
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import main
 
@@ -92,6 +93,60 @@ class VisitKoreaFestivalTests(unittest.TestCase):
         self.assertIn("장소/위치: 경기도 수원시", reference)
         self.assertIn("공식 포스터 이미지:", reference)
         self.assertIn("[여러 포털 교차검색 참고자료]", reference)
+
+    def test_builds_transient_full_width_middle_link_for_official_homepage(self) -> None:
+        link = main.build_festival_official_link(
+            {
+                "title": "수원 국가유산 야행",
+                "official_url": "https://www.swcf.or.kr/",
+            }
+        )
+
+        self.assertEqual(
+            link,
+            {
+                "button_text": "#수원 국가유산 야행홈페이지 바로가기👆🏻",
+                "url": "https://www.swcf.or.kr/",
+                "width": "",
+                "full_width": True,
+                "position": "본문중간",
+                "transient": True,
+                "source": "festival",
+            },
+        )
+
+    def test_skips_festival_link_when_official_homepage_is_missing(self) -> None:
+        self.assertIsNone(
+            main.build_festival_official_link(
+                {
+                    "title": "홈페이지 없는 축제",
+                    "official_url": "",
+                }
+            )
+        )
+
+    def test_transient_festival_link_is_used_in_article_but_not_saved(self) -> None:
+        value = lambda text: SimpleNamespace(get=lambda: text)
+        full_width = SimpleNamespace(get=lambda: True)
+        app = SimpleNamespace(
+            link_rows=[
+                {
+                    "button_entry": value("#축제홈페이지 바로가기👆🏻"),
+                    "url_entry": value("https://festival.example.com"),
+                    "width_entry": value(""),
+                    "full_width_var": full_width,
+                    "position_menu": value("본문중간"),
+                    "transient": True,
+                    "source": "festival",
+                }
+            ]
+        )
+
+        article_links = main.KeywordApp._current_writing_links(app)
+        saved_links = main.KeywordApp._current_writing_links(app, include_transient=False)
+
+        self.assertEqual(len(article_links), 1)
+        self.assertEqual(saved_links, [])
 
 
 if __name__ == "__main__":
