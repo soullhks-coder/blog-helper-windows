@@ -20917,17 +20917,6 @@ class KeywordApp(ctk.CTk):
         if festival_link:
             self._add_link_row(festival_link)
 
-        poster_path = str(event.get("poster_path") or "").strip()
-        if poster_path and Path(poster_path).exists():
-            stable_poster_path = persist_design_asset(poster_path, "thumbnail-background")
-            self.thumbnail_background_image_path = stable_poster_path
-            self.thumbnail_selected_image_label_text.set(Path(stable_poster_path).name)
-            self.thumbnail_background_mode_menu.set("선택 이미지 사용")
-            self.thumbnail_image_position_menu.set("가운데")
-            self.thumbnail_image_scale_var.set(100)
-            self.thumbnail_image_opacity_var.set(100)
-            self._on_thumbnail_image_adjust_changed()
-
         self._switch_page("writing")
         self._reset_writing_section_completion()
         self._open_writing_section("keyword", complete_previous=True)

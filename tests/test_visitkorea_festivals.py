@@ -1,4 +1,5 @@
 import queue
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -147,6 +148,15 @@ class VisitKoreaFestivalTests(unittest.TestCase):
 
         self.assertEqual(len(article_links), 1)
         self.assertEqual(saved_links, [])
+
+    def test_applying_festival_does_not_override_saved_thumbnail_design(self) -> None:
+        method_source = inspect.getsource(main.KeywordApp._apply_visitkorea_festival_to_writing)
+
+        self.assertNotIn("self.thumbnail_background_image_path =", method_source)
+        self.assertNotIn("self.thumbnail_background_mode_menu.set", method_source)
+        self.assertNotIn("self.thumbnail_image_position_menu.set", method_source)
+        self.assertNotIn("self.thumbnail_image_scale_var.set", method_source)
+        self.assertNotIn("self.thumbnail_image_opacity_var.set", method_source)
 
 
 if __name__ == "__main__":
