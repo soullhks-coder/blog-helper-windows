@@ -141,6 +141,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_UPLOAD_DIR = DATA_DIR / "Generated Uploads"
 DESIGN_ASSET_DIR = DATA_DIR / "Design Assets"
 STATE_FILE = DATA_DIR / "app_state.json"
+FESTIVAL_STATE_FILE = DATA_DIR / "visitkorea_festival_state.json"
+FESTIVAL_POSTER_DIR = DATA_DIR / "Festival Posters"
 DESKTOP_DIR = Path.home() / "Desktop"
 PROMPT_DIR = DESKTOP_DIR / "BlogHelper 프롬프트"
 PROMPT_STORAGE_DIR = DATA_DIR / "Prompts"
@@ -359,6 +361,93 @@ CARDNEWS_BORDER_COLOR_PALETTE = [
     "검정색",
 ]
 LINK_POSITION_OPTIONS = ["본문상단", "본문중간", "본문하단"]
+VISITKOREA_FESTIVAL_LIST_URL = "https://korean.visitkorea.or.kr/kfes/list/wntyFstvlList.do"
+VISITKOREA_FESTIVAL_BASE_URL = "https://korean.visitkorea.or.kr"
+
+
+def visitkorea_festival_id(url: str) -> str:
+    """Return the stable VisitKorea festival content id from a detail URL."""
+    try:
+        return str(parse_qs(urlparse(str(url or "")).query).get("fstvlCntntsId", [""])[0]).strip()
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+class FestivalStateStore:
+    """Persist VisitKorea filters, cached rows, and confirmed publish history."""
+
+    def __init__(self, path: Path = FESTIVAL_STATE_FILE) -> None:
+        self.path = Path(path)
+
+    @staticmethod
+    def empty_state() -> dict:
+        return {
+            "filters": {"period": "", "region": "", "category": ""},
+            "filter_options": {"period": [], "region": [], "category": []},
+            "events": [],
+            "selected_id": "",
+            "published": {},
+            "active": {},
+        }
+
+    def load(self) -> dict:
+        state = self.empty_state()
+        if not self.path.exists():
+            return state
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return state
+        if not isinstance(payload, dict):
+            return state
+        for key in state:
+            if key in payload and isinstance(payload[key], type(state[key])):
+                state[key] = payload[key]
+        return state
+
+    def save(self, state: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self.path)
+
+    def mark_published(
+        self,
+        state: dict,
+        event: dict,
+        published_urls: Iterable[str],
+        published_at: str = "",
+    ) -> dict:
+        festival_id = str(event.get("festival_id") or visitkorea_festival_id(event.get("detail_url", ""))).strip()
+        if not festival_id:
+            raise ValueError("축제 고유 ID가 없어 등록 이력을 저장할 수 없습니다.")
+        published = state.setdefault("published", {})
+        active_festival_id = str((state.get("active") or {}).get("festival_id") or "").strip()
+        if festival_id in published:
+            if active_festival_id == festival_id:
+                state["active"] = {}
+            self.save(state)
+            return dict(published[festival_id])
+        urls = [
+            str(url).strip()
+            for url in published_urls
+            if str(url).strip().startswith(("http://", "https://"))
+        ]
+        record = {
+            "festival_id": festival_id,
+            "title": str(event.get("title") or "").strip(),
+            "detail_url": str(event.get("detail_url") or "").strip(),
+            "published_at": published_at or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "published_urls": list(dict.fromkeys(urls)),
+        }
+        published[festival_id] = record
+        if active_festival_id == festival_id:
+            state["active"] = {}
+        self.save(state)
+        return record
 
 
 def find_google_chrome_executable() -> Path | None:
@@ -12578,6 +12667,309 @@ class DaumRealtimeKeywordWorker(threading.Thread):
         return re.sub(r"\s+", " ", value).strip()
 
 
+class VisitKoreaFestivalListWorker(threading.Thread):
+    """Load VisitKorea filters and festival rows with Playwright."""
+
+    def __init__(
+        self,
+        period: str,
+        region: str,
+        category: str,
+        published_history: dict,
+        result_queue: queue.Queue,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.period = str(period or "").strip()
+        self.region = str(region or "").strip()
+        self.category = str(category or "").strip()
+        self.published_history = dict(published_history or {})
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            self.result_queue.put(("festival_progress", "대한민국 구석구석의 검색필터를 확인하고 있습니다..."))
+            payload = self._crawl()
+            self.result_queue.put(("festival_done", payload))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("festival_error", str(exc)))
+
+    def _crawl(self) -> dict:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright가 설치되어 있지 않아 축제 목록을 가져올 수 없습니다.") from exc
+
+        chrome_path = require_google_chrome_executable()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(chrome_path),
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--window-size=1100,800",
+                ],
+            )
+            try:
+                page = browser.new_page(locale="ko-KR")
+                page.set_default_timeout(15_000)
+                page.set_default_navigation_timeout(45_000)
+                page.goto(VISITKOREA_FESTIVAL_LIST_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(1_800)
+                filter_options = {
+                    "period": self._select_options(page, "#searchDate"),
+                    "region": self._select_options(page, "#searchArea"),
+                    "category": self._select_options(page, "#searchCate"),
+                }
+                for selector, value in (
+                    ("#searchDate", self.period),
+                    ("#searchArea", self.region),
+                    ("#searchCate", self.category),
+                ):
+                    available = {item["value"] for item in self._select_options(page, selector)}
+                    if value and value in available:
+                        page.locator(selector).select_option(value=value)
+                self.result_queue.put(("festival_progress", "선택한 조건으로 축제 목록을 검색하고 있습니다..."))
+                page.locator("#btnSearch").click()
+                page.wait_for_timeout(2_200)
+                self._load_more_rows(page, limit=36)
+                events = page.locator(".other_festival_content").evaluate_all(
+                    """elements => elements.map((content) => {
+                        const anchor = content.closest('a');
+                        const image = anchor ? anchor.querySelector('.other_festival_img img') : null;
+                        return {
+                            title: (content.querySelector('strong')?.textContent || '').trim(),
+                            schedule: (content.querySelector('.date')?.textContent || '').trim(),
+                            area: (content.querySelector('.loc')?.textContent || '').trim(),
+                            detail_url: anchor?.href || '',
+                            list_image_url: image?.src || ''
+                        };
+                    })"""
+                )
+            finally:
+                browser.close()
+
+        normalized_events: list[dict] = []
+        seen_ids: set[str] = set()
+        for event in events or []:
+            detail_url = str(event.get("detail_url") or "").strip()
+            festival_id = visitkorea_festival_id(detail_url)
+            title = re.sub(r"\s+", " ", str(event.get("title") or "")).strip()
+            if not festival_id or not title or festival_id in seen_ids:
+                continue
+            seen_ids.add(festival_id)
+            history = self.published_history.get(festival_id, {})
+            event.update(
+                {
+                    "festival_id": festival_id,
+                    "title": title,
+                    "schedule": re.sub(r"\s+", "", str(event.get("schedule") or "")),
+                    "area": re.sub(r"\s+", " ", str(event.get("area") or "")).strip(),
+                    "published": bool(history),
+                    "published_at": str(history.get("published_at") or ""),
+                    "published_urls": list(history.get("published_urls") or []),
+                }
+            )
+            normalized_events.append(event)
+        return {"filter_options": filter_options, "events": normalized_events}
+
+    def _select_options(self, page, selector: str) -> list[dict]:
+        return page.locator(f"{selector} option").evaluate_all(
+            "elements => elements.map(option => ({label: (option.textContent || '').trim(), value: option.value || ''}))"
+        )
+
+    def _load_more_rows(self, page, limit: int) -> None:
+        for _ in range(4):
+            count = page.locator(".other_festival_content").count()
+            if count >= limit:
+                return
+            button = page.locator("#btnMore")
+            if not button.count() or not button.is_visible() or not button.is_enabled():
+                return
+            label = re.sub(r"\s+", "", button.inner_text())
+            progress = re.search(r"\((\d+)/(\d+)\)", label)
+            if progress and int(progress.group(1)) >= int(progress.group(2)):
+                return
+            button.click()
+            page.wait_for_timeout(900)
+
+
+class VisitKoreaFestivalDetailWorker(threading.Thread):
+    """Collect one festival's official detail, poster, and portal references."""
+
+    def __init__(self, event: dict, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.event = dict(event)
+        self.result_queue = result_queue
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    def run(self) -> None:
+        try:
+            self.result_queue.put(("festival_detail_progress", "선택한 축제의 일정·장소·포스터를 확인하고 있습니다..."))
+            event = self._crawl_detail()
+            self.result_queue.put(("festival_detail_progress", f"'{event.get('title', '')}' 포털 교차검색을 진행하고 있습니다..."))
+            portal_reference = self._collect_portal_reference(event)
+            event["reference_text"] = self._build_reference_text(event, portal_reference)
+            self.result_queue.put(("festival_detail_done", event))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("festival_detail_error", str(exc)))
+
+    def _crawl_detail(self) -> dict:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright가 설치되어 있지 않아 축제 상세정보를 가져올 수 없습니다.") from exc
+
+        detail_url = str(self.event.get("detail_url") or "").strip()
+        if not detail_url:
+            raise RuntimeError("선택한 축제의 상세 페이지 주소가 없습니다.")
+        chrome_path = require_google_chrome_executable()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(chrome_path),
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--window-size=1100,800",
+                ],
+            )
+            try:
+                page = browser.new_page(locale="ko-KR")
+                page.set_default_timeout(15_000)
+                page.set_default_navigation_timeout(45_000)
+                page.goto(detail_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(1_600)
+                payload = page.evaluate(
+                    r"""() => {
+                        const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+                        const info = className => clean(document.querySelector(`.info_ico.${className}`)?.closest('li')?.querySelector('.info_content')?.textContent);
+                        const descriptionNode = document.querySelector('.slide_content.fst');
+                        const description = descriptionNode ? clean(Array.from(descriptionNode.childNodes)
+                            .filter(node => node.nodeType === Node.TEXT_NODE)
+                            .map(node => node.textContent).join(' ')) : '';
+                        const poster = document.querySelector('a[href*="kfescdn.visitkorea"] img[alt*="포스터"]')
+                            || document.querySelector('a[href*="kfescdn.visitkorea"] img');
+                        const posterAnchor = poster?.closest('a');
+                        const official = document.querySelector('a.homepage_link_btn');
+                        return {
+                            title: clean(document.querySelector('#festival_head')?.textContent),
+                            subtitle: clean(document.querySelector('.festival_title .sub_title')?.textContent),
+                            description,
+                            schedule: info('data'),
+                            address: info('location'),
+                            price: info('price'),
+                            organizer: info('partner'),
+                            phone: info('tell'),
+                            poster_url: posterAnchor?.href || poster?.src || '',
+                            poster_alt: clean(poster?.alt),
+                            official_url: official?.href || ''
+                        };
+                    }"""
+                )
+            finally:
+                browser.close()
+        event = dict(self.event)
+        event.update({key: value for key, value in (payload or {}).items() if value})
+        event["festival_id"] = str(event.get("festival_id") or visitkorea_festival_id(detail_url))
+        event["detail_url"] = detail_url
+        poster_url = str(event.get("poster_url") or event.get("list_image_url") or "").strip()
+        if poster_url:
+            try:
+                event["poster_path"] = str(self._download_poster(poster_url, event["festival_id"]))
+            except Exception:
+                event["poster_path"] = ""
+        return event
+
+    def _download_poster(self, url: str, festival_id: str) -> Path:
+        suffix = Path(urlparse(url).path).suffix.lower()
+        if suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+            suffix = ".jpg"
+        FESTIVAL_POSTER_DIR.mkdir(parents=True, exist_ok=True)
+        destination = FESTIVAL_POSTER_DIR / f"{festival_id or hashlib.sha256(url.encode()).hexdigest()[:16]}{suffix}"
+        if destination.exists() and destination.stat().st_size > 0:
+            return destination
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 BlogHelper/1.0",
+                "Referer": VISITKOREA_FESTIVAL_BASE_URL + "/",
+            },
+        )
+        with urlopen(request, timeout=25, context=self.ssl_context) as response:
+            data = response.read()
+        if not data:
+            raise RuntimeError("축제 포스터 이미지가 비어 있습니다.")
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_bytes(data)
+        temporary.replace(destination)
+        return destination
+
+    def _collect_portal_reference(self, event: dict) -> str:
+        title = str(event.get("title") or "").strip()
+        if not title:
+            return ""
+        helper = SignalKeywordWorker(queue.Queue())
+        worker = ReferenceCollectionWorker(
+            title,
+            queue.Queue(),
+            source_url=str(event.get("detail_url") or VISITKOREA_FESTIVAL_LIST_URL),
+        )
+        facts: list[dict] = []
+        try:
+            facts = helper._merge_articles(facts, worker._fetch_playwright_facts(helper))
+        except Exception:
+            pass
+        try:
+            facts = helper._merge_articles(facts, worker._fetch_naver_web_facts(helper))
+        except Exception:
+            pass
+        for fetcher in (helper._fetch_naver_news_facts, helper._fetch_google_news_facts):
+            try:
+                facts = helper._merge_articles(facts, fetcher(title))
+            except Exception:
+                continue
+        exact = [fact for fact in facts if worker._contains_keyword(helper, fact)]
+        useful = exact or facts
+        useful = [
+            fact for fact in useful
+            if helper._clean_text(str(fact.get("title") or ""))
+            and helper._clean_text(str(fact.get("desc") or fact.get("description") or ""))
+        ]
+        return worker._build_reference_text(helper, useful) if useful else ""
+
+    def _build_reference_text(self, event: dict, portal_reference: str) -> str:
+        lines = [
+            "[대한민국 구석구석 공식 축제 정보]",
+            f"축제명: {event.get('title') or '정보 없음'}",
+            f"축제 일정: {event.get('schedule') or '정보 없음'}",
+            f"장소/위치: {event.get('address') or event.get('area') or '정보 없음'}",
+            f"가격: {event.get('price') or '정보 없음'}",
+            f"주최/주관: {event.get('organizer') or '정보 없음'}",
+            f"문의: {event.get('phone') or '정보 없음'}",
+            f"공식 홈페이지: {event.get('official_url') or '정보 없음'}",
+            f"축제 상세 출처: {event.get('detail_url') or '정보 없음'}",
+            f"공식 포스터 이미지: {event.get('poster_url') or '정보 없음'}",
+        ]
+        if event.get("subtitle"):
+            lines.extend(["", "한줄 소개:", str(event["subtitle"])])
+        if event.get("description"):
+            lines.extend(["", "축제 소개:", str(event["description"])])
+        if portal_reference:
+            lines.extend(["", "[여러 포털 교차검색 참고자료]", portal_reference])
+        lines.extend(
+            [
+                "",
+                "작성 지침: 공식 일정·주소·가격·연락처는 위 정보와 다르게 추측하지 말고, 변동 가능성이 있으므로 방문 전 공식 홈페이지 확인을 안내하세요.",
+            ]
+        )
+        return "\n".join(lines).strip()
+
+
 class PublicDataEventWorker(threading.Thread):
     BASE_ENDPOINTS = [
         ("https://apis.data.go.kr/B553457/cultureinfo", "realm2", "detail2"),
@@ -14587,6 +14979,8 @@ class KeywordApp(ctk.CTk):
         self.signal_worker: SignalKeywordWorker | None = None
         self.newneek_worker: NewneekKeywordWorker | None = None
         self.public_data_worker: PublicDataEventWorker | None = None
+        self.festival_worker: VisitKoreaFestivalListWorker | None = None
+        self.festival_detail_worker: VisitKoreaFestivalDetailWorker | None = None
         self.automation_keyword_worker: AutomationKeywordQueueWorker | None = None
         self.automation_keyword_discovery_worker: AutomationKeywordDiscoveryWorker | None = None
         self.reference_collection_worker: ReferenceCollectionWorker | None = None
@@ -14609,6 +15003,14 @@ class KeywordApp(ctk.CTk):
         self.newneek_reference_map: dict[str, str] = {}
         self.collected_reference_map: dict[str, str] = {}
         self.public_data_events: list[dict] = []
+        self.festival_store = FestivalStateStore()
+        self.festival_state = self.festival_store.load()
+        self.festival_events: list[dict] = list(self.festival_state.get("events") or [])
+        self.festival_filter_value_maps: dict[str, dict[str, str]] = {
+            "period": {},
+            "region": {},
+            "category": {},
+        }
         self.naver_kin_questions: list[dict] = list(self.wordpress_settings.naver_kin_last_questions or [])
         self.naver_kin_next_run_at = float(self.wordpress_settings.naver_kin_next_run_at or 0)
         self.naver_kin_next_action = (
@@ -14617,6 +15019,8 @@ class KeywordApp(ctk.CTk):
             else "answer"
         )
         self.selected_public_event_var = ctk.StringVar(value=self.wordpress_settings.public_data_selected_seq)
+        self.selected_festival_var = ctk.StringVar(value=str(self.festival_state.get("selected_id") or ""))
+        self.hide_published_festivals_var = tk.BooleanVar(value=True)
         self.selected_keyword_var = ctk.StringVar(value="")
         self.writing_auto_progress_var = tk.BooleanVar(
             value=self.wordpress_settings.writing_auto_progress
@@ -15004,6 +15408,7 @@ class KeywordApp(ctk.CTk):
             1.0,
             state="complete",
         )
+        self._mark_active_festival_published()
         if self.writing_complete_dialog and self.writing_complete_dialog.winfo_exists():
             try:
                 self.writing_complete_dialog.lift()
@@ -15655,7 +16060,11 @@ class KeywordApp(ctk.CTk):
                 "automation": ("automation_scroll", "automation_list"),
                 "naver_blog": ("naver_blog_scroll",),
                 "naver_kin": ("naver_kin_scroll", "naver_kin_question_frame"),
-                "public_data": ("public_data_scroll", "public_data_result_frame"),
+                "public_data": (
+                    "public_data_scroll",
+                    "public_data_result_frame",
+                    "festival_result_frame",
+                ),
                 "prompts": ("prompts_scroll",),
                 "settings": ("settings_scroll", "theme_scroll", "basic_scroll"),
             }
@@ -19884,7 +20293,7 @@ class KeywordApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             header,
-            text="data.go.kr 문화정보 API로 공연/행사/축제 데이터를 가져와 블로그 글감으로 사용합니다.",
+            text="대한민국 구석구석 축제 수집과 data.go.kr 공연·행사 데이터를 한곳에서 블로그 글감으로 사용합니다.",
             text_color="#a7b3c4",
             font=ctk.CTkFont(size=14),
         )
@@ -19893,6 +20302,21 @@ class KeywordApp(ctk.CTk):
         body = ctk.CTkScrollableFrame(self.public_data_page, fg_color="transparent")
         body.grid(row=1, column=0, padx=28, pady=(0, 26), sticky="nsew")
         body.grid_columnconfigure(0, weight=1)
+        self.public_data_scroll = body
+
+        self.public_data_source_switch = ctk.CTkSegmentedButton(
+            body,
+            values=["구석구석 축제", "기존 공공 API"],
+            height=42,
+            corner_radius=12,
+            selected_color="#3468e8",
+            selected_hover_color="#2d5cd0",
+            unselected_color="#1d2635",
+            unselected_hover_color="#27364b",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._show_public_data_source,
+        )
+        self.public_data_source_switch.grid(row=0, column=0, pady=(0, 14), sticky="ew")
 
         control_card = ctk.CTkFrame(
             body,
@@ -19901,7 +20325,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#314761",
         )
-        control_card.grid(row=0, column=0, sticky="ew")
+        control_card.grid(row=1, column=0, sticky="ew")
         control_card.grid_columnconfigure(1, weight=1)
         control_card.grid_columnconfigure(3, weight=1)
 
@@ -20024,7 +20448,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color=table_palette["border"],
         )
-        table_card.grid(row=1, column=0, pady=(16, 0), sticky="nsew")
+        table_card.grid(row=2, column=0, pady=(16, 0), sticky="nsew")
         table_card.grid_columnconfigure(0, weight=1)
 
         self.public_data_table_card = table_card
@@ -20046,6 +20470,479 @@ class KeywordApp(ctk.CTk):
         self.public_data_result_frame.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self.public_data_result_frame.grid_columnconfigure(0, weight=1)
         self._render_public_data_events([])
+        self.public_data_api_widgets = [control_card, table_card]
+        self._build_visitkorea_festival_panel(body)
+        self.public_data_source_switch.set("구석구석 축제")
+        self._show_public_data_source("구석구석 축제")
+
+    def _show_public_data_source(self, source: str) -> None:
+        show_festivals = source == "구석구석 축제"
+        if hasattr(self, "festival_panel"):
+            if show_festivals:
+                self.festival_panel.grid()
+            else:
+                self.festival_panel.grid_remove()
+        for widget in getattr(self, "public_data_api_widgets", []):
+            if show_festivals:
+                widget.grid_remove()
+            else:
+                widget.grid()
+
+    def _build_visitkorea_festival_panel(self, parent) -> None:
+        panel = ctk.CTkFrame(parent, fg_color="transparent")
+        panel.grid(row=1, column=0, sticky="nsew")
+        panel.grid_columnconfigure(0, weight=1)
+        self.festival_panel = panel
+
+        filter_card = ctk.CTkFrame(
+            panel,
+            fg_color="#1d2635",
+            corner_radius=22,
+            border_width=1,
+            border_color="#314761",
+        )
+        filter_card.grid(row=0, column=0, sticky="ew")
+        filter_card.grid_columnconfigure((0, 1, 2), weight=1)
+
+        ctk.CTkLabel(
+            filter_card,
+            text="대한민국 구석구석 전국축제",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=3, padx=18, pady=(18, 4), sticky="ew")
+        ctk.CTkLabel(
+            filter_card,
+            text="사이트의 시기·지역·카테고리를 Playwright로 그대로 읽어와 검색합니다. API 키가 필요하지 않습니다.",
+            text_color="#aab7c8",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=3, padx=18, pady=(0, 12), sticky="ew")
+
+        self.festival_period_menu = self._festival_filter_menu(filter_card, 2, 0, "시기")
+        self.festival_region_menu = self._festival_filter_menu(filter_card, 2, 1, "지역")
+        self.festival_category_menu = self._festival_filter_menu(filter_card, 2, 2, "카테고리")
+
+        action_row = ctk.CTkFrame(filter_card, fg_color="transparent")
+        action_row.grid(row=3, column=0, columnspan=3, padx=18, pady=(14, 18), sticky="ew")
+        action_row.grid_columnconfigure(0, weight=1)
+        self.festival_status_label = ctk.CTkLabel(
+            action_row,
+            text="검색조건을 선택한 뒤 축제 목록을 가져오세요.",
+            text_color="#aab7c8",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+            wraplength=560,
+            justify="left",
+        )
+        self.festival_status_label.grid(row=0, column=0, sticky="ew")
+        self.festival_refresh_button = ctk.CTkButton(
+            action_row,
+            text="필터 새로고침",
+            width=120,
+            height=38,
+            corner_radius=12,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._reset_and_fetch_visitkorea_filters,
+        )
+        self.festival_refresh_button.grid(row=0, column=1, padx=(12, 8))
+        self.festival_fetch_button = ctk.CTkButton(
+            action_row,
+            text="축제 검색",
+            width=120,
+            height=38,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._fetch_visitkorea_festivals,
+        )
+        self.festival_fetch_button.grid(row=0, column=2)
+
+        table_palette = self._public_data_table_palette()
+        table_card = ctk.CTkFrame(
+            panel,
+            fg_color=table_palette["table_fg"],
+            corner_radius=22,
+            border_width=1,
+            border_color=table_palette["border"],
+        )
+        table_card.grid(row=1, column=0, pady=(16, 0), sticky="nsew")
+        table_card.grid_columnconfigure(0, weight=1)
+
+        history_row = ctk.CTkFrame(table_card, fg_color="transparent")
+        history_row.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
+        history_row.grid_columnconfigure(0, weight=1)
+        self.festival_history_label = ctk.CTkLabel(
+            history_row,
+            text="등록 이력 0건",
+            text_color="#aab7c8",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.festival_history_label.grid(row=0, column=0, sticky="w")
+        ctk.CTkCheckBox(
+            history_row,
+            text="등록 완료 축제 숨기기",
+            variable=self.hide_published_festivals_var,
+            command=lambda: self._render_visitkorea_festivals(self.festival_events),
+            font=ctk.CTkFont(size=13),
+        ).grid(row=0, column=1, padx=(12, 0), sticky="e")
+
+        header_row = ctk.CTkFrame(table_card, fg_color=table_palette["header_fg"], corner_radius=14)
+        header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        self._configure_festival_table_columns(header_row)
+        for col, text in enumerate(("선택", "상태", "축제명", "기간", "지역")):
+            ctk.CTkLabel(
+                header_row,
+                text=text,
+                text_color=table_palette["text"],
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+
+        self.festival_result_frame = ctk.CTkScrollableFrame(table_card, fg_color="transparent", height=390)
+        self.festival_result_frame.grid(row=2, column=0, padx=16, pady=(0, 10), sticky="nsew")
+        self.festival_result_frame.grid_columnconfigure(0, weight=1)
+
+        apply_row = ctk.CTkFrame(table_card, fg_color="transparent")
+        apply_row.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="ew")
+        apply_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            apply_row,
+            text="선택 후 상세정보와 여러 포털 참고자료까지 수집합니다.",
+            text_color=table_palette["subtext"],
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        self.festival_apply_button = ctk.CTkButton(
+            apply_row,
+            text="상세 수집 후 글쓰기에 반영",
+            width=210,
+            height=40,
+            corner_radius=12,
+            fg_color="#19a957",
+            hover_color="#168f4b",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._collect_selected_festival_detail,
+        )
+        self.festival_apply_button.grid(row=0, column=1, padx=(12, 0), sticky="e")
+
+        self._set_festival_filter_options(self.festival_state.get("filter_options") or {})
+        self._render_visitkorea_festivals(self.festival_events)
+
+    def _festival_filter_menu(self, parent, row: int, column: int, label: str):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid(row=row, column=column, padx=(18 if column == 0 else 7, 18 if column == 2 else 7), sticky="ew")
+        frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            frame,
+            text=label,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, pady=(0, 5), sticky="ew")
+        menu = ctk.CTkOptionMenu(
+            frame,
+            values=["전체"],
+            height=38,
+            corner_radius=12,
+            fg_color="#111826",
+            button_color="#111826",
+            button_hover_color="#1d2940",
+            dropdown_fg_color="#273142",
+            dropdown_hover_color="#3468e8",
+        )
+        menu.grid(row=1, column=0, sticky="ew")
+        return menu
+
+    def _configure_festival_table_columns(self, frame) -> None:
+        for col, (weight, minsize) in enumerate(((0, 45), (1, 90), (4, 0), (2, 0), (2, 0))):
+            frame.grid_columnconfigure(col, weight=weight, minsize=minsize)
+
+    def _set_festival_filter_options(self, options: dict) -> None:
+        filters = self.festival_state.get("filters") or {}
+        specs = (
+            ("period", getattr(self, "festival_period_menu", None)),
+            ("region", getattr(self, "festival_region_menu", None)),
+            ("category", getattr(self, "festival_category_menu", None)),
+        )
+        for key, menu in specs:
+            raw_options = options.get(key) or []
+            label_to_value: dict[str, str] = {"전체": ""}
+            for item in raw_options:
+                if not isinstance(item, dict):
+                    continue
+                value = str(item.get("value") or "")
+                label = re.sub(r"\s+", " ", str(item.get("label") or "")).strip()
+                if not value:
+                    label = "전체"
+                if label:
+                    label_to_value[label] = value
+            self.festival_filter_value_maps[key] = label_to_value
+            if menu is None:
+                continue
+            labels = list(label_to_value) or ["전체"]
+            menu.configure(values=labels)
+            saved_value = str(filters.get(key) or "")
+            selected_label = next((label for label, value in label_to_value.items() if value == saved_value), "전체")
+            menu.set(selected_label)
+
+    def _reset_and_fetch_visitkorea_filters(self) -> None:
+        for menu_name in ("festival_period_menu", "festival_region_menu", "festival_category_menu"):
+            menu = getattr(self, menu_name, None)
+            if menu is not None:
+                menu.set("전체")
+        self._fetch_visitkorea_festivals()
+
+    def _festival_filter_value(self, key: str, menu) -> str:
+        return str(self.festival_filter_value_maps.get(key, {}).get(menu.get(), ""))
+
+    def _fetch_visitkorea_festivals(self) -> None:
+        if self.festival_worker and self.festival_worker.is_alive():
+            messagebox.showinfo("진행 중", "대한민국 구석구석 축제 목록을 가져오는 중입니다.")
+            return
+        period = self._festival_filter_value("period", self.festival_period_menu)
+        region = self._festival_filter_value("region", self.festival_region_menu)
+        category = self._festival_filter_value("category", self.festival_category_menu)
+        self.festival_state["filters"] = {"period": period, "region": region, "category": category}
+        self.festival_store.save(self.festival_state)
+        self.festival_fetch_button.configure(state="disabled", text="검색 중...")
+        self.festival_refresh_button.configure(state="disabled")
+        self.festival_status_label.configure(
+            text="Playwright로 대한민국 구석구석 축제 목록을 확인하고 있습니다.",
+            text_color="#6dadff",
+        )
+        self.festival_worker = VisitKoreaFestivalListWorker(
+            period=period,
+            region=region,
+            category=category,
+            published_history=self.festival_state.get("published") or {},
+            result_queue=self.result_queue,
+        )
+        self.festival_worker.start()
+
+    def _render_visitkorea_festivals(self, events: list[dict]) -> None:
+        if not hasattr(self, "festival_result_frame"):
+            return
+        for child in self.festival_result_frame.winfo_children():
+            child.destroy()
+        history = self.festival_state.get("published") or {}
+        normalized: list[dict] = []
+        for event in events or []:
+            event = dict(event)
+            festival_id = str(event.get("festival_id") or visitkorea_festival_id(event.get("detail_url", "")))
+            record = history.get(festival_id, {})
+            event["festival_id"] = festival_id
+            event["published"] = bool(record)
+            event["published_at"] = str(record.get("published_at") or event.get("published_at") or "")
+            event["published_urls"] = list(record.get("published_urls") or event.get("published_urls") or [])
+            normalized.append(event)
+        self.festival_events = normalized
+        self.festival_state["events"] = normalized
+        self.festival_history_label.configure(text=f"등록 이력 {len(history)}건")
+
+        visible_events = [
+            event for event in normalized
+            if not (self.hide_published_festivals_var.get() and event.get("published"))
+        ]
+        if not visible_events:
+            palette = self._public_data_table_palette()
+            empty = ctk.CTkFrame(self.festival_result_frame, fg_color=palette["empty_fg"], corner_radius=16)
+            empty.grid(row=0, column=0, padx=8, pady=10, sticky="ew")
+            message = (
+                "조건에 맞는 미등록 축제가 없습니다. '등록 완료 축제 숨기기'를 끄면 이력까지 볼 수 있습니다."
+                if normalized
+                else "조회된 축제가 없습니다. 검색조건을 바꿔 다시 시도해 주세요."
+            )
+            ctk.CTkLabel(
+                empty,
+                text=message,
+                text_color=palette["subtext"],
+                font=ctk.CTkFont(size=14),
+                wraplength=760,
+                justify="left",
+            ).grid(row=0, column=0, padx=18, pady=18, sticky="w")
+            return
+
+        selected_id = self.selected_festival_var.get()
+        selectable_ids = [str(event.get("festival_id") or "") for event in visible_events if not event.get("published")]
+        if selected_id not in selectable_ids:
+            self.selected_festival_var.set(selectable_ids[0] if selectable_ids else "")
+        palette = self._public_data_table_palette()
+        for row, event in enumerate(visible_events):
+            festival_id = str(event.get("festival_id") or "")
+            published = bool(event.get("published"))
+            row_frame = ctk.CTkFrame(
+                self.festival_result_frame,
+                fg_color=palette["row_odd"] if row % 2 == 0 else palette["row_even"],
+                corner_radius=14,
+            )
+            row_frame.grid(row=row, column=0, padx=8, pady=(0, 8), sticky="ew")
+            self._configure_festival_table_columns(row_frame)
+            ctk.CTkRadioButton(
+                row_frame,
+                text="",
+                value=festival_id,
+                variable=self.selected_festival_var,
+                state="disabled" if published else "normal",
+                command=self._save_festival_selection,
+                width=22,
+                radiobutton_width=18,
+                radiobutton_height=18,
+                fg_color="#3468e8",
+                hover_color="#2d5cd0",
+            ).grid(row=0, column=0, padx=(10, 4), pady=12, sticky="w")
+            status_text = "등록 완료" if published else "미등록"
+            if published and event.get("published_at"):
+                status_text += f"\n{str(event['published_at'])[:10]}"
+            values = (
+                status_text,
+                str(event.get("title") or ""),
+                str(event.get("schedule") or "-"),
+                str(event.get("area") or "-"),
+            )
+            for col, value in enumerate(values, start=1):
+                ctk.CTkLabel(
+                    row_frame,
+                    text=value,
+                    text_color=("#48d980" if published and col == 1 else palette["text"] if col == 2 else palette["muted"]),
+                    font=ctk.CTkFont(size=13, weight="bold" if col in (1, 2) else "normal"),
+                    anchor="w",
+                    justify="left",
+                    wraplength=300 if col == 2 else 180,
+                ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+
+    def _save_festival_selection(self) -> None:
+        self.festival_state["selected_id"] = self.selected_festival_var.get()
+        self.festival_store.save(self.festival_state)
+
+    def _selected_visitkorea_festival(self) -> dict | None:
+        selected_id = self.selected_festival_var.get()
+        for event in self.festival_events:
+            if str(event.get("festival_id") or "") == selected_id:
+                return event
+        return None
+
+    def _collect_selected_festival_detail(self) -> None:
+        if self.festival_detail_worker and self.festival_detail_worker.is_alive():
+            messagebox.showinfo("진행 중", "선택한 축제의 상세정보와 포털 자료를 수집하고 있습니다.")
+            return
+        event = self._selected_visitkorea_festival()
+        if not event:
+            messagebox.showwarning("선택 필요", "글을 작성할 축제를 선택해 주세요.")
+            return
+        festival_id = str(event.get("festival_id") or "")
+        if festival_id in (self.festival_state.get("published") or {}):
+            messagebox.showwarning("등록 완료 축제", "이미 글을 발행한 축제입니다. 중복 등록을 막기 위해 다시 선택할 수 없습니다.")
+            self._render_visitkorea_festivals(self.festival_events)
+            return
+        self._save_festival_selection()
+        self.festival_apply_button.configure(state="disabled", text="상세·포털 수집 중...")
+        self.festival_fetch_button.configure(state="disabled")
+        self.festival_status_label.configure(
+            text="축제 상세정보를 확인한 뒤 네이버·구글 등 포털 자료를 교차검색합니다.",
+            text_color="#6dadff",
+        )
+        self.festival_detail_worker = VisitKoreaFestivalDetailWorker(event, self.result_queue)
+        self.festival_detail_worker.start()
+
+    def _apply_visitkorea_festival_to_writing(self, event: dict) -> None:
+        title = str(event.get("title") or "축제 정보").strip()
+        reference_text = str(event.get("reference_text") or "").strip()
+        detail_url = str(event.get("detail_url") or "").strip()
+        official_url = str(event.get("official_url") or "").strip()
+        self.festival_state["active"] = dict(event)
+        self.festival_state["selected_id"] = str(event.get("festival_id") or "")
+        updated_events: list[dict] = []
+        for existing in self.festival_events:
+            if str(existing.get("festival_id") or "") == str(event.get("festival_id") or ""):
+                merged = dict(existing)
+                merged.update(event)
+                updated_events.append(merged)
+            else:
+                updated_events.append(existing)
+        self.festival_events = updated_events
+        self.festival_state["events"] = updated_events
+        self.festival_store.save(self.festival_state)
+
+        source_urls = {"대한민국 구석구석": detail_url or VISITKOREA_FESTIVAL_LIST_URL}
+        if official_url:
+            source_urls["축제 공식 홈페이지"] = official_url
+        self.current_keyword = "대한민국 구석구석 축제"
+        self.current_insights = [
+            KeywordInsight(
+                keyword=title,
+                score=94,
+                reasons=["한국관광공사 축제 상세정보", "네이버·구글 등 포털 교차검색 참고자료 포함"],
+                sources=list(source_urls),
+                categories=["축제", str(event.get("area") or "전국")],
+                source_urls=source_urls,
+            )
+        ]
+        self.selected_keyword_var.set(title)
+        self.topic_entry.delete(0, "end")
+        self.topic_entry.insert(0, title)
+        self.manual_keyword_entry.delete(0, "end")
+        self.manual_keyword_entry.insert(0, title)
+        self.reference_textbox.delete("1.0", "end")
+        self.reference_textbox.insert("1.0", reference_text)
+        self._update_reference_count()
+        self.daum_reference_map = {}
+        self.signal_reference_map = {}
+        self.newneek_reference_map = {}
+        self.collected_reference_map = {title: reference_text}
+        self._render_keyword_choices(self.current_insights)
+        self._render_results(self.current_insights)
+
+        poster_path = str(event.get("poster_path") or "").strip()
+        if poster_path and Path(poster_path).exists():
+            stable_poster_path = persist_design_asset(poster_path, "thumbnail-background")
+            self.thumbnail_background_image_path = stable_poster_path
+            self.thumbnail_selected_image_label_text.set(Path(stable_poster_path).name)
+            self.thumbnail_background_mode_menu.set("선택 이미지 사용")
+            self.thumbnail_image_position_menu.set("가운데")
+            self.thumbnail_image_scale_var.set(100)
+            self.thumbnail_image_opacity_var.set(100)
+            self._on_thumbnail_image_adjust_changed()
+
+        self._switch_page("writing")
+        self._reset_writing_section_completion()
+        self._open_writing_section("keyword", complete_previous=True)
+        self.keyword_status_label.configure(text="축제 공식정보와 포털 참고자료를 블로그글쓰기에 반영했습니다.")
+        self._save_ui_state()
+
+    def _mark_festival_published(self, event: dict, published_urls: Iterable[str]) -> dict | None:
+        if not event:
+            return None
+        try:
+            record = self.festival_store.mark_published(
+                self.festival_state,
+                event,
+                published_urls,
+            )
+        except ValueError:
+            return None
+        self.festival_events = list(self.festival_state.get("events") or self.festival_events)
+        if hasattr(self, "festival_result_frame"):
+            self._render_visitkorea_festivals(self.festival_events)
+        return record
+
+    def _mark_active_festival_published(self) -> dict | None:
+        active = dict(self.festival_state.get("active") or {})
+        urls = self._completed_published_post_urls()
+        if not active or not urls:
+            return None
+        active_title = re.sub(r"\s+", "", str(active.get("title") or ""))
+        current_title = re.sub(
+            r"\s+",
+            "",
+            self.article_title_entry.get().strip()
+            or self.generated_article_title
+            or self._selected_or_manual_keyword(),
+        )
+        if active_title and active_title not in current_title and current_title not in active_title:
+            return None
+        return self._mark_festival_published(active, urls)
 
     def _fetch_public_data_events(self) -> None:
         if self.public_data_worker and self.public_data_worker.is_alive():
@@ -27808,6 +28705,7 @@ class KeywordApp(ctk.CTk):
             "target_platforms": list(automation_targets),
             "post_mode": settings.post_mode,
             "status": "대기 중",
+            "festival": dict(self.festival_state.get("active") or {}),
         }
         self._assign_automation_schedule(queue_item)
         self.automation_queue.append(queue_item)
@@ -29289,6 +30187,56 @@ class KeywordApp(ctk.CTk):
                     if hasattr(self, "public_data_status_label"):
                         self.public_data_status_label.configure(text="공공데이터 조회 실패", text_color="#ff6b6b")
                     messagebox.showerror("공공데이터 조회 실패", payload)
+                elif event_type == "festival_progress":
+                    if hasattr(self, "festival_status_label"):
+                        self.festival_status_label.configure(text=str(payload), text_color="#6dadff")
+                elif event_type == "festival_done":
+                    self.festival_worker = None
+                    if hasattr(self, "festival_fetch_button"):
+                        self.festival_fetch_button.configure(state="normal", text="축제 검색")
+                        self.festival_refresh_button.configure(state="normal")
+                    options = dict((payload or {}).get("filter_options") or {})
+                    events = list((payload or {}).get("events") or [])
+                    self.festival_state["filter_options"] = options
+                    self._set_festival_filter_options(options)
+                    self._render_visitkorea_festivals(events)
+                    self.festival_store.save(self.festival_state)
+                    if hasattr(self, "festival_status_label"):
+                        hidden_count = sum(1 for event in events if event.get("published"))
+                        self.festival_status_label.configure(
+                            text=f"축제 {len(events)}개를 불러왔습니다. 등록 완료 {hidden_count}개는 중복 발행이 차단됩니다.",
+                            text_color="#48d980",
+                        )
+                elif event_type == "festival_error":
+                    self.festival_worker = None
+                    if hasattr(self, "festival_fetch_button"):
+                        self.festival_fetch_button.configure(state="normal", text="축제 검색")
+                        self.festival_refresh_button.configure(state="normal")
+                    if hasattr(self, "festival_status_label"):
+                        self.festival_status_label.configure(text="축제 목록 수집 실패", text_color="#ff6b6b")
+                    messagebox.showerror("축제 목록 수집 실패", str(payload))
+                elif event_type == "festival_detail_progress":
+                    if hasattr(self, "festival_status_label"):
+                        self.festival_status_label.configure(text=str(payload), text_color="#6dadff")
+                elif event_type == "festival_detail_done":
+                    self.festival_detail_worker = None
+                    if hasattr(self, "festival_apply_button"):
+                        self.festival_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
+                        self.festival_fetch_button.configure(state="normal")
+                    if hasattr(self, "festival_status_label"):
+                        self.festival_status_label.configure(
+                            text="축제 상세정보와 포털 교차검색 자료 수집을 완료했습니다.",
+                            text_color="#48d980",
+                        )
+                    self._apply_visitkorea_festival_to_writing(dict(payload or {}))
+                elif event_type == "festival_detail_error":
+                    self.festival_detail_worker = None
+                    if hasattr(self, "festival_apply_button"):
+                        self.festival_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
+                        self.festival_fetch_button.configure(state="normal")
+                    if hasattr(self, "festival_status_label"):
+                        self.festival_status_label.configure(text="축제 상세·포털 수집 실패", text_color="#ff6b6b")
+                    messagebox.showerror("축제 상세정보 수집 실패", str(payload))
                 elif event_type == "automation_collect_progress":
                     if hasattr(self, "automation_status_label"):
                         self.automation_status_label.configure(text=payload, text_color="#6dadff")
@@ -30128,6 +31076,11 @@ class KeywordApp(ctk.CTk):
         if success:
             published_url = str(item.get("published_url") or "").strip() if item else ""
             published_urls = dict(item.get("published_urls") or {}) if item else {}
+            if item and item.get("festival") and (published_url or published_urls):
+                self._mark_festival_published(
+                    dict(item.get("festival") or {}),
+                    list(published_urls.values()) or [published_url],
+                )
             remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
             remote_agent = getattr(self, "remote_agent", None)
             if (published_url or published_urls) and remote_agent is not None:
