@@ -106,7 +106,7 @@ class VisitKoreaFestivalTests(unittest.TestCase):
         self.assertEqual(
             link,
             {
-                "button_text": "#수원 국가유산 야행홈페이지 바로가기👆🏻",
+                "button_text": "수원 국가유산 야행홈페이지 바로가기👆🏻",
                 "url": "https://www.swcf.or.kr/",
                 "width": "",
                 "full_width": True,
@@ -132,7 +132,7 @@ class VisitKoreaFestivalTests(unittest.TestCase):
         app = SimpleNamespace(
             link_rows=[
                 {
-                    "button_entry": value("#축제홈페이지 바로가기👆🏻"),
+                    "button_entry": value("축제홈페이지 바로가기👆🏻"),
                     "url_entry": value("https://festival.example.com"),
                     "width_entry": value(""),
                     "full_width_var": full_width,

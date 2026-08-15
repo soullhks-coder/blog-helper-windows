@@ -380,7 +380,7 @@ def build_festival_official_link(event: dict) -> dict | None:
     if not title or not official_url:
         return None
     return {
-        "button_text": f"#{title}홈페이지 바로가기👆🏻",
+        "button_text": f"{title}홈페이지 바로가기👆🏻",
         "url": official_url,
         "width": "",
         "full_width": True,
