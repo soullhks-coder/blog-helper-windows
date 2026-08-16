@@ -143,6 +143,7 @@ DESIGN_ASSET_DIR = DATA_DIR / "Design Assets"
 STATE_FILE = DATA_DIR / "app_state.json"
 FESTIVAL_STATE_FILE = DATA_DIR / "visitkorea_festival_state.json"
 FESTIVAL_POSTER_DIR = DATA_DIR / "Festival Posters"
+WELFARE_STATE_FILE = DATA_DIR / "bokjiro_welfare_state.json"
 DESKTOP_DIR = Path.home() / "Desktop"
 PROMPT_DIR = DESKTOP_DIR / "BlogHelper 프롬프트"
 PROMPT_STORAGE_DIR = DATA_DIR / "Prompts"
@@ -363,6 +364,13 @@ CARDNEWS_BORDER_COLOR_PALETTE = [
 LINK_POSITION_OPTIONS = ["본문상단", "본문중간", "본문하단"]
 VISITKOREA_FESTIVAL_LIST_URL = "https://korean.visitkorea.or.kr/kfes/list/wntyFstvlList.do"
 VISITKOREA_FESTIVAL_BASE_URL = "https://korean.visitkorea.or.kr"
+BOKJIRO_WELFARE_LIST_URL = "https://www.bokjiro.go.kr/ssis-tbu/twataa/wlfareInfo/moveTWAT52005M.do"
+BOKJIRO_WELFARE_DETAIL_BASE_URL = (
+    "https://www.bokjiro.go.kr/ssis-tbu/twataa/wlfareInfo/moveTWAT52011M.do"
+)
+BOKJIRO_WELFARE_PRIVATE_DETAIL_BASE_URL = (
+    "https://www.bokjiro.go.kr/ssis-tbu/twataa/wlfareInfo/moveTWAT52015M.do"
+)
 
 
 def visitkorea_festival_id(url: str) -> str:
@@ -425,7 +433,20 @@ class FestivalStateStore:
                 state[key] = payload[key]
         return state
 
-    def save(self, state: dict) -> None:
+    def _read_payload(self) -> dict:
+        if not self.path.exists():
+            return {}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def save(self, state: dict, preserve_published: bool = True) -> None:
+        if preserve_published:
+            disk_history = dict(self._read_payload().get("published") or {})
+            disk_history.update(dict(state.get("published") or {}))
+            state["published"] = disk_history
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary_path.write_text(
@@ -433,6 +454,16 @@ class FestivalStateStore:
             encoding="utf-8",
         )
         temporary_path.replace(self.path)
+
+    def clear_published(self, state: dict) -> None:
+        state["published"] = {}
+        state["active"] = {}
+        for event in state.get("events") or []:
+            if isinstance(event, dict):
+                event["published"] = False
+                event["published_at"] = ""
+                event["published_urls"] = []
+        self.save(state, preserve_published=False)
 
     def mark_published(
         self,
@@ -468,6 +499,106 @@ class FestivalStateStore:
             state["active"] = {}
         self.save(state)
         return record
+
+
+class WelfareStateStore:
+    """Persist Bokjiro filters, cached policies, and confirmed publish history."""
+
+    def __init__(self, path: Path = WELFARE_STATE_FILE) -> None:
+        self.path = Path(path)
+
+    @staticmethod
+    def empty_state() -> dict:
+        return {
+            "filters": {
+                "provider": "중앙부처",
+                "lifecycle": "전체",
+                "household": "전체",
+                "interest": "전체",
+                "keyword": "",
+                "excluded_keyword": "",
+                "age": "",
+            },
+            "events": [],
+            "selected_id": "",
+            "published": {},
+            "active": {},
+        }
+
+    def _read_payload(self) -> dict:
+        if not self.path.exists():
+            return {}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def load(self) -> dict:
+        state = self.empty_state()
+        payload = self._read_payload()
+        for key in state:
+            if key in payload and isinstance(payload[key], type(state[key])):
+                state[key] = payload[key]
+        return state
+
+    def save(self, state: dict, preserve_published: bool = True) -> None:
+        if preserve_published:
+            disk_history = dict(self._read_payload().get("published") or {})
+            disk_history.update(dict(state.get("published") or {}))
+            state["published"] = disk_history
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self.path)
+
+    def mark_published(
+        self,
+        state: dict,
+        event: dict,
+        published_urls: Iterable[str],
+        published_at: str = "",
+    ) -> dict:
+        welfare_id = str(event.get("welfare_id") or "").strip()
+        if not welfare_id:
+            raise ValueError("복지정책 고유 ID가 없어 등록 이력을 저장할 수 없습니다.")
+        published = state.setdefault("published", {})
+        active_id = str((state.get("active") or {}).get("welfare_id") or "").strip()
+        if welfare_id in published:
+            if active_id == welfare_id:
+                state["active"] = {}
+            self.save(state)
+            return dict(published[welfare_id])
+        urls = [
+            str(url).strip()
+            for url in published_urls
+            if str(url).strip().startswith(("http://", "https://"))
+        ]
+        record = {
+            "welfare_id": welfare_id,
+            "title": str(event.get("title") or "").strip(),
+            "detail_url": str(event.get("detail_url") or "").strip(),
+            "published_at": published_at or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "published_urls": list(dict.fromkeys(urls)),
+        }
+        published[welfare_id] = record
+        if active_id == welfare_id:
+            state["active"] = {}
+        self.save(state)
+        return record
+
+    def clear_published(self, state: dict) -> None:
+        state["published"] = {}
+        state["active"] = {}
+        for event in state.get("events") or []:
+            if isinstance(event, dict):
+                event["published"] = False
+                event["published_at"] = ""
+                event["published_urls"] = []
+        self.save(state, preserve_published=False)
 
 
 def find_google_chrome_executable() -> Path | None:
@@ -12990,6 +13121,357 @@ class VisitKoreaFestivalDetailWorker(threading.Thread):
         return "\n".join(lines).strip()
 
 
+class BokjiroWelfareListWorker(threading.Thread):
+    """Scrape Bokjiro policy rows while preserving the site's own filter data."""
+
+    PROVIDER_DATASETS = {
+        "전체": "dsServiceList0",
+        "중앙부처": "dsServiceList1",
+        "지자체": "dsServiceList2",
+        "민간": "dsServiceList3",
+    }
+
+    def __init__(self, filters: dict, published_history: dict, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.filters = dict(filters or {})
+        self.published_history = dict(published_history or {})
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            self.result_queue.put(("welfare_progress", "복지로의 복지서비스 목록을 확인하고 있습니다..."))
+            self.result_queue.put(("welfare_done", self._crawl()))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("welfare_error", str(exc)))
+
+    def _crawl(self) -> dict:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright가 설치되어 있지 않아 복지정책을 가져올 수 없습니다.") from exc
+
+        responses: list[dict] = []
+        chrome_path = require_google_chrome_executable()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(chrome_path),
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--window-size=1100,800",
+                ],
+            )
+            try:
+                page = browser.new_page(locale="ko-KR")
+                page.set_default_timeout(8_000)
+                page.set_default_navigation_timeout(45_000)
+
+                def capture_response(response) -> None:
+                    if "selectWlfareInfo.do" not in response.url:
+                        return
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        return
+                    if isinstance(payload, dict):
+                        responses.append(payload)
+
+                page.on("response", capture_response)
+                page.goto(BOKJIRO_WELFARE_LIST_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(2_000)
+                self._apply_visible_filters(page)
+                page.wait_for_timeout(2_500)
+            finally:
+                browser.close()
+
+        if not responses:
+            raise RuntimeError("복지로가 정책 목록 데이터를 반환하지 않았습니다. 잠시 후 다시 시도해 주세요.")
+        payload = responses[-1]
+        dataset_name = self.PROVIDER_DATASETS.get(str(self.filters.get("provider") or "중앙부처"), "dsServiceList1")
+        rows = payload.get(dataset_name) or []
+        if not rows:
+            rows = max(
+                (payload.get(name) or [] for name in self.PROVIDER_DATASETS.values()),
+                key=len,
+                default=[],
+            )
+        return {"events": self._normalize_rows(rows)}
+
+    def _apply_visible_filters(self, page) -> None:
+        for key in ("provider", "lifecycle", "household", "interest"):
+            value = str(self.filters.get(key) or "").strip()
+            if not value or value == "전체":
+                continue
+            locator = page.get_by_text(value, exact=True)
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible():
+                        candidate.click(force=True)
+                        page.wait_for_timeout(250)
+                        break
+                except Exception:
+                    continue
+        for aria, value in (
+            ("나이를 입력해주세요.", self.filters.get("age")),
+            ("검색어", self.filters.get("keyword")),
+            ("제외 검색어", self.filters.get("excluded_keyword")),
+        ):
+            value = str(value or "").strip()
+            if not value:
+                continue
+            locator = page.get_by_role("textbox", name=aria, exact=True)
+            if locator.count():
+                try:
+                    locator.first.fill(value)
+                except Exception:
+                    pass
+        search = page.get_by_role("button", name="검색", exact=True)
+        if search.count():
+            try:
+                search.last.click(force=True)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _metadata(value: object) -> dict[str, str]:
+        metadata: dict[str, str] = {}
+        for item in str(value or "").split(";"):
+            if ":" not in item:
+                continue
+            key, raw_value = item.split(":", 1)
+            metadata[key.strip()] = raw_value.strip()
+        return metadata
+
+    def _normalize_rows(self, rows: list[dict]) -> list[dict]:
+        keyword = re.sub(r"\s+", " ", str(self.filters.get("keyword") or "")).strip().lower()
+        excluded = re.sub(r"\s+", " ", str(self.filters.get("excluded_keyword") or "")).strip().lower()
+        lifecycle = str(self.filters.get("lifecycle") or "전체").replace(" ", "")
+        household = str(self.filters.get("household") or "전체").replace(" ", "")
+        interest = str(self.filters.get("interest") or "전체").replace(" ", "")
+        normalized: list[dict] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            welfare_id = str(row.get("WLFARE_INFO_ID") or "").strip()
+            title = re.sub(r"\s+", " ", str(row.get("WLFARE_INFO_NM") or "")).strip()
+            summary = re.sub(r"\s+", " ", str(row.get("WLFARE_INFO_OUTL_CN") or "")).strip()
+            if not welfare_id or not title or welfare_id in seen:
+                continue
+            metadata = self._metadata(row.get("RETURN_STR"))
+            searchable = f"{title} {summary} {row.get('BIZ_CHR_INST_NM') or ''}".lower()
+            if keyword and keyword not in searchable:
+                continue
+            if excluded and excluded in searchable:
+                continue
+            lifecycle_value = str(metadata.get("BKJR_LFTM_CYC_CD") or "").replace(" ", "")
+            household_value = str(metadata.get("FMLY_CIRC_CD") or "").replace(" ", "")
+            interest_value = str(metadata.get("INTRS_THEMA_CD") or "").replace(" ", "")
+            if lifecycle != "전체" and lifecycle not in lifecycle_value:
+                continue
+            if household != "전체" and household not in household_value:
+                continue
+            if interest != "전체" and interest not in interest_value:
+                continue
+            seen.add(welfare_id)
+            history = self.published_history.get(welfare_id, {})
+            target_kind = str(row.get("WLFARE_GDNC_TRGT_KCD") or "").strip()
+            detail_base_url = (
+                BOKJIRO_WELFARE_PRIVATE_DETAIL_BASE_URL
+                if target_kind == "03"
+                else BOKJIRO_WELFARE_DETAIL_BASE_URL
+            )
+            normalized.append(
+                {
+                    "welfare_id": welfare_id,
+                    "title": title,
+                    "summary": summary,
+                    "institution": re.sub(r"\s+", " ", str(row.get("BIZ_CHR_INST_NM") or "")).strip(),
+                    "lifecycle": lifecycle_value.replace(",", ", "),
+                    "household": household_value.replace(",", ", "),
+                    "interest": interest_value.replace(",", ", "),
+                    "phone": str(row.get("RPRS_CTADR") or "").strip(),
+                    "target_kind": target_kind,
+                    "detail_url": f"{detail_base_url}?wlfareInfoId={quote_plus(welfare_id)}",
+                    "published": bool(history),
+                    "published_at": str(history.get("published_at") or ""),
+                    "published_urls": list(history.get("published_urls") or []),
+                }
+            )
+        return normalized[:60]
+
+
+class BokjiroWelfareDetailWorker(threading.Thread):
+    """Collect one Bokjiro policy detail and supporting portal references."""
+
+    SECTION_NAMES = (
+        "지원대상",
+        "선정기준",
+        "서비스 내용",
+        "신청방법",
+        "추가정보",
+        "문의",
+    )
+
+    def __init__(self, event: dict, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.event = dict(event)
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            self.result_queue.put(("welfare_detail_progress", "선택한 복지정책의 지원대상·혜택·신청방법을 확인하고 있습니다..."))
+            event = self._crawl_detail()
+            self.result_queue.put(("welfare_detail_progress", f"'{event.get('title', '')}' 관련 최신 참고자료를 교차검색합니다..."))
+            portal_reference = self._collect_portal_reference(event)
+            event["reference_text"] = self._build_reference_text(event, portal_reference)
+            self.result_queue.put(("welfare_detail_done", event))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("welfare_detail_error", str(exc)))
+
+    def _crawl_detail(self) -> dict:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright가 설치되어 있지 않아 복지정책 상세정보를 가져올 수 없습니다.") from exc
+        detail_url = str(self.event.get("detail_url") or "").strip()
+        if not detail_url:
+            raise RuntimeError("선택한 복지정책의 상세 페이지 주소가 없습니다.")
+        chrome_path = require_google_chrome_executable()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(chrome_path),
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--window-size=1100,800",
+                ],
+            )
+            try:
+                page = browser.new_page(locale="ko-KR")
+                page.set_default_timeout(15_000)
+                page.set_default_navigation_timeout(45_000)
+                page.goto(detail_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(2_000)
+                section_data: dict[str, str] = {}
+                for tab_name in ("지원대상", "서비스 내용", "신청방법", "추가정보"):
+                    tab = page.get_by_text(tab_name, exact=True)
+                    if tab.count():
+                        try:
+                            tab.first.click(force=True)
+                            page.wait_for_timeout(650)
+                        except Exception:
+                            pass
+                    section_data.update(self._extract_sections(page.locator("body").inner_text()))
+                links = page.locator("a[href]").evaluate_all(
+                    "elements => elements.map(a => ({text: (a.textContent || '').replace(/\\s+/g, ' ').trim(), href: a.href || ''}))"
+                )
+            finally:
+                browser.close()
+        event = dict(self.event)
+        event.update(section_data)
+        useful_links = [
+            item for item in links or []
+            if str(item.get("href") or "").startswith(("http://", "https://"))
+        ]
+        application = next(
+            (item for item in useful_links if any(word in str(item.get("text") or "") for word in ("온라인 신청", "신청하기", "홈페이지"))),
+            {},
+        )
+        event["application_url"] = str(application.get("href") or "").strip()
+        return event
+
+    def _extract_sections(self, body_text: str) -> dict:
+        lines = [re.sub(r"\s+", " ", line).strip() for line in str(body_text or "").splitlines()]
+        lines = [line for line in lines if line]
+        result: dict[str, str] = {}
+        mapping = {
+            "지원대상": "eligibility",
+            "선정기준": "criteria",
+            "서비스 내용": "benefits",
+            "신청방법": "application_method",
+            "추가정보": "additional_info",
+            "문의": "contact",
+        }
+        normalized_headers = {re.sub(r"\s+", "", name): name for name in self.SECTION_NAMES}
+        header_indexes: list[tuple[int, str]] = []
+        for index, line in enumerate(lines):
+            compact = re.sub(r"\s+", "", line)
+            if compact in normalized_headers:
+                header_indexes.append((index, normalized_headers[compact]))
+        for position, (start, header) in enumerate(header_indexes):
+            end = header_indexes[position + 1][0] if position + 1 < len(header_indexes) else min(len(lines), start + 45)
+            content_lines = lines[start + 1:end]
+            for marker in (
+                "현재 페이지의 메뉴가 명확하게 구분되어 있습니까?",
+                "현재 페이지의 오류와 개선점이 있으면 의견을 주시기 바랍니다.",
+            ):
+                if marker in content_lines:
+                    content_lines = content_lines[:content_lines.index(marker)]
+            content = "\n".join(content_lines).strip()
+            if re.fullmatch(r"(?:지원대상|서비스\s*내용|신청방법|추가정보)\s*선택됨", content):
+                continue
+            if content:
+                result[mapping[header]] = content[:5000]
+        return result
+
+    def _collect_portal_reference(self, event: dict) -> str:
+        title = str(event.get("title") or "").strip()
+        if not title:
+            return ""
+        helper = SignalKeywordWorker(queue.Queue())
+        worker = ReferenceCollectionWorker(title, queue.Queue(), source_url=str(event.get("detail_url") or BOKJIRO_WELFARE_LIST_URL))
+        facts: list[dict] = []
+        for fetcher in (
+            lambda: worker._fetch_playwright_facts(helper),
+            lambda: worker._fetch_naver_web_facts(helper),
+            lambda: helper._fetch_naver_news_facts(title),
+            lambda: helper._fetch_google_news_facts(title),
+        ):
+            try:
+                facts = helper._merge_articles(facts, fetcher())
+            except Exception:
+                continue
+        exact = [fact for fact in facts if worker._contains_keyword(helper, fact)]
+        useful = exact or facts
+        return worker._build_reference_text(helper, useful[:8]) if useful else ""
+
+    def _build_reference_text(self, event: dict, portal_reference: str) -> str:
+        lines = [
+            "[복지로 공식 복지정책 정보]",
+            f"정책명: {event.get('title') or '정보 없음'}",
+            f"한줄 소개: {event.get('summary') or '정보 없음'}",
+            f"담당기관: {event.get('institution') or '정보 없음'}",
+            f"생애주기: {event.get('lifecycle') or '정보 없음'}",
+            f"가구상황: {event.get('household') or '정보 없음'}",
+            f"관심주제: {event.get('interest') or '정보 없음'}",
+            f"지원대상: {event.get('eligibility') or '정보 없음'}",
+            f"선정기준: {event.get('criteria') or '정보 없음'}",
+            f"서비스 내용: {event.get('benefits') or '정보 없음'}",
+            f"신청방법: {event.get('application_method') or '정보 없음'}",
+            f"추가정보: {event.get('additional_info') or '정보 없음'}",
+            f"문의: {event.get('contact') or event.get('phone') or '정보 없음'}",
+            f"온라인 신청/공식 홈페이지: {event.get('application_url') or '정보 없음'}",
+            f"복지로 상세 출처: {event.get('detail_url') or '정보 없음'}",
+        ]
+        if portal_reference:
+            lines.extend(["", "[여러 포털 교차검색 참고자료]", portal_reference])
+        lines.extend(
+            [
+                "",
+                "작성 지침: 지원대상·소득기준·지원금액·신청기간을 추측하지 말고 위 공식 내용을 우선하세요. 제도 변경 가능성이 있으므로 신청 전 복지로 또는 담당기관에서 최신 내용을 확인하도록 안내하세요.",
+            ]
+        )
+        return "\n".join(lines).strip()
+
+
 class PublicDataEventWorker(threading.Thread):
     BASE_ENDPOINTS = [
         ("https://apis.data.go.kr/B553457/cultureinfo", "realm2", "detail2"),
@@ -15001,6 +15483,8 @@ class KeywordApp(ctk.CTk):
         self.public_data_worker: PublicDataEventWorker | None = None
         self.festival_worker: VisitKoreaFestivalListWorker | None = None
         self.festival_detail_worker: VisitKoreaFestivalDetailWorker | None = None
+        self.welfare_worker: BokjiroWelfareListWorker | None = None
+        self.welfare_detail_worker: BokjiroWelfareDetailWorker | None = None
         self.automation_keyword_worker: AutomationKeywordQueueWorker | None = None
         self.automation_keyword_discovery_worker: AutomationKeywordDiscoveryWorker | None = None
         self.reference_collection_worker: ReferenceCollectionWorker | None = None
@@ -15026,6 +15510,9 @@ class KeywordApp(ctk.CTk):
         self.festival_store = FestivalStateStore()
         self.festival_state = self.festival_store.load()
         self.festival_events: list[dict] = list(self.festival_state.get("events") or [])
+        self.welfare_store = WelfareStateStore()
+        self.welfare_state = self.welfare_store.load()
+        self.welfare_events: list[dict] = list(self.welfare_state.get("events") or [])
         self.festival_filter_value_maps: dict[str, dict[str, str]] = {
             "period": {},
             "region": {},
@@ -15041,6 +15528,8 @@ class KeywordApp(ctk.CTk):
         self.selected_public_event_var = ctk.StringVar(value=self.wordpress_settings.public_data_selected_seq)
         self.selected_festival_var = ctk.StringVar(value=str(self.festival_state.get("selected_id") or ""))
         self.hide_published_festivals_var = tk.BooleanVar(value=True)
+        self.selected_welfare_var = ctk.StringVar(value=str(self.welfare_state.get("selected_id") or ""))
+        self.hide_published_welfare_var = tk.BooleanVar(value=True)
         saved_festival_link_positions = self.festival_state.get("link_positions")
         if not isinstance(saved_festival_link_positions, list):
             saved_festival_link_positions = list(LINK_POSITION_OPTIONS)
@@ -15436,6 +15925,7 @@ class KeywordApp(ctk.CTk):
             state="complete",
         )
         self._mark_active_festival_published()
+        self._mark_active_welfare_published()
         if self.writing_complete_dialog and self.writing_complete_dialog.winfo_exists():
             try:
                 self.writing_complete_dialog.lift()
@@ -15536,6 +16026,7 @@ class KeywordApp(ctk.CTk):
                 pass
             dialog.destroy()
         self._clear_festival_writing_context()
+        self._clear_welfare_writing_context()
         self._reset_writing_accordion_state()
 
     def _show_reference_collection_complete_dialog(self, keyword: str, count: int) -> None:
@@ -20339,7 +20830,7 @@ class KeywordApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             header,
-            text="대한민국 구석구석 축제 수집과 data.go.kr 공연·행사 데이터를 한곳에서 블로그 글감으로 사용합니다.",
+            text="대한민국 구석구석 축제와 복지로의 복지·정부지원 정책을 수집해 블로그 글감으로 사용합니다.",
             text_color="#a7b3c4",
             font=ctk.CTkFont(size=14),
         )
@@ -20352,7 +20843,7 @@ class KeywordApp(ctk.CTk):
 
         self.public_data_source_switch = ctk.CTkSegmentedButton(
             body,
-            values=["구석구석 축제", "기존 공공 API"],
+            values=["구석구석 축제", "공공 복지"],
             height=42,
             corner_radius=12,
             selected_color="#3468e8",
@@ -20518,21 +21009,25 @@ class KeywordApp(ctk.CTk):
         self._render_public_data_events([])
         self.public_data_api_widgets = [control_card, table_card]
         self._build_visitkorea_festival_panel(body)
+        self._build_bokjiro_welfare_panel(body)
         self.public_data_source_switch.set("구석구석 축제")
         self._show_public_data_source("구석구석 축제")
 
     def _show_public_data_source(self, source: str) -> None:
         show_festivals = source == "구석구석 축제"
+        show_welfare = source == "공공 복지"
         if hasattr(self, "festival_panel"):
             if show_festivals:
                 self.festival_panel.grid()
             else:
                 self.festival_panel.grid_remove()
-        for widget in getattr(self, "public_data_api_widgets", []):
-            if show_festivals:
-                widget.grid_remove()
+        if hasattr(self, "welfare_panel"):
+            if show_welfare:
+                self.welfare_panel.grid()
             else:
-                widget.grid()
+                self.welfare_panel.grid_remove()
+        for widget in getattr(self, "public_data_api_widgets", []):
+            widget.grid_remove()
 
     def _build_visitkorea_festival_panel(self, parent) -> None:
         panel = ctk.CTkFrame(parent, fg_color="transparent")
@@ -20669,6 +21164,18 @@ class KeywordApp(ctk.CTk):
             command=self._collect_selected_festival_detail,
         )
         self.festival_apply_button.grid(row=0, column=2, sticky="e")
+        self.festival_history_reset_button = ctk.CTkButton(
+            history_row,
+            text="등록완료 초기화",
+            width=118,
+            height=40,
+            corner_radius=12,
+            fg_color="#8f3535",
+            hover_color="#a44444",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._reset_festival_published_history,
+        )
+        self.festival_history_reset_button.grid(row=0, column=3, padx=(8, 0), sticky="e")
 
         header_row = ctk.CTkFrame(table_card, fg_color=table_palette["header_fg"], corner_radius=14)
         header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -21030,6 +21537,511 @@ class KeywordApp(ctk.CTk):
         if active_title and active_title not in current_title and current_title not in active_title:
             return None
         return self._mark_festival_published(active, urls)
+
+    def _reset_festival_published_history(self) -> None:
+        history = dict(self.festival_state.get("published") or {})
+        if not history:
+            messagebox.showinfo("초기화할 이력 없음", "저장된 축제 등록완료 이력이 없습니다.")
+            return
+        if not messagebox.askyesno(
+            "축제 등록완료 이력 초기화",
+            f"저장된 축제 등록완료 이력 {len(history)}건을 모두 초기화할까요?\n이 작업은 되돌릴 수 없습니다.",
+        ):
+            return
+        self.festival_store.clear_published(self.festival_state)
+        self.festival_events = list(self.festival_state.get("events") or [])
+        self.selected_festival_var.set("")
+        self._render_visitkorea_festivals(self.festival_events)
+        self.festival_status_label.configure(
+            text="축제 등록완료 이력을 초기화했습니다.",
+            text_color="#48d980",
+        )
+
+    def _build_bokjiro_welfare_panel(self, parent) -> None:
+        panel = ctk.CTkFrame(parent, fg_color="transparent")
+        panel.grid(row=1, column=0, sticky="nsew")
+        panel.grid_columnconfigure(0, weight=1)
+        self.welfare_panel = panel
+
+        filter_card = ctk.CTkFrame(
+            panel,
+            fg_color="#1d2635",
+            corner_radius=22,
+            border_width=1,
+            border_color="#314761",
+        )
+        filter_card.grid(row=0, column=0, sticky="ew")
+        filter_card.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        ctk.CTkLabel(
+            filter_card,
+            text="복지로 복지·정부지원 정책",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=4, padx=18, pady=(18, 4), sticky="ew")
+        ctk.CTkLabel(
+            filter_card,
+            text="복지로의 대상·가구상황·관심주제 필터를 적용해 지원정책을 수집합니다. API 키가 필요하지 않습니다.",
+            text_color="#aab7c8",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=4, padx=18, pady=(0, 12), sticky="ew")
+
+        filters = dict(self.welfare_state.get("filters") or {})
+        self.welfare_provider_menu = self._welfare_filter_menu(
+            filter_card, 2, 0, "제공 주체", ["중앙부처", "지자체", "민간", "전체"], filters.get("provider", "중앙부처")
+        )
+        self.welfare_lifecycle_menu = self._welfare_filter_menu(
+            filter_card, 2, 1, "생애주기",
+            ["전체", "임신·출산", "영유아", "아동", "청소년", "청년", "중장년", "노년"],
+            filters.get("lifecycle", "전체"),
+        )
+        self.welfare_household_menu = self._welfare_filter_menu(
+            filter_card, 2, 2, "가구상황",
+            ["전체", "저소득", "장애인", "한부모·조손", "다자녀", "다문화·탈북민", "보훈대상자"],
+            filters.get("household", "전체"),
+        )
+        self.welfare_interest_menu = self._welfare_filter_menu(
+            filter_card, 2, 3, "관심주제",
+            [
+                "전체", "신체건강", "정신건강", "생활지원", "주거", "일자리", "문화·여가",
+                "안전·위기", "임신·출산", "보육", "교육", "입양·위탁", "보호·돌봄",
+                "서민금융", "법률", "에너지",
+            ],
+            filters.get("interest", "전체"),
+        )
+
+        search_row = ctk.CTkFrame(filter_card, fg_color="transparent")
+        search_row.grid(row=3, column=0, columnspan=4, padx=18, pady=(14, 0), sticky="ew")
+        search_row.grid_columnconfigure((0, 1), weight=2)
+        search_row.grid_columnconfigure(2, weight=1)
+        self.welfare_keyword_entry = ctk.CTkEntry(
+            search_row,
+            height=40,
+            corner_radius=12,
+            fg_color="#111826",
+            border_color="#2d3f59",
+            placeholder_text="검색어 (예: 청년 월세, 기초연금)",
+        )
+        self.welfare_keyword_entry.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.welfare_keyword_entry.insert(0, str(filters.get("keyword") or ""))
+        self.welfare_excluded_entry = ctk.CTkEntry(
+            search_row,
+            height=40,
+            corner_radius=12,
+            fg_color="#111826",
+            border_color="#2d3f59",
+            placeholder_text="제외 검색어",
+        )
+        self.welfare_excluded_entry.grid(row=0, column=1, padx=8, sticky="ew")
+        self.welfare_excluded_entry.insert(0, str(filters.get("excluded_keyword") or ""))
+        self.welfare_age_entry = ctk.CTkEntry(
+            search_row,
+            height=40,
+            corner_radius=12,
+            fg_color="#111826",
+            border_color="#2d3f59",
+            placeholder_text="나이 (선택)",
+        )
+        self.welfare_age_entry.grid(row=0, column=2, padx=(8, 0), sticky="ew")
+        self.welfare_age_entry.insert(0, str(filters.get("age") or ""))
+
+        action_row = ctk.CTkFrame(filter_card, fg_color="transparent")
+        action_row.grid(row=4, column=0, columnspan=4, padx=18, pady=(14, 18), sticky="ew")
+        action_row.grid_columnconfigure(0, weight=1)
+        self.welfare_status_label = ctk.CTkLabel(
+            action_row,
+            text="검색조건을 선택한 뒤 복지정책을 가져오세요.",
+            text_color="#aab7c8",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+            wraplength=660,
+            justify="left",
+        )
+        self.welfare_status_label.grid(row=0, column=0, sticky="ew")
+        self.welfare_fetch_button = ctk.CTkButton(
+            action_row,
+            text="복지정책 검색",
+            width=132,
+            height=40,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._fetch_bokjiro_welfare,
+        )
+        self.welfare_fetch_button.grid(row=0, column=1, padx=(12, 0), sticky="e")
+
+        palette = self._public_data_table_palette()
+        table_card = ctk.CTkFrame(
+            panel,
+            fg_color=palette["table_fg"],
+            corner_radius=22,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        table_card.grid(row=1, column=0, pady=(16, 0), sticky="nsew")
+        table_card.grid_columnconfigure(0, weight=1)
+        history_row = ctk.CTkFrame(table_card, fg_color="transparent")
+        history_row.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
+        history_row.grid_columnconfigure(0, weight=1)
+        self.welfare_history_label = ctk.CTkLabel(
+            history_row,
+            text="등록 이력 0건",
+            text_color="#aab7c8",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.welfare_history_label.grid(row=0, column=0, sticky="w")
+        ctk.CTkCheckBox(
+            history_row,
+            text="등록 완료 정책 숨기기",
+            variable=self.hide_published_welfare_var,
+            command=lambda: self._render_bokjiro_welfare(self.welfare_events),
+            font=ctk.CTkFont(size=13),
+        ).grid(row=0, column=1, padx=(12, 10), sticky="e")
+        self.welfare_apply_button = ctk.CTkButton(
+            history_row,
+            text="상세 수집 후 글쓰기에 반영",
+            width=210,
+            height=40,
+            corner_radius=12,
+            fg_color="#19a957",
+            hover_color="#168f4b",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._collect_selected_welfare_detail,
+        )
+        self.welfare_apply_button.grid(row=0, column=2, sticky="e")
+        ctk.CTkButton(
+            history_row,
+            text="등록완료 초기화",
+            width=118,
+            height=40,
+            corner_radius=12,
+            fg_color="#8f3535",
+            hover_color="#a44444",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._reset_welfare_published_history,
+        ).grid(row=0, column=3, padx=(8, 0), sticky="e")
+
+        header_row = ctk.CTkFrame(table_card, fg_color=palette["header_fg"], corner_radius=14)
+        header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        self._configure_welfare_table_columns(header_row)
+        for col, text_value in enumerate(("선택", "상태", "복지정책명", "담당기관", "관심주제")):
+            ctk.CTkLabel(
+                header_row,
+                text=text_value,
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+        self.welfare_result_frame = ctk.CTkScrollableFrame(table_card, fg_color="transparent", height=390)
+        self.welfare_result_frame.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self.welfare_result_frame.grid_columnconfigure(0, weight=1)
+        self._render_bokjiro_welfare(self.welfare_events)
+
+    def _welfare_filter_menu(self, parent, row: int, column: int, label: str, values: list[str], selected: str):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid(
+            row=row,
+            column=column,
+            padx=(18 if column == 0 else 7, 18 if column == 3 else 7),
+            sticky="ew",
+        )
+        frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(frame, text=label, font=ctk.CTkFont(size=13, weight="bold"), anchor="w").grid(
+            row=0, column=0, pady=(0, 5), sticky="ew"
+        )
+        menu = ctk.CTkOptionMenu(
+            frame,
+            values=values,
+            height=38,
+            corner_radius=12,
+            fg_color="#111826",
+            button_color="#111826",
+            button_hover_color="#1d2940",
+            dropdown_fg_color="#273142",
+            dropdown_hover_color="#3468e8",
+        )
+        menu.grid(row=1, column=0, sticky="ew")
+        menu.set(selected if selected in values else values[0])
+        return menu
+
+    @staticmethod
+    def _configure_welfare_table_columns(frame) -> None:
+        for col, (weight, minsize) in enumerate(((0, 42), (0, 110), (4, 0), (2, 0), (2, 0))):
+            frame.grid_columnconfigure(col, weight=weight, minsize=minsize)
+
+    def _read_welfare_filters(self) -> dict:
+        return {
+            "provider": self.welfare_provider_menu.get(),
+            "lifecycle": self.welfare_lifecycle_menu.get(),
+            "household": self.welfare_household_menu.get(),
+            "interest": self.welfare_interest_menu.get(),
+            "keyword": self.welfare_keyword_entry.get().strip(),
+            "excluded_keyword": self.welfare_excluded_entry.get().strip(),
+            "age": self.welfare_age_entry.get().strip(),
+        }
+
+    def _fetch_bokjiro_welfare(self) -> None:
+        if self.welfare_worker and self.welfare_worker.is_alive():
+            messagebox.showinfo("진행 중", "복지로의 복지정책을 가져오는 중입니다.")
+            return
+        self.welfare_state["filters"] = self._read_welfare_filters()
+        self.welfare_store.save(self.welfare_state)
+        self.welfare_fetch_button.configure(state="disabled", text="검색 중...")
+        self.welfare_status_label.configure(
+            text="Playwright로 복지로의 복지·정부지원 정책을 확인하고 있습니다.",
+            text_color="#6dadff",
+        )
+        self.welfare_worker = BokjiroWelfareListWorker(
+            filters=self.welfare_state["filters"],
+            published_history=self.welfare_state.get("published") or {},
+            result_queue=self.result_queue,
+        )
+        self.welfare_worker.start()
+
+    def _render_bokjiro_welfare(self, events: list[dict]) -> None:
+        if not hasattr(self, "welfare_result_frame"):
+            return
+        for child in self.welfare_result_frame.winfo_children():
+            child.destroy()
+        history = dict(self.welfare_state.get("published") or {})
+        normalized: list[dict] = []
+        for source in events or []:
+            event = dict(source)
+            welfare_id = str(event.get("welfare_id") or "").strip()
+            if not welfare_id:
+                continue
+            record = dict(history.get(welfare_id) or {})
+            event["published"] = bool(record)
+            event["published_at"] = str(record.get("published_at") or event.get("published_at") or "")
+            event["published_urls"] = list(record.get("published_urls") or event.get("published_urls") or [])
+            normalized.append(event)
+        self.welfare_events = normalized
+        self.welfare_state["events"] = normalized
+        self.welfare_history_label.configure(text=f"등록 이력 {len(history)}건")
+        visible = [
+            event for event in normalized
+            if not (self.hide_published_welfare_var.get() and event.get("published"))
+        ]
+        palette = self._public_data_table_palette()
+        if not visible:
+            empty = ctk.CTkFrame(self.welfare_result_frame, fg_color=palette["empty_fg"], corner_radius=16)
+            empty.grid(row=0, column=0, padx=8, pady=10, sticky="ew")
+            message = (
+                "조건에 맞는 미등록 복지정책이 없습니다. '등록 완료 정책 숨기기'를 끄면 이력까지 볼 수 있습니다."
+                if normalized else "조회된 복지정책이 없습니다. 검색조건을 바꿔 다시 시도해 주세요."
+            )
+            ctk.CTkLabel(
+                empty,
+                text=message,
+                text_color=palette["subtext"],
+                font=ctk.CTkFont(size=14),
+                wraplength=760,
+                justify="left",
+            ).grid(row=0, column=0, padx=18, pady=18, sticky="w")
+            return
+        selectable_ids = [str(event.get("welfare_id") or "") for event in visible if not event.get("published")]
+        if self.selected_welfare_var.get() not in selectable_ids:
+            self.selected_welfare_var.set(selectable_ids[0] if selectable_ids else "")
+        for row, event in enumerate(visible):
+            welfare_id = str(event.get("welfare_id") or "")
+            published = bool(event.get("published"))
+            row_frame = ctk.CTkFrame(
+                self.welfare_result_frame,
+                fg_color=palette["row_odd"] if row % 2 == 0 else palette["row_even"],
+                corner_radius=14,
+            )
+            row_frame.grid(row=row, column=0, padx=8, pady=(0, 8), sticky="ew")
+            self._configure_welfare_table_columns(row_frame)
+            ctk.CTkRadioButton(
+                row_frame,
+                text="",
+                value=welfare_id,
+                variable=self.selected_welfare_var,
+                state="disabled" if published else "normal",
+                command=self._save_welfare_selection,
+                width=22,
+                radiobutton_width=18,
+                radiobutton_height=18,
+                fg_color="#3468e8",
+                hover_color="#2d5cd0",
+            ).grid(row=0, column=0, padx=(10, 4), pady=12, sticky="w")
+            status = "등록 완료" if published else "미등록"
+            if published and event.get("published_at"):
+                status += f"\n{str(event['published_at'])[:10]}"
+            values = (
+                status,
+                str(event.get("title") or ""),
+                str(event.get("institution") or "정보 없음"),
+                str(event.get("interest") or event.get("lifecycle") or "전체"),
+            )
+            for col, value in enumerate(values, start=1):
+                ctk.CTkLabel(
+                    row_frame,
+                    text=value,
+                    text_color="#48d980" if published and col == 1 else palette["text"] if col == 2 else palette["muted"],
+                    font=ctk.CTkFont(size=13, weight="bold" if col in (1, 2) else "normal"),
+                    anchor="w",
+                    justify="left",
+                    wraplength=330 if col == 2 else 190,
+                ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+
+    def _save_welfare_selection(self) -> None:
+        self.welfare_state["selected_id"] = self.selected_welfare_var.get()
+        self.welfare_store.save(self.welfare_state)
+
+    def _selected_bokjiro_welfare(self) -> dict | None:
+        selected_id = self.selected_welfare_var.get()
+        return next(
+            (event for event in self.welfare_events if str(event.get("welfare_id") or "") == selected_id),
+            None,
+        )
+
+    def _collect_selected_welfare_detail(self) -> None:
+        if self.welfare_detail_worker and self.welfare_detail_worker.is_alive():
+            messagebox.showinfo("진행 중", "선택한 복지정책의 상세정보와 포털 자료를 수집하고 있습니다.")
+            return
+        event = self._selected_bokjiro_welfare()
+        if not event:
+            messagebox.showwarning("선택 필요", "글을 작성할 복지정책을 선택해 주세요.")
+            return
+        welfare_id = str(event.get("welfare_id") or "")
+        if welfare_id in (self.welfare_state.get("published") or {}):
+            messagebox.showwarning("등록 완료 정책", "이미 글을 발행한 복지정책입니다. 중복 등록을 막기 위해 다시 선택할 수 없습니다.")
+            self._render_bokjiro_welfare(self.welfare_events)
+            return
+        self._save_welfare_selection()
+        self.welfare_apply_button.configure(state="disabled", text="상세·포털 수집 중...")
+        self.welfare_fetch_button.configure(state="disabled")
+        self.welfare_status_label.configure(
+            text="복지로 상세정보를 확인한 뒤 네이버·구글 등 포털 자료를 교차검색합니다.",
+            text_color="#6dadff",
+        )
+        self.welfare_detail_worker = BokjiroWelfareDetailWorker(event, self.result_queue)
+        self.welfare_detail_worker.start()
+
+    def _apply_bokjiro_welfare_to_writing(self, event: dict) -> None:
+        title = str(event.get("title") or "복지 지원정책").strip()
+        reference_text = str(event.get("reference_text") or "").strip()
+        detail_url = str(event.get("detail_url") or BOKJIRO_WELFARE_LIST_URL).strip()
+        application_url = normalize_external_url(str(event.get("application_url") or ""))
+        self.welfare_state["active"] = dict(event)
+        self.welfare_state["selected_id"] = str(event.get("welfare_id") or "")
+        updated_events: list[dict] = []
+        for existing in self.welfare_events:
+            if str(existing.get("welfare_id") or "") == str(event.get("welfare_id") or ""):
+                merged = dict(existing)
+                merged.update(event)
+                updated_events.append(merged)
+            else:
+                updated_events.append(existing)
+        self.welfare_events = updated_events
+        self.welfare_state["events"] = updated_events
+        self.welfare_store.save(self.welfare_state)
+
+        source_urls = {"복지로 공식정보": detail_url}
+        if application_url:
+            source_urls["온라인 신청/공식 홈페이지"] = application_url
+        self.current_keyword = "복지로 복지·정부지원 정책"
+        self.current_insights = [
+            KeywordInsight(
+                keyword=title,
+                score=95,
+                reasons=["복지로 공식 지원대상·혜택·신청방법", "네이버·구글 등 포털 교차검색 참고자료 포함"],
+                sources=list(source_urls),
+                categories=["복지", str(event.get("interest") or event.get("lifecycle") or "정부지원")],
+                source_urls=source_urls,
+            )
+        ]
+        self.selected_keyword_var.set(title)
+        self.topic_entry.delete(0, "end")
+        self.topic_entry.insert(0, title)
+        self.manual_keyword_entry.delete(0, "end")
+        self.manual_keyword_entry.insert(0, title)
+        self.reference_textbox.delete("1.0", "end")
+        self.reference_textbox.insert("1.0", reference_text)
+        self._update_reference_count()
+        self.daum_reference_map = {}
+        self.signal_reference_map = {}
+        self.newneek_reference_map = {}
+        self.collected_reference_map = {title: reference_text}
+        self._render_keyword_choices(self.current_insights)
+        self._render_results(self.current_insights)
+
+        self._clear_transient_writing_links("welfare")
+        target_url = application_url or normalize_external_url(detail_url)
+        if target_url:
+            self._add_link_row(
+                {
+                    "button_text": f"{title} 복지로에서 자세히 보기👆🏻",
+                    "url": target_url,
+                    "width": "",
+                    "full_width": True,
+                    "position": "본문하단",
+                    "transient": True,
+                    "source": "welfare",
+                }
+            )
+        self._switch_page("writing")
+        self._reset_writing_section_completion()
+        self._open_writing_section("keyword", complete_previous=True)
+        self.keyword_status_label.configure(text="복지로 공식정보와 포털 참고자료를 블로그글쓰기에 반영했습니다.")
+        self._save_ui_state()
+        self._start_auto_progress_with_collected_reference(title, "복지로 공식정보와 포털 참고자료")
+
+    def _clear_welfare_writing_context(self) -> None:
+        self._clear_transient_writing_links("welfare")
+        if self.welfare_state.get("active"):
+            self.welfare_state["active"] = {}
+            self.welfare_store.save(self.welfare_state)
+
+    def _mark_welfare_published(self, event: dict, published_urls: Iterable[str]) -> dict | None:
+        if not event:
+            return None
+        try:
+            record = self.welfare_store.mark_published(self.welfare_state, event, published_urls)
+        except ValueError:
+            return None
+        self.welfare_events = list(self.welfare_state.get("events") or self.welfare_events)
+        if hasattr(self, "welfare_result_frame"):
+            self._render_bokjiro_welfare(self.welfare_events)
+        return record
+
+    def _mark_active_welfare_published(self) -> dict | None:
+        active = dict(self.welfare_state.get("active") or {})
+        urls = self._completed_published_post_urls()
+        if not active or not urls:
+            return None
+        active_title = re.sub(r"\s+", "", str(active.get("title") or ""))
+        current_title = re.sub(
+            r"\s+",
+            "",
+            self.article_title_entry.get().strip()
+            or self.generated_article_title
+            or self._selected_or_manual_keyword(),
+        )
+        if active_title and active_title not in current_title and current_title not in active_title:
+            return None
+        return self._mark_welfare_published(active, urls)
+
+    def _reset_welfare_published_history(self) -> None:
+        history = dict(self.welfare_state.get("published") or {})
+        if not history:
+            messagebox.showinfo("초기화할 이력 없음", "저장된 복지정책 등록완료 이력이 없습니다.")
+            return
+        if not messagebox.askyesno(
+            "복지정책 등록완료 이력 초기화",
+            f"저장된 복지정책 등록완료 이력 {len(history)}건을 모두 초기화할까요?\n이 작업은 되돌릴 수 없습니다.",
+        ):
+            return
+        self.welfare_store.clear_published(self.welfare_state)
+        self.welfare_events = list(self.welfare_state.get("events") or [])
+        self.selected_welfare_var.set("")
+        self._render_bokjiro_welfare(self.welfare_events)
+        self.welfare_status_label.configure(
+            text="복지정책 등록완료 이력을 초기화했습니다.",
+            text_color="#48d980",
+        )
 
     def _fetch_public_data_events(self) -> None:
         if self.public_data_worker and self.public_data_worker.is_alive():
@@ -28817,6 +29829,7 @@ class KeywordApp(ctk.CTk):
             "post_mode": settings.post_mode,
             "status": "대기 중",
             "festival": dict(self.festival_state.get("active") or {}),
+            "welfare": dict(self.welfare_state.get("active") or {}),
         }
         self._assign_automation_schedule(queue_item)
         self.automation_queue.append(queue_item)
@@ -30309,9 +31322,10 @@ class KeywordApp(ctk.CTk):
                     options = dict((payload or {}).get("filter_options") or {})
                     events = list((payload or {}).get("events") or [])
                     self.festival_state["filter_options"] = options
-                    self._set_festival_filter_options(options)
-                    self._render_visitkorea_festivals(events)
+                    self.festival_state["events"] = events
                     self.festival_store.save(self.festival_state)
+                    self._set_festival_filter_options(options)
+                    self._render_visitkorea_festivals(self.festival_state.get("events") or [])
                     if hasattr(self, "festival_status_label"):
                         hidden_count = sum(1 for event in events if event.get("published"))
                         self.festival_status_label.configure(
@@ -30348,6 +31362,52 @@ class KeywordApp(ctk.CTk):
                     if hasattr(self, "festival_status_label"):
                         self.festival_status_label.configure(text="축제 상세·포털 수집 실패", text_color="#ff6b6b")
                     messagebox.showerror("축제 상세정보 수집 실패", str(payload))
+                elif event_type == "welfare_progress":
+                    if hasattr(self, "welfare_status_label"):
+                        self.welfare_status_label.configure(text=str(payload), text_color="#6dadff")
+                elif event_type == "welfare_done":
+                    self.welfare_worker = None
+                    if hasattr(self, "welfare_fetch_button"):
+                        self.welfare_fetch_button.configure(state="normal", text="복지정책 검색")
+                    events = list((payload or {}).get("events") or [])
+                    self.welfare_state["events"] = events
+                    self.welfare_store.save(self.welfare_state)
+                    self._render_bokjiro_welfare(self.welfare_state.get("events") or [])
+                    if hasattr(self, "welfare_status_label"):
+                        published_count = sum(1 for event in events if event.get("published"))
+                        self.welfare_status_label.configure(
+                            text=f"복지정책 {len(events)}개를 불러왔습니다. 등록 완료 {published_count}개는 중복 발행이 차단됩니다.",
+                            text_color="#48d980",
+                        )
+                elif event_type == "welfare_error":
+                    self.welfare_worker = None
+                    if hasattr(self, "welfare_fetch_button"):
+                        self.welfare_fetch_button.configure(state="normal", text="복지정책 검색")
+                    if hasattr(self, "welfare_status_label"):
+                        self.welfare_status_label.configure(text="복지정책 목록 수집 실패", text_color="#ff6b6b")
+                    messagebox.showerror("복지정책 목록 수집 실패", str(payload))
+                elif event_type == "welfare_detail_progress":
+                    if hasattr(self, "welfare_status_label"):
+                        self.welfare_status_label.configure(text=str(payload), text_color="#6dadff")
+                elif event_type == "welfare_detail_done":
+                    self.welfare_detail_worker = None
+                    if hasattr(self, "welfare_apply_button"):
+                        self.welfare_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
+                        self.welfare_fetch_button.configure(state="normal")
+                    if hasattr(self, "welfare_status_label"):
+                        self.welfare_status_label.configure(
+                            text="복지정책 상세정보와 포털 교차검색 자료 수집을 완료했습니다.",
+                            text_color="#48d980",
+                        )
+                    self._apply_bokjiro_welfare_to_writing(dict(payload or {}))
+                elif event_type == "welfare_detail_error":
+                    self.welfare_detail_worker = None
+                    if hasattr(self, "welfare_apply_button"):
+                        self.welfare_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
+                        self.welfare_fetch_button.configure(state="normal")
+                    if hasattr(self, "welfare_status_label"):
+                        self.welfare_status_label.configure(text="복지정책 상세·포털 수집 실패", text_color="#ff6b6b")
+                    messagebox.showerror("복지정책 상세정보 수집 실패", str(payload))
                 elif event_type == "automation_collect_progress":
                     if hasattr(self, "automation_status_label"):
                         self.automation_status_label.configure(text=payload, text_color="#6dadff")
@@ -31190,6 +32250,11 @@ class KeywordApp(ctk.CTk):
             if item and item.get("festival") and (published_url or published_urls):
                 self._mark_festival_published(
                     dict(item.get("festival") or {}),
+                    list(published_urls.values()) or [published_url],
+                )
+            if item and item.get("welfare") and (published_url or published_urls):
+                self._mark_welfare_published(
+                    dict(item.get("welfare") or {}),
                     list(published_urls.values()) or [published_url],
                 )
             remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""

@@ -72,6 +72,41 @@ class VisitKoreaFestivalTests(unittest.TestCase):
             restored = store.load()
             self.assertEqual(restored["active"]["festival_id"], "festival-next")
 
+    def test_new_fetch_save_preserves_history_already_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FestivalStateStore(Path(directory) / "festival-state.json")
+            current = store.load()
+            store.mark_published(
+                current,
+                {"festival_id": "festival-saved", "title": "저장 축제", "detail_url": self.DETAIL_URL},
+                ["https://blog.example.com/saved"],
+            )
+            stale_fetch_state = store.empty_state()
+            stale_fetch_state["events"] = [{"festival_id": "festival-new", "title": "신규 축제"}]
+
+            store.save(stale_fetch_state)
+
+            restored = store.load()
+            self.assertIn("festival-saved", restored["published"])
+            self.assertEqual(restored["events"][0]["festival_id"], "festival-new")
+
+    def test_publish_history_is_removed_only_by_explicit_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FestivalStateStore(Path(directory) / "festival-state.json")
+            state = store.load()
+            state["events"] = [{"festival_id": "festival-123", "published": True}]
+            store.mark_published(
+                state,
+                {"festival_id": "festival-123", "title": "테스트 축제", "detail_url": self.DETAIL_URL},
+                ["https://blog.example.com/published"],
+            )
+
+            store.clear_published(state)
+
+            restored = store.load()
+            self.assertEqual(restored["published"], {})
+            self.assertFalse(restored["events"][0]["published"])
+
     def test_reference_text_contains_official_fields_and_portal_section(self) -> None:
         worker = main.VisitKoreaFestivalDetailWorker({}, queue.Queue())
         reference = worker._build_reference_text(
