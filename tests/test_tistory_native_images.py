@@ -654,7 +654,7 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn("Example Creator", prepared)
             self.assertNotIn("news.example.com", prepared)
 
-    def test_unprotected_reference_image_crops_fifty_pixels_from_bottom(self) -> None:
+    def test_unprotected_reference_image_crops_configured_footer_from_bottom(self) -> None:
         if main.Image is None:
             self.skipTest("Pillow is not available")
         with tempfile.TemporaryDirectory() as directory:
@@ -669,7 +669,7 @@ class TistoryNativeImageTests(unittest.TestCase):
                 )
             )
             with main.Image.open(image_path) as cropped:
-                self.assertEqual(cropped.size, (640, 430))
+                self.assertEqual(cropped.size, (640, 420))
 
     def test_reference_collector_saves_only_captured_image_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
