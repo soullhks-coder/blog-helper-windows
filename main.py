@@ -337,6 +337,7 @@ CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
 GOOGLE_IMAGE_COLLAGE_ENABLED = True
 TISTORY_REFERENCE_IMAGE_PREFIX = "reference-capture-"
+TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX = 50
 RUNTIME_LOG_FILE = DATA_DIR / "blog-helper-runtime.log"
 AI_GENERATION_TIMEOUT_SECONDS = 180
 AI_GENERATION_MAX_ATTEMPTS = 2
@@ -5368,7 +5369,31 @@ def _save_reference_image_with_pillow(data_url: str, destination: Path) -> bool:
         return False
 
 
-def capture_reference_image_region(data_url: str, destination: Path) -> bool:
+def _crop_reference_image_bottom(destination: Path, crop_bottom_px: int) -> bool:
+    """Remove a fixed footer strip without leaving a truncated, unusable image."""
+    if crop_bottom_px <= 0:
+        return True
+    if Image is None or not destination.exists():
+        return False
+    try:
+        with Image.open(destination) as source:
+            image = ImageOps.exif_transpose(source) if ImageOps is not None else source.copy()
+            image = image.convert("RGB")
+            cropped_height = image.height - int(crop_bottom_px)
+            if image.width < 220 or cropped_height < 130 or image.width * cropped_height < 45_000:
+                return False
+            cropped = image.crop((0, 0, image.width, cropped_height))
+            cropped.save(destination, format="PNG", optimize=True)
+        return destination.exists() and destination.stat().st_size > 0
+    except (OSError, ValueError):
+        return False
+
+
+def capture_reference_image_region(
+    data_url: str,
+    destination: Path,
+    crop_bottom_px: int = 0,
+) -> bool:
     """Render one reusable image and capture only its element, never browser chrome."""
     if not data_url:
         return False
@@ -5409,10 +5434,17 @@ def capture_reference_image_region(data_url: str, destination: Path) -> bool:
             finally:
                 browser.close()
         if destination.exists() and destination.stat().st_size >= 4_000:
-            return True
+            if _crop_reference_image_bottom(destination, crop_bottom_px):
+                return True
+            destination.unlink(missing_ok=True)
     except Exception:
         pass
-    return _save_reference_image_with_pillow(data_url, destination)
+    if not _save_reference_image_with_pillow(data_url, destination):
+        return False
+    if _crop_reference_image_bottom(destination, crop_bottom_px):
+        return True
+    destination.unlink(missing_ok=True)
+    return False
 
 
 def collect_tistory_reference_image_files(
@@ -5446,7 +5478,15 @@ def collect_tistory_reference_image_files(
             if len(captures) >= capture_target:
                 break
             destination = GENERATED_UPLOAD_DIR / f"{TISTORY_REFERENCE_IMAGE_PREFIX}{stamp}-{index}.png"
-            if not capture_reference_image_region(str(candidate.get("data_url") or ""), destination):
+            if not capture_reference_image_region(
+                str(candidate.get("data_url") or ""),
+                destination,
+                crop_bottom_px=(
+                    TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX
+                    if not protection_mode
+                    else 0
+                ),
+            ):
                 destination.unlink(missing_ok=True)
                 continue
             capture = dict(candidate)

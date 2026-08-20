@@ -654,11 +654,33 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertNotIn("Example Creator", prepared)
             self.assertNotIn("news.example.com", prepared)
 
+    def test_unprotected_reference_image_crops_fifty_pixels_from_bottom(self) -> None:
+        if main.Image is None:
+            self.skipTest("Pillow is not available")
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "reference-crop.png"
+            image = main.Image.new("RGB", (640, 480), "white")
+            image.save(image_path, format="PNG")
+
+            self.assertTrue(
+                main._crop_reference_image_bottom(
+                    image_path,
+                    main.TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX,
+                )
+            )
+            with main.Image.open(image_path) as cropped:
+                self.assertEqual(cropped.size, (640, 430))
+
     def test_reference_collector_saves_only_captured_image_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
 
-            def fake_capture(_data_url: str, destination: Path) -> bool:
+            def fake_capture(
+                _data_url: str,
+                destination: Path,
+                crop_bottom_px: int = 0,
+            ) -> bool:
+                self.assertEqual(crop_bottom_px, 0)
                 destination.write_bytes(b"captured-image-region")
                 return True
 
@@ -696,7 +718,15 @@ class TistoryNativeImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
 
-            def fake_capture(_data_url: str, destination: Path) -> bool:
+            def fake_capture(
+                _data_url: str,
+                destination: Path,
+                crop_bottom_px: int = 0,
+            ) -> bool:
+                self.assertEqual(
+                    crop_bottom_px,
+                    main.TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX,
+                )
                 destination.write_bytes(b"captured-web-image")
                 return True
 
@@ -736,7 +766,15 @@ class TistoryNativeImageTests(unittest.TestCase):
             output_dir = Path(directory)
             attempted_data_urls: list[str] = []
 
-            def fake_capture(data_url: str, destination: Path) -> bool:
+            def fake_capture(
+                data_url: str,
+                destination: Path,
+                crop_bottom_px: int = 0,
+            ) -> bool:
+                self.assertEqual(
+                    crop_bottom_px,
+                    main.TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX,
+                )
                 attempted_data_urls.append(data_url)
                 if data_url.endswith("FIRST"):
                     return False
@@ -803,7 +841,15 @@ class TistoryNativeImageTests(unittest.TestCase):
                 "license": "저작권 보호 모드 OFF",
             }
 
-            def fake_capture(data_url: str, destination: Path) -> bool:
+            def fake_capture(
+                data_url: str,
+                destination: Path,
+                crop_bottom_px: int = 0,
+            ) -> bool:
+                self.assertEqual(
+                    crop_bottom_px,
+                    main.TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX,
+                )
                 if not data_url.endswith("BROWSER"):
                     return False
                 destination.write_bytes(b"captured-browser-image")
