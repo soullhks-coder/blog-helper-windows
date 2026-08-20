@@ -14,6 +14,42 @@ class VisitKoreaFestivalTests(unittest.TestCase):
         "fstvlCntntsId=61868dbd-e352-418c-a6f3-9cd0684c5cf7&cntntsNm=수원국가유산야행"
     )
 
+    def test_public_data_select_all_only_enables_selectable_rows(self) -> None:
+        class FakeBooleanVar:
+            def __init__(self, value: bool = False) -> None:
+                self.value = value
+
+            def set(self, value: bool) -> None:
+                self.value = bool(value)
+
+            def get(self) -> bool:
+                return self.value
+
+        variables = {
+            "festival-visible-1": FakeBooleanVar(),
+            "festival-published": FakeBooleanVar(True),
+            "festival-visible-2": FakeBooleanVar(),
+        }
+
+        selected_count = main.KeywordApp._set_public_data_selection_vars(
+            variables,
+            {"festival-visible-1", "festival-visible-2"},
+            True,
+        )
+
+        self.assertEqual(selected_count, 2)
+        self.assertTrue(variables["festival-visible-1"].get())
+        self.assertTrue(variables["festival-visible-2"].get())
+        self.assertFalse(variables["festival-published"].get())
+
+        cleared_count = main.KeywordApp._set_public_data_selection_vars(
+            variables,
+            {"festival-visible-1", "festival-visible-2"},
+            False,
+        )
+        self.assertEqual(cleared_count, 0)
+        self.assertFalse(any(variable.get() for variable in variables.values()))
+
     def test_extracts_stable_festival_id_from_detail_url(self) -> None:
         self.assertEqual(
             main.visitkorea_festival_id(self.DETAIL_URL),

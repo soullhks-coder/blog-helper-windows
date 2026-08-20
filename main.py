@@ -21318,8 +21318,42 @@ class KeywordApp(ctk.CTk):
         )
         self.festival_history_reset_button.grid(row=0, column=4, padx=(8, 0), sticky="e")
 
+        selection_row = ctk.CTkFrame(table_card, fg_color=table_palette["header_fg"], corner_radius=14)
+        selection_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        selection_row.grid_columnconfigure(0, weight=1)
+        self.festival_selection_status_label = ctk.CTkLabel(
+            selection_row,
+            text="선택된 축제 0개",
+            text_color=table_palette["subtext"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.festival_selection_status_label.grid(row=0, column=0, padx=14, pady=10, sticky="w")
+        ctk.CTkButton(
+            selection_row,
+            text="전체선택",
+            width=96,
+            height=34,
+            corner_radius=11,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._set_festival_selection(True),
+        ).grid(row=0, column=1, padx=(8, 4), pady=7, sticky="e")
+        ctk.CTkButton(
+            selection_row,
+            text="선택해제",
+            width=96,
+            height=34,
+            corner_radius=11,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._set_festival_selection(False),
+        ).grid(row=0, column=2, padx=(4, 10), pady=7, sticky="e")
+
         header_row = ctk.CTkFrame(table_card, fg_color=table_palette["header_fg"], corner_radius=14)
-        header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        header_row.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
         self._configure_festival_table_columns(header_row)
         for col, text in enumerate(("선택", "상태", "축제명", "기간", "지역")):
             ctk.CTkLabel(
@@ -21330,11 +21364,11 @@ class KeywordApp(ctk.CTk):
             ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
 
         self.festival_result_frame = ctk.CTkScrollableFrame(table_card, fg_color="transparent", height=390)
-        self.festival_result_frame.grid(row=2, column=0, padx=16, pady=(0, 10), sticky="nsew")
+        self.festival_result_frame.grid(row=3, column=0, padx=16, pady=(0, 10), sticky="nsew")
         self.festival_result_frame.grid_columnconfigure(0, weight=1)
 
         apply_row = ctk.CTkFrame(table_card, fg_color="transparent")
-        apply_row.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="ew")
+        apply_row.grid(row=4, column=0, padx=16, pady=(0, 16), sticky="ew")
         apply_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             apply_row,
@@ -21461,7 +21495,12 @@ class KeywordApp(ctk.CTk):
             event for event in normalized
             if not (self.hide_published_festivals_var.get() and event.get("published"))
         ]
+        visible_ids = {str(event.get("festival_id") or "") for event in visible_events}
+        for stale_id in set(self.festival_selection_vars) - visible_ids:
+            self.festival_selection_vars.pop(stale_id, None)
         if not visible_events:
+            if hasattr(self, "festival_selection_status_label"):
+                self.festival_selection_status_label.configure(text="선택된 축제 0개")
             palette = self._public_data_table_palette()
             empty = ctk.CTkFrame(self.festival_result_frame, fg_color=palette["empty_fg"], corner_radius=16)
             empty.grid(row=0, column=0, padx=8, pady=10, sticky="ew")
@@ -21486,9 +21525,6 @@ class KeywordApp(ctk.CTk):
         legacy_selected_id = self.selected_festival_var.get()
         if not saved_selected_ids and legacy_selected_id:
             saved_selected_ids.add(legacy_selected_id)
-        visible_ids = {str(event.get("festival_id") or "") for event in visible_events}
-        for stale_id in set(self.festival_selection_vars) - visible_ids:
-            self.festival_selection_vars.pop(stale_id, None)
         palette = self._public_data_table_palette()
         for row, event in enumerate(visible_events):
             festival_id = str(event.get("festival_id") or "")
@@ -21504,6 +21540,8 @@ class KeywordApp(ctk.CTk):
             if selection_var is None:
                 selection_var = tk.BooleanVar(value=festival_id in saved_selected_ids and not published)
                 self.festival_selection_vars[festival_id] = selection_var
+            elif published:
+                selection_var.set(False)
             ctk.CTkCheckBox(
                 row_frame,
                 text="",
@@ -21535,6 +21573,10 @@ class KeywordApp(ctk.CTk):
                     justify="left",
                     wraplength=300 if col == 2 else 180,
                 ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+        if hasattr(self, "festival_selection_status_label"):
+            self.festival_selection_status_label.configure(
+                text=f"선택된 축제 {len(self._selected_festival_ids())}개"
+            )
 
     def _save_festival_selection(self) -> None:
         selected_ids = self._selected_festival_ids()
@@ -21542,6 +21584,35 @@ class KeywordApp(ctk.CTk):
         self.festival_state["selected_id"] = selected_ids[0] if selected_ids else ""
         self.selected_festival_var.set(self.festival_state["selected_id"])
         self.festival_store.save(self.festival_state)
+        if hasattr(self, "festival_selection_status_label"):
+            self.festival_selection_status_label.configure(text=f"선택된 축제 {len(selected_ids)}개")
+
+    @staticmethod
+    def _set_public_data_selection_vars(
+        selection_vars: dict[str, tk.BooleanVar],
+        selectable_ids: set[str],
+        selected: bool,
+    ) -> int:
+        selected_count = 0
+        for item_id, variable in selection_vars.items():
+            item_selected = bool(selected and item_id in selectable_ids)
+            variable.set(item_selected)
+            if item_selected:
+                selected_count += 1
+        return selected_count
+
+    def _set_festival_selection(self, selected: bool) -> None:
+        selectable_ids = {
+            str(event.get("festival_id") or "")
+            for event in self.festival_events
+            if str(event.get("festival_id") or "") and not event.get("published")
+        }
+        self._set_public_data_selection_vars(
+            self.festival_selection_vars,
+            selectable_ids,
+            selected,
+        )
+        self._save_festival_selection()
 
     def _selected_festival_ids(self) -> list[str]:
         return [
@@ -21921,8 +21992,42 @@ class KeywordApp(ctk.CTk):
             command=self._reset_welfare_published_history,
         ).grid(row=0, column=4, padx=(8, 0), sticky="e")
 
+        selection_row = ctk.CTkFrame(table_card, fg_color=palette["header_fg"], corner_radius=14)
+        selection_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        selection_row.grid_columnconfigure(0, weight=1)
+        self.welfare_selection_status_label = ctk.CTkLabel(
+            selection_row,
+            text="선택된 복지정책 0개",
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.welfare_selection_status_label.grid(row=0, column=0, padx=14, pady=10, sticky="w")
+        ctk.CTkButton(
+            selection_row,
+            text="전체선택",
+            width=96,
+            height=34,
+            corner_radius=11,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._set_welfare_selection(True),
+        ).grid(row=0, column=1, padx=(8, 4), pady=7, sticky="e")
+        ctk.CTkButton(
+            selection_row,
+            text="선택해제",
+            width=96,
+            height=34,
+            corner_radius=11,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._set_welfare_selection(False),
+        ).grid(row=0, column=2, padx=(4, 10), pady=7, sticky="e")
+
         header_row = ctk.CTkFrame(table_card, fg_color=palette["header_fg"], corner_radius=14)
-        header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        header_row.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
         self._configure_welfare_table_columns(header_row)
         for col, text_value in enumerate(("선택", "상태", "복지정책명", "담당기관", "관심주제")):
             ctk.CTkLabel(
@@ -21932,7 +22037,7 @@ class KeywordApp(ctk.CTk):
                 font=ctk.CTkFont(size=13, weight="bold"),
             ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
         self.welfare_result_frame = ctk.CTkScrollableFrame(table_card, fg_color="transparent", height=390)
-        self.welfare_result_frame.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self.welfare_result_frame.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="nsew")
         self.welfare_result_frame.grid_columnconfigure(0, weight=1)
         self._render_bokjiro_welfare(self.welfare_events)
 
@@ -22021,8 +22126,13 @@ class KeywordApp(ctk.CTk):
             event for event in normalized
             if not (self.hide_published_welfare_var.get() and event.get("published"))
         ]
+        visible_ids = {str(event.get("welfare_id") or "") for event in visible}
+        for stale_id in set(self.welfare_selection_vars) - visible_ids:
+            self.welfare_selection_vars.pop(stale_id, None)
         palette = self._public_data_table_palette()
         if not visible:
+            if hasattr(self, "welfare_selection_status_label"):
+                self.welfare_selection_status_label.configure(text="선택된 복지정책 0개")
             empty = ctk.CTkFrame(self.welfare_result_frame, fg_color=palette["empty_fg"], corner_radius=16)
             empty.grid(row=0, column=0, padx=8, pady=10, sticky="ew")
             message = (
@@ -22044,9 +22154,6 @@ class KeywordApp(ctk.CTk):
         legacy_selected_id = self.selected_welfare_var.get()
         if not saved_selected_ids and legacy_selected_id:
             saved_selected_ids.add(legacy_selected_id)
-        visible_ids = {str(event.get("welfare_id") or "") for event in visible}
-        for stale_id in set(self.welfare_selection_vars) - visible_ids:
-            self.welfare_selection_vars.pop(stale_id, None)
         for row, event in enumerate(visible):
             welfare_id = str(event.get("welfare_id") or "")
             published = bool(event.get("published"))
@@ -22061,6 +22168,8 @@ class KeywordApp(ctk.CTk):
             if selection_var is None:
                 selection_var = tk.BooleanVar(value=welfare_id in saved_selected_ids and not published)
                 self.welfare_selection_vars[welfare_id] = selection_var
+            elif published:
+                selection_var.set(False)
             ctk.CTkCheckBox(
                 row_frame,
                 text="",
@@ -22092,6 +22201,10 @@ class KeywordApp(ctk.CTk):
                     justify="left",
                     wraplength=330 if col == 2 else 190,
                 ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
+        if hasattr(self, "welfare_selection_status_label"):
+            self.welfare_selection_status_label.configure(
+                text=f"선택된 복지정책 {len(self._selected_welfare_ids())}개"
+            )
 
     def _save_welfare_selection(self) -> None:
         selected_ids = self._selected_welfare_ids()
@@ -22099,6 +22212,21 @@ class KeywordApp(ctk.CTk):
         self.welfare_state["selected_id"] = selected_ids[0] if selected_ids else ""
         self.selected_welfare_var.set(self.welfare_state["selected_id"])
         self.welfare_store.save(self.welfare_state)
+        if hasattr(self, "welfare_selection_status_label"):
+            self.welfare_selection_status_label.configure(text=f"선택된 복지정책 {len(selected_ids)}개")
+
+    def _set_welfare_selection(self, selected: bool) -> None:
+        selectable_ids = {
+            str(event.get("welfare_id") or "")
+            for event in self.welfare_events
+            if str(event.get("welfare_id") or "") and not event.get("published")
+        }
+        self._set_public_data_selection_vars(
+            self.welfare_selection_vars,
+            selectable_ids,
+            selected,
+        )
+        self._save_welfare_selection()
 
     def _selected_welfare_ids(self) -> list[str]:
         return [
