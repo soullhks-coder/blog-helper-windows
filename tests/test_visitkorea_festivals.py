@@ -185,6 +185,40 @@ class VisitKoreaFestivalTests(unittest.TestCase):
 
             self.assertEqual(restored["link_positions"], ["본문상단", "본문하단"])
 
+    def test_multiple_festival_selections_are_persistent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.FestivalStateStore(Path(directory) / "festival-state.json")
+            state = store.load()
+            state["selected_ids"] = ["festival-1", "festival-2"]
+            store.save(state)
+
+            restored = store.load()
+
+            self.assertEqual(restored["selected_ids"], ["festival-1", "festival-2"])
+
+    def test_festival_automation_payload_keeps_detail_and_selected_links(self) -> None:
+        event = {
+            "festival_id": "festival-1",
+            "title": "수원 국가유산 야행",
+            "detail_url": self.DETAIL_URL,
+            "official_url": "https://www.swcf.or.kr/",
+            "reference_text": "축제 공식 상세정보",
+            "area": "경기",
+        }
+
+        payload = main.build_public_data_automation_payload(
+            event,
+            "festival",
+            ["본문상단", "본문하단"],
+        )
+
+        self.assertEqual(payload["source_name"], "구석구석 축제")
+        self.assertEqual(payload["festival"]["festival_id"], "festival-1")
+        self.assertEqual(
+            [link["position"] for link in payload["writing_links"]],
+            ["본문상단", "본문하단"],
+        )
+
     def test_transient_festival_link_is_used_in_article_but_not_saved(self) -> None:
         value = lambda text: SimpleNamespace(get=lambda: text)
         full_width = SimpleNamespace(get=lambda: True)

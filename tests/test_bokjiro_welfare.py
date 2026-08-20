@@ -143,6 +143,49 @@ class BokjiroWelfareTests(unittest.TestCase):
         self.assertNotIn("self.thumbnail_background_mode_menu.set", method_source)
         self.assertIn("self._start_auto_progress_with_collected_reference", method_source)
 
+    def test_welfare_link_positions_and_multiple_selections_are_persistent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = main.WelfareStateStore(Path(directory) / "welfare-state.json")
+            state = store.load()
+            state["link_positions"] = ["본문상단", "본문중간", "본문하단"]
+            state["selected_ids"] = ["WLF-100", "WLF-200"]
+            store.save(state)
+
+            restored = store.load()
+
+            self.assertEqual(restored["link_positions"], main.LINK_POSITION_OPTIONS)
+            self.assertEqual(restored["selected_ids"], ["WLF-100", "WLF-200"])
+
+    def test_welfare_automation_payload_adds_links_to_all_selected_positions(self) -> None:
+        event = {
+            "welfare_id": "WLF-100",
+            "title": "청년 월세 지원",
+            "detail_url": "https://www.bokjiro.go.kr/policy/WLF-100",
+            "application_url": "https://www.bokjiro.go.kr/apply/WLF-100",
+            "reference_text": "지원대상과 신청방법을 포함한 공식 상세정보",
+            "interest": "주거",
+        }
+
+        payload = main.build_public_data_automation_payload(
+            event,
+            "welfare",
+            main.LINK_POSITION_OPTIONS,
+        )
+
+        self.assertEqual(payload["source_name"], "공공 복지")
+        self.assertEqual(payload["welfare"]["welfare_id"], "WLF-100")
+        self.assertEqual(
+            [link["position"] for link in payload["writing_links"]],
+            ["본문상단", "본문중간", "본문하단"],
+        )
+        self.assertTrue(all(link["full_width"] for link in payload["writing_links"]))
+
+    def test_welfare_writing_flow_applies_every_selected_link_position(self) -> None:
+        method_source = inspect.getsource(main.KeywordApp._apply_bokjiro_welfare_to_writing)
+
+        self.assertIn("for position in self._selected_welfare_link_positions()", method_source)
+        self.assertIn("build_welfare_official_link(event, position=position)", method_source)
+
 
 if __name__ == "__main__":
     unittest.main()

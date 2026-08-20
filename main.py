@@ -400,6 +400,78 @@ def build_festival_official_link(event: dict, position: str = "본문중간") ->
     }
 
 
+def build_welfare_official_link(event: dict, position: str = "본문하단") -> dict | None:
+    """Build a temporary full-width link to the welfare application/detail page."""
+    title = re.sub(r"\s+", " ", str(event.get("title") or "")).strip()
+    target_url = normalize_external_url(
+        str(event.get("application_url") or event.get("detail_url") or "")
+    )
+    if not title or not target_url:
+        return None
+    if position not in LINK_POSITION_OPTIONS:
+        position = "본문하단"
+    return {
+        "button_text": f"{title} 복지로에서 자세히 보기👆🏻",
+        "url": target_url,
+        "width": "",
+        "full_width": True,
+        "position": position,
+        "transient": True,
+        "source": "welfare",
+    }
+
+
+def build_public_data_automation_payload(
+    event: dict,
+    source: str,
+    link_positions: Iterable[str],
+    rank: int = 1,
+) -> dict:
+    """Convert one detailed festival/welfare record into an automation payload."""
+    event = dict(event or {})
+    title = re.sub(r"\s+", " ", str(event.get("title") or "")).strip()
+    if not title:
+        raise ValueError("대기열에 넣을 공공정보 제목이 없습니다.")
+    positions = [position for position in link_positions if position in LINK_POSITION_OPTIONS]
+    if source == "festival":
+        detail_url = normalize_external_url(str(event.get("detail_url") or ""))
+        official_url = normalize_external_url(str(event.get("official_url") or ""))
+        source_urls = {"대한민국 구석구석": detail_url or VISITKOREA_FESTIVAL_LIST_URL}
+        if official_url:
+            source_urls["축제 공식 홈페이지"] = official_url
+        links = [build_festival_official_link(event, position) for position in positions]
+        return {
+            "source_name": "구석구석 축제",
+            "rank": rank,
+            "keyword": title,
+            "reference_text": str(event.get("reference_text") or "").strip(),
+            "source_urls": source_urls,
+            "score": 94,
+            "categories": ["축제", str(event.get("area") or "전국")],
+            "writing_links": [link for link in links if link],
+            "festival": event,
+        }
+    if source == "welfare":
+        detail_url = normalize_external_url(str(event.get("detail_url") or ""))
+        application_url = normalize_external_url(str(event.get("application_url") or ""))
+        source_urls = {"복지로 공식정보": detail_url or BOKJIRO_WELFARE_LIST_URL}
+        if application_url:
+            source_urls["온라인 신청/공식 홈페이지"] = application_url
+        links = [build_welfare_official_link(event, position) for position in positions]
+        return {
+            "source_name": "공공 복지",
+            "rank": rank,
+            "keyword": title,
+            "reference_text": str(event.get("reference_text") or "").strip(),
+            "source_urls": source_urls,
+            "score": 95,
+            "categories": ["복지", str(event.get("interest") or event.get("lifecycle") or "정부지원")],
+            "writing_links": [link for link in links if link],
+            "welfare": event,
+        }
+    raise ValueError(f"지원하지 않는 공공정보 유형입니다: {source}")
+
+
 class FestivalStateStore:
     """Persist VisitKorea filters, cached rows, and confirmed publish history."""
 
@@ -414,6 +486,7 @@ class FestivalStateStore:
             "link_positions": list(LINK_POSITION_OPTIONS),
             "events": [],
             "selected_id": "",
+            "selected_ids": [],
             "published": {},
             "active": {},
         }
@@ -519,8 +592,10 @@ class WelfareStateStore:
                 "excluded_keyword": "",
                 "age": "",
             },
+            "link_positions": list(LINK_POSITION_OPTIONS),
             "events": [],
             "selected_id": "",
+            "selected_ids": [],
             "published": {},
             "active": {},
         }
@@ -13720,7 +13795,8 @@ class AutomationKeywordQueueWorker(threading.Thread):
                         f"{index}/{len(payloads)} '{keyword}' 참고내용을 먼저 수집하는 중...",
                     )
                 )
-                payload["reference_text"] = self._collect_reference_text_for_keyword(payload)
+                if not payload.get("reference_collected"):
+                    payload["reference_text"] = self._collect_reference_text_for_keyword(payload)
                 self.result_queue.put(
                     (
                         "automation_collect_progress",
@@ -13829,6 +13905,9 @@ class AutomationKeywordQueueWorker(threading.Thread):
         title = generated_title or extract_title_from_article_html(article_html, keyword)
         if self.settings.inline_images_enabled and self.settings.imagen_api_key:
             article_html = self._attach_inline_images(title, keyword, article_html)
+        writing_links = payload.get("writing_links") or []
+        if isinstance(writing_links, list) and writing_links:
+            article_html = append_external_link_buttons(article_html, writing_links)
         return title, article_html, provider_name
 
     def _collect_reference_text_for_keyword(self, payload: dict) -> str:
@@ -15510,9 +15589,12 @@ class KeywordApp(ctk.CTk):
         self.festival_store = FestivalStateStore()
         self.festival_state = self.festival_store.load()
         self.festival_events: list[dict] = list(self.festival_state.get("events") or [])
+        self.festival_selection_vars: dict[str, tk.BooleanVar] = {}
         self.welfare_store = WelfareStateStore()
         self.welfare_state = self.welfare_store.load()
         self.welfare_events: list[dict] = list(self.welfare_state.get("events") or [])
+        self.welfare_selection_vars: dict[str, tk.BooleanVar] = {}
+        self.public_data_batch_context: dict | None = None
         self.festival_filter_value_maps: dict[str, dict[str, str]] = {
             "period": {},
             "region": {},
@@ -15535,6 +15617,13 @@ class KeywordApp(ctk.CTk):
             saved_festival_link_positions = list(LINK_POSITION_OPTIONS)
         self.festival_link_position_vars = {
             position: tk.BooleanVar(value=position in saved_festival_link_positions)
+            for position in LINK_POSITION_OPTIONS
+        }
+        saved_welfare_link_positions = self.welfare_state.get("link_positions")
+        if not isinstance(saved_welfare_link_positions, list):
+            saved_welfare_link_positions = list(LINK_POSITION_OPTIONS)
+        self.welfare_link_position_vars = {
+            position: tk.BooleanVar(value=position in saved_welfare_link_positions)
             for position in LINK_POSITION_OPTIONS
         }
         self.selected_keyword_var = ctk.StringVar(value="")
@@ -21164,6 +21253,18 @@ class KeywordApp(ctk.CTk):
             command=self._collect_selected_festival_detail,
         )
         self.festival_apply_button.grid(row=0, column=2, sticky="e")
+        self.festival_batch_button = ctk.CTkButton(
+            history_row,
+            text="선택 항목 대기열 생성",
+            width=174,
+            height=40,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._start_public_data_batch("festival"),
+        )
+        self.festival_batch_button.grid(row=0, column=3, padx=(8, 0), sticky="e")
         self.festival_history_reset_button = ctk.CTkButton(
             history_row,
             text="등록완료 초기화",
@@ -21175,7 +21276,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._reset_festival_published_history,
         )
-        self.festival_history_reset_button.grid(row=0, column=3, padx=(8, 0), sticky="e")
+        self.festival_history_reset_button.grid(row=0, column=4, padx=(8, 0), sticky="e")
 
         header_row = ctk.CTkFrame(table_card, fg_color=table_palette["header_fg"], corner_radius=14)
         header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -21339,10 +21440,15 @@ class KeywordApp(ctk.CTk):
             ).grid(row=0, column=0, padx=18, pady=18, sticky="w")
             return
 
-        selected_id = self.selected_festival_var.get()
-        selectable_ids = [str(event.get("festival_id") or "") for event in visible_events if not event.get("published")]
-        if selected_id not in selectable_ids:
-            self.selected_festival_var.set(selectable_ids[0] if selectable_ids else "")
+        saved_selected_ids = {
+            str(value) for value in (self.festival_state.get("selected_ids") or []) if str(value)
+        }
+        legacy_selected_id = self.selected_festival_var.get()
+        if not saved_selected_ids and legacy_selected_id:
+            saved_selected_ids.add(legacy_selected_id)
+        visible_ids = {str(event.get("festival_id") or "") for event in visible_events}
+        for stale_id in set(self.festival_selection_vars) - visible_ids:
+            self.festival_selection_vars.pop(stale_id, None)
         palette = self._public_data_table_palette()
         for row, event in enumerate(visible_events):
             festival_id = str(event.get("festival_id") or "")
@@ -21354,16 +21460,19 @@ class KeywordApp(ctk.CTk):
             )
             row_frame.grid(row=row, column=0, padx=8, pady=(0, 8), sticky="ew")
             self._configure_festival_table_columns(row_frame)
-            ctk.CTkRadioButton(
+            selection_var = self.festival_selection_vars.get(festival_id)
+            if selection_var is None:
+                selection_var = tk.BooleanVar(value=festival_id in saved_selected_ids and not published)
+                self.festival_selection_vars[festival_id] = selection_var
+            ctk.CTkCheckBox(
                 row_frame,
                 text="",
-                value=festival_id,
-                variable=self.selected_festival_var,
+                variable=selection_var,
                 state="disabled" if published else "normal",
                 command=self._save_festival_selection,
                 width=22,
-                radiobutton_width=18,
-                radiobutton_height=18,
+                checkbox_width=18,
+                checkbox_height=18,
                 fg_color="#3468e8",
                 hover_color="#2d5cd0",
             ).grid(row=0, column=0, padx=(10, 4), pady=12, sticky="w")
@@ -21388,8 +21497,18 @@ class KeywordApp(ctk.CTk):
                 ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
 
     def _save_festival_selection(self) -> None:
-        self.festival_state["selected_id"] = self.selected_festival_var.get()
+        selected_ids = self._selected_festival_ids()
+        self.festival_state["selected_ids"] = selected_ids
+        self.festival_state["selected_id"] = selected_ids[0] if selected_ids else ""
+        self.selected_festival_var.set(self.festival_state["selected_id"])
         self.festival_store.save(self.festival_state)
+
+    def _selected_festival_ids(self) -> list[str]:
+        return [
+            festival_id
+            for festival_id, variable in self.festival_selection_vars.items()
+            if bool(variable.get())
+        ]
 
     def _selected_festival_link_positions(self) -> list[str]:
         variables = getattr(self, "festival_link_position_vars", {})
@@ -21406,7 +21525,8 @@ class KeywordApp(ctk.CTk):
         self.festival_store.save(self.festival_state)
 
     def _selected_visitkorea_festival(self) -> dict | None:
-        selected_id = self.selected_festival_var.get()
+        selected_ids = self._selected_festival_ids()
+        selected_id = selected_ids[0] if selected_ids else self.selected_festival_var.get()
         for event in self.festival_events:
             if str(event.get("festival_id") or "") == selected_id:
                 return event
@@ -21415,6 +21535,10 @@ class KeywordApp(ctk.CTk):
     def _collect_selected_festival_detail(self) -> None:
         if self.festival_detail_worker and self.festival_detail_worker.is_alive():
             messagebox.showinfo("진행 중", "선택한 축제의 상세정보와 포털 자료를 수집하고 있습니다.")
+            return
+        selected_ids = self._selected_festival_ids()
+        if len(selected_ids) != 1:
+            messagebox.showwarning("하나만 선택", "글쓰기 화면에 반영할 축제는 정확히 1개만 선택해 주세요.")
             return
         event = self._selected_visitkorea_festival()
         if not event:
@@ -21645,8 +21769,30 @@ class KeywordApp(ctk.CTk):
         self.welfare_age_entry.grid(row=0, column=2, padx=(8, 0), sticky="ew")
         self.welfare_age_entry.insert(0, str(filters.get("age") or ""))
 
+        welfare_link_row = ctk.CTkFrame(filter_card, fg_color="#111826", corner_radius=14)
+        welfare_link_row.grid(row=4, column=0, columnspan=4, padx=18, pady=(14, 0), sticky="ew")
+        welfare_link_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            welfare_link_row,
+            text="복지 안내 버튼 위치",
+            text_color="#dce5f2",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=(14, 8), pady=12, sticky="w")
+        for column, position in enumerate(LINK_POSITION_OPTIONS, start=1):
+            ctk.CTkCheckBox(
+                welfare_link_row,
+                text=position,
+                variable=self.welfare_link_position_vars[position],
+                checkbox_width=19,
+                checkbox_height=19,
+                corner_radius=5,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                command=self._save_welfare_link_positions,
+            ).grid(row=0, column=column, padx=(8, 14), pady=12, sticky="e")
+
         action_row = ctk.CTkFrame(filter_card, fg_color="transparent")
-        action_row.grid(row=4, column=0, columnspan=4, padx=18, pady=(14, 18), sticky="ew")
+        action_row.grid(row=5, column=0, columnspan=4, padx=18, pady=(14, 18), sticky="ew")
         action_row.grid_columnconfigure(0, weight=1)
         self.welfare_status_label = ctk.CTkLabel(
             action_row,
@@ -21711,6 +21857,18 @@ class KeywordApp(ctk.CTk):
             command=self._collect_selected_welfare_detail,
         )
         self.welfare_apply_button.grid(row=0, column=2, sticky="e")
+        self.welfare_batch_button = ctk.CTkButton(
+            history_row,
+            text="선택 항목 대기열 생성",
+            width=174,
+            height=40,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._start_public_data_batch("welfare"),
+        )
+        self.welfare_batch_button.grid(row=0, column=3, padx=(8, 0), sticky="e")
         ctk.CTkButton(
             history_row,
             text="등록완료 초기화",
@@ -21721,7 +21879,7 @@ class KeywordApp(ctk.CTk):
             hover_color="#a44444",
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._reset_welfare_published_history,
-        ).grid(row=0, column=3, padx=(8, 0), sticky="e")
+        ).grid(row=0, column=4, padx=(8, 0), sticky="e")
 
         header_row = ctk.CTkFrame(table_card, fg_color=palette["header_fg"], corner_radius=14)
         header_row.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -21840,9 +21998,15 @@ class KeywordApp(ctk.CTk):
                 justify="left",
             ).grid(row=0, column=0, padx=18, pady=18, sticky="w")
             return
-        selectable_ids = [str(event.get("welfare_id") or "") for event in visible if not event.get("published")]
-        if self.selected_welfare_var.get() not in selectable_ids:
-            self.selected_welfare_var.set(selectable_ids[0] if selectable_ids else "")
+        saved_selected_ids = {
+            str(value) for value in (self.welfare_state.get("selected_ids") or []) if str(value)
+        }
+        legacy_selected_id = self.selected_welfare_var.get()
+        if not saved_selected_ids and legacy_selected_id:
+            saved_selected_ids.add(legacy_selected_id)
+        visible_ids = {str(event.get("welfare_id") or "") for event in visible}
+        for stale_id in set(self.welfare_selection_vars) - visible_ids:
+            self.welfare_selection_vars.pop(stale_id, None)
         for row, event in enumerate(visible):
             welfare_id = str(event.get("welfare_id") or "")
             published = bool(event.get("published"))
@@ -21853,16 +22017,19 @@ class KeywordApp(ctk.CTk):
             )
             row_frame.grid(row=row, column=0, padx=8, pady=(0, 8), sticky="ew")
             self._configure_welfare_table_columns(row_frame)
-            ctk.CTkRadioButton(
+            selection_var = self.welfare_selection_vars.get(welfare_id)
+            if selection_var is None:
+                selection_var = tk.BooleanVar(value=welfare_id in saved_selected_ids and not published)
+                self.welfare_selection_vars[welfare_id] = selection_var
+            ctk.CTkCheckBox(
                 row_frame,
                 text="",
-                value=welfare_id,
-                variable=self.selected_welfare_var,
+                variable=selection_var,
                 state="disabled" if published else "normal",
                 command=self._save_welfare_selection,
                 width=22,
-                radiobutton_width=18,
-                radiobutton_height=18,
+                checkbox_width=18,
+                checkbox_height=18,
                 fg_color="#3468e8",
                 hover_color="#2d5cd0",
             ).grid(row=0, column=0, padx=(10, 4), pady=12, sticky="w")
@@ -21887,11 +22054,36 @@ class KeywordApp(ctk.CTk):
                 ).grid(row=0, column=col, padx=8, pady=12, sticky="ew")
 
     def _save_welfare_selection(self) -> None:
-        self.welfare_state["selected_id"] = self.selected_welfare_var.get()
+        selected_ids = self._selected_welfare_ids()
+        self.welfare_state["selected_ids"] = selected_ids
+        self.welfare_state["selected_id"] = selected_ids[0] if selected_ids else ""
+        self.selected_welfare_var.set(self.welfare_state["selected_id"])
+        self.welfare_store.save(self.welfare_state)
+
+    def _selected_welfare_ids(self) -> list[str]:
+        return [
+            welfare_id
+            for welfare_id, variable in self.welfare_selection_vars.items()
+            if bool(variable.get())
+        ]
+
+    def _selected_welfare_link_positions(self) -> list[str]:
+        variables = getattr(self, "welfare_link_position_vars", {})
+        if not variables:
+            return list(LINK_POSITION_OPTIONS)
+        return [
+            position
+            for position in LINK_POSITION_OPTIONS
+            if position in variables and bool(variables[position].get())
+        ]
+
+    def _save_welfare_link_positions(self) -> None:
+        self.welfare_state["link_positions"] = self._selected_welfare_link_positions()
         self.welfare_store.save(self.welfare_state)
 
     def _selected_bokjiro_welfare(self) -> dict | None:
-        selected_id = self.selected_welfare_var.get()
+        selected_ids = self._selected_welfare_ids()
+        selected_id = selected_ids[0] if selected_ids else self.selected_welfare_var.get()
         return next(
             (event for event in self.welfare_events if str(event.get("welfare_id") or "") == selected_id),
             None,
@@ -21900,6 +22092,10 @@ class KeywordApp(ctk.CTk):
     def _collect_selected_welfare_detail(self) -> None:
         if self.welfare_detail_worker and self.welfare_detail_worker.is_alive():
             messagebox.showinfo("진행 중", "선택한 복지정책의 상세정보와 포털 자료를 수집하고 있습니다.")
+            return
+        selected_ids = self._selected_welfare_ids()
+        if len(selected_ids) != 1:
+            messagebox.showwarning("하나만 선택", "글쓰기 화면에 반영할 복지정책은 정확히 1개만 선택해 주세요.")
             return
         event = self._selected_bokjiro_welfare()
         if not event:
@@ -21969,19 +22165,10 @@ class KeywordApp(ctk.CTk):
         self._render_results(self.current_insights)
 
         self._clear_transient_writing_links("welfare")
-        target_url = application_url or normalize_external_url(detail_url)
-        if target_url:
-            self._add_link_row(
-                {
-                    "button_text": f"{title} 복지로에서 자세히 보기👆🏻",
-                    "url": target_url,
-                    "width": "",
-                    "full_width": True,
-                    "position": "본문하단",
-                    "transient": True,
-                    "source": "welfare",
-                }
-            )
+        for position in self._selected_welfare_link_positions():
+            welfare_link = build_welfare_official_link(event, position=position)
+            if welfare_link:
+                self._add_link_row(welfare_link)
         self._switch_page("writing")
         self._reset_writing_section_completion()
         self._open_writing_section("keyword", complete_previous=True)
@@ -22042,6 +22229,163 @@ class KeywordApp(ctk.CTk):
             text="복지정책 등록완료 이력을 초기화했습니다.",
             text_color="#48d980",
         )
+
+    def _start_public_data_batch(self, source: str) -> None:
+        """Collect selected public records one-by-one, then build automation queue items."""
+        if self.public_data_batch_context:
+            messagebox.showinfo("진행 중", "선택한 공공정보를 대기열로 만드는 중입니다.")
+            return
+        if self.automation_keyword_worker and self.automation_keyword_worker.is_alive():
+            messagebox.showinfo("진행 중", "블로그자동화 글 작성이 끝난 뒤 다시 시도해 주세요.")
+            return
+        if source == "festival":
+            selected_ids = set(self._selected_festival_ids())
+            history = self.festival_state.get("published") or {}
+            events = [
+                dict(event) for event in self.festival_events
+                if str(event.get("festival_id") or "") in selected_ids
+                and str(event.get("festival_id") or "") not in history
+            ]
+            label = "축제"
+        else:
+            selected_ids = set(self._selected_welfare_ids())
+            history = self.welfare_state.get("published") or {}
+            events = [
+                dict(event) for event in self.welfare_events
+                if str(event.get("welfare_id") or "") in selected_ids
+                and str(event.get("welfare_id") or "") not in history
+            ]
+            label = "복지정책"
+        if not events:
+            messagebox.showwarning("선택 필요", f"대기열에 추가할 미등록 {label}을 하나 이상 체크해 주세요.")
+            return
+
+        targets = self._automation_target_platforms()
+        if not targets:
+            messagebox.showwarning("발행 대상 필요", "블로그자동화 메뉴에서 발행 대상을 하나 이상 선택해 주세요.")
+            return
+        settings = self._read_wordpress_settings()
+        settings.target_platforms = list(targets)
+        settings.automation_target_platforms = list(targets)
+        model_error = writing_model_validation_error(settings)
+        if model_error:
+            messagebox.showerror("작성 모델 확인", model_error)
+            return
+
+        self.wordpress_settings = settings
+        self._save_automation_settings()
+        self.public_data_batch_context = {
+            "source": source,
+            "label": label,
+            "pending": events,
+            "payloads": [],
+            "failed": [],
+            "total": len(events),
+            "settings": settings,
+            "phase": "detail",
+        }
+        self._set_public_data_batch_controls(source, running=True)
+        self._start_next_public_data_batch_detail()
+
+    def _set_public_data_batch_controls(self, source: str, running: bool) -> None:
+        state = "disabled" if running else "normal"
+        if source == "festival":
+            if hasattr(self, "festival_batch_button"):
+                self.festival_batch_button.configure(
+                    state=state,
+                    text="대기열 생성 중..." if running else "선택 항목 대기열 생성",
+                )
+            if hasattr(self, "festival_apply_button"):
+                self.festival_apply_button.configure(state=state)
+            if hasattr(self, "festival_fetch_button"):
+                self.festival_fetch_button.configure(state=state)
+        else:
+            if hasattr(self, "welfare_batch_button"):
+                self.welfare_batch_button.configure(
+                    state=state,
+                    text="대기열 생성 중..." if running else "선택 항목 대기열 생성",
+                )
+            if hasattr(self, "welfare_apply_button"):
+                self.welfare_apply_button.configure(state=state)
+            if hasattr(self, "welfare_fetch_button"):
+                self.welfare_fetch_button.configure(state=state)
+
+    def _start_next_public_data_batch_detail(self) -> None:
+        context = self.public_data_batch_context
+        if not context:
+            return
+        pending = context["pending"]
+        if not pending:
+            payloads = context["payloads"]
+            if not payloads:
+                self._finish_public_data_batch(success=False, message="상세정보를 수집한 항목이 없습니다.")
+                return
+            context["phase"] = "generation"
+            settings = context["settings"]
+            self.automation_keyword_worker = AutomationKeywordQueueWorker(
+                settings,
+                [],
+                self.result_queue,
+                selected_payloads=payloads,
+            )
+            self.automation_keyword_worker.start()
+            return
+
+        event = pending.pop(0)
+        context["current"] = event
+        completed = len(context["payloads"]) + len(context["failed"])
+        message = f"{completed + 1}/{context['total']} '{event.get('title', '')}' 상세정보 수집 중..."
+        if context["source"] == "festival":
+            self.festival_status_label.configure(text=message, text_color="#6dadff")
+            self.festival_detail_worker = VisitKoreaFestivalDetailWorker(event, self.result_queue)
+            self.festival_detail_worker.start()
+        else:
+            self.welfare_status_label.configure(text=message, text_color="#6dadff")
+            self.welfare_detail_worker = BokjiroWelfareDetailWorker(event, self.result_queue)
+            self.welfare_detail_worker.start()
+
+    def _handle_public_data_batch_detail_done(self, source: str, event: dict) -> None:
+        context = self.public_data_batch_context
+        if not context or context.get("source") != source or context.get("phase") != "detail":
+            return
+        rank = len(context["payloads"]) + 1
+        positions = (
+            self._selected_festival_link_positions()
+            if source == "festival"
+            else self._selected_welfare_link_positions()
+        )
+        payload = build_public_data_automation_payload(event, source, positions, rank=rank)
+        payload["reference_collected"] = True
+        payload["target_platforms"] = list(context["settings"].automation_target_platforms)
+        context["payloads"].append(payload)
+        self._start_next_public_data_batch_detail()
+
+    def _handle_public_data_batch_detail_error(self, source: str, error: str) -> None:
+        context = self.public_data_batch_context
+        if not context or context.get("source") != source or context.get("phase") != "detail":
+            return
+        current = dict(context.get("current") or {})
+        context["failed"].append({"title": current.get("title", ""), "error": str(error)})
+        self._start_next_public_data_batch_detail()
+
+    def _finish_public_data_batch(self, success: bool, message: str = "") -> None:
+        context = self.public_data_batch_context
+        if not context:
+            return
+        source = str(context.get("source") or "")
+        failed_count = len(context.get("failed") or [])
+        self.public_data_batch_context = None
+        self._set_public_data_batch_controls(source, running=False)
+        status_label = self.festival_status_label if source == "festival" else self.welfare_status_label
+        status_label.configure(
+            text=message or ("선택 항목을 대기열에 추가했습니다." if success else "대기열 생성에 실패했습니다."),
+            text_color="#48d980" if success else "#ff6b6b",
+        )
+        if success:
+            suffix = f"\n상세 수집 실패 {failed_count}건은 제외했습니다." if failed_count else ""
+            messagebox.showinfo("대기열 생성 완료", f"{message}{suffix}")
+        else:
+            messagebox.showerror("대기열 생성 실패", message or "선택 항목을 처리하지 못했습니다.")
 
     def _fetch_public_data_events(self) -> None:
         if self.public_data_worker and self.public_data_worker.is_alive():
@@ -30260,6 +30604,10 @@ class KeywordApp(ctk.CTk):
             "remote_job_id": str(payload.get("remote_job_id") or "").strip(),
             "remote_action": str(payload.get("remote_action") or "queue").strip(),
         }
+        if isinstance(payload.get("festival"), dict):
+            queue_item["festival"] = dict(payload["festival"])
+        if isinstance(payload.get("welfare"), dict):
+            queue_item["welfare"] = dict(payload["welfare"])
         if self._should_apply_automation_cardnews(settings):
             self.automation_status_label.configure(
                 text=f"{payload.get('index', '?')}/{payload.get('total', '?')} '{title}' 본문 카드뉴스 생성 중...",
@@ -31345,6 +31693,13 @@ class KeywordApp(ctk.CTk):
                         self.festival_status_label.configure(text=str(payload), text_color="#6dadff")
                 elif event_type == "festival_detail_done":
                     self.festival_detail_worker = None
+                    if (
+                        self.public_data_batch_context
+                        and self.public_data_batch_context.get("source") == "festival"
+                        and self.public_data_batch_context.get("phase") == "detail"
+                    ):
+                        self._handle_public_data_batch_detail_done("festival", dict(payload or {}))
+                        continue
                     if hasattr(self, "festival_apply_button"):
                         self.festival_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
                         self.festival_fetch_button.configure(state="normal")
@@ -31356,6 +31711,13 @@ class KeywordApp(ctk.CTk):
                     self._apply_visitkorea_festival_to_writing(dict(payload or {}))
                 elif event_type == "festival_detail_error":
                     self.festival_detail_worker = None
+                    if (
+                        self.public_data_batch_context
+                        and self.public_data_batch_context.get("source") == "festival"
+                        and self.public_data_batch_context.get("phase") == "detail"
+                    ):
+                        self._handle_public_data_batch_detail_error("festival", str(payload))
+                        continue
                     if hasattr(self, "festival_apply_button"):
                         self.festival_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
                         self.festival_fetch_button.configure(state="normal")
@@ -31391,6 +31753,13 @@ class KeywordApp(ctk.CTk):
                         self.welfare_status_label.configure(text=str(payload), text_color="#6dadff")
                 elif event_type == "welfare_detail_done":
                     self.welfare_detail_worker = None
+                    if (
+                        self.public_data_batch_context
+                        and self.public_data_batch_context.get("source") == "welfare"
+                        and self.public_data_batch_context.get("phase") == "detail"
+                    ):
+                        self._handle_public_data_batch_detail_done("welfare", dict(payload or {}))
+                        continue
                     if hasattr(self, "welfare_apply_button"):
                         self.welfare_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
                         self.welfare_fetch_button.configure(state="normal")
@@ -31402,6 +31771,13 @@ class KeywordApp(ctk.CTk):
                     self._apply_bokjiro_welfare_to_writing(dict(payload or {}))
                 elif event_type == "welfare_detail_error":
                     self.welfare_detail_worker = None
+                    if (
+                        self.public_data_batch_context
+                        and self.public_data_batch_context.get("source") == "welfare"
+                        and self.public_data_batch_context.get("phase") == "detail"
+                    ):
+                        self._handle_public_data_batch_detail_error("welfare", str(payload))
+                        continue
                     if hasattr(self, "welfare_apply_button"):
                         self.welfare_apply_button.configure(state="normal", text="상세 수집 후 글쓰기에 반영")
                         self.welfare_fetch_button.configure(state="normal")
@@ -31422,6 +31798,13 @@ class KeywordApp(ctk.CTk):
                     self._handle_automation_keyword_item_collected(payload)
                 elif event_type == "automation_collect_done":
                     self._handle_automation_keywords_collected(payload)
+                    if self.public_data_batch_context and self.public_data_batch_context.get("phase") == "generation":
+                        count = int((payload or {}).get("count", 0) or 0)
+                        total = int((payload or {}).get("total", count) or count)
+                        self._finish_public_data_batch(
+                            success=True,
+                            message=f"선택한 {total}개 중 {count}개의 글·썸네일·카드뉴스를 대기열에 추가했습니다.",
+                        )
                 elif event_type == "automation_collect_error":
                     if hasattr(self, "automation_collect_button"):
                         self.automation_collect_button.configure(
@@ -31431,7 +31814,9 @@ class KeywordApp(ctk.CTk):
                     if hasattr(self, "automation_status_label"):
                         self.automation_status_label.configure(text="자동화 키워드 수집 실패", text_color="#ff6b6b")
                     self._schedule_next_automation_collection()
-                    if not self.automation_schedule_running:
+                    if self.public_data_batch_context and self.public_data_batch_context.get("phase") == "generation":
+                        self._finish_public_data_batch(success=False, message=str(payload))
+                    elif not self.automation_schedule_running:
                         messagebox.showerror("자동화 키워드 수집 실패", payload)
                 elif event_type == "reference_collect_progress":
                     self.keyword_status_label.configure(text=payload)
