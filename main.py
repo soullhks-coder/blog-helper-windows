@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import webbrowser
 import weakref
 import xml.etree.ElementTree as ET
@@ -309,6 +310,15 @@ TISTORY_COOKIE_KEEP_DAYS = 180
 NAVER_BLOG_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog Chrome Profile"
 NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
 NAVER_BLOG_COOKIE_KEEP_DAYS = 180
+NAVER_BLOG_AUTOMATION_MODE_SEMI = "semi"
+NAVER_BLOG_AUTOMATION_MODE_FULL = "full"
+NAVER_BLOG_AUTOMATION_MODE_LABELS = {
+    NAVER_BLOG_AUTOMATION_MODE_SEMI: "반자동",
+    NAVER_BLOG_AUTOMATION_MODE_FULL: "완전자동",
+}
+NAVER_BLOG_AUTOMATION_MODE_BY_LABEL = {
+    label: value for value, label in NAVER_BLOG_AUTOMATION_MODE_LABELS.items()
+}
 NAVER_KIN_QUESTION_LIST_URL = "https://kin.naver.com/qna/questionList.naver"
 NAVER_KIN_DEBUG_LOG_FILE = DATA_DIR / "naver-kin-debug.log"
 NAVER_SEARCH_ADVISOR_CRAWL_URL = (
@@ -1139,6 +1149,17 @@ DEFAULT_NAVER_BLOG_CONVERSION_RULES = (
     "4. 본문은 도입부, 핵심 정리, 상세 설명, 주의사항, 마무리 순서로 구성한다.\n"
     "5. 확인되지 않은 사실, 가격, 날짜, 인물 정보는 임의로 만들지 않는다.\n"
     "6. 이미지 마커가 있으면 [image_1.jpg] 형식으로 남겨 자동화가 삽입 위치를 알 수 있게 한다.\n"
+    "7. 한 문단은 2~4문장 정도로 짧게 작성하고, 문단과 문단 사이에는 반드시 빈 줄을 한 줄 넣는다.\n"
+    "8. 긴 문장을 한 덩어리로 붙이지 말고 소제목, 짧은 문단, 목록을 활용해 모바일에서도 읽기 쉽게 줄바꿈한다.\n"
+    "9. 소제목은 3~6개를 만들고 반드시 `## 소제목` 형식으로 한 줄에 작성한다.\n"
+    "10. 독자가 꼭 알아야 할 핵심 문장은 문단마다 한 문장 이내로 골라 `**중요 문장**` 형식으로 표시한다.\n"
+    "11. `##`와 `**` 표시는 네이버 에디터의 인용구와 굵기 서식 적용용이며 최종 화면에는 표시하지 않는다.\n"
+)
+DEFAULT_NAVER_BLOG_TITLE_PROMPT = (
+    "네이버 블로그에 어울리는 자연스러운 제목과 도입부를 작성해줘."
+)
+DEFAULT_NAVER_BLOG_TOPIC_PROMPT = (
+    "선택한 카테고리와 키워드를 바탕으로 친근하고 정보성 있는 네이버 블로그 글을 작성해줘."
 )
 LEGACY_NAVER_KIN_ANSWER_PROMPT = (
     "【N지식인 답변형 워드프레스 글쓰기 프롬프트】\n\n"
@@ -1981,11 +2002,14 @@ class WordPressSettings:
     naver_blog_publish_name: str = ""
     naver_blog_body_delay_ms: int = 20
     naver_blog_run_count: int = 1
+    naver_blog_image_count: int = 2
+    naver_blog_automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI
     naver_blog_work_folder: str = ""
     naver_blog_prompt_type: str = "공통"
+    naver_blog_prompt_id: str = "naver-blog-default"
     naver_blog_topic_category: str = "선택안함"
-    naver_blog_title_prompt: str = ""
-    naver_blog_topic_prompt: str = ""
+    naver_blog_title_prompt: str = DEFAULT_NAVER_BLOG_TITLE_PROMPT
+    naver_blog_topic_prompt: str = DEFAULT_NAVER_BLOG_TOPIC_PROMPT
     naver_blog_conversion_rules: str = DEFAULT_NAVER_BLOG_CONVERSION_RULES
     naver_blog_generation_model: str = "[CLI] Codex"
     naver_blog_image_model: str = "[CLI IMG] Codex"
@@ -2082,6 +2106,8 @@ class PromptFileStore:
         "tistory_automation_prompt": "tistory_automation.txt",
         "blogspot_title_prompt_template": "blogspot_title.txt",
         "blogspot_article_prompt_template": "blogspot_article.txt",
+        "naver_blog_title_prompt": "naver_blog_title_prompt.txt",
+        "naver_blog_topic_prompt": "naver_blog_topic_prompt.txt",
         "naver_blog_conversion_rules": "naver_blog_conversion_rules.txt",
         "naver_kin_answer_prompt": "naver_kin_answer_prompt.txt",
     }
@@ -2167,6 +2193,13 @@ class PromptFileStore:
                 "article_prompt": settings.tistory_article_prompt_template or DEFAULT_TISTORY_ARTICLE_PROMPT,
             },
             {
+                "id": "naver-blog-default",
+                "platform": "naver_blog",
+                "name": "기본",
+                "title_prompt": settings.naver_blog_title_prompt or DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+                "article_prompt": settings.naver_blog_topic_prompt or DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
+            },
+            {
                 "id": "blogspot-default",
                 "platform": "blogspot",
                 "name": "기본",
@@ -2184,7 +2217,7 @@ class PromptFileStore:
             if not isinstance(item, dict):
                 continue
             platform = str(item.get("platform") or "").strip()
-            if platform not in ("wordpress", "tistory", "blogspot"):
+            if platform not in ("wordpress", "tistory", "naver_blog", "blogspot"):
                 continue
             prompt_id = str(item.get("id") or f"{platform}-{int(time.time() * 1000)}").strip()
             if prompt_id in seen_ids:
@@ -2239,6 +2272,8 @@ class PromptFileStore:
             "tistory_automation_prompt": DEFAULT_TISTORY_AUTOMATION_PROMPT,
             "blogspot_title_prompt_template": DEFAULT_BLOGSPOT_TITLE_PROMPT,
             "blogspot_article_prompt_template": DEFAULT_BLOGSPOT_ARTICLE_PROMPT,
+            "naver_blog_title_prompt": DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+            "naver_blog_topic_prompt": DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
             "naver_blog_conversion_rules": DEFAULT_NAVER_BLOG_CONVERSION_RULES,
             "naver_kin_answer_prompt": DEFAULT_NAVER_KIN_ANSWER_PROMPT,
         }[attribute]
@@ -2458,11 +2493,25 @@ class AppStateStore:
             naver_blog_publish_name=payload.get("naver_blog_publish_name", ""),
             naver_blog_body_delay_ms=payload.get("naver_blog_body_delay_ms", 20),
             naver_blog_run_count=payload.get("naver_blog_run_count", 1),
+            naver_blog_image_count=max(1, min(int(payload.get("naver_blog_image_count", 2) or 2), 10)),
+            naver_blog_automation_mode=normalize_naver_blog_automation_mode(
+                payload.get(
+                    "naver_blog_automation_mode",
+                    NAVER_BLOG_AUTOMATION_MODE_SEMI,
+                )
+            ),
             naver_blog_work_folder=payload.get("naver_blog_work_folder", ""),
             naver_blog_prompt_type=payload.get("naver_blog_prompt_type", "공통"),
+            naver_blog_prompt_id=payload.get("naver_blog_prompt_id", "naver-blog-default"),
             naver_blog_topic_category=payload.get("naver_blog_topic_category", "선택안함"),
-            naver_blog_title_prompt=payload.get("naver_blog_title_prompt", ""),
-            naver_blog_topic_prompt=payload.get("naver_blog_topic_prompt", ""),
+            naver_blog_title_prompt=payload.get(
+                "naver_blog_title_prompt",
+                DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+            ) or DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+            naver_blog_topic_prompt=payload.get(
+                "naver_blog_topic_prompt",
+                DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
+            ) or DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
             naver_blog_conversion_rules=payload.get("naver_blog_conversion_rules", DEFAULT_NAVER_BLOG_CONVERSION_RULES),
             naver_blog_generation_model=payload.get("naver_blog_generation_model", "[CLI] Codex"),
             naver_blog_image_model=payload.get("naver_blog_image_model", "[CLI IMG] Codex"),
@@ -3265,6 +3314,30 @@ def append_runtime_log(scope: str, message: str) -> None:
             log_file.write(f"[{timestamp}] [{scope}] {message.strip()}\n")
     except OSError:
         pass
+
+
+def friendly_naver_blog_automation_error(exc: BaseException) -> str:
+    """Translate common NBlog browser failures into actionable guidance."""
+    message = str(exc or "").strip()
+    lowered = message.lower()
+    profile_collision_markers = (
+        "target page, context or browser has been closed",
+        "existing browser session",
+        "processsingleton",
+        "profile appears to be in use",
+        "user data directory is already in use",
+        "기존 브라우저 세션",
+    )
+    if any(marker in lowered for marker in profile_collision_markers):
+        return (
+            "N블로그 전용 Chrome 창이 이미 열려 있어 새 자동화를 시작하지 못했습니다.\n\n"
+            "현재 열려 있는 N블로그 글쓰기 전용 Chrome 창을 먼저 닫은 뒤 다시 실행해 주세요. "
+            "Blog Helper가 두 개 실행 중이면 하나만 남겨 주세요.\n\n"
+            f"상세 로그: {RUNTIME_LOG_FILE}"
+        )
+    if not message:
+        message = "알 수 없는 오류가 발생했습니다."
+    return f"{message}\n\n상세 로그: {RUNTIME_LOG_FILE}"
 
 
 def is_network_timeout(exc: BaseException) -> bool:
@@ -7801,6 +7874,17 @@ def normalize_naver_blog_id(value: str) -> str:
     return value.strip()
 
 
+def normalize_naver_blog_automation_mode(value: object) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if lowered in NAVER_BLOG_AUTOMATION_MODE_LABELS:
+        return lowered
+    return NAVER_BLOG_AUTOMATION_MODE_BY_LABEL.get(
+        text,
+        NAVER_BLOG_AUTOMATION_MODE_SEMI,
+    )
+
+
 def is_naver_logged_in_context(context) -> bool:
     try:
         for cookie in context.cookies():
@@ -7849,12 +7933,1502 @@ def extract_naver_blog_nickname(page) -> str:
     return nickname[:80]
 
 
+def is_naver_blog_editor_page(page) -> bool:
+    """Return True only when the Naver blog writing editor is actually ready."""
+    try:
+        pages_and_frames = [page, *list(page.frames)]
+    except Exception:
+        pages_and_frames = [page]
+
+    editor_selectors = (
+        ".se-editor",
+        ".se-documentTitle",
+        ".se-title-text",
+        "[data-placeholder*='제목']",
+        "textarea[placeholder*='제목']",
+        "input[placeholder*='제목']",
+    )
+    for target in pages_and_frames:
+        for selector in editor_selectors:
+            try:
+                locator = target.locator(selector)
+                if locator.count() and locator.first.is_visible():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def wait_for_naver_blog_editor(context, timeout_seconds: int = 120):
+    deadline = time.time() + max(15, int(timeout_seconds))
+    while time.time() < deadline:
+        for candidate in reversed(list(context.pages)):
+            try:
+                if is_naver_blog_editor_page(candidate):
+                    return candidate
+            except Exception:
+                continue
+        time.sleep(0.5)
+    return None
+
+
+def _cancel_naver_existing_draft_popup_in_target(target) -> bool:
+    """Cancel only Naver's existing-draft restore popup, not unrelated dialogs."""
+    try:
+        clicked = bool(
+            target.evaluate(
+                """() => {
+                    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                    const isVisible = (node) => {
+                        if (!node) return false;
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' &&
+                            Number(style.opacity || 1) !== 0 && rect.width > 1 && rect.height > 1;
+                    };
+                    const markers = Array.from(document.querySelectorAll('h1, h2, h3, strong, p, span, div'))
+                        .filter((node) => isVisible(node) && normalize(node.textContent).includes('작성 중인 글이 있습니다'));
+                    for (const marker of markers) {
+                        let container = marker;
+                        for (let depth = 0; container && depth < 10; depth += 1, container = container.parentElement) {
+                            const containerText = normalize(container.innerText || container.textContent);
+                            if (!containerText.includes('작성 중인 글이 있습니다') ||
+                                !containerText.includes('이어') || !containerText.includes('작성')) {
+                                continue;
+                            }
+                            const controls = Array.from(
+                                container.querySelectorAll('button, a, [role="button"], input[type="button"]')
+                            );
+                            const cancel = controls.find((node) => {
+                                const label = normalize(node.innerText || node.value || node.getAttribute('aria-label'));
+                                return isVisible(node) && label === '취소';
+                            });
+                            if (cancel) {
+                                cancel.click();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }"""
+            )
+        )
+        if clicked:
+            return True
+    except Exception:
+        pass
+
+    # SmartEditor sometimes mounts the modal through a React portal whose
+    # wrapper changes independently from the editor. Use accessible text as a
+    # fallback, but only while the exact existing-draft message is visible.
+    try:
+        markers = target.get_by_text("작성 중인 글이 있습니다", exact=False)
+        marker_visible = any(
+            markers.nth(index).is_visible()
+            for index in range(min(markers.count(), 10))
+        )
+        if not marker_visible:
+            return False
+        cancel_buttons = target.get_by_role("button", name="취소", exact=True)
+        for index in range(min(cancel_buttons.count(), 10)):
+            candidate = cancel_buttons.nth(index)
+            if candidate.is_visible() and candidate.is_enabled():
+                candidate.click(timeout=5_000)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def dismiss_naver_existing_draft_popup(context, timeout_seconds: int = 12) -> bool:
+    """Wait briefly for Naver's draft-restore popup and choose Cancel when present."""
+    deadline = time.time() + max(2, int(timeout_seconds))
+    editor_ready_since: float | None = None
+    while time.time() < deadline:
+        pages = list(context.pages)
+        for page in reversed(pages):
+            targets = [page, *list(page.frames)]
+            for target in targets:
+                if _cancel_naver_existing_draft_popup_in_target(target):
+                    try:
+                        page.wait_for_timeout(600)
+                    except Exception:
+                        time.sleep(0.6)
+                    return True
+        editor_ready = any(is_naver_blog_editor_page(page) for page in pages)
+        if editor_ready:
+            if editor_ready_since is None:
+                editor_ready_since = time.time()
+            elif time.time() - editor_ready_since >= 2.0:
+                return False
+        else:
+            editor_ready_since = None
+        time.sleep(0.25)
+    return False
+
+
+def naver_blog_plain_text_from_html(article_html: str) -> str:
+    """Convert generated HTML to readable SmartEditor text without flattening paragraphs."""
+    text = re.sub(r"<script\b[^<]*(?:(?!</script>)<[^<]*)*</script>", " ", article_html or "", flags=re.I)
+    text = re.sub(r"<style\b[^<]*(?:(?!</style>)<[^<]*)*</style>", " ", text, flags=re.I)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</(?:h[1-6]|p|div|blockquote|section|article|tr)>", "\n\n", text, flags=re.I)
+    text = re.sub(r"<li\b[^>]*>", "\n- ", text, flags=re.I)
+    text = re.sub(r"</li>", "", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text).replace("\u00a0", " ")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    result: list[str] = []
+    for line in lines:
+        if line:
+            result.append(line)
+        elif result and result[-1] != "":
+            result.append("")
+    return "\n".join(result).strip()
+
+
+def normalize_naver_blog_paragraph_spacing(body_text: str) -> str:
+    """Create short, readable paragraphs even when the model returns one text block."""
+    normalized = str(body_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+    normalized = re.sub(r"\n[ \t]+", "\n", normalized)
+    # The writing model sometimes emits inline headings such as `[핵심 내용 *]`.
+    # Pull them out before sentence grouping so SmartEditor receives real blocks.
+    normalized = re.sub(
+        r"\[\s*([^\[\]\n]{2,80}?)\s*\*?\s*\]",
+        lambda match: f"\n\n{match.group(1).strip()}\n\n",
+        normalized,
+    )
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    if not normalized:
+        return ""
+
+    paragraphs: list[str] = []
+    for raw_block in re.split(r"\n{2,}", normalized):
+        block = re.sub(r"[ \t\n]+", " ", raw_block).strip()
+        if not block:
+            continue
+        if len(block) <= 70 and not re.search(r"[.!?。！？]", block):
+            paragraphs.append(block)
+            continue
+
+        # Korean model output occasionally omits a space after a full stop.
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])(?:\s+|(?=[가-힣\[]))", block)
+            if sentence.strip()
+        ]
+        if len(sentences) <= 1:
+            paragraphs.append(block)
+            continue
+
+        current: list[str] = []
+        current_length = 0
+        for sentence in sentences:
+            current.append(sentence)
+            current_length += len(sentence)
+            # Two sentences is comfortable on mobile; very short sentences may use three.
+            if len(current) >= 2 and (current_length >= 90 or len(current) >= 3):
+                paragraphs.append(" ".join(current))
+                current = []
+                current_length = 0
+        if current:
+            if paragraphs and len(current) == 1 and len(current[0]) < 45:
+                paragraphs[-1] = f"{paragraphs[-1]} {current[0]}".strip()
+            else:
+                paragraphs.append(" ".join(current))
+    return "\n\n".join(paragraphs).strip()
+
+
+def select_naver_image_collage(editor_page, timeout_seconds: int = 20) -> bool:
+    """Select Naver SmartEditor's collage layout after attaching multiple images."""
+    deadline = time.time() + max(3, int(timeout_seconds))
+    exact_collage = re.compile(r"^\s*콜라주\s*$")
+    selectors = (
+        "button[aria-label='콜라주']",
+        "[role='button'][aria-label='콜라주']",
+        "button[title='콜라주']",
+        "[role='button'][title='콜라주']",
+        "[data-name*='collage' i]",
+        "[class*='collage' i]",
+    )
+
+    while time.time() < deadline:
+        pages = list(editor_page.context.pages) or [editor_page]
+        for page in reversed(pages):
+            for target in [page, *list(page.frames)]:
+                candidates = []
+                try:
+                    candidates.append(target.get_by_role("button", name=exact_collage))
+                except Exception:
+                    pass
+                try:
+                    candidates.append(target.get_by_text(exact_collage, exact=True))
+                except Exception:
+                    pass
+                for selector in selectors:
+                    try:
+                        candidates.append(target.locator(selector))
+                    except Exception:
+                        continue
+
+                for locator in candidates:
+                    try:
+                        for index in range(min(locator.count(), 12)):
+                            candidate = locator.nth(index)
+                            if not candidate.is_visible() or not candidate.is_enabled():
+                                continue
+                            candidate.scroll_into_view_if_needed(timeout=3_000)
+                            candidate.click(timeout=5_000)
+                            page.wait_for_timeout(700)
+                            append_runtime_log("NBlog", "이미지 배치 방식에서 콜라주를 선택했습니다.")
+                            return True
+                    except Exception:
+                        continue
+        time.sleep(0.25)
+    append_runtime_log("NBlog", "콜라주 선택 팝업을 찾지 못해 현재 이미지 배치를 유지했습니다.")
+    return False
+
+
+def _visible_naver_editor_locator(
+    target,
+    selectors: tuple[str, ...],
+    exclude_title: bool = False,
+    require_editable: bool = True,
+):
+    for selector in selectors:
+        try:
+            locator = target.locator(selector)
+            for index in range(min(locator.count(), 30)):
+                candidate = locator.nth(index)
+                if not candidate.is_visible() or not candidate.is_enabled():
+                    continue
+                metadata = candidate.evaluate(
+                    """node => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return {
+                            hidden: Boolean(node.closest('[aria-hidden="true"], [hidden], [inert]')) ||
+                                style.display === 'none' || style.visibility === 'hidden' ||
+                                Number(style.opacity || 1) === 0,
+                            clipboardHelper: node.getAttribute('allow') === 'clipboard-read',
+                            editable: Boolean(node.isContentEditable) ||
+                                node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' ||
+                                node.getAttribute('role') === 'textbox',
+                            width: rect.width,
+                            height: rect.height,
+                            right: rect.right,
+                            bottom: rect.bottom
+                        };
+                    }"""
+                )
+                if (
+                    not metadata
+                    or metadata.get("hidden")
+                    or metadata.get("clipboardHelper")
+                    or (require_editable and not metadata.get("editable"))
+                    or float(metadata.get("width") or 0) < 8
+                    or float(metadata.get("height") or 0) < 8
+                    or float(metadata.get("right") or 0) <= 0
+                    or float(metadata.get("bottom") or 0) <= 0
+                ):
+                    continue
+                if exclude_title:
+                    in_title = bool(
+                        candidate.evaluate(
+                            "node => Boolean(node.closest('.se-documentTitle, .se-title-text, [data-placeholder*=\"제목\"]'))"
+                        )
+                    )
+                    if in_title:
+                        continue
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _wait_for_visible_naver_editor_locator(
+    editor_page,
+    selectors: tuple[str, ...],
+    *,
+    exclude_title: bool = False,
+    require_editable: bool = True,
+    timeout_seconds: int = 30,
+):
+    """Re-resolve a SmartEditor field after overlays and React rerenders."""
+    deadline = time.time() + max(2, int(timeout_seconds))
+    while time.time() < deadline:
+        popup_cancelled = False
+        pages = list(editor_page.context.pages) or [editor_page]
+        for page in reversed(pages):
+            for target in [page, *list(page.frames)]:
+                if _cancel_naver_existing_draft_popup_in_target(target):
+                    popup_cancelled = True
+                    break
+            if popup_cancelled:
+                break
+        if popup_cancelled:
+            append_runtime_log("NBlog", "작성 중인 글 복원 팝업에서 취소를 눌렀습니다.")
+            time.sleep(0.8)
+            continue
+
+        for page in reversed(pages):
+            for target in [page, *list(page.frames)]:
+                locator = _visible_naver_editor_locator(
+                    target,
+                    selectors,
+                    exclude_title=exclude_title,
+                    require_editable=require_editable,
+                )
+                if locator is not None:
+                    return locator
+        time.sleep(0.3)
+    return None
+
+
+def _visible_last_naver_editor_locator(
+    target,
+    selectors: tuple[str, ...],
+    *,
+    exclude_title: bool = False,
+    exclude_quote: bool = False,
+    require_text_component: bool = False,
+    require_editable: bool = True,
+):
+    """Return the last matching SmartEditor node instead of the first paragraph."""
+    try:
+        locator = target.locator(", ".join(selectors))
+        for index in range(min(locator.count(), 80) - 1, -1, -1):
+            candidate = locator.nth(index)
+            if not candidate.is_visible() or not candidate.is_enabled():
+                continue
+            metadata = candidate.evaluate(
+                """node => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return {
+                        hidden: Boolean(node.closest('[aria-hidden="true"], [hidden], [inert]')) ||
+                            style.display === 'none' || style.visibility === 'hidden' ||
+                            Number(style.opacity || 1) === 0,
+                        clipboardHelper: node.getAttribute('allow') === 'clipboard-read',
+                        editable: Boolean(node.isContentEditable) ||
+                            node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' ||
+                            node.getAttribute('role') === 'textbox',
+                        inTitle: Boolean(node.closest(
+                            '.se-documentTitle, .se-title-text, [data-placeholder*="제목"]'
+                        )),
+                        inQuote: Boolean(node.closest(
+                            '.se-component.se-quotation, .se-component[class*="quotation"], .se-component[class*="quote"], .se-quotation'
+                        )),
+                        inTextComponent: Boolean(node.closest('.se-component.se-text')),
+                        inMediaComponent: Boolean(node.closest(
+                            '.se-component.se-image, .se-component.se-video, .se-component.se-file, .se-component.se-oglink, .se-component.se-table'
+                        )),
+                        isCaptionOrSource: /caption|source|cite|출처|설명/i.test([
+                            node.className || '',
+                            node.getAttribute('data-placeholder') || '',
+                            node.getAttribute('placeholder') || '',
+                            node.getAttribute('aria-label') || ''
+                        ].join(' ')),
+                        width: rect.width,
+                        height: rect.height,
+                        right: rect.right,
+                        bottom: rect.bottom
+                    };
+                }"""
+            )
+            if (
+                not metadata
+                or metadata.get("hidden")
+                or metadata.get("clipboardHelper")
+                or (require_editable and not metadata.get("editable"))
+                or (exclude_title and metadata.get("inTitle"))
+                or (exclude_quote and metadata.get("inQuote"))
+                or (require_text_component and not metadata.get("inTextComponent"))
+                or metadata.get("inMediaComponent")
+                or metadata.get("isCaptionOrSource")
+                or float(metadata.get("width") or 0) < 8
+                or float(metadata.get("height") or 0) < 8
+                or float(metadata.get("right") or 0) <= 0
+                or float(metadata.get("bottom") or 0) <= 0
+            ):
+                continue
+            return candidate
+    except Exception:
+        return None
+    return None
+
+
+def _wait_for_last_naver_editor_locator(
+    editor_page,
+    selectors: tuple[str, ...],
+    *,
+    exclude_title: bool = False,
+    exclude_quote: bool = False,
+    require_text_component: bool = False,
+    require_editable: bool = True,
+    timeout_seconds: int = 20,
+):
+    deadline = time.time() + max(2, int(timeout_seconds))
+    while time.time() < deadline:
+        pages = list(editor_page.context.pages) or [editor_page]
+        for page in reversed(pages):
+            for target in [page, *list(page.frames)]:
+                locator = _visible_last_naver_editor_locator(
+                    target,
+                    selectors,
+                    exclude_title=exclude_title,
+                    exclude_quote=exclude_quote,
+                    require_text_component=require_text_component,
+                    require_editable=require_editable,
+                )
+                if locator is not None:
+                    return locator
+        time.sleep(0.2)
+    return None
+
+
+def _focus_naver_editor_locator(locator) -> None:
+    """Bring a verified SmartEditor field into view before keyboard input."""
+    try:
+        locator.scroll_into_view_if_needed(timeout=5_000)
+        locator.click(timeout=10_000)
+        return
+    except Exception:
+        pass
+    locator.evaluate(
+        """node => {
+            node.scrollIntoView({block: 'center', inline: 'nearest'});
+            node.focus();
+            node.click();
+        }"""
+    )
+
+
+def _wait_for_safe_naver_blog_body_locator(editor_page, timeout_seconds: int = 20):
+    """Find a normal text paragraph, including SmartEditor's non-editable body shell."""
+    timeout_seconds = max(6, int(timeout_seconds or 20))
+    deadline = time.time() + timeout_seconds
+
+    body_locator = _wait_for_last_naver_editor_locator(
+        editor_page,
+        NAVER_BLOG_TEXT_PARAGRAPH_SELECTORS,
+        exclude_title=True,
+        exclude_quote=True,
+        require_text_component=True,
+        require_editable=True,
+        timeout_seconds=min(4, timeout_seconds),
+    )
+    if body_locator is not None:
+        return body_locator
+
+    remaining = max(2, int(deadline - time.time()))
+    blank_body_locator = _wait_for_last_naver_editor_locator(
+        editor_page,
+        NAVER_BLOG_BODY_ACTIVATION_SELECTORS,
+        exclude_title=True,
+        exclude_quote=True,
+        require_text_component=True,
+        require_editable=False,
+        timeout_seconds=remaining,
+    )
+    if blank_body_locator is None:
+        return None
+
+    # SmartEditor accepts keyboard input on this visual module even though its
+    # empty paragraph does not expose contenteditable=true in the DOM.
+    append_runtime_log(
+        "NBlog",
+        "네이버 빈 본문 모듈을 확인했습니다. 클릭 후 본문을 입력합니다.",
+    )
+    return blank_body_locator
+
+
+class NaverBlogAutomationCancelled(RuntimeError):
+    """Raised when the current NBlog automation run is stopped by the user."""
+
+
+def _raise_if_naver_blog_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise NaverBlogAutomationCancelled("네이버 블로그 자동화를 사용자가 중단했습니다.")
+
+
+def _replace_naver_editor_text(
+    editor_page,
+    locator,
+    text: str,
+    delay_ms: int = 0,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """Click a SmartEditor visual module and enter Unicode text reliably."""
+    _focus_naver_editor_locator(locator)
+    modifier = "Meta" if sys.platform == "darwin" else "Control"
+    editor_page.keyboard.press(f"{modifier}+A")
+    editor_page.keyboard.press("Backspace")
+    delay_seconds = max(0, min(int(delay_ms or 0), 100)) / 1000
+    if delay_seconds <= 0:
+        _raise_if_naver_blog_cancelled(cancel_event)
+        editor_page.keyboard.insert_text(text)
+        return
+    for character in text:
+        _raise_if_naver_blog_cancelled(cancel_event)
+        editor_page.keyboard.insert_text(character)
+        time.sleep(delay_seconds)
+
+
+def _replace_naver_editor_multiline_text(
+    editor_page,
+    locator,
+    text: str,
+    delay_ms: int = 0,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """Enter text with real Enter key events so SmartEditor creates paragraph blocks."""
+    _focus_naver_editor_locator(locator)
+    modifier = "Meta" if sys.platform == "darwin" else "Control"
+    editor_page.keyboard.press(f"{modifier}+A")
+    editor_page.keyboard.press("Backspace")
+    delay_seconds = max(0, min(int(delay_ms or 0), 100)) / 1000
+    lines = str(text or "").split("\n")
+    for line_index, line in enumerate(lines):
+        _raise_if_naver_blog_cancelled(cancel_event)
+        if line:
+            if delay_seconds <= 0:
+                editor_page.keyboard.insert_text(line)
+            else:
+                for character in line:
+                    _raise_if_naver_blog_cancelled(cancel_event)
+                    editor_page.keyboard.insert_text(character)
+                    time.sleep(delay_seconds)
+        if line_index < len(lines) - 1:
+            editor_page.keyboard.press("Enter")
+            time.sleep(0.04)
+
+
+def _clean_naver_blog_heading_text(value: str) -> str:
+    """Return one clean heading line so quote blocks never absorb body text."""
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = re.sub(r"__NBL_(?:HEADING|BOLD)_(?:OPEN|CLOSE)__", "", text)
+    for line in text.splitlines():
+        cleaned = re.sub(r"\s+", " ", line).strip(" \t-#*|")
+        if cleaned:
+            return cleaned[:100].strip()
+    return ""
+
+
+def naver_blog_editor_blocks_from_html(article_html: str, fallback_body_text: str = "") -> list[dict]:
+    """Build SmartEditor blocks while preserving generated headings and emphasis."""
+    source = str(article_html or "").strip()
+    if source:
+        source = re.sub(
+            r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>",
+            lambda match: f"\n\n__NBL_HEADING_OPEN__{match.group(1)}__NBL_HEADING_CLOSE__\n\n",
+            source,
+            flags=re.I | re.S,
+        )
+        source = re.sub(
+            r"<(?:strong|b)\b[^>]*>(.*?)</(?:strong|b)>",
+            lambda match: f"__NBL_BOLD_OPEN__{match.group(1)}__NBL_BOLD_CLOSE__",
+            source,
+            flags=re.I | re.S,
+        )
+        plain_text = naver_blog_plain_text_from_html(source)
+    else:
+        plain_text = str(fallback_body_text or "")
+
+    plain_text = re.sub(
+        r"(?m)^\s*#{1,6}\s+(.+?)\s*$",
+        r"__NBL_HEADING_OPEN__\1__NBL_HEADING_CLOSE__",
+        plain_text,
+    )
+    plain_text = re.sub(
+        r"\*\*(.+?)\*\*",
+        r"__NBL_BOLD_OPEN__\1__NBL_BOLD_CLOSE__",
+        plain_text,
+        flags=re.S,
+    )
+    blocks: list[dict] = []
+
+    def append_paragraph_blocks(segment: str) -> None:
+        normalized = normalize_naver_blog_paragraph_spacing(segment)
+        for raw_block in re.split(r"\n{2,}", normalized):
+            block = re.sub(r"[ \t\n]+", " ", raw_block).strip()
+            if not block:
+                continue
+            bold = "__NBL_BOLD_OPEN__" in block
+            text = re.sub(r"__NBL_BOLD_(?:OPEN|CLOSE)__", "", block).strip()
+            if not text:
+                continue
+            heading = False
+            # Older saved prompts may emit a plain short heading instead of a marker.
+            if len(text) <= 48 and not re.search(r"[.!?。！？]$", text):
+                if re.match(r"^(?:핵심|정리|주의|마무리|알아두|왜 |어떻게|신청|방법|조건|대상|내용)", text):
+                    heading = True
+            blocks.append({"kind": "heading" if heading else "paragraph", "text": text, "bold": bool(bold)})
+
+    heading_pattern = re.compile(
+        r"__NBL_HEADING_OPEN__(.*?)__NBL_HEADING_CLOSE__",
+        flags=re.S,
+    )
+    offset = 0
+    for match in heading_pattern.finditer(plain_text):
+        append_paragraph_blocks(plain_text[offset:match.start()])
+        heading_text = _clean_naver_blog_heading_text(match.group(1))
+        if heading_text:
+            blocks.append({"kind": "heading", "text": heading_text, "bold": False})
+        offset = match.end()
+    append_paragraph_blocks(plain_text[offset:])
+    return blocks
+
+
+def distribute_naver_blog_image_groups(image_paths: list[str]) -> list[list[str]]:
+    """Distribute up to ten images over the top, middle, and bottom of a post."""
+    paths = list(image_paths or [])[:10]
+    if len(paths) <= 1:
+        return [paths, [], []]
+    if len(paths) == 2:
+        return [paths, [], []]
+    if len(paths) == 3:
+        return [paths[:2], [], paths[2:]]
+
+    base, remainder = divmod(len(paths), 3)
+    sizes = [base + (1 if index < remainder else 0) for index in range(3)]
+    groups: list[list[str]] = []
+    offset = 0
+    for size in sizes:
+        groups.append(paths[offset:offset + size])
+        offset += size
+    return groups
+
+
+NAVER_BLOG_BODY_SELECTORS = (
+    "[data-a11y-title='본문'] .se-module-text",
+    ".se-component.se-text .se-module-text",
+    ".se-component.se-text .se-text-paragraph",
+    ".se-content .se-component.se-text .se-text-paragraph[contenteditable='true']",
+    ".se-component.se-text .se-text-paragraph[contenteditable='true']",
+    ".se-main-container [role='textbox'][contenteditable='true']",
+    ".se-main-container .se-text-paragraph[contenteditable='true']",
+    "[role='textbox'][contenteditable='true']",
+    ".se-content [contenteditable='true']",
+    ".se-text-paragraph[contenteditable='true']",
+    "[contenteditable='true']",
+)
+
+NAVER_BLOG_BODY_ACTIVATION_SELECTORS = (
+    ".se-main-container .se-component.se-text .se-module-text",
+    ".se-content .se-component.se-text .se-module-text",
+    ".se-component.se-text .se-module-text",
+    ".se-main-container .se-component.se-text .se-text-paragraph",
+    ".se-content .se-component.se-text .se-text-paragraph",
+    ".se-component.se-text .se-text-paragraph",
+)
+
+NAVER_BLOG_TEXT_PARAGRAPH_SELECTORS = (
+    ".se-main-container .se-component.se-text .se-text-paragraph[contenteditable='true']",
+    ".se-main-container .se-component.se-text [role='textbox'][contenteditable='true']",
+    ".se-main-container .se-component.se-text [contenteditable='true']",
+    ".se-content .se-component.se-text .se-text-paragraph[contenteditable='true']",
+    ".se-component.se-text .se-text-paragraph[contenteditable='true']",
+    ".se-component.se-text [contenteditable='true']",
+)
+
+
+def _focus_naver_blog_editor_end(editor_page, timeout_seconds: int = 20):
+    # SmartEditor lives on the current writing page.  Searching every open tab
+    # and calling Playwright visibility APIs for each selector can inherit the
+    # 30 second default timeout, so try one DOM pass on the current page first.
+    marker = f"blog-helper-body-{time.time_ns()}"
+    fast_script = """marker => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2;
+        };
+        const selectors = [
+            '.se-main-container .se-component.se-text .se-text-paragraph[contenteditable="true"]',
+            '.se-main-container .se-component.se-text [role="textbox"][contenteditable="true"]',
+            '.se-main-container .se-component.se-text [contenteditable="true"]',
+            '.se-content .se-component.se-text .se-text-paragraph[contenteditable="true"]',
+            '.se-component.se-text .se-text-paragraph[contenteditable="true"]',
+            '.se-component.se-text [contenteditable="true"]'
+        ];
+        const nodes = [];
+        for (const selector of selectors) {
+            for (const node of document.querySelectorAll(selector)) {
+                if (!nodes.includes(node)) nodes.push(node);
+            }
+        }
+        const safe = nodes.filter(node => {
+            if (!visible(node)) return false;
+            if (node.closest('.se-documentTitle, .se-title-text')) return false;
+            if (node.closest(
+                '.se-component.se-quotation, .se-component.se-quote, ' +
+                '.se-component[class*="quotation"], .se-component[class*="quote"]'
+            )) return false;
+            if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) return false;
+            const hint = [
+                node.className || '', node.getAttribute('data-placeholder') || '',
+                node.getAttribute('placeholder') || '', node.getAttribute('aria-label') || ''
+            ].join(' ');
+            return !/(출처|source|cite|caption)/i.test(hint);
+        });
+        const node = safe[safe.length - 1];
+        if (!node) return false;
+        node.setAttribute('data-blog-helper-body-target', marker);
+        return true;
+    }"""
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    for target in targets:
+        try:
+            if not target.evaluate(fast_script, marker):
+                continue
+            locator = target.locator(
+                f'[data-blog-helper-body-target="{marker}"]'
+            )
+            locator.evaluate(
+                """node => {
+                    node.removeAttribute('data-blog-helper-body-target');
+                    node.scrollIntoView({block: 'center', inline: 'nearest'});
+                    node.focus();
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    range.collapse(false);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }"""
+            )
+            return locator
+        except Exception:
+            continue
+
+    locator = _wait_for_last_naver_editor_locator(
+        editor_page,
+        NAVER_BLOG_TEXT_PARAGRAPH_SELECTORS,
+        exclude_title=True,
+        exclude_quote=True,
+        require_text_component=True,
+        require_editable=True,
+        timeout_seconds=min(3, max(2, int(timeout_seconds))),
+    )
+    if locator is None:
+        locator = _wait_for_safe_naver_blog_body_locator(
+            editor_page,
+            timeout_seconds=min(4, max(2, int(timeout_seconds))),
+        )
+    if locator is None:
+        raise RuntimeError("네이버 블로그 본문 입력란을 다시 찾지 못했습니다.")
+    locator.evaluate(
+        """node => {
+            node.scrollIntoView({block: 'center', inline: 'nearest'});
+            node.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }"""
+    )
+    return locator
+
+
+def _type_naver_blog_text(
+    editor_page,
+    text: str,
+    delay_ms: int,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    delay_seconds = max(0, min(int(delay_ms or 0), 100)) / 1000
+    if delay_seconds <= 0:
+        editor_page.keyboard.insert_text(str(text or ""))
+        return
+    for character in str(text or ""):
+        _raise_if_naver_blog_cancelled(cancel_event)
+        editor_page.keyboard.insert_text(character)
+        time.sleep(delay_seconds)
+
+
+def _fill_latest_naver_quote_component(
+    editor_page,
+    heading_text: str,
+    timeout_seconds: int = 4,
+) -> bool:
+    """Fill the content field of the newest quote component, never its source field."""
+    heading_text = _clean_naver_blog_heading_text(heading_text)
+    if not heading_text:
+        return False
+    deadline = time.time() + min(1.2, max(0.3, float(timeout_seconds or 0.8)))
+    marker = f"blog-helper-quote-{time.time_ns()}"
+    find_quote_field = """marker => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2;
+        };
+        const quoteSelector = [
+            '.se-component.se-quotation', '.se-component.se-quote',
+            '.se-component[class*="quotation"]', '.se-component[class*="quote"]',
+            '.se-quotation', '.se-quote'
+        ].join(',');
+        const isSource = node => {
+            const hint = [
+                node.className || '', node.getAttribute('data-placeholder') || '',
+                node.getAttribute('placeholder') || '', node.getAttribute('aria-label') || '',
+                node.getAttribute('title') || ''
+            ].join(' ');
+            return /(출처|source|cite|caption)/i.test(hint) ||
+                Boolean(node.closest('[class*="source" i], [class*="cite" i], [class*="caption" i]'));
+        };
+        let active = document.activeElement;
+        if (active && !active.matches('[contenteditable="true"], [role="textbox"]')) {
+            active = active.closest('[contenteditable="true"], [role="textbox"]');
+        }
+        let field = null;
+        if (active && visible(active) && active.closest(quoteSelector) && !isSource(active)) {
+            field = active;
+        }
+        if (!field) {
+            const quotes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
+            for (let index = quotes.length - 1; index >= 0 && !field; index -= 1) {
+                const fields = Array.from(
+                    quotes[index].querySelectorAll('[contenteditable="true"], [role="textbox"]')
+                );
+                field = fields.find(node => visible(node) && !isSource(node)) || null;
+            }
+        }
+        if (!field) return false;
+        field.setAttribute('data-blog-helper-quote-target', marker);
+        return true;
+    }"""
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    while time.time() < deadline:
+        for target in targets:
+            try:
+                if not target.evaluate(find_quote_field, marker):
+                    continue
+                field = target.locator(
+                    f'[data-blog-helper-quote-target="{marker}"]'
+                )
+                field.evaluate(
+                    """node => {
+                        node.scrollIntoView({block: 'center', inline: 'nearest'});
+                        node.focus();
+                        const selection = window.getSelection();
+                        const range = document.createRange();
+                        range.selectNodeContents(node);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }"""
+                )
+                editor_page.keyboard.press("Backspace")
+                editor_page.keyboard.insert_text(heading_text)
+                actual_text = str(
+                    field.evaluate(
+                        "node => String(node.innerText || node.textContent || '')"
+                    )
+                    or ""
+                )
+                expected = re.sub(r"\s+", " ", heading_text).strip()
+                actual = re.sub(
+                    r"\s+",
+                    " ",
+                    actual_text.replace("\u200b", "").replace("\ufeff", ""),
+                ).strip()
+                field.evaluate(
+                    "node => node.removeAttribute('data-blog-helper-quote-target')"
+                )
+                if actual == expected:
+                    return True
+                append_runtime_log(
+                    "NBlog",
+                    f"인용구 입력 검증 실패: expected={expected!r}, actual={actual!r}",
+                )
+                return False
+            except Exception:
+                continue
+        time.sleep(0.05)
+    return False
+
+
+def _focus_naver_blog_paragraph_after_latest_quote(
+    editor_page,
+    timeout_seconds: float = 2.0,
+) -> bool:
+    """Focus the first normal text paragraph after the newest quote component."""
+    deadline = time.time() + max(0.12, min(float(timeout_seconds or 0.5), 0.8))
+    marker = f"blog-helper-after-quote-{time.time_ns()}"
+    find_after_quote = """marker => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2;
+        };
+        const quoteSelector = [
+            '.se-component.se-quotation', '.se-component.se-quote',
+            '.se-component[class*="quotation"]', '.se-component[class*="quote"]',
+            '.se-quotation', '.se-quote'
+        ].join(',');
+        const quotes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
+        const quote = quotes[quotes.length - 1];
+        if (!quote) return false;
+        const selectors = [
+            '.se-main-container .se-component.se-text .se-text-paragraph[contenteditable="true"]',
+            '.se-main-container .se-component.se-text [role="textbox"][contenteditable="true"]',
+            '.se-main-container .se-component.se-text [contenteditable="true"]',
+            '.se-content .se-component.se-text .se-text-paragraph[contenteditable="true"]',
+            '.se-component.se-text .se-text-paragraph[contenteditable="true"]',
+            '.se-component.se-text [contenteditable="true"]'
+        ];
+        const nodes = [];
+        for (const selector of selectors) {
+            for (const node of document.querySelectorAll(selector)) {
+                if (!nodes.includes(node)) nodes.push(node);
+            }
+        }
+        const safe = nodes.filter(node => {
+            if (!visible(node)) return false;
+            if (!(quote.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+            if (node.closest(quoteSelector)) return false;
+            if (node.closest('.se-documentTitle, .se-title-text')) return false;
+            if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) return false;
+            const hint = [node.className || '', node.getAttribute('data-placeholder') || '',
+                node.getAttribute('placeholder') || '', node.getAttribute('aria-label') || ''].join(' ');
+            return !/(출처|source|cite|caption)/i.test(hint);
+        });
+        const node = safe[0];
+        if (!node) return false;
+        node.setAttribute('data-blog-helper-after-quote', marker);
+        return true;
+    }"""
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    while time.time() < deadline:
+        for target in targets:
+            try:
+                if not target.evaluate(find_after_quote, marker):
+                    continue
+                locator = target.locator(
+                    f'[data-blog-helper-after-quote="{marker}"]'
+                )
+                locator.evaluate(
+                    """node => {
+                        node.removeAttribute('data-blog-helper-after-quote');
+                        node.scrollIntoView({block: 'center', inline: 'nearest'});
+                        node.focus();
+                        const selection = window.getSelection();
+                        const range = document.createRange();
+                        range.selectNodeContents(node);
+                        range.collapse(false);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }"""
+                )
+                return True
+            except Exception:
+                continue
+        time.sleep(0.04)
+    return False
+
+
+def _naver_blog_active_normal_paragraph(editor_page) -> bool:
+    """Return True when the caret is already inside a normal body paragraph."""
+    script = """() => {
+        let node = document.activeElement;
+        if (!node) return false;
+        if (!node.matches('[contenteditable="true"], [role="textbox"]')) {
+            node = node.closest('[contenteditable="true"], [role="textbox"]');
+        }
+        if (!node || !node.closest('.se-component.se-text')) return false;
+        if (node.closest('.se-documentTitle, .se-title-text')) return false;
+        if (node.closest('.se-component.se-quotation, .se-component.se-quote, ' +
+            '.se-component[class*="quotation"], .se-component[class*="quote"]')) return false;
+        if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) {
+            return false;
+        }
+        const hint = [node.className || '', node.getAttribute('data-placeholder') || '',
+            node.getAttribute('placeholder') || '', node.getAttribute('aria-label') || ''].join(' ');
+        return !/(출처|source|cite|caption)/i.test(hint);
+    }"""
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    for target in targets:
+        try:
+            if target.evaluate(script):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _leave_naver_blog_quote(editor_page, timeout_seconds: float = 0.6) -> bool:
+    """Leave the active quote and keep the caret in a new normal paragraph."""
+    # SmartEditor often creates a normal paragraph together with the quote.
+    # Prefer that paragraph instead of adding extra blank quote lines.
+    if _focus_naver_blog_paragraph_after_latest_quote(
+        editor_page,
+        timeout_seconds=min(float(timeout_seconds or 0.6), 0.22),
+    ):
+        return True
+
+    editor_page.keyboard.press("End")
+    editor_page.keyboard.press("Enter")
+    if _naver_blog_active_normal_paragraph(editor_page):
+        return True
+    if _focus_naver_blog_paragraph_after_latest_quote(
+        editor_page,
+        timeout_seconds=min(float(timeout_seconds or 0.6), 0.22),
+    ):
+        return True
+
+    # A few SmartEditor builds need a boundary move, but never type body text
+    # until a normal text component is positively identified.
+    editor_page.keyboard.press("ArrowDown")
+    editor_page.keyboard.press("Enter")
+    if _naver_blog_active_normal_paragraph(editor_page):
+        return True
+    return _focus_naver_blog_paragraph_after_latest_quote(
+        editor_page,
+        timeout_seconds=0.25,
+    )
+
+
+def _ensure_naver_blog_normal_paragraph_after_quote(editor_page) -> bool:
+    """Confirm the caret is outside a quote before any body text is entered."""
+    if _naver_blog_active_normal_paragraph(editor_page):
+        return True
+    if _focus_naver_blog_paragraph_after_latest_quote(
+        editor_page,
+        timeout_seconds=0.22,
+    ):
+        return True
+    return _leave_naver_blog_quote(editor_page, timeout_seconds=0.45)
+
+
+def apply_naver_blog_quote_style(
+    editor_page,
+    heading_text: str = "",
+    timeout_seconds: int = 4,
+) -> bool:
+    """Insert a quote component and put the heading in its content field."""
+    heading_text = _clean_naver_blog_heading_text(heading_text)
+    if not heading_text:
+        return False
+    started_at = time.monotonic()
+    deadline = time.time() + min(0.85, max(0.25, float(timeout_seconds or 0.6)))
+    marker = f"blog-helper-quote-button-{time.time_ns()}"
+    find_toolbar_button = """marker => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2 && !node.disabled;
+        };
+        const selectors = [
+            '.se-toolbar-item-quotation button', 'button[data-log*="quotation" i]',
+            'button[data-log*="quote" i]', '[data-name*="quotation" i]',
+            '[data-name*="quote" i]', '[aria-label*="인용구"]', '[title*="인용구"]'
+        ];
+        const candidates = [];
+        for (const selector of selectors) {
+            for (const node of document.querySelectorAll(selector)) {
+                const button = node.closest('button, [role="button"]') || node;
+                if (!candidates.includes(button)) candidates.push(button);
+            }
+        }
+        for (const node of document.querySelectorAll('button, [role="button"]')) {
+            const label = [node.innerText || '', node.getAttribute('aria-label') || '',
+                node.getAttribute('title') || ''].join(' ').replace(/\\s+/g, ' ').trim();
+            if (/^인용구(?:\\s*추가)?$/.test(label) && !candidates.includes(node)) {
+                candidates.push(node);
+            }
+        }
+        const button = candidates.find(visible);
+        if (!button) return false;
+        button.setAttribute('data-blog-helper-quote-button', marker);
+        return true;
+    }"""
+    choose_quote_style = """() => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2 && !node.disabled;
+        };
+        const layers = Array.from(document.querySelectorAll(
+            '.se-toolbar-layer, .se-popup, [class*="quotation"][class*="layer"], ' +
+            '[class*="quote"][class*="layer"]'
+        )).filter(visible);
+        for (const layer of layers) {
+            const options = Array.from(layer.querySelectorAll(
+                'button, [role="button"], [class*="quotation"], [class*="quote"]'
+            )).filter(node => visible(node) && !node.closest('.se-toolbar-item-quotation'));
+            const option = options.find(node => {
+                const hint = [node.className || '', node.getAttribute('data-name') || '',
+                    node.getAttribute('aria-label') || '', node.getAttribute('title') || ''].join(' ');
+                return /(quotation|quote|인용)/i.test(hint);
+            }) || options[0];
+            if (option) {
+                option.click();
+                return true;
+            }
+        }
+        return false;
+    }"""
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    while time.time() < deadline:
+        for target in targets:
+            try:
+                if not target.evaluate(find_toolbar_button, marker):
+                    continue
+                button = target.locator(
+                    f'[data-blog-helper-quote-button="{marker}"]'
+                )
+                button.click(timeout=450)
+                try:
+                    button.evaluate(
+                        "node => node.removeAttribute('data-blog-helper-quote-button')"
+                    )
+                except Exception:
+                    pass
+                editor_page.wait_for_timeout(20)
+                try:
+                    target.evaluate(choose_quote_style)
+                except Exception:
+                    pass
+                editor_page.wait_for_timeout(20)
+                if not _fill_latest_naver_quote_component(
+                    editor_page,
+                    heading_text,
+                    timeout_seconds=0.5,
+                ):
+                    append_runtime_log(
+                        "NBlog",
+                        "인용구 본문 입력칸을 확인하지 못해 소제목을 굵은 일반 문단으로 처리합니다.",
+                    )
+                    return False
+                elapsed = time.monotonic() - started_at
+                append_runtime_log(
+                    "NBlog",
+                    f"인용구 소제목 입력 완료 ({elapsed:.2f}초): {heading_text}",
+                )
+                return True
+            except Exception:
+                continue
+        time.sleep(0.05)
+    append_runtime_log("NBlog", "인용구 도구를 찾지 못해 소제목을 일반 문단으로 유지했습니다.")
+    return False
+
+
+def _attach_naver_blog_image_group(
+    editor_page,
+    image_paths: list[str],
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> tuple[int, bool]:
+    existing_files = [
+        str(Path(path).expanduser().resolve())
+        for path in image_paths
+        if Path(path).expanduser().is_file()
+    ]
+    if not existing_files:
+        return 0, False
+    _raise_if_naver_blog_cancelled(cancel_event)
+    result_queue.put(("naver_blog_progress", f"현재 본문 위치에 이미지 {len(existing_files)}개를 첨부하는 중..."))
+    targets = []
+    for page in reversed(list(editor_page.context.pages) or [editor_page]):
+        targets.extend([page, *list(page.frames)])
+    photo_selectors = (
+        "button:has-text('사진')",
+        "[role='button']:has-text('사진')",
+        "[aria-label*='사진']",
+        "[title*='사진']",
+        ".se-toolbar-item-image button",
+        "[data-name='image']",
+    )
+    attached_count = 0
+    clicked = False
+    for target in targets:
+        photo_button = _visible_naver_editor_locator(target, photo_selectors, require_editable=False)
+        if photo_button is None:
+            continue
+        try:
+            with editor_page.expect_file_chooser(timeout=5_000) as chooser_info:
+                photo_button.click()
+            chooser_info.value.set_files(existing_files)
+            attached_count = len(existing_files)
+            clicked = True
+            break
+        except Exception:
+            try:
+                photo_button.click()
+                clicked = True
+            except Exception:
+                pass
+            break
+    if attached_count == 0:
+        editor_page.wait_for_timeout(700 if clicked else 100)
+        for target in targets:
+            inputs = target.locator("input[type='file']")
+            for index in range(inputs.count() - 1, -1, -1):
+                try:
+                    inputs.nth(index).set_input_files(existing_files)
+                    attached_count = len(existing_files)
+                    break
+                except Exception:
+                    continue
+            if attached_count:
+                break
+    if attached_count == 0:
+        raise RuntimeError("네이버 블로그 상단 사진 버튼의 파일 첨부 입력란을 찾지 못했습니다.")
+    editor_page.wait_for_timeout(1200)
+    collage_selected = False
+    if attached_count >= 2:
+        result_queue.put(("naver_blog_progress", "현재 이미지 그룹을 콜라주로 배치하는 중..."))
+        collage_selected = select_naver_image_collage(editor_page, timeout_seconds=20)
+    return attached_count, collage_selected
+
+
+def fill_naver_blog_editor(
+    editor_page,
+    title: str,
+    body_text: str,
+    image_paths: list[str],
+    result_queue: queue.Queue,
+    body_delay_ms: int = 20,
+    cancel_event: threading.Event | None = None,
+    article_html: str = "",
+    automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
+) -> dict:
+    """Fill the current Naver SmartEditor and attach local images without publishing."""
+    automation_mode = normalize_naver_blog_automation_mode(automation_mode)
+    use_rich_formatting = automation_mode == NAVER_BLOG_AUTOMATION_MODE_FULL
+    title_selectors = (
+        ".se-documentTitle [contenteditable='true']",
+        ".se-title-text [contenteditable='true']",
+        ".se-documentTitle .se-title-text",
+        ".se-documentTitle .se-module-text",
+        ".se-documentTitle .se-text-paragraph",
+        ".se-title-text",
+        "[data-placeholder*='제목']",
+        "textarea[placeholder*='제목']",
+        "input[placeholder*='제목']",
+    )
+    _raise_if_naver_blog_cancelled(cancel_event)
+    title_locator = _wait_for_visible_naver_editor_locator(
+        editor_page,
+        title_selectors,
+        require_editable=False,
+        timeout_seconds=30,
+    )
+    if title_locator is None:
+        raise RuntimeError("네이버 블로그 제목 입력란을 찾지 못했습니다.")
+    result_queue.put(("naver_blog_progress", "네이버 블로그 제목을 입력하는 중..."))
+    try:
+        tag_name = str(title_locator.evaluate("node => node.tagName.toLowerCase()"))
+    except Exception:
+        tag_name = ""
+    if tag_name in {"input", "textarea"}:
+        title_locator.fill(title)
+    else:
+        _replace_naver_editor_text(
+            editor_page,
+            title_locator,
+            title,
+            delay_ms=8,
+            cancel_event=cancel_event,
+        )
+
+    _raise_if_naver_blog_cancelled(cancel_event)
+    body_locator = _wait_for_safe_naver_blog_body_locator(
+        editor_page,
+        timeout_seconds=30,
+    )
+    if body_locator is None:
+        raise RuntimeError("네이버 블로그 본문 입력란을 찾지 못했습니다.")
+    result_queue.put(("naver_blog_progress", "본문 구조와 이미지 배치를 준비하는 중..."))
+    typing_delay = max(0, min(int(body_delay_ms or 0), 100))
+    blocks = naver_blog_editor_blocks_from_html(article_html, body_text)
+    if not blocks:
+        raise RuntimeError("네이버 블로그에 입력할 본문 문단이 없습니다.")
+
+    _focus_naver_editor_locator(body_locator)
+    modifier = "Meta" if sys.platform == "darwin" else "Control"
+    editor_page.keyboard.press(f"{modifier}+A")
+    editor_page.keyboard.press("Backspace")
+
+    image_groups = distribute_naver_blog_image_groups(image_paths)
+    attached_count = 0
+    collage_selected = False
+    normal_paragraph_ready = True
+
+    def attach_group(group: list[str], position_name: str) -> None:
+        nonlocal attached_count, collage_selected, normal_paragraph_ready
+        if not group:
+            return
+        _raise_if_naver_blog_cancelled(cancel_event)
+        result_queue.put(("naver_blog_progress", f"본문 {position_name}에 이미지 {len(group)}개를 배치하는 중..."))
+        count, used_collage = _attach_naver_blog_image_group(
+            editor_page,
+            group,
+            result_queue,
+            cancel_event=cancel_event,
+        )
+        attached_count += count
+        collage_selected = collage_selected or used_collage
+        _focus_naver_blog_editor_end(editor_page)
+        editor_page.keyboard.press("Enter")
+        editor_page.keyboard.press("Enter")
+        normal_paragraph_ready = _naver_blog_active_normal_paragraph(editor_page)
+
+    attach_group(image_groups[0], "상단")
+    middle_index = max(1, (len(blocks) + 1) // 2)
+    for block_index, block in enumerate(blocks):
+        _raise_if_naver_blog_cancelled(cancel_event)
+        if block_index == middle_index:
+            attach_group(image_groups[1], "중간")
+
+        block_kind = str(block.get("kind") or "paragraph")
+        block_text = str(block.get("text") or "").strip()
+        if block_kind == "heading":
+            block_text = _clean_naver_blog_heading_text(block_text)
+        if not block_text:
+            continue
+        if block_kind == "heading":
+            if not use_rich_formatting:
+                result_queue.put(
+                    (
+                        "naver_blog_progress",
+                        f"소제목을 일반 문단으로 입력하는 중: {block_text[:28]}",
+                    )
+                )
+                if not normal_paragraph_ready or not _naver_blog_active_normal_paragraph(editor_page):
+                    _focus_naver_blog_editor_end(editor_page)
+                _type_naver_blog_text(
+                    editor_page,
+                    block_text,
+                    typing_delay,
+                    cancel_event=cancel_event,
+                )
+                editor_page.keyboard.press("Enter")
+                editor_page.keyboard.press("Enter")
+                normal_paragraph_ready = _naver_blog_active_normal_paragraph(editor_page)
+                continue
+            result_queue.put(("naver_blog_progress", f"소제목을 인용구로 입력하는 중: {block_text[:28]}"))
+            _focus_naver_blog_editor_end(editor_page)
+            normal_paragraph_ready = False
+            if apply_naver_blog_quote_style(
+                editor_page,
+                heading_text=block_text,
+                timeout_seconds=1.2,
+            ):
+                if not _leave_naver_blog_quote(editor_page, timeout_seconds=0.6):
+                    raise RuntimeError(
+                        "인용구 소제목 다음의 일반 본문 입력란을 만들지 못했습니다."
+                    )
+                normal_paragraph_ready = True
+                continue
+            _focus_naver_blog_editor_end(editor_page)
+            editor_page.keyboard.press(f"{modifier}+B")
+            _type_naver_blog_text(
+                editor_page,
+                block_text,
+                typing_delay,
+                cancel_event=cancel_event,
+            )
+            editor_page.keyboard.press(f"{modifier}+B")
+            editor_page.keyboard.press("Enter")
+            editor_page.keyboard.press("Enter")
+            normal_paragraph_ready = _naver_blog_active_normal_paragraph(editor_page)
+            continue
+        apply_bold = use_rich_formatting and bool(block.get("bold"))
+        if apply_bold:
+            result_queue.put(("naver_blog_progress", "핵심 문장을 굵게 입력하는 중..."))
+
+        if not normal_paragraph_ready or not _naver_blog_active_normal_paragraph(editor_page):
+            _focus_naver_blog_editor_end(editor_page)
+        if apply_bold:
+            editor_page.keyboard.press(f"{modifier}+B")
+        _type_naver_blog_text(
+            editor_page,
+            block_text,
+            typing_delay,
+            cancel_event=cancel_event,
+        )
+        if apply_bold:
+            editor_page.keyboard.press(f"{modifier}+B")
+
+        editor_page.keyboard.press("Enter")
+        editor_page.keyboard.press("Enter")
+        normal_paragraph_ready = _naver_blog_active_normal_paragraph(editor_page)
+
+    attach_group(image_groups[2], "하단")
+    return {
+        "title_filled": True,
+        "body_filled": True,
+        "image_count": attached_count,
+        "collage_selected": collage_selected,
+        "automation_mode": automation_mode,
+    }
+
+
 def run_naver_blog_playwright_bootstrap(
     write_url: str,
     result_queue: queue.Queue,
     blog_id: str = "",
     login_timeout_seconds: int = 300,
-) -> tuple[bool, str]:
+    article_payload: dict | None = None,
+    body_delay_ms: int = 20,
+    cancel_event: threading.Event | None = None,
+    automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
+) -> tuple[bool, dict]:
+    def report(message: str) -> None:
+        result_queue.put(("naver_blog_progress", message))
+        append_runtime_log("NBlog", message)
+
+    _raise_if_naver_blog_cancelled(cancel_event)
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -7867,19 +9441,26 @@ def run_naver_blog_playwright_bootstrap(
 
     NAVER_BLOG_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
-            executable_path=str(chrome_path),
-            headless=False,
-            no_viewport=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-session-crashed-bubble",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        )
+        _raise_if_naver_blog_cancelled(cancel_event)
+        report(f"N블로그 전용 Chrome을 시작합니다. 프로필: {NAVER_BLOG_CHROME_PROFILE_DIR}")
         try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
+                executable_path=str(chrome_path),
+                headless=False,
+                no_viewport=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+        except Exception as exc:
+            append_runtime_log("NBlog", f"전용 Chrome 시작 실패: {exc}\n{traceback.format_exc()}")
+            raise RuntimeError(friendly_naver_blog_automation_error(exc)) from exc
+        try:
+            _raise_if_naver_blog_cancelled(cancel_event)
             saved_state = load_naver_blog_storage_state()
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
@@ -7890,51 +9471,134 @@ def run_naver_blog_playwright_bootstrap(
             blog_id = normalize_naver_blog_id(blog_id)
             fixed_write_url = f"https://blog.naver.com/{blog_id}?Redirect=Write&" if blog_id else write_url
             login_url = "https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/"
-            result_queue.put(("naver_blog_progress", "네이버 로그인창을 열고 로그인 완료를 기다립니다..."))
+            report("네이버 로그인창을 열고 로그인 완료를 기다립니다...")
             page.goto(login_url, wait_until="domcontentloaded")
 
             deadline = time.time() + max(30, login_timeout_seconds)
             login_notice_sent = False
             while time.time() < deadline:
+                _raise_if_naver_blog_cancelled(cancel_event)
                 active_pages = list(context.pages) or [page]
                 page = active_pages[-1]
-                current_url = page.url or ""
                 logged_in = is_naver_logged_in_context(context) or any(
                     "nid.naver.com" not in ((candidate.url or "").lower()) and "naver.com" in ((candidate.url or "").lower())
                     for candidate in active_pages
                 )
                 if not logged_in:
                     if not login_notice_sent:
-                        result_queue.put(("naver_blog_progress", "전용 Chrome에서 네이버 로그인을 완료해 주세요. 로그인 완료까지 기다립니다..."))
+                        report("전용 Chrome에서 네이버 로그인을 완료해 주세요. 로그인 완료까지 기다립니다...")
                         login_notice_sent = True
                 else:
-                    save_naver_blog_storage_state(context)
+                    break
+                if cancel_event is not None:
+                    cancel_event.wait(1)
+                else:
+                    time.sleep(1)
+            else:
+                raise RuntimeError("5분 안에 네이버 로그인이 확인되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 시도해 주세요.")
+
+            _raise_if_naver_blog_cancelled(cancel_event)
+            save_naver_blog_storage_state(context)
+            report("네이버 로그인 상태를 확인하고 저장했습니다.")
+            nickname = ""
+            if blog_id:
+                report("로그인 완료. 블로그 정보와 글쓰기 URL을 확인하는 중...")
+                try:
+                    page.goto(f"https://blog.naver.com/{blog_id}", wait_until="domcontentloaded")
+                    page.wait_for_timeout(1200)
+                    nickname = extract_naver_blog_nickname(page)
+                except Exception:
                     nickname = ""
-                    if blog_id:
-                        result_queue.put(("naver_blog_progress", "로그인 완료. 블로그 닉네임과 글쓰기 URL을 확인하는 중..."))
-                        try:
-                            page.goto(f"https://blog.naver.com/{blog_id}", wait_until="domcontentloaded")
-                            page.wait_for_timeout(1200)
-                            nickname = extract_naver_blog_nickname(page)
-                        except Exception:
-                            nickname = ""
-                        try:
-                            page.goto(fixed_write_url, wait_until="domcontentloaded")
-                        except Exception:
-                            pass
-                    return True, {
-                        "message": "네이버 로그인을 확인했고 프로필 정보를 저장했습니다.",
-                        "write_url": fixed_write_url,
-                        "nickname": nickname,
-                        "blog_id": blog_id,
-                    }
-                time.sleep(1)
-            raise RuntimeError("5분 안에 네이버 로그인이 확인되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 시도해 주세요.")
+
+            report("네이버 블로그 글쓰기 화면으로 이동하는 중...")
+            _raise_if_naver_blog_cancelled(cancel_event)
+            try:
+                page.goto(fixed_write_url, wait_until="domcontentloaded")
+            except PlaywrightTimeoutError:
+                # SmartEditor는 문서 로드 이후에도 비동기로 준비되므로 아래에서 다시 확인합니다.
+                pass
+
+            if dismiss_naver_existing_draft_popup(context, timeout_seconds=15):
+                report("이전에 작성 중이던 글 안내를 확인해 취소하고 새 글 작성을 계속합니다.")
+
+            editor_page = wait_for_naver_blog_editor(context, timeout_seconds=120)
+            if editor_page is None:
+                raise RuntimeError(
+                    "네이버 로그인은 확인했지만 글쓰기 에디터를 열지 못했습니다. "
+                    "설정의 글쓰기 URL과 블로그 ID를 확인해 주세요."
+                )
+            if dismiss_naver_existing_draft_popup(context, timeout_seconds=4):
+                report("작성 중인 글 복원 팝업을 취소했습니다. 새 에디터를 다시 확인합니다.")
+                editor_page = wait_for_naver_blog_editor(context, timeout_seconds=30)
+                if editor_page is None:
+                    raise RuntimeError("작성 중인 글 팝업을 닫았지만 새 글쓰기 에디터를 확인하지 못했습니다.")
+            report("네이버 블로그 글쓰기 에디터 진입을 확인했습니다.")
+
+            editor_result = {}
+            if isinstance(article_payload, dict) and article_payload.get("title") and article_payload.get("body_text"):
+                _raise_if_naver_blog_cancelled(cancel_event)
+                editor_result = fill_naver_blog_editor(
+                    editor_page,
+                    str(article_payload.get("title") or "").strip(),
+                    str(article_payload.get("body_text") or "").strip(),
+                    list(article_payload.get("image_paths") or []),
+                    result_queue,
+                    body_delay_ms=body_delay_ms,
+                    cancel_event=cancel_event,
+                    article_html=str(article_payload.get("article_html") or ""),
+                    automation_mode=automation_mode,
+                )
+                report(
+                    "네이버 블로그 제목과 본문을 입력하고 "
+                    f"이미지 {int(editor_result.get('image_count') or 0)}개를 첨부했습니다."
+                )
+
+            payload = {
+                "message": (
+                    "네이버 블로그 제목·본문 입력과 이미지 첨부를 완료했습니다."
+                    if editor_result
+                    else "네이버 로그인과 글쓰기 에디터 진입을 확인했습니다."
+                ),
+                "write_url": fixed_write_url,
+                "nickname": nickname,
+                "blog_id": blog_id,
+                "article_ready": bool(editor_result),
+                "title": str((article_payload or {}).get("title") or ""),
+                "image_count": int(editor_result.get("image_count") or 0),
+                "work_dir": str((article_payload or {}).get("work_dir") or ""),
+                "provider": str((article_payload or {}).get("provider") or ""),
+            }
+            save_naver_blog_storage_state(context)
+            result_queue.put(("naver_blog_editor_ready", payload))
+            report(
+                "작성과 사진 첨부 완료. 내용을 확인할 수 있도록 브라우저를 열어 두었습니다."
+                if editor_result
+                else "에디터 준비 완료. 브라우저를 열어 둔 채 작성 대기 중입니다."
+            )
+
+            # 1차 기반에서는 사용자가 화면을 확인할 수 있도록 에디터 탭을 유지합니다.
+            while True:
+                _raise_if_naver_blog_cancelled(cancel_event)
+                try:
+                    if editor_page.is_closed():
+                        break
+                except Exception:
+                    break
+                if cancel_event is not None:
+                    cancel_event.wait(0.5)
+                else:
+                    time.sleep(0.5)
+            return True, payload
         except PlaywrightTimeoutError as exc:
+            append_runtime_log("NBlog", f"화면 응답 시간 초과: {exc}\n{traceback.format_exc()}")
             raise RuntimeError(f"네이버 블로그 화면 응답 시간이 초과되었습니다: {exc}") from exc
+        except Exception as exc:
+            append_runtime_log("NBlog", f"브라우저 자동화 실패: {exc}\n{traceback.format_exc()}")
+            raise
         finally:
             save_naver_blog_storage_state(context)
             context.close()
+            append_runtime_log("NBlog", "N블로그 전용 Chrome 컨텍스트를 종료했습니다.")
 
 
 def _find_naver_search_advisor_url_input(page):
@@ -14348,22 +16012,294 @@ class CodexCLITestWorker(threading.Thread):
             self.result_queue.put(("codex_test_error", str(exc)))
 
 
+def _naver_blog_work_directory(work_folder: str, topic: str) -> Path:
+    root = Path(work_folder).expanduser() if str(work_folder or "").strip() else DATA_DIR / "Naver Blog Work"
+    safe_topic = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", re.sub(r"\s+", "_", topic.strip())).strip(" ._")
+    safe_topic = safe_topic[:70] or "naver-blog"
+    work_dir = root / f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_topic}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
+def generate_naver_blog_article(
+    settings: WordPressSettings,
+    topic: str,
+    reference_text: str,
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> tuple[str, str, str, str]:
+    _raise_if_naver_blog_cancelled(cancel_event)
+    category = str(settings.naver_blog_topic_category or "선택안함").strip()
+    title_template = render_prompt_template(
+        settings.naver_blog_title_prompt or DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+        topic,
+        topic,
+        reference_text[:12000],
+    )
+    title_prompt = (
+        "[프롬프트관리 > N블로그 > 제목 프롬프트]\n"
+        f"{title_template}\n\n"
+        "[이번 실행의 필수 조건]\n"
+        f"- 글 주제: {topic}\n"
+        f"- 카테고리: {category}\n"
+        "- 검색된 최신 사실을 반영하되 확인되지 않은 내용은 만들지 않습니다.\n"
+        "- 네이버 블로그 제목 한 줄만 반환합니다. 설명, 따옴표, 번호, 마크다운을 쓰지 않습니다.\n\n"
+        f"[최신 참고내용]\n{reference_text[:12000]}"
+    )
+    result_queue.put(("naver_blog_progress", "선택한 N블로그 제목 프롬프트로 제목을 작성하는 중..."))
+    raw_title, provider_name = generate_text_with_writing_model(settings, title_prompt)
+    _raise_if_naver_blog_cancelled(cancel_event)
+    title = clean_generated_title(raw_title, topic)
+
+    article_template = render_prompt_template(
+        settings.naver_blog_topic_prompt or DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
+        topic,
+        topic,
+        reference_text[:12000],
+        title,
+    )
+    conversion_rules = str(settings.naver_blog_conversion_rules or DEFAULT_NAVER_BLOG_CONVERSION_RULES).strip()
+    article_prompt = (
+        "[프롬프트관리 > N블로그 > 본문글작성 프롬프트]\n"
+        f"{article_template}\n\n"
+        "[N블로그 글변환 규칙]\n"
+        f"{conversion_rules}\n\n"
+        "[이번 실행의 필수 조건]\n"
+        f"- 제목: {title}\n"
+        f"- 글 주제: {topic}\n"
+        f"- 카테고리: {category}\n"
+        "- 참고내용의 최신 사실을 중심으로 사람이 직접 작성한 듯 자연스럽고 읽기 쉽게 씁니다.\n"
+        "- 출처 문장을 그대로 복사하지 말고 새로운 문장으로 재작성합니다.\n"
+        "- 과장하거나 확인되지 않은 날짜, 수치, 인물 관계를 만들지 않습니다.\n"
+        "- 한 문단은 2~4문장으로 짧게 쓰고 문단 사이에는 반드시 빈 줄을 한 줄 넣습니다.\n"
+        "- 긴 문장을 한 덩어리로 붙이지 말고 소제목, 짧은 문단, 목록으로 나눠 모바일에서도 읽기 쉽게 작성합니다.\n"
+        "- 소제목을 3~6개 만들고 각 소제목은 반드시 `## 소제목` 형식으로 한 줄에 단독 작성합니다.\n"
+        "- 각 핵심 구간에서 중요한 문장 한 개는 반드시 `**중요 문장**` 형식으로 한 문단에 단독 작성합니다.\n"
+        "- `##`와 `**` 표시는 네이버 에디터에서 각각 인용구와 굵은 글씨로 변환되므로 삭제하지 않습니다.\n"
+        "- 제목은 반복하지 말고 본문 HTML만 반환합니다.\n\n"
+        f"[최신 참고내용]\n{reference_text[:12000]}"
+    )
+    result_queue.put(("naver_blog_progress", "선택한 N블로그 본문 프롬프트로 글을 작성하는 중..."))
+    raw_article, provider_name = generate_text_with_writing_model(settings, article_prompt)
+    _raise_if_naver_blog_cancelled(cancel_event)
+    article_html = normalize_generated_article_html(raw_article)
+    body_text = normalize_naver_blog_paragraph_spacing(naver_blog_plain_text_from_html(article_html))
+    if not body_text:
+        raise RuntimeError("N블로그 본문 생성 결과가 비어 있습니다.")
+    return title, article_html, body_text, provider_name
+
+
+def collect_naver_blog_image_files(
+    topic: str,
+    title: str,
+    count: int,
+    work_dir: Path,
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> list[str]:
+    _raise_if_naver_blog_cancelled(cancel_event)
+    target_count = max(1, min(int(count or 2), 10))
+    collector = GoogleImageCollageCollector()
+    query = f"{topic} {title} 관련 최신 사진"
+    result_queue.put(("naver_blog_progress", f"'{topic}' 관련 이미지를 검색해 {target_count}개 저장하는 중..."))
+    candidates = collector.collect_web(query, count=max(target_count * 4, 10))
+    _raise_if_naver_blog_cancelled(cancel_event)
+    if len(candidates) < target_count:
+        try:
+            candidates.extend(collector.collect_licensed(query, count=target_count * 3))
+        except Exception:
+            pass
+
+    image_paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        _raise_if_naver_blog_cancelled(cancel_event)
+        fingerprint = str(candidate.get("image_url") or candidate.get("source_url") or candidate.get("data_url") or "")
+        if not fingerprint or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        destination = work_dir / f"image_{len(image_paths) + 1}.png"
+        data_url = str(candidate.get("data_url") or "")
+        if _save_reference_image_with_pillow(data_url, destination) or capture_reference_image_region(
+            data_url,
+            destination,
+        ):
+            image_paths.append(str(destination))
+        if len(image_paths) >= target_count:
+            break
+    if not image_paths:
+        raise RuntimeError("주제와 관련된 첨부 이미지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    result_queue.put(("naver_blog_progress", f"관련 이미지 {len(image_paths)}개를 작업 폴더에 저장했습니다."))
+    return image_paths
+
+
+def build_naver_blog_workflow_payload(
+    settings: WordPressSettings,
+    topic: str,
+    image_count: int,
+    work_folder: str,
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    """Prepare a reusable NBlog article package for manual runs and the future queue."""
+    _raise_if_naver_blog_cancelled(cancel_event)
+    topic = re.sub(r"\s+", " ", str(topic or "")).strip()
+    if not topic:
+        raise RuntimeError("글 주제를 입력해 주세요.")
+    append_runtime_log("NBlog", f"작성 패키지 준비 시작: {topic}")
+    result_queue.put(("naver_blog_progress", f"'{topic}'의 최신 검색 내용과 기사 정보를 수집하는 중..."))
+    class NaverBlogProgressQueue:
+        def put(self, event) -> None:
+            if isinstance(event, tuple) and len(event) == 2 and event[0] == "automation_collect_progress":
+                payload = event[1]
+                message = (
+                    str(payload.get("message") or "")
+                    if isinstance(payload, dict)
+                    else str(payload or "")
+                )
+                if message:
+                    result_queue.put(("naver_blog_progress", message))
+                    append_runtime_log("NBlog", message)
+                return
+            result_queue.put(event)
+
+    collector = AutomationKeywordQueueWorker(settings, [], NaverBlogProgressQueue())
+    reference_text = collector._collect_reference_text_for_keyword(
+        {
+            "keyword": topic,
+            "source_name": "N블로그",
+            "reference_text": "",
+            "source_urls": {
+                "naver": f"https://search.naver.com/search.naver?query={quote_plus(topic)}",
+                "google": f"https://www.google.com/search?q={quote_plus(topic)}",
+            },
+        }
+    )
+    _raise_if_naver_blog_cancelled(cancel_event)
+    if not reference_text:
+        raise RuntimeError("주제의 최신 참고내용을 수집하지 못했습니다.")
+    append_runtime_log("NBlog", f"최신 참고내용 수집 완료: {len(reference_text)}자")
+    title, article_html, body_text, provider_name = generate_naver_blog_article(
+        settings,
+        topic,
+        reference_text,
+        result_queue,
+        cancel_event=cancel_event,
+    )
+    work_dir = _naver_blog_work_directory(work_folder, topic)
+    try:
+        image_paths = collect_naver_blog_image_files(
+            topic,
+            title,
+            image_count,
+            work_dir,
+            result_queue,
+            cancel_event=cancel_event,
+        )
+        _raise_if_naver_blog_cancelled(cancel_event)
+    except NaverBlogAutomationCancelled:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+    (work_dir / "title.txt").write_text(title, encoding="utf-8")
+    (work_dir / "body.txt").write_text(body_text, encoding="utf-8")
+    (work_dir / "body.html").write_text(article_html, encoding="utf-8")
+    (work_dir / "reference.txt").write_text(reference_text, encoding="utf-8")
+    payload = {
+        "topic": topic,
+        "title": title,
+        "article_html": article_html,
+        "body_text": body_text,
+        "reference_text": reference_text,
+        "image_paths": image_paths,
+        "image_count": len(image_paths),
+        "provider": provider_name,
+        "work_dir": str(work_dir),
+        "prompt_id": str(settings.naver_blog_prompt_id or ""),
+    }
+    (work_dir / "manifest.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    append_runtime_log(
+        "NBlog",
+        f"작성 패키지 저장 완료: {work_dir} (이미지 {len(image_paths)}개, 모델 {provider_name})",
+    )
+    return payload
+
+
 class NaverBlogBootstrapWorker(threading.Thread):
-    def __init__(self, write_url: str, blog_id: str, result_queue: queue.Queue) -> None:
+    def __init__(
+        self,
+        write_url: str,
+        blog_id: str,
+        result_queue: queue.Queue,
+        settings: WordPressSettings | None = None,
+        topic: str = "",
+        image_count: int = 2,
+        work_folder: str = "",
+        body_delay_ms: int = 20,
+        automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI,
+    ) -> None:
         super().__init__(daemon=True)
         self.write_url = write_url
         self.blog_id = blog_id
         self.result_queue = result_queue
+        self.settings = WordPressSettings(**asdict(settings)) if settings is not None else None
+        self.topic = str(topic or "").strip()
+        # Keep the worker limit aligned with the persisted NBlog setting and UI.
+        self.image_count = max(1, min(int(image_count or 2), 10))
+        self.work_folder = str(work_folder or "").strip()
+        self.body_delay_ms = max(0, min(int(body_delay_ms or 20), 100))
+        self.automation_mode = normalize_naver_blog_automation_mode(automation_mode)
+        self.cancel_event = threading.Event()
+        self.article_payload: dict | None = None
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    def _cleanup_cancelled_work(self) -> None:
+        work_dir = str((self.article_payload or {}).get("work_dir") or "").strip()
+        if work_dir:
+            shutil.rmtree(Path(work_dir), ignore_errors=True)
 
     def run(self) -> None:
+        append_runtime_log("NBlog", f"자동화 작업 시작: 주제={self.topic or '(에디터만 열기)'}")
         try:
-            success, message = run_naver_blog_playwright_bootstrap(self.write_url, self.result_queue, self.blog_id)
+            article_payload = None
+            _raise_if_naver_blog_cancelled(self.cancel_event)
+            if self.settings is not None and self.topic:
+                article_payload = build_naver_blog_workflow_payload(
+                    self.settings,
+                    self.topic,
+                    self.image_count,
+                    self.work_folder,
+                    self.result_queue,
+                    cancel_event=self.cancel_event,
+                )
+                self.article_payload = article_payload
+            _raise_if_naver_blog_cancelled(self.cancel_event)
+            success, message = run_naver_blog_playwright_bootstrap(
+                self.write_url,
+                self.result_queue,
+                self.blog_id,
+                article_payload=article_payload,
+                body_delay_ms=self.body_delay_ms,
+                automation_mode=self.automation_mode,
+                cancel_event=self.cancel_event,
+            )
             if success:
+                append_runtime_log("NBlog", "자동화 작업 완료")
                 self.result_queue.put(("naver_blog_done", message))
             else:
+                append_runtime_log("NBlog", f"자동화 작업 실패 응답: {message}")
                 self.result_queue.put(("naver_blog_error", message))
+        except NaverBlogAutomationCancelled:
+            self._cleanup_cancelled_work()
+            append_runtime_log("NBlog", "사용자 요청으로 자동화 작업과 임시 파일을 정리했습니다.")
+            self.result_queue.put(("naver_blog_cancelled", "자동화를 중단하고 처음 상태로 돌아왔습니다."))
         except Exception as exc:  # pragma: no cover - runtime handling
-            self.result_queue.put(("naver_blog_error", str(exc)))
+            append_runtime_log("NBlog", f"자동화 예외: {exc}\n{traceback.format_exc()}")
+            self.result_queue.put(("naver_blog_error", friendly_naver_blog_automation_error(exc)))
 
 
 class NaverSearchAdvisorWorker(threading.Thread):
@@ -18802,6 +20738,7 @@ class KeywordApp(ctk.CTk):
             target.bind("<Button-5>", on_mousewheel)
 
     def _build_naver_blog_page(self) -> None:
+        palette = self._theme_palette()
         header = ctk.CTkFrame(self.naver_blog_page, fg_color="transparent")
         header.grid(row=0, column=0, padx=28, pady=(26, 12), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
@@ -18815,7 +20752,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(
             header,
             text="네이버 블로그 전용 Chrome 프로필을 사용해 로그인 상태를 유지하고, Playwright 자동작성 기반을 준비합니다.",
-            text_color="#a7b3c4",
+            text_color=palette["subtext"],
             font=ctk.CTkFont(size=14),
         ).grid(row=1, column=0, pady=(6, 0), sticky="w")
 
@@ -18832,7 +20769,6 @@ class KeywordApp(ctk.CTk):
                 ("settings", "설정"),
                 ("rules", "글변환규칙"),
                 ("convert", "글변환"),
-                ("ai", "프롬프트"),
                 ("reverse", "역순작성"),
                 ("reverse_image", "역순사진"),
             ]
@@ -18843,9 +20779,9 @@ class KeywordApp(ctk.CTk):
                 width=94,
                 height=34,
                 corner_radius=8,
-                fg_color="#1d2635",
-                hover_color="#2a3950",
-                text_color="#cbd6e6",
+                fg_color=palette["card"],
+                hover_color=palette["hover"],
+                text_color=palette["text"],
                 font=ctk.CTkFont(size=13, weight="bold"),
                 command=lambda key=tab_key: self._switch_naver_blog_tab(key),
             )
@@ -18858,8 +20794,8 @@ class KeywordApp(ctk.CTk):
         self.naver_blog_tab_holder.grid_rowconfigure(0, weight=1)
         self.naver_blog_tab_frames: dict[str, ctk.CTkFrame] = {}
 
-        for tab_key in ("writing", "settings", "rules", "convert", "ai", "reverse", "reverse_image"):
-            frame = ctk.CTkFrame(self.naver_blog_tab_holder, fg_color="#05080e")
+        for tab_key in ("writing", "settings", "rules", "convert", "reverse", "reverse_image"):
+            frame = ctk.CTkFrame(self.naver_blog_tab_holder, fg_color=palette["shell"])
             frame.grid(row=0, column=0, sticky="ew")
             frame.grid_columnconfigure(0, weight=1)
             self.naver_blog_tab_frames[tab_key] = frame
@@ -18867,10 +20803,10 @@ class KeywordApp(ctk.CTk):
         self._build_naver_blog_writing_tab(self.naver_blog_tab_frames["writing"])
         self._build_naver_blog_settings_tab(self.naver_blog_tab_frames["settings"])
         self._build_naver_blog_rules_tab(self.naver_blog_tab_frames["rules"])
-        self._build_naver_blog_ai_tab(self.naver_blog_tab_frames["ai"])
         self._build_naver_blog_placeholder_tab(self.naver_blog_tab_frames["convert"], "글변환", "기존 글을 네이버 블로그용 문체와 형식으로 변환하는 공간입니다. 다음 단계에서 붙여갈게요.")
         self._build_naver_blog_placeholder_tab(self.naver_blog_tab_frames["reverse"], "역순작성", "텍스트 파일/이미지 묶음을 역순으로 등록하는 자동화 기반 영역입니다.")
         self._build_naver_blog_placeholder_tab(self.naver_blog_tab_frames["reverse_image"], "역순사진", "사진 중심 포스팅을 역순으로 구성하는 자동화 기반 영역입니다.")
+        self.active_naver_blog_tab = ""
         self._switch_naver_blog_tab("writing")
 
     def _build_naver_kin_page(self) -> None:
@@ -19232,56 +21168,119 @@ class KeywordApp(ctk.CTk):
         self._render_naver_kin_questions(self.naver_kin_questions)
 
     def _naver_panel(self, parent, title: str, row: int) -> ctk.CTkFrame:
-        panel = ctk.CTkFrame(parent, fg_color="#1d2635", corner_radius=18, border_width=1, border_color="#314761")
+        palette = self._theme_palette()
+        panel = ctk.CTkFrame(
+            parent,
+            fg_color=palette["card"],
+            corner_radius=18,
+            border_width=1,
+            border_color=palette["border"],
+        )
         panel.grid(row=row, column=0, pady=(0, 14), sticky="ew")
         panel.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(panel, text=title, font=ctk.CTkFont(size=16, weight="bold"), text_color="#dce6f3").grid(
+        ctk.CTkLabel(panel, text=title, font=ctk.CTkFont(size=16, weight="bold"), text_color=palette["text"]).grid(
             row=0, column=0, columnspan=4, padx=18, pady=(16, 10), sticky="w"
         )
         return panel
 
     def _build_naver_blog_writing_tab(self, parent) -> None:
-        prompt_panel = self._naver_panel(parent, "글 타입 프롬프트", 0)
-        ctk.CTkLabel(prompt_panel, text="글 타입 프롬프트", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
+        palette = self._theme_palette()
+        prompt_panel = self._naver_panel(parent, "N블로그 프롬프트", 0)
+        ctk.CTkLabel(prompt_panel, text="N블로그 프롬프트", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
         self.naver_blog_prompt_type_menu = ctk.CTkOptionMenu(
             prompt_panel,
-            values=["공통", "정보성", "후기형", "뉴스형", "상품형"],
-            width=160,
+            values=self._naver_blog_prompt_menu_values(),
+            width=220,
             height=36,
-            fg_color="#111826",
-            button_color="#31445f",
-            command=lambda _value: self._save_naver_blog_settings(silent=True),
+            fg_color=palette["input"],
+            button_color=palette["button"],
+            button_hover_color=palette["button_hover"],
+            text_color=palette["text"],
+            command=self._on_naver_blog_prompt_selected,
         )
         self.naver_blog_prompt_type_menu.grid(row=1, column=1, padx=(0, 10), pady=8, sticky="w")
-        self.naver_blog_prompt_type_menu.set(self.wordpress_settings.naver_blog_prompt_type)
-        ctk.CTkButton(prompt_panel, text="저장", width=92, height=36, fg_color="#314761", command=self._save_naver_blog_settings).grid(row=1, column=2, padx=(0, 8), pady=8)
-        ctk.CTkButton(prompt_panel, text="보기 / 편집", width=120, height=36, fg_color="#314761", command=lambda: self._switch_naver_blog_tab("ai")).grid(row=1, column=3, padx=(0, 18), pady=8)
+        self._refresh_naver_blog_prompt_menu()
+        ctk.CTkButton(prompt_panel, text="저장", width=92, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._save_naver_blog_settings).grid(row=1, column=2, padx=(0, 8), pady=8)
+        ctk.CTkButton(
+            prompt_panel,
+            text="보기 / 편집",
+            width=120,
+            height=36,
+            fg_color=palette["button"],
+            hover_color=palette["button_hover"],
+            text_color=palette["text"],
+            command=self._open_naver_blog_prompt_manager,
+        ).grid(row=1, column=3, padx=(0, 18), pady=8)
 
-        ctk.CTkLabel(prompt_panel, text="주제 카테고리", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=(8, 16), sticky="w")
+        ctk.CTkLabel(prompt_panel, text="주제 카테고리", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=(8, 16), sticky="w")
         self.naver_blog_topic_category_menu = ctk.CTkOptionMenu(
             prompt_panel,
             values=["선택안함", "여행", "건강", "이슈", "공연/행사", "생활정보", "상품리뷰"],
             width=160,
             height=36,
-            fg_color="#111826",
-            button_color="#31445f",
+            fg_color=palette["input"],
+            button_color=palette["button"],
+            button_hover_color=palette["button_hover"],
+            text_color=palette["text"],
             command=lambda _value: self._save_naver_blog_settings(silent=True),
         )
         self.naver_blog_topic_category_menu.grid(row=2, column=1, padx=(0, 10), pady=(8, 16), sticky="w")
         self.naver_blog_topic_category_menu.set(self.wordpress_settings.naver_blog_topic_category)
 
         url_panel = self._naver_panel(parent, "URL 글쓰기 (설정)", 1)
-        ctk.CTkLabel(url_panel, text="글쓰기 URL", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_write_url_entry = ctk.CTkEntry(url_panel, height=36, fg_color="#111826", border_color="#314761")
+        ctk.CTkLabel(url_panel, text="글쓰기 URL", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
+        self.naver_blog_write_url_entry = ctk.CTkEntry(url_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_write_url_entry.grid(row=1, column=1, columnspan=2, padx=(0, 10), pady=8, sticky="ew")
         self.naver_blog_write_url_entry.insert(0, self.wordpress_settings.naver_blog_write_url)
-        ctk.CTkButton(url_panel, text="저장하기", width=96, height=36, fg_color="#314761", command=self._save_naver_blog_settings).grid(row=1, column=3, padx=(0, 18), pady=8)
-        ctk.CTkLabel(url_panel, text="발행명", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_publish_name_entry = ctk.CTkEntry(url_panel, height=36, fg_color="#111826", border_color="#314761")
+        ctk.CTkButton(url_panel, text="저장하기", width=96, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._save_naver_blog_settings).grid(row=1, column=3, padx=(0, 18), pady=8)
+        ctk.CTkLabel(url_panel, text="글 주제", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
+        self.naver_blog_publish_name_entry = ctk.CTkEntry(
+            url_panel,
+            height=36,
+            fg_color=palette["input"],
+            border_color=palette["border"],
+            text_color=palette["text"],
+            placeholder_text="예: 이번 주 연예 이슈 정리",
+        )
         self.naver_blog_publish_name_entry.grid(row=2, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
         self.naver_blog_publish_name_entry.insert(0, self.wordpress_settings.naver_blog_publish_name)
 
         control_panel = self._naver_panel(parent, "자동화 제어", 2)
+        self.naver_blog_automation_mode_var = tk.StringVar(
+            value=NAVER_BLOG_AUTOMATION_MODE_LABELS[
+                normalize_naver_blog_automation_mode(
+                    self.wordpress_settings.naver_blog_automation_mode
+                )
+            ]
+        )
+        ctk.CTkLabel(
+            control_panel,
+            text="작성 방식",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=1, column=0, padx=(18, 10), pady=(0, 10), sticky="w")
+        self.naver_blog_automation_mode_control = ctk.CTkSegmentedButton(
+            control_panel,
+            values=["반자동", "완전자동"],
+            variable=self.naver_blog_automation_mode_var,
+            command=self._on_naver_blog_automation_mode_changed,
+            height=34,
+            corner_radius=10,
+            fg_color=palette["input"],
+            selected_color="#3468e8",
+            selected_hover_color="#2d5cd0",
+            unselected_color=palette["button"],
+            unselected_hover_color=palette["button_hover"],
+            text_color=palette["text"],
+        )
+        self.naver_blog_automation_mode_control.grid(
+            row=1,
+            column=1,
+            columnspan=3,
+            padx=(0, 18),
+            pady=(0, 10),
+            sticky="ew",
+        )
         self.naver_blog_status_label = ctk.CTkLabel(
             control_panel,
             text="현재 상태: 대기 중",
@@ -19289,7 +21288,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         )
-        self.naver_blog_status_label.grid(row=1, column=0, columnspan=4, padx=18, pady=(0, 10), sticky="ew")
+        self.naver_blog_status_label.grid(row=2, column=0, columnspan=4, padx=18, pady=(0, 10), sticky="ew")
         self.naver_blog_start_button = ctk.CTkButton(
             control_panel,
             text="🚀 자동화 시작 (Playwright)",
@@ -19300,9 +21299,36 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._start_naver_blog_bootstrap,
         )
-        self.naver_blog_start_button.grid(row=2, column=0, columnspan=4, padx=18, pady=(0, 18), sticky="ew")
+        self.naver_blog_start_button.grid(
+            row=3,
+            column=0,
+            columnspan=3,
+            padx=(18, 8),
+            pady=(0, 18),
+            sticky="ew",
+        )
+        self.naver_blog_stop_button = ctk.CTkButton(
+            control_panel,
+            text="자동화 중단",
+            width=150,
+            height=44,
+            corner_radius=12,
+            fg_color="#943b3b",
+            hover_color="#7d3030",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            state="disabled",
+            command=self._stop_naver_blog_bootstrap,
+        )
+        self.naver_blog_stop_button.grid(
+            row=3,
+            column=3,
+            padx=(0, 18),
+            pady=(0, 18),
+            sticky="ew",
+        )
 
     def _build_naver_blog_settings_tab(self, parent) -> None:
+        palette = self._theme_palette()
         profile_panel = self._naver_panel(parent, "프로필 자동화 설정", 0)
         self.naver_blog_profile_mode_var = tk.StringVar(value="profile")
         ctk.CTkRadioButton(profile_panel, text="프로필 자동화", variable=self.naver_blog_profile_mode_var, value="profile").grid(row=1, column=0, padx=18, pady=(0, 10), sticky="w")
@@ -19316,30 +21342,44 @@ class KeywordApp(ctk.CTk):
         self._refresh_naver_profile_cards()
 
         model_panel = self._naver_panel(parent, "생성 모델 선택", 1)
-        ctk.CTkLabel(model_panel, text="글 생성 모델", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_generation_model_entry = ctk.CTkEntry(model_panel, height=36, fg_color="#111826", border_color="#314761")
+        ctk.CTkLabel(model_panel, text="글 생성 모델", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
+        self.naver_blog_generation_model_entry = ctk.CTkEntry(model_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_generation_model_entry.grid(row=1, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
         self.naver_blog_generation_model_entry.insert(0, self.wordpress_settings.naver_blog_generation_model)
-        ctk.CTkLabel(model_panel, text="이미지 모델", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=(8, 16), sticky="w")
-        self.naver_blog_image_model_entry = ctk.CTkEntry(model_panel, height=36, fg_color="#111826", border_color="#314761")
+        ctk.CTkLabel(model_panel, text="이미지 모델", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=(8, 16), sticky="w")
+        self.naver_blog_image_model_entry = ctk.CTkEntry(model_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_image_model_entry.grid(row=2, column=1, columnspan=3, padx=(0, 18), pady=(8, 16), sticky="ew")
         self.naver_blog_image_model_entry.insert(0, self.wordpress_settings.naver_blog_image_model)
 
         posting_panel = self._naver_panel(parent, "포스팅 설정", 2)
-        ctk.CTkLabel(posting_panel, text="본문 타이핑 간격(ms)", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_body_delay_entry = ctk.CTkEntry(posting_panel, width=130, height=36, fg_color="#111826", border_color="#314761")
+        ctk.CTkLabel(posting_panel, text="본문 타이핑 간격(ms)", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
+        self.naver_blog_body_delay_entry = ctk.CTkEntry(posting_panel, width=130, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_body_delay_entry.grid(row=1, column=1, padx=(0, 10), pady=8, sticky="w")
         self.naver_blog_body_delay_entry.insert(0, str(self.wordpress_settings.naver_blog_body_delay_ms))
-        ctk.CTkLabel(posting_panel, text="자동화 횟수", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_run_count_entry = ctk.CTkEntry(posting_panel, width=130, height=36, fg_color="#111826", border_color="#314761")
+        ctk.CTkLabel(posting_panel, text="자동화 횟수", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
+        self.naver_blog_run_count_entry = ctk.CTkEntry(posting_panel, width=130, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_run_count_entry.grid(row=2, column=1, padx=(0, 10), pady=8, sticky="w")
         self.naver_blog_run_count_entry.insert(0, str(self.wordpress_settings.naver_blog_run_count))
+        ctk.CTkLabel(posting_panel, text="첨부 이미지 수", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, padx=18, pady=(8, 16), sticky="w")
+        self.naver_blog_image_count_menu = ctk.CTkOptionMenu(
+            posting_panel,
+            values=[f"{count}개" for count in range(1, 11)],
+            width=130,
+            height=36,
+            fg_color=palette["input"],
+            button_color=palette["button"],
+            button_hover_color=palette["button_hover"],
+            text_color=palette["text"],
+            command=lambda _value: self._save_naver_blog_settings(silent=True),
+        )
+        self.naver_blog_image_count_menu.grid(row=3, column=1, padx=(0, 10), pady=(8, 16), sticky="w")
+        self.naver_blog_image_count_menu.set(f"{max(1, min(int(self.wordpress_settings.naver_blog_image_count or 2), 10))}개")
 
         folder_panel = self._naver_panel(parent, "작업 데이터 (이미지/텍스트 폴더)", 3)
-        self.naver_blog_work_folder_entry = ctk.CTkEntry(folder_panel, height=36, fg_color="#111826", border_color="#314761")
+        self.naver_blog_work_folder_entry = ctk.CTkEntry(folder_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_work_folder_entry.grid(row=1, column=0, columnspan=3, padx=18, pady=(0, 16), sticky="ew")
         self.naver_blog_work_folder_entry.insert(0, self.wordpress_settings.naver_blog_work_folder)
-        ctk.CTkButton(folder_panel, text="폴더 선택", width=110, height=36, fg_color="#314761", command=self._choose_naver_blog_work_folder).grid(row=1, column=3, padx=(0, 18), pady=(0, 16))
+        ctk.CTkButton(folder_panel, text="폴더 선택", width=110, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._choose_naver_blog_work_folder).grid(row=1, column=3, padx=(0, 18), pady=(0, 16))
 
     def _build_naver_blog_rules_tab(self, parent) -> None:
         panel = self._naver_panel(parent, "N블로그 글변환 규칙", 0)
@@ -19399,17 +21439,64 @@ class KeywordApp(ctk.CTk):
             command=self._open_prompt_folder,
         ).grid(row=0, column=2, padx=(10, 0), sticky="e")
 
-    def _build_naver_blog_ai_tab(self, parent) -> None:
-        panel = self._naver_panel(parent, "✍ 프롬프트", 0)
-        ctk.CTkLabel(panel, text="글 타입 프롬프트", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_title_prompt_box = ctk.CTkTextbox(panel, height=90, fg_color="#111826", border_width=1, border_color="#314761")
-        self.naver_blog_title_prompt_box.grid(row=1, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
-        self.naver_blog_title_prompt_box.insert("1.0", self.wordpress_settings.naver_blog_title_prompt or "네이버 블로그에 어울리는 자연스러운 제목과 도입부를 작성해줘.")
-        ctk.CTkLabel(panel, text="주제 카테고리 프롬프트", text_color="#cbd6e6", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_topic_prompt_box = ctk.CTkTextbox(panel, height=130, fg_color="#111826", border_width=1, border_color="#314761")
-        self.naver_blog_topic_prompt_box.grid(row=2, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
-        self.naver_blog_topic_prompt_box.insert("1.0", self.wordpress_settings.naver_blog_topic_prompt or "선택한 카테고리와 키워드를 바탕으로 친근하고 정보성 있는 네이버 블로그 글을 작성해줘.")
-        ctk.CTkButton(panel, text="저장", height=40, fg_color="#19a957", hover_color="#168f4b", command=self._save_naver_blog_settings).grid(row=3, column=0, columnspan=4, padx=18, pady=(8, 18), sticky="ew")
+    def _open_naver_blog_prompt_manager(self) -> None:
+        selected_id = str(self.wordpress_settings.naver_blog_prompt_id or "")
+        if selected_id:
+            self.active_prompt_set_ids["naver_blog"] = selected_id
+        self._switch_page("prompts")
+        self._switch_prompt_platform("naver_blog")
+
+    def _naver_blog_prompt_menu_values(self) -> list[str]:
+        return self._prompt_set_menu_values("naver_blog")
+
+    def _apply_naver_blog_prompt_set(self, prompt_set: dict, persist: bool = False) -> None:
+        prompt_id = str(prompt_set.get("id") or "")
+        prompt_name = str(prompt_set.get("name") or "기본")
+        title_prompt = str(prompt_set.get("title_prompt") or DEFAULT_NAVER_BLOG_TITLE_PROMPT)
+        article_prompt = str(prompt_set.get("article_prompt") or DEFAULT_NAVER_BLOG_TOPIC_PROMPT)
+        self.wordpress_settings.naver_blog_prompt_id = prompt_id
+        self.wordpress_settings.naver_blog_prompt_type = prompt_name
+        self.wordpress_settings.naver_blog_title_prompt = title_prompt
+        self.wordpress_settings.naver_blog_topic_prompt = article_prompt
+        if hasattr(self, "naver_blog_prompt_type_menu"):
+            self.naver_blog_prompt_type_menu.set(self._prompt_set_label(prompt_set))
+        if hasattr(self, "active_prompt_set_ids"):
+            self.active_prompt_set_ids["naver_blog"] = prompt_id
+        if persist:
+            PromptFileStore.save_values(
+                {
+                    "naver_blog_title_prompt": title_prompt,
+                    "naver_blog_topic_prompt": article_prompt,
+                }
+            )
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
+
+    def _refresh_naver_blog_prompt_menu(self) -> None:
+        if not hasattr(self, "naver_blog_prompt_type_menu"):
+            return
+        values = self._naver_blog_prompt_menu_values()
+        self.naver_blog_prompt_type_menu.configure(values=values)
+        selected = self._prompt_set_by_id(str(self.wordpress_settings.naver_blog_prompt_id or ""))
+        if not selected or selected.get("platform") != "naver_blog":
+            selected = next(
+                (item for item in self._prompt_sets() if item.get("platform") == "naver_blog"),
+                None,
+            )
+        if selected:
+            self._apply_naver_blog_prompt_set(selected)
+        else:
+            self.naver_blog_prompt_type_menu.set(values[0])
+
+    def _on_naver_blog_prompt_selected(self, label: str) -> None:
+        selected = self._prompt_set_by_label(label, "naver_blog")
+        if not selected:
+            return
+        self._apply_naver_blog_prompt_set(selected, persist=True)
+        if hasattr(self, "naver_blog_status_label"):
+            self.naver_blog_status_label.configure(
+                text=f"현재 상태: {selected.get('name') or '기본'} 프롬프트 선택 완료",
+                text_color="#48d980",
+            )
 
     def _build_naver_blog_placeholder_tab(self, parent, title: str, description: str) -> None:
         panel = self._naver_panel(parent, title, 0)
@@ -19423,13 +21510,13 @@ class KeywordApp(ctk.CTk):
         ).grid(row=1, column=0, columnspan=4, padx=18, pady=(0, 18), sticky="ew")
 
     def _switch_naver_blog_tab(self, tab_key: str) -> None:
-        if getattr(self, "active_naver_blog_tab", "") == tab_key:
-            return
+        palette = self._theme_palette()
         self.active_naver_blog_tab = tab_key
         for key, button in self.naver_blog_tab_buttons.items():
             button.configure(
-                fg_color="#163153" if key == tab_key else "#1d2635",
-                text_color="#6dadff" if key == tab_key else "#cbd6e6",
+                fg_color=palette["selected"] if key == tab_key else palette["card"],
+                hover_color=palette["hover"],
+                text_color=palette["accent"] if key == tab_key else palette["text"],
             )
         for key, frame in self.naver_blog_tab_frames.items():
             if key == tab_key:
@@ -19443,7 +21530,7 @@ class KeywordApp(ctk.CTk):
                 canvas.yview_moveto(0)
         except Exception:
             pass
-        self._finish_theme_paint()
+        self._finish_theme_paint(force=True)
 
     def _naver_blog_profiles_from_state(self) -> list[dict]:
         profiles = list(self.wordpress_settings.naver_blog_profiles or [])
@@ -19571,6 +21658,12 @@ class KeywordApp(ctk.CTk):
         self.naver_blog_work_folder_entry.insert(0, folder)
         self._save_naver_blog_settings(silent=True)
 
+    def _on_naver_blog_automation_mode_changed(self, value: str) -> None:
+        self.wordpress_settings.naver_blog_automation_mode = (
+            normalize_naver_blog_automation_mode(value)
+        )
+        self._save_naver_blog_settings(silent=True)
+
     def _save_naver_blog_settings(self, silent: bool = False) -> None:
         self.wordpress_settings.naver_blog_profiles = self._current_naver_blog_profiles()
         if hasattr(self, "naver_blog_active_profile_var"):
@@ -19581,12 +21674,28 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.naver_blog_publish_name = self.naver_blog_publish_name_entry.get().strip()
         if hasattr(self, "naver_blog_body_delay_entry"):
             self.wordpress_settings.naver_blog_body_delay_ms = self._safe_int(self.naver_blog_body_delay_entry.get(), 20)
+        if hasattr(self, "naver_blog_automation_mode_var"):
+            self.wordpress_settings.naver_blog_automation_mode = (
+                normalize_naver_blog_automation_mode(
+                    self.naver_blog_automation_mode_var.get()
+                )
+            )
         if hasattr(self, "naver_blog_run_count_entry"):
             self.wordpress_settings.naver_blog_run_count = self._safe_int(self.naver_blog_run_count_entry.get(), 1)
+        if hasattr(self, "naver_blog_image_count_menu"):
+            self.wordpress_settings.naver_blog_image_count = max(
+                1,
+                min(self._safe_int(self.naver_blog_image_count_menu.get().replace("개", ""), 2), 10),
+            )
         if hasattr(self, "naver_blog_work_folder_entry"):
             self.wordpress_settings.naver_blog_work_folder = self.naver_blog_work_folder_entry.get().strip()
         if hasattr(self, "naver_blog_prompt_type_menu"):
-            self.wordpress_settings.naver_blog_prompt_type = self.naver_blog_prompt_type_menu.get()
+            selected = self._prompt_set_by_label(
+                self.naver_blog_prompt_type_menu.get(),
+                "naver_blog",
+            )
+            if selected:
+                self._apply_naver_blog_prompt_set(selected)
         if hasattr(self, "naver_blog_topic_category_menu"):
             self.wordpress_settings.naver_blog_topic_category = self.naver_blog_topic_category_menu.get()
         if hasattr(self, "naver_blog_generation_model_entry"):
@@ -19597,10 +21706,6 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.naver_blog_generation_model = self.naver_blog_ai_generation_model_entry.get().strip() or self.wordpress_settings.naver_blog_generation_model
         if hasattr(self, "naver_blog_ai_image_model_entry"):
             self.wordpress_settings.naver_blog_image_model = self.naver_blog_ai_image_model_entry.get().strip() or self.wordpress_settings.naver_blog_image_model
-        if hasattr(self, "naver_blog_title_prompt_box"):
-            self.wordpress_settings.naver_blog_title_prompt = self.naver_blog_title_prompt_box.get("1.0", "end").strip()
-        if hasattr(self, "naver_blog_topic_prompt_box"):
-            self.wordpress_settings.naver_blog_topic_prompt = self.naver_blog_topic_prompt_box.get("1.0", "end").strip()
         if hasattr(self, "naver_blog_rules_box"):
             self.wordpress_settings.naver_blog_conversion_rules = (
                 self.naver_blog_rules_box.get("1.0", "end").strip() or DEFAULT_NAVER_BLOG_CONVERSION_RULES
@@ -19632,6 +21737,39 @@ class KeywordApp(ctk.CTk):
                 self.naver_blog_rules_feedback_label.configure(text="TXT 저장 실패", text_color="#ff6b6b")
             messagebox.showerror("N블로그 규칙 저장 실패", str(exc))
 
+    def _reset_naver_blog_automation_controls(
+        self,
+        status: str = "현재 상태: 대기 중",
+        color: str = "#6dadff",
+    ) -> None:
+        if hasattr(self, "naver_blog_start_button"):
+            self.naver_blog_start_button.configure(
+                state="normal",
+                text="🚀 자동화 시작 (Playwright)",
+            )
+        if hasattr(self, "naver_blog_stop_button"):
+            self.naver_blog_stop_button.configure(state="disabled", text="자동화 중단")
+        if hasattr(self, "naver_blog_status_label"):
+            self.naver_blog_status_label.configure(text=status, text_color=color)
+
+    def _stop_naver_blog_bootstrap(self) -> None:
+        worker = self.naver_blog_worker
+        if worker is None or not worker.is_alive():
+            self.naver_blog_worker = None
+            self._reset_naver_blog_automation_controls()
+            return
+        worker.cancel()
+        if hasattr(self, "naver_blog_start_button"):
+            self.naver_blog_start_button.configure(state="disabled", text="자동화 중단 처리 중...")
+        if hasattr(self, "naver_blog_stop_button"):
+            self.naver_blog_stop_button.configure(state="disabled", text="중단 중...")
+        if hasattr(self, "naver_blog_status_label"):
+            self.naver_blog_status_label.configure(
+                text="현재 상태: 작업과 전용 Chrome을 안전하게 종료하는 중...",
+                text_color="#ffb86b",
+            )
+        append_runtime_log("NBlog", "사용자가 자동화 중단 버튼을 눌렀습니다.")
+
     def _start_naver_blog_bootstrap(self, profile_name: str | None = None) -> None:
         if self.naver_blog_worker and self.naver_blog_worker.is_alive():
             messagebox.showinfo("진행 중", "네이버 블로그 자동화 준비가 이미 진행 중입니다.")
@@ -19645,10 +21783,48 @@ class KeywordApp(ctk.CTk):
         if not blog_id:
             messagebox.showwarning("블로그 ID 필요", "네이버 블로그 ID를 먼저 입력해 주세요.\n예: https://blog.naver.com/soullhk 에서 soullhk")
             return
+        workflow_mode = profile_name is None
+        topic = ""
+        if workflow_mode:
+            topic = (
+                self.naver_blog_publish_name_entry.get().strip()
+                if hasattr(self, "naver_blog_publish_name_entry")
+                else self.wordpress_settings.naver_blog_publish_name.strip()
+            )
+            if not topic:
+                messagebox.showwarning("글 주제 필요", "글작성 탭의 '글 주제'를 먼저 입력해 주세요.")
+                return
+            validation_error = writing_model_validation_error(self.wordpress_settings)
+            if validation_error:
+                messagebox.showwarning("기본 작성 모델 설정 필요", validation_error)
+                return
         write_url = build_naver_blog_write_url(profile, self.wordpress_settings.naver_blog_write_url)
-        self.naver_blog_start_button.configure(state="disabled", text="전용 Chrome 여는 중...")
-        self.naver_blog_status_label.configure(text="현재 상태: 네이버 로그인창 여는 중...", text_color="#6dadff")
-        self.naver_blog_worker = NaverBlogBootstrapWorker(write_url, blog_id, self.result_queue)
+        if hasattr(self, "naver_blog_start_button"):
+            self.naver_blog_start_button.configure(
+                state="disabled",
+                text="자료 수집·글 작성 중..." if workflow_mode else "전용 Chrome 여는 중...",
+            )
+        if hasattr(self, "naver_blog_stop_button"):
+            self.naver_blog_stop_button.configure(state="normal", text="자동화 중단")
+        self.naver_blog_status_label.configure(
+            text=(
+                f"현재 상태: '{topic}' 최신 자료를 수집하는 중..."
+                if workflow_mode
+                else "현재 상태: 네이버 로그인창 여는 중..."
+            ),
+            text_color="#6dadff",
+        )
+        self.naver_blog_worker = NaverBlogBootstrapWorker(
+            write_url,
+            blog_id,
+            self.result_queue,
+            settings=self.wordpress_settings if workflow_mode else None,
+            topic=topic,
+            image_count=self.wordpress_settings.naver_blog_image_count,
+            work_folder=self.wordpress_settings.naver_blog_work_folder,
+            body_delay_ms=self.wordpress_settings.naver_blog_body_delay_ms,
+            automation_mode=self.wordpress_settings.naver_blog_automation_mode,
+        )
         self.naver_blog_worker.start()
 
     def _apply_naver_blog_bootstrap_result(self, payload) -> str:
@@ -22766,6 +24942,8 @@ class KeywordApp(ctk.CTk):
         self.prompt_name_entries: dict[str, ctk.CTkEntry] = {}
         self.active_prompt_set_ids: dict[str, str] = {}
         self.tistory_automation_prompt_box: tk.Text | None = None
+        self.naver_blog_title_prompt_box: tk.Text | None = None
+        self.naver_blog_topic_prompt_box: tk.Text | None = None
         self.naver_kin_answer_prompt_box: tk.Text | None = None
         self.active_prompt_platform = "wordpress"
 
@@ -22774,6 +24952,7 @@ class KeywordApp(ctk.CTk):
         prompt_tabs = (
             ("wordpress", "워드프레스"),
             ("tistory", "티스토리"),
+            ("naver_blog", "N블로그"),
             ("blogspot", "블로그스팟"),
             ("tistory_automation", "티스토리 자동화"),
             ("naver_kin_automation", "N지식인자동화"),
@@ -22806,7 +24985,12 @@ class KeywordApp(ctk.CTk):
         platform_holder.grid_columnconfigure(0, weight=1)
         platform_holder.grid_rowconfigure(0, weight=1)
 
-        for platform, label in (("wordpress", "워드프레스"), ("tistory", "티스토리"), ("blogspot", "블로그스팟")):
+        for platform, label in (
+            ("wordpress", "워드프레스"),
+            ("tistory", "티스토리"),
+            ("naver_blog", "N블로그"),
+            ("blogspot", "블로그스팟"),
+        ):
             frame = ctk.CTkFrame(platform_holder, fg_color="transparent")
             frame.grid(row=0, column=0, sticky="ew")
             frame.grid_columnconfigure(0, weight=1)
@@ -22902,6 +25086,10 @@ class KeywordApp(ctk.CTk):
             )
             article_label.grid(row=3, column=0, padx=24, pady=(0, 10), sticky="w")
             self.prompt_article_boxes[platform] = self._prompt_textarea(frame, row=4, height=13)
+
+        # Existing TXT persistence and N blog automation follow the active N blog set.
+        self.naver_blog_title_prompt_box = self.prompt_title_boxes["naver_blog"]
+        self.naver_blog_topic_prompt_box = self.prompt_article_boxes["naver_blog"]
 
         automation_frame = ctk.CTkFrame(platform_holder, fg_color="transparent")
         automation_frame.grid(row=0, column=0, sticky="nsew")
@@ -23106,7 +25294,12 @@ class KeywordApp(ctk.CTk):
         return self.wordpress_settings.prompt_sets
 
     def _prompt_set_label(self, prompt_set: dict) -> str:
-        platform_label = {"wordpress": "워드프레스", "tistory": "티스토리", "blogspot": "블로그스팟"}.get(
+        platform_label = {
+            "wordpress": "워드프레스",
+            "tistory": "티스토리",
+            "naver_blog": "N블로그",
+            "blogspot": "블로그스팟",
+        }.get(
             str(prompt_set.get("platform") or ""),
             "블로그",
         )
@@ -23116,6 +25309,8 @@ class KeywordApp(ctk.CTk):
         values = []
         for prompt_set in self._prompt_sets():
             if platform and prompt_set.get("platform") != platform:
+                continue
+            if platform is None and prompt_set.get("platform") not in ("wordpress", "tistory", "blogspot"):
                 continue
             values.append(self._prompt_set_label(prompt_set))
         return values or ["기본"]
@@ -23146,6 +25341,7 @@ class KeywordApp(ctk.CTk):
             if active_set:
                 menu.set(self._prompt_set_label(active_set))
         self._refresh_writing_prompt_menu()
+        self._refresh_naver_blog_prompt_menu()
         self._refresh_naver_kin_wordpress_prompt_menu()
 
     def _refresh_writing_prompt_menu(self) -> None:
@@ -23193,6 +25389,8 @@ class KeywordApp(ctk.CTk):
         if selected:
             self.active_prompt_set_ids[platform] = str(selected.get("id"))
             self._load_prompt_set_into_boxes(platform)
+            if platform == "naver_blog":
+                self._apply_naver_blog_prompt_set(selected)
         self._on_prompt_text_changed()
 
     def _add_prompt_set(self, platform: str) -> None:
@@ -23211,6 +25409,10 @@ class KeywordApp(ctk.CTk):
         self.active_prompt_set_ids[platform] = prompt_id
         self._refresh_prompt_set_menus()
         self._load_prompt_set_into_boxes(platform)
+        if platform == "naver_blog":
+            created = self._prompt_set_by_id(prompt_id)
+            if created:
+                self._apply_naver_blog_prompt_set(created)
         self.prompt_feedback_label.configure(text="새 프롬프트가 추가되었습니다. 저장 버튼을 누르면 반영됩니다.", text_color="#f4c95d")
 
     def _update_prompt_set(self, platform: str) -> None:
@@ -23230,6 +25432,10 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(settings, save_secrets=False)
         self._refresh_prompt_set_menus()
         self._refresh_writing_prompt_menu()
+        if platform == "naver_blog":
+            updated = self._prompt_set_by_id(prompt_id)
+            if updated:
+                self._apply_naver_blog_prompt_set(updated, persist=True)
         prompt_name = self.prompt_name_entries[platform].get().strip() or "선택한"
         self.prompt_feedback_label.configure(text=f"{prompt_name} 프롬프트 수정 저장 완료", text_color="#48d980")
 
@@ -23245,6 +25451,8 @@ class KeywordApp(ctk.CTk):
             self.active_prompt_set_ids[platform] = str(first.get("id"))
         self._refresh_prompt_set_menus()
         self._load_prompt_set_into_boxes(platform)
+        if platform == "naver_blog" and first:
+            self._apply_naver_blog_prompt_set(first, persist=True)
         self.prompt_feedback_label.configure(text="프롬프트를 삭제했습니다. 저장 버튼을 누르면 반영됩니다.", text_color="#f4c95d")
 
     def _on_writing_prompt_selected(self, label: str) -> None:
@@ -23268,6 +25476,12 @@ class KeywordApp(ctk.CTk):
             "tistory_automation_prompt": self.tistory_automation_prompt_box.get("1.0", "end").strip()
             if self.tistory_automation_prompt_box
             else self.wordpress_settings.tistory_automation_prompt,
+            "naver_blog_title_prompt": self.naver_blog_title_prompt_box.get("1.0", "end").strip()
+            if self.naver_blog_title_prompt_box
+            else self.wordpress_settings.naver_blog_title_prompt,
+            "naver_blog_topic_prompt": self.naver_blog_topic_prompt_box.get("1.0", "end").strip()
+            if self.naver_blog_topic_prompt_box
+            else self.wordpress_settings.naver_blog_topic_prompt,
             "naver_kin_answer_prompt": self.naver_kin_answer_prompt_box.get("1.0", "end").strip()
             if self.naver_kin_answer_prompt_box
             else self.wordpress_settings.naver_kin_answer_prompt,
@@ -28146,6 +30360,16 @@ class KeywordApp(ctk.CTk):
         self.prompt_article_boxes["blogspot"].insert("1.0", self.wordpress_settings.blogspot_article_prompt_template)
         if self.tistory_automation_prompt_box:
             self.tistory_automation_prompt_box.insert("1.0", self.wordpress_settings.tistory_automation_prompt)
+        if self.naver_blog_title_prompt_box:
+            self.naver_blog_title_prompt_box.insert(
+                "1.0",
+                self.wordpress_settings.naver_blog_title_prompt or DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+            )
+        if self.naver_blog_topic_prompt_box:
+            self.naver_blog_topic_prompt_box.insert(
+                "1.0",
+                self.wordpress_settings.naver_blog_topic_prompt or DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
+            )
         if self.naver_kin_answer_prompt_box:
             self.naver_kin_answer_prompt_box.insert("1.0", self.wordpress_settings.naver_kin_answer_prompt)
         if hasattr(self, "prompt_set_menus"):
@@ -28153,8 +30377,26 @@ class KeywordApp(ctk.CTk):
                 self.wordpress_settings.prompt_sets,
                 self.wordpress_settings,
             )
-            for platform in ("wordpress", "tistory", "blogspot"):
-                active = next((item for item in self.wordpress_settings.prompt_sets if item.get("platform") == platform), None)
+            for platform in ("wordpress", "tistory", "naver_blog", "blogspot"):
+                preferred_id = (
+                    self.wordpress_settings.naver_blog_prompt_id
+                    if platform == "naver_blog"
+                    else ""
+                )
+                active = next(
+                    (
+                        item
+                        for item in self.wordpress_settings.prompt_sets
+                        if item.get("platform") == platform
+                        and (not preferred_id or item.get("id") == preferred_id)
+                    ),
+                    None,
+                )
+                if active is None:
+                    active = next(
+                        (item for item in self.wordpress_settings.prompt_sets if item.get("platform") == platform),
+                        None,
+                    )
                 if active:
                     self.active_prompt_set_ids[platform] = str(active.get("id"))
             self._refresh_prompt_set_menus()
@@ -29008,9 +31250,22 @@ class KeywordApp(ctk.CTk):
             naver_blog_write_url=self.naver_blog_write_url_entry.get().strip() if hasattr(self, "naver_blog_write_url_entry") else self.wordpress_settings.naver_blog_write_url,
             naver_blog_publish_name=self.naver_blog_publish_name_entry.get().strip() if hasattr(self, "naver_blog_publish_name_entry") else self.wordpress_settings.naver_blog_publish_name,
             naver_blog_body_delay_ms=self._safe_int(self.naver_blog_body_delay_entry.get(), 20) if hasattr(self, "naver_blog_body_delay_entry") else self.wordpress_settings.naver_blog_body_delay_ms,
+            naver_blog_automation_mode=(
+                normalize_naver_blog_automation_mode(
+                    self.naver_blog_automation_mode_var.get()
+                )
+                if hasattr(self, "naver_blog_automation_mode_var")
+                else self.wordpress_settings.naver_blog_automation_mode
+            ),
             naver_blog_run_count=self._safe_int(self.naver_blog_run_count_entry.get(), 1) if hasattr(self, "naver_blog_run_count_entry") else self.wordpress_settings.naver_blog_run_count,
+            naver_blog_image_count=(
+                max(1, min(self._safe_int(self.naver_blog_image_count_menu.get().replace("개", ""), 2), 10))
+                if hasattr(self, "naver_blog_image_count_menu")
+                else self.wordpress_settings.naver_blog_image_count
+            ),
             naver_blog_work_folder=self.naver_blog_work_folder_entry.get().strip() if hasattr(self, "naver_blog_work_folder_entry") else self.wordpress_settings.naver_blog_work_folder,
             naver_blog_prompt_type=self.naver_blog_prompt_type_menu.get() if hasattr(self, "naver_blog_prompt_type_menu") else self.wordpress_settings.naver_blog_prompt_type,
+            naver_blog_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
             naver_blog_topic_category=self.naver_blog_topic_category_menu.get() if hasattr(self, "naver_blog_topic_category_menu") else self.wordpress_settings.naver_blog_topic_category,
             naver_blog_title_prompt=self.naver_blog_title_prompt_box.get("1.0", "end").strip() if hasattr(self, "naver_blog_title_prompt_box") else self.wordpress_settings.naver_blog_title_prompt,
             naver_blog_topic_prompt=self.naver_blog_topic_prompt_box.get("1.0", "end").strip() if hasattr(self, "naver_blog_topic_prompt_box") else self.wordpress_settings.naver_blog_topic_prompt,
@@ -29858,6 +32113,7 @@ class KeywordApp(ctk.CTk):
         defaults = {
             "wordpress": (DEFAULT_WORDPRESS_TITLE_PROMPT, DEFAULT_WORDPRESS_ARTICLE_PROMPT),
             "tistory": (DEFAULT_TISTORY_TITLE_PROMPT, DEFAULT_TISTORY_ARTICLE_PROMPT),
+            "naver_blog": (DEFAULT_NAVER_BLOG_TITLE_PROMPT, DEFAULT_NAVER_BLOG_TOPIC_PROMPT),
             "blogspot": (DEFAULT_BLOGSPOT_TITLE_PROMPT, DEFAULT_BLOGSPOT_ARTICLE_PROMPT),
         }
         for platform, (title_prompt, article_prompt) in defaults.items():
@@ -29876,6 +32132,8 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_title_prompt_template = DEFAULT_TISTORY_TITLE_PROMPT
         self.wordpress_settings.tistory_article_prompt_template = DEFAULT_TISTORY_ARTICLE_PROMPT
         self.wordpress_settings.tistory_automation_prompt = DEFAULT_TISTORY_AUTOMATION_PROMPT
+        self.wordpress_settings.naver_blog_title_prompt = DEFAULT_NAVER_BLOG_TITLE_PROMPT
+        self.wordpress_settings.naver_blog_topic_prompt = DEFAULT_NAVER_BLOG_TOPIC_PROMPT
         self.wordpress_settings.naver_kin_answer_prompt = DEFAULT_NAVER_KIN_ANSWER_PROMPT
         self.wordpress_settings.blogspot_title_prompt_template = DEFAULT_BLOGSPOT_TITLE_PROMPT
         self.wordpress_settings.blogspot_article_prompt_template = DEFAULT_BLOGSPOT_ARTICLE_PROMPT
@@ -29883,7 +32141,9 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.article_prompt_template = DEFAULT_WORDPRESS_ARTICLE_PROMPT
         self.wordpress_settings.prompt_sets = PromptFileStore.default_prompt_sets(self.wordpress_settings)
         self.wordpress_settings.selected_prompt_id = self.wordpress_settings.prompt_sets[0]["id"]
-        for platform in ("wordpress", "tistory", "blogspot"):
+        self.wordpress_settings.naver_blog_prompt_id = "naver-blog-default"
+        self.wordpress_settings.naver_blog_prompt_type = "기본"
+        for platform in ("wordpress", "tistory", "naver_blog", "blogspot"):
             active = next((item for item in self.wordpress_settings.prompt_sets if item.get("platform") == platform), None)
             if active:
                 self.active_prompt_set_ids[platform] = str(active.get("id"))
@@ -32245,21 +34505,61 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "naver_blog_progress":
                     if hasattr(self, "naver_blog_status_label"):
                         self.naver_blog_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")
+                elif event_type == "naver_blog_editor_ready":
+                    message = self._apply_naver_blog_bootstrap_result(payload)
+                    article_ready = bool(payload.get("article_ready")) if isinstance(payload, dict) else False
+                    attached_count = int(payload.get("image_count") or 0) if isinstance(payload, dict) else 0
+                    if hasattr(self, "naver_blog_start_button"):
+                        self.naver_blog_start_button.configure(
+                            state="disabled",
+                            text=(
+                                f"작성 완료 · 사진 {attached_count}개 첨부"
+                                if article_ready
+                                else "에디터 열림 · 작성 대기"
+                            ),
+                        )
+                    if hasattr(self, "naver_blog_stop_button"):
+                        self.naver_blog_stop_button.configure(state="normal", text="자동화 중단")
+                    if hasattr(self, "naver_blog_status_label"):
+                        self.naver_blog_status_label.configure(
+                            text=(
+                                "현재 상태: 제목·본문 작성과 사진 첨부 완료 · 발행 전 내용을 확인해 주세요."
+                                if article_ready
+                                else "현재 상태: 에디터 진입 완료 · 전용 Chrome을 열어 둔 상태입니다."
+                            ),
+                            text_color="#48d980",
+                        )
+                    self._update_quick_status(
+                        "네이버 블로그 작성·사진 첨부 완료" if article_ready else "네이버 블로그 에디터 준비",
+                        message,
+                        "#48d980",
+                    )
                 elif event_type == "naver_blog_done":
                     message = self._apply_naver_blog_bootstrap_result(payload)
-                    if hasattr(self, "naver_blog_start_button"):
-                        self.naver_blog_start_button.configure(state="normal", text="🚀 자동화 시작 (Playwright)")
-                    if hasattr(self, "naver_blog_status_label"):
-                        self.naver_blog_status_label.configure(text=f"현재 상태: {message}", text_color="#48d980")
+                    self._reset_naver_blog_automation_controls(
+                        status=f"현재 상태: {message}",
+                        color="#48d980",
+                    )
                     self.naver_blog_worker = None
                     self._update_quick_status("네이버 블로그 준비 완료", message, "#48d980")
-                elif event_type == "naver_blog_error":
-                    if hasattr(self, "naver_blog_start_button"):
-                        self.naver_blog_start_button.configure(state="normal", text="🚀 자동화 시작 (Playwright)")
-                    if hasattr(self, "naver_blog_status_label"):
-                        self.naver_blog_status_label.configure(text="현재 상태: 네이버 블로그 자동화 준비 실패", text_color="#ff6b6b")
+                elif event_type == "naver_blog_cancelled":
                     self.naver_blog_worker = None
-                    messagebox.showwarning("네이버 블로그 자동화 준비 실패", payload)
+                    self._reset_naver_blog_automation_controls()
+                    self._update_quick_status(
+                        "N블로그 자동화 중단",
+                        str(payload or "자동화를 중단하고 처음 상태로 돌아왔습니다."),
+                        "#ffb86b",
+                    )
+                elif event_type == "naver_blog_error":
+                    self._reset_naver_blog_automation_controls(
+                        status="현재 상태: 네이버 블로그 자동화 준비 실패",
+                        color="#ff6b6b",
+                    )
+                    self.naver_blog_worker = None
+                    error_message = str(payload or "").strip()
+                    if "상세 로그:" not in error_message:
+                        error_message = f"{error_message}\n\n상세 로그: {RUNTIME_LOG_FILE}"
+                    messagebox.showwarning("네이버 블로그 자동화 준비 실패", error_message)
                 elif event_type == "naver_search_advisor_progress":
                     message = str((payload or {}).get("message") or "")
                     if hasattr(self, "publish_status_label"):
