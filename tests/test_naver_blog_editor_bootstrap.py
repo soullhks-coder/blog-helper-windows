@@ -129,6 +129,11 @@ class NaverBlogEditorBootstrapTests(unittest.TestCase):
         self.assertIn("automation_mode=self.wordpress_settings.naver_blog_automation_mode", self.source)
         self.assertIn("use_rich_formatting = automation_mode == NAVER_BLOG_AUTOMATION_MODE_FULL", fill_source)
         self.assertIn("if not use_rich_formatting", fill_source)
+        self.assertIn('apply_bold = bool(block.get("bold"))', fill_source)
+        self.assertNotIn(
+            'apply_bold = use_rich_formatting and bool(block.get("bold"))',
+            fill_source,
+        )
         self.assertIn('keyboard.press("Enter")', fill_source)
 
 

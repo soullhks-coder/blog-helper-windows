@@ -9383,7 +9383,7 @@ def fill_naver_blog_editor(
             editor_page.keyboard.press("Enter")
             normal_paragraph_ready = _naver_blog_active_normal_paragraph(editor_page)
             continue
-        apply_bold = use_rich_formatting and bool(block.get("bold"))
+        apply_bold = bool(block.get("bold"))
         if apply_bold:
             result_queue.put(("naver_blog_progress", "핵심 문장을 굵게 입력하는 중..."))
 
