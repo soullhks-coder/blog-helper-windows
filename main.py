@@ -2015,6 +2015,7 @@ class WordPressSettings:
     webmaster_submit_naver: bool = True
     webmaster_submit_daum: bool = True
     webmaster_submit_google: bool = True
+    webmaster_completion_message: bool = False
     categories: list[dict] = field(default_factory=list)
     gpt_api_key: str = ""
     gpt_model: str = "gpt-4.1-mini"
@@ -2485,6 +2486,7 @@ class AppStateStore:
             webmaster_submit_naver=bool(payload.get("webmaster_submit_naver", True)),
             webmaster_submit_daum=bool(payload.get("webmaster_submit_daum", True)),
             webmaster_submit_google=bool(payload.get("webmaster_submit_google", True)),
+            webmaster_completion_message=bool(payload.get("webmaster_completion_message", False)),
             categories=payload.get("categories", []),
             gpt_api_key=KeychainStore.load_secret(KEYCHAIN_GPT_ACCOUNT) or gpt_fallback,
             gpt_model=payload.get("gpt_model", "gpt-4.1-mini"),
@@ -25936,6 +25938,7 @@ class KeywordApp(ctk.CTk):
         self.webmaster_naver_var = ctk.BooleanVar(value=True)
         self.webmaster_daum_var = ctk.BooleanVar(value=True)
         self.webmaster_google_var = ctk.BooleanVar(value=True)
+        self.webmaster_completion_message_var = ctk.BooleanVar(value=False)
         for column, (label, variable) in enumerate(
             (
                 ("네이버", self.webmaster_naver_var),
@@ -25956,6 +25959,28 @@ class KeywordApp(ctk.CTk):
             text_color="#9da7ba",
             font=ctk.CTkFont(size=12),
         ).grid(row=1, column=0, columnspan=3, padx=20, pady=(0, 12), sticky="w")
+
+        self.webmaster_completion_message_switch = ctk.CTkSwitch(
+            webmaster_frame,
+            text="완료메세지 OFF",
+            variable=self.webmaster_completion_message_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=46,
+            switch_height=24,
+            corner_radius=12,
+            progress_color="#1faa55",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_webmaster_completion_message_changed,
+        )
+        self.webmaster_completion_message_switch.grid(
+            row=2,
+            column=0,
+            columnspan=3,
+            padx=20,
+            pady=(0, 14),
+            sticky="w",
+        )
 
         button_row = ctk.CTkFrame(self.wp_card, fg_color="transparent")
         button_row.grid(row=16, column=0, padx=24, pady=(18, 0), sticky="ew")
@@ -30536,6 +30561,16 @@ class KeywordApp(ctk.CTk):
         self.webmaster_naver_var.set(self.wordpress_settings.webmaster_submit_naver)
         self.webmaster_daum_var.set(self.wordpress_settings.webmaster_submit_daum)
         self.webmaster_google_var.set(self.wordpress_settings.webmaster_submit_google)
+        self.webmaster_completion_message_var.set(
+            self.wordpress_settings.webmaster_completion_message
+        )
+        self.webmaster_completion_message_switch.configure(
+            text=(
+                "완료메세지 ON"
+                if self.wordpress_settings.webmaster_completion_message
+                else "완료메세지 OFF"
+            )
+        )
         self.gpt_api_entry.insert(0, "OpenAI")
         self.gpt_secret_entry.insert(0, self.wordpress_settings.gpt_api_key)
         self.gpt_model_menu.set(self.wordpress_settings.gpt_model)
@@ -31076,6 +31111,14 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.webmaster_submit_google = bool(self.webmaster_google_var.get())
         self._save_ui_state()
 
+    def _on_webmaster_completion_message_changed(self) -> None:
+        enabled = bool(self.webmaster_completion_message_var.get())
+        self.wordpress_settings.webmaster_completion_message = enabled
+        self.webmaster_completion_message_switch.configure(
+            text="완료메세지 ON" if enabled else "완료메세지 OFF"
+        )
+        self._save_ui_state()
+
     def _toggle_password_visibility(self) -> None:
         self.password_visible = not self.password_visible
         self.password_entry.configure(show="" if self.password_visible else "*")
@@ -31460,6 +31503,9 @@ class KeywordApp(ctk.CTk):
             webmaster_submit_naver=bool(self.webmaster_naver_var.get()),
             webmaster_submit_daum=bool(self.webmaster_daum_var.get()),
             webmaster_submit_google=bool(self.webmaster_google_var.get()),
+            webmaster_completion_message=bool(
+                self.webmaster_completion_message_var.get()
+            ),
             categories=self.wordpress_settings.categories,
             gpt_api_key=self.gpt_secret_entry.get().strip(),
             gpt_model=self.gpt_model_menu.get(),
@@ -35682,7 +35728,14 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "publish_status_label"):
             self.publish_status_label.configure(text=message, text_color=status_color)
         self._update_quick_status(status_title, message, status_color)
-        if show_feedback:
+        completion_message_enabled = bool(
+            getattr(
+                getattr(self, "wordpress_settings", None),
+                "webmaster_completion_message",
+                False,
+            )
+        )
+        if show_feedback and completion_message_enabled:
             if partial:
                 messagebox.showwarning(status_title, message)
             else:

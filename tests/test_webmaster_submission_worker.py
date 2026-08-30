@@ -1,5 +1,6 @@
 import queue
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -131,6 +132,68 @@ class WebmasterSubmissionWorkerTests(unittest.TestCase):
         self.assertTrue(settings.webmaster_submit_naver)
         self.assertTrue(settings.webmaster_submit_daum)
         self.assertTrue(settings.webmaster_submit_google)
+        self.assertFalse(settings.webmaster_completion_message)
+
+    def test_completion_alert_is_hidden_when_setting_is_off(self) -> None:
+        app = SimpleNamespace(
+            wordpress_settings=main.WordPressSettings(
+                webmaster_completion_message=False
+            ),
+            naver_search_advisor_worker=object(),
+            _update_quick_status=lambda *_args: None,
+            _start_next_naver_search_advisor_submission=lambda: None,
+            after=lambda _delay, _callback: None,
+        )
+
+        with (
+            patch.object(main.messagebox, "showinfo") as showinfo,
+            patch.object(main.messagebox, "showwarning") as showwarning,
+        ):
+            main.KeywordApp._handle_naver_search_advisor_done(
+                app,
+                {
+                    "message": "검색엔진 등록 완료",
+                    "show_feedback": True,
+                    "partial": False,
+                },
+            )
+            main.KeywordApp._handle_naver_search_advisor_done(
+                app,
+                {
+                    "message": "검색엔진 일부 등록 완료",
+                    "show_feedback": True,
+                    "partial": True,
+                },
+            )
+
+        showinfo.assert_not_called()
+        showwarning.assert_not_called()
+
+    def test_completion_alert_is_shown_when_setting_is_on(self) -> None:
+        app = SimpleNamespace(
+            wordpress_settings=main.WordPressSettings(
+                webmaster_completion_message=True
+            ),
+            naver_search_advisor_worker=object(),
+            _update_quick_status=lambda *_args: None,
+            _start_next_naver_search_advisor_submission=lambda: None,
+            after=lambda _delay, _callback: None,
+        )
+
+        with patch.object(main.messagebox, "showinfo") as showinfo:
+            main.KeywordApp._handle_naver_search_advisor_done(
+                app,
+                {
+                    "message": "검색엔진 등록 완료",
+                    "show_feedback": True,
+                    "partial": False,
+                },
+            )
+
+        showinfo.assert_called_once_with(
+            "검색엔진 수집 요청 완료",
+            "검색엔진 등록 완료",
+        )
 
 
 if __name__ == "__main__":
