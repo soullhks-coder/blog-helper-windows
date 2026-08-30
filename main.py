@@ -2151,6 +2151,7 @@ class WordPressSettings:
     naver_blog_prompt_type: str = "공통"
     naver_blog_prompt_id: str = "naver-blog-default"
     naver_blog_topic_category: str = "선택안함"
+    naver_blog_reference_text: str = ""
     naver_blog_title_prompt: str = DEFAULT_NAVER_BLOG_TITLE_PROMPT
     naver_blog_topic_prompt: str = DEFAULT_NAVER_BLOG_TOPIC_PROMPT
     naver_blog_conversion_rules: str = DEFAULT_NAVER_BLOG_CONVERSION_RULES
@@ -2654,6 +2655,9 @@ class AppStateStore:
             naver_blog_prompt_type=payload.get("naver_blog_prompt_type", "공통"),
             naver_blog_prompt_id=payload.get("naver_blog_prompt_id", "naver-blog-default"),
             naver_blog_topic_category=payload.get("naver_blog_topic_category", "선택안함"),
+            naver_blog_reference_text=str(
+                payload.get("naver_blog_reference_text", "") or ""
+            ),
             naver_blog_title_prompt=payload.get(
                 "naver_blog_title_prompt",
                 DEFAULT_NAVER_BLOG_TITLE_PROMPT,
@@ -16469,6 +16473,37 @@ def prepare_naver_blog_manual_image_files(
     return copied_paths
 
 
+def combine_naver_blog_reference_text(
+    manual_reference: str,
+    portal_reference: str,
+    max_chars: int = 12000,
+) -> str:
+    """Combine optional user notes with portal facts while retaining both sources."""
+    manual = str(manual_reference or "").strip()
+    portal = str(portal_reference or "").strip()
+    limit = max(1, int(max_chars or 12000))
+    if not manual:
+        return portal[:limit]
+
+    manual_header = "[직접 입력한 참고내용]\n"
+    if not portal:
+        return f"{manual_header}{manual}"[:limit]
+
+    portal_header = "\n\n[포털 자동수집 참고내용]\n"
+    available = max(0, limit - len(manual_header) - len(portal_header))
+    manual_count = min(len(manual), available // 2)
+    portal_count = min(len(portal), available // 2)
+    remaining = available - manual_count - portal_count
+    manual_extra = min(len(manual) - manual_count, remaining)
+    manual_count += manual_extra
+    remaining -= manual_extra
+    portal_count += min(len(portal) - portal_count, remaining)
+    return (
+        f"{manual_header}{manual[:manual_count]}"
+        f"{portal_header}{portal[:portal_count]}"
+    )[:limit]
+
+
 def build_naver_blog_workflow_payload(
     settings: WordPressSettings,
     topic: str,
@@ -16502,7 +16537,7 @@ def build_naver_blog_workflow_payload(
             result_queue.put(event)
 
     collector = AutomationKeywordQueueWorker(settings, [], NaverBlogProgressQueue())
-    reference_text = collector._collect_reference_text_for_keyword(
+    portal_reference_text = collector._collect_reference_text_for_keyword(
         {
             "keyword": topic,
             "source_name": "N블로그",
@@ -16513,10 +16548,14 @@ def build_naver_blog_workflow_payload(
             },
         }
     )
+    reference_text = combine_naver_blog_reference_text(
+        settings.naver_blog_reference_text,
+        portal_reference_text,
+    )
     _raise_if_naver_blog_cancelled(cancel_event)
     if not reference_text:
         raise RuntimeError("주제의 최신 참고내용을 수집하지 못했습니다.")
-    append_runtime_log("NBlog", f"최신 참고내용 수집 완료: {len(reference_text)}자")
+    append_runtime_log("NBlog", f"직접 입력·포털 통합 참고내용 준비 완료: {len(reference_text)}자")
     title, article_html, body_text, provider_name = generate_naver_blog_article(
         settings,
         topic,
@@ -21644,6 +21683,77 @@ class KeywordApp(ctk.CTk):
         self.naver_blog_topic_category_menu.grid(row=2, column=1, padx=(0, 10), pady=(8, 16), sticky="w")
         self.naver_blog_topic_category_menu.set(self.wordpress_settings.naver_blog_topic_category)
 
+        reference_header = ctk.CTkFrame(prompt_panel, fg_color="transparent")
+        reference_header.grid(
+            row=3,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(2, 8),
+            sticky="ew",
+        )
+        reference_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            reference_header,
+            text="참고내용 (선택)",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            reference_header,
+            text="초기화",
+            width=86,
+            height=32,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            command=self._clear_naver_blog_reference_text,
+        ).grid(row=0, column=1, sticky="e")
+        self.naver_blog_reference_textbox = ctk.CTkTextbox(
+            prompt_panel,
+            height=150,
+            corner_radius=12,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13),
+            wrap="word",
+        )
+        self.naver_blog_reference_textbox.grid(
+            row=4,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 6),
+            sticky="ew",
+        )
+        self.naver_blog_reference_textbox.insert(
+            "1.0",
+            self.wordpress_settings.naver_blog_reference_text,
+        )
+        self.naver_blog_reference_textbox.bind(
+            "<KeyRelease>",
+            self._on_naver_blog_reference_text_changed,
+        )
+        self._bind_private_mousewheel_scroll(self.naver_blog_reference_textbox)
+        self.naver_blog_reference_count_label = ctk.CTkLabel(
+            prompt_panel,
+            text="",
+            text_color=palette["subtext"],
+            justify="left",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+        )
+        self.naver_blog_reference_count_label.grid(
+            row=5,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 14),
+            sticky="ew",
+        )
+        self._update_naver_blog_reference_count()
+
         url_panel = self._naver_panel(parent, "URL 글쓰기 (설정)", 1)
         ctk.CTkLabel(url_panel, text="글쓰기 URL", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
         self.naver_blog_write_url_entry = ctk.CTkEntry(url_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
@@ -22597,6 +22707,38 @@ class KeywordApp(ctk.CTk):
         )
         self._save_naver_blog_settings(silent=True)
 
+    def _update_naver_blog_reference_count(self) -> None:
+        if not hasattr(self, "naver_blog_reference_count_label"):
+            return
+        reference = (
+            self.naver_blog_reference_textbox.get("1.0", "end").strip()
+            if hasattr(self, "naver_blog_reference_textbox")
+            else self.wordpress_settings.naver_blog_reference_text
+        )
+        self.naver_blog_reference_count_label.configure(
+            text=(
+                f"직접 입력 {len(reference):,}자 · 포털 자동 수집 내용과 합쳐서 글을 작성합니다."
+                if reference
+                else "비워두면 직접 입력 내용은 사용하지 않고 포털 자동 수집 내용으로 작성합니다."
+            )
+        )
+
+    def _on_naver_blog_reference_text_changed(self, event=None) -> None:
+        self._mark_text_input_activity(event)
+        self.wordpress_settings.naver_blog_reference_text = (
+            self.naver_blog_reference_textbox.get("1.0", "end").strip()
+        )
+        self._update_naver_blog_reference_count()
+        self._save_ui_state()
+
+    def _clear_naver_blog_reference_text(self) -> None:
+        if not hasattr(self, "naver_blog_reference_textbox"):
+            return
+        self.naver_blog_reference_textbox.delete("1.0", "end")
+        self.wordpress_settings.naver_blog_reference_text = ""
+        self._update_naver_blog_reference_count()
+        self._save_naver_blog_settings(silent=True)
+
     def _save_naver_blog_settings(self, silent: bool = False) -> None:
         profiles = self._current_naver_blog_profiles()
         self.wordpress_settings.naver_blog_profiles = profiles
@@ -22667,6 +22809,11 @@ class KeywordApp(ctk.CTk):
                 self._apply_naver_blog_prompt_set(selected)
         if hasattr(self, "naver_blog_topic_category_menu"):
             self.wordpress_settings.naver_blog_topic_category = self.naver_blog_topic_category_menu.get()
+        if hasattr(self, "naver_blog_reference_textbox"):
+            self.wordpress_settings.naver_blog_reference_text = (
+                self.naver_blog_reference_textbox.get("1.0", "end").strip()
+            )
+            self._update_naver_blog_reference_count()
         if hasattr(self, "naver_blog_generation_model_entry"):
             self.wordpress_settings.naver_blog_generation_model = self.naver_blog_generation_model_entry.get().strip() or "[CLI] Codex"
         if hasattr(self, "naver_blog_image_model_entry"):
@@ -32360,6 +32507,11 @@ class KeywordApp(ctk.CTk):
             naver_blog_prompt_type=self.naver_blog_prompt_type_menu.get() if hasattr(self, "naver_blog_prompt_type_menu") else self.wordpress_settings.naver_blog_prompt_type,
             naver_blog_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
             naver_blog_topic_category=self.naver_blog_topic_category_menu.get() if hasattr(self, "naver_blog_topic_category_menu") else self.wordpress_settings.naver_blog_topic_category,
+            naver_blog_reference_text=(
+                self.naver_blog_reference_textbox.get("1.0", "end").strip()
+                if hasattr(self, "naver_blog_reference_textbox")
+                else self.wordpress_settings.naver_blog_reference_text
+            ),
             naver_blog_title_prompt=self.naver_blog_title_prompt_box.get("1.0", "end").strip() if hasattr(self, "naver_blog_title_prompt_box") else self.wordpress_settings.naver_blog_title_prompt,
             naver_blog_topic_prompt=self.naver_blog_topic_prompt_box.get("1.0", "end").strip() if hasattr(self, "naver_blog_topic_prompt_box") else self.wordpress_settings.naver_blog_topic_prompt,
             naver_blog_conversion_rules=(
