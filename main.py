@@ -7955,6 +7955,18 @@ def build_naver_blog_write_url(profile: dict | None = None, fallback_url: str = 
     return "https://blog.naver.com/GoBlogWrite.naver"
 
 
+def resolved_naver_blog_profile_write_url(profile: dict | None = None) -> str:
+    """Resolve only the selected profile's URL without borrowing another profile."""
+    profile = profile or {}
+    write_url = str(profile.get("write_url") or "").strip()
+    if write_url:
+        return build_naver_blog_write_url({"write_url": write_url})
+    blog_id = normalize_naver_blog_id(str(profile.get("blog_id") or ""))
+    if blog_id:
+        return f"https://blog.naver.com/{blog_id}?Redirect=Write&"
+    return ""
+
+
 def normalize_naver_blog_id(value: str) -> str:
     value = (value or "").strip()
     if not value:
@@ -21494,8 +21506,15 @@ class KeywordApp(ctk.CTk):
         ctk.CTkRadioButton(profile_panel, text="프로필 자동화", variable=self.naver_blog_profile_mode_var, value="profile").grid(row=1, column=0, padx=18, pady=(0, 10), sticky="w")
         ctk.CTkButton(profile_panel, text="새로고침", width=110, height=36, fg_color="#314761", command=self._refresh_naver_profile_cards).grid(row=1, column=3, padx=(0, 18), pady=(0, 10), sticky="e")
 
+        ctk.CTkLabel(
+            profile_panel,
+            text="라디오로 선택한 블로그의 글쓰기 URL이 글작성 메뉴에 즉시 반영됩니다.",
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=2, column=0, columnspan=4, padx=18, pady=(0, 10), sticky="w")
+
         self.naver_profile_cards_frame = ctk.CTkFrame(profile_panel, fg_color="transparent")
-        self.naver_profile_cards_frame.grid(row=2, column=0, columnspan=4, padx=18, pady=(0, 16), sticky="ew")
+        self.naver_profile_cards_frame.grid(row=3, column=0, columnspan=4, padx=18, pady=(0, 16), sticky="ew")
         for col in range(3):
             self.naver_profile_cards_frame.grid_columnconfigure(col, weight=1, uniform="naver_profiles")
         self.naver_blog_profile_vars: dict[str, tk.StringVar] = {}
@@ -21737,6 +21756,10 @@ class KeywordApp(ctk.CTk):
                 var = tk.StringVar(value=str(profile.get(field_key) or ""))
                 entry = ctk.CTkEntry(card, textvariable=var, height=30, fg_color="#111826", border_color="#314761")
                 entry.grid(row=row, column=1, padx=(0, 14), pady=4, sticky="ew")
+                entry.bind(
+                    "<FocusOut>",
+                    lambda _event, value=name: self._on_naver_profile_field_changed(value),
+                )
                 self.naver_blog_profile_vars[f"{index}:{field_key}"] = var
             ctk.CTkLabel(
                 card,
@@ -21762,11 +21785,78 @@ class KeywordApp(ctk.CTk):
                 command=lambda value=name: self._start_naver_blog_bootstrap(value),
             ).grid(row=0, column=1, padx=(0, 6), sticky="ew")
             ctk.CTkButton(button_row, text="초기화", height=32, fg_color="#596579", command=lambda idx=index: self._reset_naver_profile(idx)).grid(row=0, column=2, sticky="ew")
+        self._sync_naver_blog_write_url_from_profile(active_profile, persist=False)
         self._finish_theme_paint()
 
     def _set_naver_active_profile(self, profile_name: str) -> None:
-        self.wordpress_settings.naver_blog_active_profile = profile_name
-        self._save_naver_blog_settings(silent=True)
+        write_url = self._sync_naver_blog_write_url_from_profile(profile_name, persist=True)
+        if hasattr(self, "naver_blog_status_label"):
+            url_status = write_url or "글쓰기 URL 미설정"
+            self.naver_blog_status_label.configure(
+                text=f"현재 상태: {profile_name} 선택 · {url_status}",
+                text_color="#48d980" if write_url else "#ffb86b",
+            )
+
+    def _sync_naver_blog_write_url_from_profile(
+        self,
+        profile_name: str | None = None,
+        persist: bool = True,
+    ) -> str:
+        profiles = self._current_naver_blog_profiles()
+        if not profiles:
+            return ""
+        active_name = str(
+            profile_name
+            or (
+                self.naver_blog_active_profile_var.get()
+                if hasattr(self, "naver_blog_active_profile_var")
+                else self.wordpress_settings.naver_blog_active_profile
+            )
+            or ""
+        )
+        selected_index = next(
+            (
+                index
+                for index, profile in enumerate(profiles)
+                if str(profile.get("name") or "") == active_name
+            ),
+            0,
+        )
+        selected = profiles[selected_index]
+        active_name = str(selected.get("name") or f"블로그 {selected_index + 1}")
+        write_url = resolved_naver_blog_profile_write_url(selected)
+        selected["write_url"] = write_url
+
+        self.wordpress_settings.naver_blog_profiles = profiles
+        self.wordpress_settings.naver_blog_active_profile = active_name
+        self.wordpress_settings.naver_blog_write_url = write_url
+        if hasattr(self, "naver_blog_active_profile_var"):
+            self.naver_blog_active_profile_var.set(active_name)
+        profile_url_var = getattr(self, "naver_blog_profile_vars", {}).get(
+            f"{selected_index}:write_url"
+        )
+        if profile_url_var is not None:
+            profile_url_var.set(write_url)
+        if hasattr(self, "naver_blog_write_url_entry"):
+            current_url = self.naver_blog_write_url_entry.get().strip()
+            if current_url != write_url:
+                self.naver_blog_write_url_entry.delete(0, "end")
+                self.naver_blog_write_url_entry.insert(0, write_url)
+        if persist:
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        return write_url
+
+    def _on_naver_profile_field_changed(self, profile_name: str) -> None:
+        self.wordpress_settings.naver_blog_profiles = self._current_naver_blog_profiles()
+        active_name = (
+            self.naver_blog_active_profile_var.get()
+            if hasattr(self, "naver_blog_active_profile_var")
+            else self.wordpress_settings.naver_blog_active_profile
+        )
+        if profile_name == active_name:
+            self._sync_naver_blog_write_url_from_profile(profile_name, persist=True)
+            return
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
 
     def _reset_naver_profile(self, index: int) -> None:
         profiles = self._naver_blog_profiles_from_state()
@@ -21779,8 +21869,18 @@ class KeywordApp(ctk.CTk):
                 "write_url": "",
                 "profile_path": f"~/naver_blog/profile_{index + 1}",
             }
+            for field_key in ("blog_id", "nickname", "write_url"):
+                var = getattr(self, "naver_blog_profile_vars", {}).get(
+                    f"{index}:{field_key}"
+                )
+                if var is not None:
+                    var.set("")
             self.wordpress_settings.naver_blog_profiles = profiles
-            self._save_naver_blog_settings(silent=True)
+            self._sync_naver_blog_write_url_from_profile(
+                self.wordpress_settings.naver_blog_active_profile,
+                persist=False,
+            )
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
             self._refresh_naver_profile_cards()
             self.naver_blog_status_label.configure(text=f"{name} 프로필 입력값을 초기화했습니다.", text_color="#ffcc66")
 
@@ -21825,11 +21925,36 @@ class KeywordApp(ctk.CTk):
         self._save_naver_blog_settings(silent=True)
 
     def _save_naver_blog_settings(self, silent: bool = False) -> None:
-        self.wordpress_settings.naver_blog_profiles = self._current_naver_blog_profiles()
+        profiles = self._current_naver_blog_profiles()
+        self.wordpress_settings.naver_blog_profiles = profiles
         if hasattr(self, "naver_blog_active_profile_var"):
             self.wordpress_settings.naver_blog_active_profile = self.naver_blog_active_profile_var.get()
         if hasattr(self, "naver_blog_write_url_entry"):
-            self.wordpress_settings.naver_blog_write_url = self.naver_blog_write_url_entry.get().strip()
+            entry_url = self.naver_blog_write_url_entry.get().strip()
+            selected_index = next(
+                (
+                    index
+                    for index, profile in enumerate(profiles)
+                    if str(profile.get("name") or "")
+                    == self.wordpress_settings.naver_blog_active_profile
+                ),
+                None,
+            )
+            if selected_index is not None:
+                selected = dict(profiles[selected_index])
+                selected["write_url"] = entry_url
+                entry_url = resolved_naver_blog_profile_write_url(selected)
+                profiles[selected_index]["write_url"] = entry_url
+                profile_url_var = getattr(self, "naver_blog_profile_vars", {}).get(
+                    f"{selected_index}:write_url"
+                )
+                if profile_url_var is not None:
+                    profile_url_var.set(entry_url)
+            self.wordpress_settings.naver_blog_profiles = profiles
+            self.wordpress_settings.naver_blog_write_url = entry_url
+            if self.naver_blog_write_url_entry.get().strip() != entry_url:
+                self.naver_blog_write_url_entry.delete(0, "end")
+                self.naver_blog_write_url_entry.insert(0, entry_url)
         if hasattr(self, "naver_blog_publish_name_entry"):
             self.wordpress_settings.naver_blog_publish_name = self.naver_blog_publish_name_entry.get().strip()
         if hasattr(self, "naver_blog_body_delay_entry"):
@@ -21935,8 +22060,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("진행 중", "네이버 블로그 자동화 준비가 이미 진행 중입니다.")
             return
         if profile_name and hasattr(self, "naver_blog_active_profile_var"):
-            self.naver_blog_active_profile_var.set(profile_name)
-            self.wordpress_settings.naver_blog_active_profile = profile_name
+            self._sync_naver_blog_write_url_from_profile(profile_name, persist=False)
         self._save_naver_blog_settings(silent=True)
         profile = self._selected_naver_blog_profile()
         blog_id = self._normalize_naver_blog_id(str(profile.get("blog_id") or ""))

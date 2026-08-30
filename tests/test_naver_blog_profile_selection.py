@@ -1,0 +1,139 @@
+import ast
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import main
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MAIN_PATH = ROOT / "main.py"
+
+
+class _ValueStub:
+    def __init__(self, value="") -> None:
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value) -> None:
+        self.value = value
+
+
+class _EntryStub(_ValueStub):
+    def delete(self, _start, _end) -> None:
+        self.value = ""
+
+    def insert(self, _index, value) -> None:
+        self.value = value
+
+
+class NaverBlogProfileSelectionTests(unittest.TestCase):
+    def _app_stub(self, profiles, active="블로그 1"):
+        profile_vars = {}
+        for index, profile in enumerate(profiles):
+            for field_key in ("blog_id", "nickname", "write_url"):
+                profile_vars[f"{index}:{field_key}"] = _ValueStub(
+                    str(profile.get(field_key) or "")
+                )
+        app = SimpleNamespace(
+            wordpress_settings=main.WordPressSettings(
+                naver_blog_profiles=[dict(profile) for profile in profiles],
+                naver_blog_active_profile=active,
+            ),
+            naver_blog_profile_vars=profile_vars,
+            naver_blog_active_profile_var=_ValueStub(active),
+            naver_blog_write_url_entry=_EntryStub("old-url"),
+        )
+        for method_name in (
+            "_naver_blog_profiles_from_state",
+            "_current_naver_blog_profiles",
+            "_normalize_naver_blog_id",
+            "_sync_naver_blog_write_url_from_profile",
+            "_set_naver_active_profile",
+        ):
+            setattr(
+                app,
+                method_name,
+                getattr(main.KeywordApp, method_name).__get__(app),
+            )
+        return app
+
+    def test_profile_url_resolver_uses_url_then_id_without_cross_profile_fallback(self) -> None:
+        self.assertEqual(
+            main.resolved_naver_blog_profile_write_url(
+                {"write_url": "blog.naver.com/second?Redirect=Write&"}
+            ),
+            "https://blog.naver.com/second?Redirect=Write&",
+        )
+        self.assertEqual(
+            main.resolved_naver_blog_profile_write_url({"blog_id": "second"}),
+            "https://blog.naver.com/second?Redirect=Write&",
+        )
+        self.assertEqual(main.resolved_naver_blog_profile_write_url({}), "")
+
+    def test_radio_selection_updates_writing_url_and_persists_active_blog(self) -> None:
+        app = self._app_stub(
+            [
+                {"name": "블로그 1", "blog_id": "first", "write_url": ""},
+                {
+                    "name": "블로그 2",
+                    "blog_id": "second",
+                    "write_url": "https://blog.naver.com/second?Redirect=Write&",
+                },
+            ]
+        )
+
+        with patch.object(main.AppStateStore, "save") as save:
+            main.KeywordApp._set_naver_active_profile(app, "블로그 2")
+
+        expected = "https://blog.naver.com/second?Redirect=Write&"
+        self.assertEqual(app.naver_blog_active_profile_var.get(), "블로그 2")
+        self.assertEqual(app.wordpress_settings.naver_blog_active_profile, "블로그 2")
+        self.assertEqual(app.wordpress_settings.naver_blog_write_url, expected)
+        self.assertEqual(app.naver_blog_write_url_entry.get(), expected)
+        save.assert_called_once_with(app.wordpress_settings, save_secrets=False)
+
+    def test_radio_selection_generates_writing_url_from_blog_id(self) -> None:
+        app = self._app_stub(
+            [
+                {"name": "블로그 1", "blog_id": "first", "write_url": ""},
+                {"name": "블로그 2", "blog_id": "second", "write_url": ""},
+            ]
+        )
+
+        with patch.object(main.AppStateStore, "save"):
+            app._sync_naver_blog_write_url_from_profile("블로그 2", persist=True)
+
+        expected = "https://blog.naver.com/second?Redirect=Write&"
+        self.assertEqual(app.naver_blog_write_url_entry.get(), expected)
+        self.assertEqual(app.naver_blog_profile_vars["1:write_url"].get(), expected)
+
+    def test_settings_ui_keeps_radio_selection_and_focus_sync_hooks(self) -> None:
+        source = MAIN_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        methods = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        build_source = ast.get_source_segment(
+            source,
+            methods["_refresh_naver_profile_cards"],
+        ) or ""
+        settings_source = ast.get_source_segment(
+            source,
+            methods["_build_naver_blog_settings_tab"],
+        ) or ""
+
+        self.assertIn("CTkRadioButton", build_source)
+        self.assertIn("_set_naver_active_profile", build_source)
+        self.assertIn('entry.bind(', build_source)
+        self.assertIn("_on_naver_profile_field_changed", build_source)
+        self.assertIn("글작성 메뉴에 즉시 반영", settings_source)
+
+
+if __name__ == "__main__":
+    unittest.main()
