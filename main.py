@@ -373,6 +373,23 @@ NAVER_BLOG_AUTOMATION_MODE_LABELS = {
 NAVER_BLOG_AUTOMATION_MODE_BY_LABEL = {
     label: value for value, label in NAVER_BLOG_AUTOMATION_MODE_LABELS.items()
 }
+NAVER_BLOG_IMAGE_MODE_AUTO = "auto"
+NAVER_BLOG_IMAGE_MODE_MANUAL = "manual"
+NAVER_BLOG_IMAGE_MODE_LABELS = {
+    NAVER_BLOG_IMAGE_MODE_AUTO: "이미지 자동",
+    NAVER_BLOG_IMAGE_MODE_MANUAL: "이미지 수동",
+}
+NAVER_BLOG_IMAGE_MODE_BY_LABEL = {
+    label: value for value, label in NAVER_BLOG_IMAGE_MODE_LABELS.items()
+}
+NAVER_BLOG_MANUAL_IMAGE_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+}
 
 
 def _application_restart_environment() -> dict[str, str]:
@@ -2092,6 +2109,8 @@ class WordPressSettings:
     naver_blog_body_delay_ms: int = 20
     naver_blog_run_count: int = 1
     naver_blog_image_count: int = 2
+    naver_blog_image_mode: str = NAVER_BLOG_IMAGE_MODE_AUTO
+    naver_blog_manual_image_paths: list[str] = field(default_factory=list)
     naver_blog_automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI
     naver_blog_work_folder: str = ""
     naver_blog_prompt_type: str = "공통"
@@ -2488,6 +2507,9 @@ class AppStateStore:
             ]
         naver_profiles = payload.get("naver_blog_profiles", [])
         naver_profiles = normalize_naver_blog_profiles(naver_profiles)
+        naver_manual_image_paths = payload.get("naver_blog_manual_image_paths", [])
+        if not isinstance(naver_manual_image_paths, list):
+            naver_manual_image_paths = []
         settings = WordPressSettings(
             blog_url=payload.get("blog_url", ""),
             username=username,
@@ -2579,6 +2601,14 @@ class AppStateStore:
             naver_blog_body_delay_ms=payload.get("naver_blog_body_delay_ms", 20),
             naver_blog_run_count=payload.get("naver_blog_run_count", 1),
             naver_blog_image_count=max(1, min(int(payload.get("naver_blog_image_count", 2) or 2), 10)),
+            naver_blog_image_mode=normalize_naver_blog_image_mode(
+                payload.get("naver_blog_image_mode", NAVER_BLOG_IMAGE_MODE_AUTO)
+            ),
+            naver_blog_manual_image_paths=[
+                str(path)
+                for path in naver_manual_image_paths
+                if str(path or "").strip()
+            ][:10],
             naver_blog_automation_mode=normalize_naver_blog_automation_mode(
                 payload.get(
                     "naver_blog_automation_mode",
@@ -8044,6 +8074,17 @@ def normalize_naver_blog_automation_mode(value: object) -> str:
     return NAVER_BLOG_AUTOMATION_MODE_BY_LABEL.get(
         text,
         NAVER_BLOG_AUTOMATION_MODE_SEMI,
+    )
+
+
+def normalize_naver_blog_image_mode(value: object) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if lowered in NAVER_BLOG_IMAGE_MODE_LABELS:
+        return lowered
+    return NAVER_BLOG_IMAGE_MODE_BY_LABEL.get(
+        text,
+        NAVER_BLOG_IMAGE_MODE_AUTO,
     )
 
 
@@ -16316,6 +16357,58 @@ def collect_naver_blog_image_files(
     return image_paths
 
 
+def prepare_naver_blog_manual_image_files(
+    image_paths: list[str] | tuple[str, ...] | None,
+    max_count: int,
+    work_dir: Path,
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> list[str]:
+    """Validate and copy the user's selected images into this run's work folder."""
+    _raise_if_naver_blog_cancelled(cancel_event)
+    limit = max(1, min(int(max_count or 1), 10))
+    sources: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in image_paths or []:
+        clean_path = str(raw_path or "").strip()
+        if not clean_path:
+            continue
+        source = Path(clean_path).expanduser()
+        fingerprint = str(source.resolve())
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        sources.append(source)
+    if len(sources) > limit:
+        raise RuntimeError(
+            f"수동 이미지는 설정의 첨부 이미지 수({limit}장)까지만 선택할 수 있습니다."
+        )
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    copied_paths: list[str] = []
+    for index, source in enumerate(sources, start=1):
+        _raise_if_naver_blog_cancelled(cancel_event)
+        if not source.is_file():
+            raise RuntimeError(f"선택한 이미지 파일을 찾을 수 없습니다: {source}")
+        suffix = source.suffix.lower()
+        if suffix not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES:
+            raise RuntimeError(
+                f"지원하지 않는 이미지 형식입니다: {source.name}\n"
+                "PNG, JPG, JPEG, GIF, WEBP, BMP 파일을 선택해 주세요."
+            )
+        destination = work_dir / f"manual_image_{index}{suffix}"
+        shutil.copy2(source, destination)
+        copied_paths.append(str(destination))
+
+    result_queue.put(
+        (
+            "naver_blog_progress",
+            f"수동으로 선택한 이미지 {len(copied_paths)}개를 글에 첨부할 준비를 마쳤습니다.",
+        )
+    )
+    return copied_paths
+
+
 def build_naver_blog_workflow_payload(
     settings: WordPressSettings,
     topic: str,
@@ -16323,6 +16416,8 @@ def build_naver_blog_workflow_payload(
     work_folder: str,
     result_queue: queue.Queue,
     cancel_event: threading.Event | None = None,
+    image_mode: str = NAVER_BLOG_IMAGE_MODE_AUTO,
+    manual_image_paths: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """Prepare a reusable NBlog article package for manual runs and the future queue."""
     _raise_if_naver_blog_cancelled(cancel_event)
@@ -16370,15 +16465,25 @@ def build_naver_blog_workflow_payload(
         cancel_event=cancel_event,
     )
     work_dir = _naver_blog_work_directory(work_folder, topic)
+    image_mode = normalize_naver_blog_image_mode(image_mode)
     try:
-        image_paths = collect_naver_blog_image_files(
-            topic,
-            title,
-            image_count,
-            work_dir,
-            result_queue,
-            cancel_event=cancel_event,
-        )
+        if image_mode == NAVER_BLOG_IMAGE_MODE_MANUAL:
+            image_paths = prepare_naver_blog_manual_image_files(
+                manual_image_paths,
+                image_count,
+                work_dir,
+                result_queue,
+                cancel_event=cancel_event,
+            )
+        else:
+            image_paths = collect_naver_blog_image_files(
+                topic,
+                title,
+                image_count,
+                work_dir,
+                result_queue,
+                cancel_event=cancel_event,
+            )
         _raise_if_naver_blog_cancelled(cancel_event)
     except NaverBlogAutomationCancelled:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -16395,6 +16500,7 @@ def build_naver_blog_workflow_payload(
         "reference_text": reference_text,
         "image_paths": image_paths,
         "image_count": len(image_paths),
+        "image_mode": image_mode,
         "provider": provider_name,
         "work_dir": str(work_dir),
         "prompt_id": str(settings.naver_blog_prompt_id or ""),
@@ -16423,6 +16529,8 @@ class NaverBlogBootstrapWorker(threading.Thread):
         body_delay_ms: int = 20,
         automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI,
         profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
+        image_mode: str = NAVER_BLOG_IMAGE_MODE_AUTO,
+        manual_image_paths: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.write_url = write_url
@@ -16438,6 +16546,12 @@ class NaverBlogBootstrapWorker(threading.Thread):
         self.profile_scope = naver_blog_profile_scope(
             {"profile_scope": profile_scope}
         )
+        self.image_mode = normalize_naver_blog_image_mode(image_mode)
+        self.manual_image_paths = [
+            str(path)
+            for path in (manual_image_paths or [])
+            if str(path or "").strip()
+        ]
         self.cancel_event = threading.Event()
         self.article_payload: dict | None = None
 
@@ -16462,6 +16576,8 @@ class NaverBlogBootstrapWorker(threading.Thread):
                     self.work_folder,
                     self.result_queue,
                     cancel_event=self.cancel_event,
+                    image_mode=self.image_mode,
+                    manual_image_paths=self.manual_image_paths,
                 )
                 self.article_payload = article_payload
             _raise_if_naver_blog_cancelled(self.cancel_event)
@@ -21486,7 +21602,117 @@ class KeywordApp(ctk.CTk):
         self.naver_blog_publish_name_entry.grid(row=2, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
         self.naver_blog_publish_name_entry.insert(0, self.wordpress_settings.naver_blog_publish_name)
 
-        control_panel = self._naver_panel(parent, "자동화 제어", 2)
+        image_panel = self._naver_panel(parent, "이미지 첨부", 2)
+        self.naver_blog_image_mode_var = tk.StringVar(
+            value=NAVER_BLOG_IMAGE_MODE_LABELS[
+                normalize_naver_blog_image_mode(
+                    self.wordpress_settings.naver_blog_image_mode
+                )
+            ]
+        )
+        self.naver_blog_manual_image_paths = [
+            str(path)
+            for path in self.wordpress_settings.naver_blog_manual_image_paths
+            if str(path or "").strip()
+        ]
+        ctk.CTkLabel(
+            image_panel,
+            text="이미지 방식",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=1, column=0, padx=(18, 10), pady=(0, 10), sticky="w")
+        self.naver_blog_image_mode_control = ctk.CTkSegmentedButton(
+            image_panel,
+            values=["이미지 자동", "이미지 수동"],
+            variable=self.naver_blog_image_mode_var,
+            command=self._on_naver_blog_image_mode_changed,
+            height=34,
+            corner_radius=10,
+            fg_color=palette["input"],
+            selected_color="#3468e8",
+            selected_hover_color="#2d5cd0",
+            unselected_color=palette["button"],
+            unselected_hover_color=palette["button_hover"],
+            text_color=palette["text"],
+        )
+        self.naver_blog_image_mode_control.grid(
+            row=1,
+            column=1,
+            columnspan=3,
+            padx=(0, 18),
+            pady=(0, 10),
+            sticky="ew",
+        )
+        self.naver_blog_manual_image_button = ctk.CTkButton(
+            image_panel,
+            text="컴퓨터에서 이미지 선택",
+            width=180,
+            height=36,
+            fg_color=palette["button"],
+            hover_color=palette["button_hover"],
+            text_color=palette["text"],
+            command=self._choose_naver_blog_manual_images,
+        )
+        self.naver_blog_manual_image_button.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            padx=(18, 8),
+            pady=(0, 8),
+            sticky="w",
+        )
+        self.naver_blog_manual_image_clear_button = ctk.CTkButton(
+            image_panel,
+            text="선택 해제",
+            width=100,
+            height=36,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            command=self._clear_naver_blog_manual_images,
+        )
+        self.naver_blog_manual_image_clear_button.grid(
+            row=2,
+            column=2,
+            padx=(0, 8),
+            pady=(0, 8),
+            sticky="w",
+        )
+        self.naver_blog_manual_image_summary_label = ctk.CTkLabel(
+            image_panel,
+            text="",
+            text_color=palette["subtext"],
+            justify="left",
+            anchor="w",
+            wraplength=760,
+            font=ctk.CTkFont(size=12),
+        )
+        self.naver_blog_manual_image_summary_label.grid(
+            row=3,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 6),
+            sticky="ew",
+        )
+        self.naver_blog_manual_image_limit_label = ctk.CTkLabel(
+            image_panel,
+            text="",
+            text_color=palette["subtext"],
+            justify="left",
+            anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.naver_blog_manual_image_limit_label.grid(
+            row=4,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 14),
+            sticky="ew",
+        )
+        self._refresh_naver_blog_manual_image_controls()
+
+        control_panel = self._naver_panel(parent, "자동화 제어", 3)
         self.naver_blog_automation_mode_var = tk.StringVar(
             value=NAVER_BLOG_AUTOMATION_MODE_LABELS[
                 normalize_naver_blog_automation_mode(
@@ -21618,7 +21844,7 @@ class KeywordApp(ctk.CTk):
             button_color=palette["button"],
             button_hover_color=palette["button_hover"],
             text_color=palette["text"],
-            command=lambda _value: self._save_naver_blog_settings(silent=True),
+            command=self._on_naver_blog_image_count_changed,
         )
         self.naver_blog_image_count_menu.grid(row=3, column=1, padx=(0, 10), pady=(8, 16), sticky="w")
         self.naver_blog_image_count_menu.set(f"{max(1, min(int(self.wordpress_settings.naver_blog_image_count or 2), 10))}개")
@@ -21972,6 +22198,139 @@ class KeywordApp(ctk.CTk):
         )
         return next((profile for profile in profiles if str(profile.get("name") or "") == active_name), profiles[0])
 
+    def _naver_blog_manual_image_limit(self) -> int:
+        if hasattr(self, "naver_blog_image_count_menu"):
+            return max(
+                1,
+                min(
+                    self._safe_int(
+                        self.naver_blog_image_count_menu.get().replace("개", ""),
+                        2,
+                    ),
+                    10,
+                ),
+            )
+        return max(
+            1,
+            min(int(self.wordpress_settings.naver_blog_image_count or 2), 10),
+        )
+
+    def _current_naver_blog_manual_image_paths(self) -> list[str]:
+        raw_paths = (
+            self.naver_blog_manual_image_paths
+            if hasattr(self, "naver_blog_manual_image_paths")
+            else self.wordpress_settings.naver_blog_manual_image_paths
+        )
+        paths: list[str] = []
+        seen: set[str] = set()
+        for raw_path in raw_paths or []:
+            path = str(raw_path or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+        return paths[: self._naver_blog_manual_image_limit()]
+
+    def _refresh_naver_blog_manual_image_controls(self) -> None:
+        image_mode = normalize_naver_blog_image_mode(
+            self.naver_blog_image_mode_var.get()
+            if hasattr(self, "naver_blog_image_mode_var")
+            else self.wordpress_settings.naver_blog_image_mode
+        )
+        limit = self._naver_blog_manual_image_limit()
+        paths = self._current_naver_blog_manual_image_paths()
+        self.naver_blog_manual_image_paths = paths
+        self.wordpress_settings.naver_blog_image_mode = image_mode
+        self.wordpress_settings.naver_blog_manual_image_paths = list(paths)
+        manual_enabled = image_mode == NAVER_BLOG_IMAGE_MODE_MANUAL
+        control_state = "normal" if manual_enabled else "disabled"
+        if hasattr(self, "naver_blog_manual_image_button"):
+            self.naver_blog_manual_image_button.configure(state=control_state)
+        if hasattr(self, "naver_blog_manual_image_clear_button"):
+            self.naver_blog_manual_image_clear_button.configure(
+                state="normal" if manual_enabled and paths else "disabled"
+            )
+        if hasattr(self, "naver_blog_manual_image_summary_label"):
+            if paths:
+                lines = [f"선택 {len(paths)}/{limit}장"]
+                for index, path in enumerate(paths, start=1):
+                    missing = " (파일 없음)" if not Path(path).is_file() else ""
+                    lines.append(f"{index}. {Path(path).name}{missing}")
+                summary = "\n".join(lines)
+            else:
+                summary = f"선택된 이미지 없음 (0/{limit}장)"
+            self.naver_blog_manual_image_summary_label.configure(
+                text=summary,
+                text_color="#a7b3c4" if manual_enabled else "#77869a",
+            )
+        if hasattr(self, "naver_blog_manual_image_limit_label"):
+            self.naver_blog_manual_image_limit_label.configure(
+                text=(
+                    f"설정 탭의 첨부 이미지 수 기준으로 최대 {limit}장까지 선택할 수 있습니다. "
+                    "0장부터 최대치 이하까지 선택한 이미지 그대로 첨부합니다."
+                )
+            )
+
+    def _on_naver_blog_image_mode_changed(self, value: str) -> None:
+        self.wordpress_settings.naver_blog_image_mode = (
+            normalize_naver_blog_image_mode(value)
+        )
+        self._refresh_naver_blog_manual_image_controls()
+        self._save_naver_blog_settings(silent=True)
+
+    def _on_naver_blog_image_count_changed(self, value: str) -> None:
+        self.wordpress_settings.naver_blog_image_count = max(
+            1,
+            min(self._safe_int(str(value).replace("개", ""), 2), 10),
+        )
+        self._refresh_naver_blog_manual_image_controls()
+        self._save_naver_blog_settings(silent=True)
+
+    def _choose_naver_blog_manual_images(self) -> None:
+        limit = self._naver_blog_manual_image_limit()
+        selected_paths = list(
+            filedialog.askopenfilenames(
+                title=f"N블로그 첨부 이미지 선택 (최대 {limit}장)",
+                filetypes=[
+                    ("이미지 파일", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"),
+                    ("모든 파일", "*.*"),
+                ],
+            )
+        )
+        if not selected_paths:
+            return
+        if len(selected_paths) > limit:
+            messagebox.showwarning(
+                "이미지 수 초과",
+                f"설정 탭의 첨부 이미지 수는 최대 {limit}장입니다.\n"
+                f"{limit}장 이하로 다시 선택해 주세요.",
+            )
+            return
+        unsupported = [
+            Path(path).name
+            for path in selected_paths
+            if Path(path).suffix.lower() not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES
+        ]
+        if unsupported:
+            messagebox.showwarning(
+                "지원하지 않는 이미지",
+                "PNG, JPG, JPEG, GIF, WEBP, BMP 파일만 선택할 수 있습니다.\n\n"
+                + "\n".join(unsupported),
+            )
+            return
+        self.naver_blog_manual_image_paths = [str(path) for path in selected_paths]
+        self.wordpress_settings.naver_blog_manual_image_paths = list(
+            self.naver_blog_manual_image_paths
+        )
+        self._refresh_naver_blog_manual_image_controls()
+        self._save_naver_blog_settings(silent=True)
+
+    def _clear_naver_blog_manual_images(self) -> None:
+        self.naver_blog_manual_image_paths = []
+        self.wordpress_settings.naver_blog_manual_image_paths = []
+        self._refresh_naver_blog_manual_image_controls()
+        self._save_naver_blog_settings(silent=True)
+
     def _choose_naver_blog_work_folder(self) -> None:
         folder = filedialog.askdirectory(title="네이버 블로그 작업 폴더 선택")
         if not folder:
@@ -22034,6 +22393,17 @@ class KeywordApp(ctk.CTk):
                 1,
                 min(self._safe_int(self.naver_blog_image_count_menu.get().replace("개", ""), 2), 10),
             )
+        if hasattr(self, "naver_blog_image_mode_var"):
+            self.wordpress_settings.naver_blog_image_mode = (
+                normalize_naver_blog_image_mode(
+                    self.naver_blog_image_mode_var.get()
+                )
+            )
+        if hasattr(self, "naver_blog_manual_image_paths"):
+            self.wordpress_settings.naver_blog_manual_image_paths = (
+                self._current_naver_blog_manual_image_paths()
+            )
+            self._refresh_naver_blog_manual_image_controls()
         if hasattr(self, "naver_blog_work_folder_entry"):
             self.wordpress_settings.naver_blog_work_folder = self.naver_blog_work_folder_entry.get().strip()
         if hasattr(self, "naver_blog_prompt_type_menu"):
@@ -22131,6 +22501,10 @@ class KeywordApp(ctk.CTk):
             return
         workflow_mode = profile_name is None
         topic = ""
+        image_mode = normalize_naver_blog_image_mode(
+            self.wordpress_settings.naver_blog_image_mode
+        )
+        manual_image_paths: list[str] = []
         if workflow_mode:
             topic = (
                 self.naver_blog_publish_name_entry.get().strip()
@@ -22144,6 +22518,33 @@ class KeywordApp(ctk.CTk):
             if validation_error:
                 messagebox.showwarning("기본 작성 모델 설정 필요", validation_error)
                 return
+            if image_mode == NAVER_BLOG_IMAGE_MODE_MANUAL:
+                manual_image_paths = self._current_naver_blog_manual_image_paths()
+                missing_paths = [
+                    path for path in manual_image_paths if not Path(path).is_file()
+                ]
+                if missing_paths:
+                    messagebox.showwarning(
+                        "수동 이미지 확인 필요",
+                        "다음 이미지 파일을 찾을 수 없습니다. 다시 선택해 주세요.\n\n"
+                        + "\n".join(Path(path).name for path in missing_paths),
+                    )
+                    return
+                unsupported_paths = [
+                    path
+                    for path in manual_image_paths
+                    if Path(path).suffix.lower()
+                    not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES
+                ]
+                if unsupported_paths:
+                    messagebox.showwarning(
+                        "수동 이미지 확인 필요",
+                        "지원하지 않는 이미지 형식입니다. 다시 선택해 주세요.\n\n"
+                        + "\n".join(
+                            Path(path).name for path in unsupported_paths
+                        ),
+                    )
+                    return
         write_url = build_naver_blog_write_url(profile, self.wordpress_settings.naver_blog_write_url)
         profile_scope = naver_blog_profile_scope(profile)
         if hasattr(self, "naver_blog_start_button"):
@@ -22172,6 +22573,8 @@ class KeywordApp(ctk.CTk):
             body_delay_ms=self.wordpress_settings.naver_blog_body_delay_ms,
             automation_mode=self.wordpress_settings.naver_blog_automation_mode,
             profile_scope=profile_scope,
+            image_mode=image_mode,
+            manual_image_paths=manual_image_paths,
         )
         self.naver_blog_worker.start()
 
@@ -31688,6 +32091,18 @@ class KeywordApp(ctk.CTk):
                 max(1, min(self._safe_int(self.naver_blog_image_count_menu.get().replace("개", ""), 2), 10))
                 if hasattr(self, "naver_blog_image_count_menu")
                 else self.wordpress_settings.naver_blog_image_count
+            ),
+            naver_blog_image_mode=(
+                normalize_naver_blog_image_mode(
+                    self.naver_blog_image_mode_var.get()
+                )
+                if hasattr(self, "naver_blog_image_mode_var")
+                else self.wordpress_settings.naver_blog_image_mode
+            ),
+            naver_blog_manual_image_paths=(
+                self._current_naver_blog_manual_image_paths()
+                if hasattr(self, "naver_blog_manual_image_paths")
+                else list(self.wordpress_settings.naver_blog_manual_image_paths)
             ),
             naver_blog_work_folder=self.naver_blog_work_folder_entry.get().strip() if hasattr(self, "naver_blog_work_folder_entry") else self.wordpress_settings.naver_blog_work_folder,
             naver_blog_prompt_type=self.naver_blog_prompt_type_menu.get() if hasattr(self, "naver_blog_prompt_type_menu") else self.wordpress_settings.naver_blog_prompt_type,
