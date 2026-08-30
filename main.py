@@ -48,6 +48,17 @@ except ImportError:  # pragma: no cover - 기존 Tk 이미지 처리로 대체
     ImageTk = None
 
 try:
+    from pillow_heif import register_heif_opener
+except ImportError:  # pragma: no cover - HEIC는 원본 첨부하고 미리보기만 생략
+    register_heif_opener = None
+
+if Image is not None and register_heif_opener is not None:
+    try:
+        register_heif_opener()
+    except Exception:  # pragma: no cover - HEIC 외 이미지 기능은 계속 사용
+        pass
+
+try:
     from yt_dlp import YoutubeDL
 except ImportError:  # pragma: no cover - runtime handling
     YoutubeDL = None
@@ -386,6 +397,7 @@ NAVER_BLOG_MANUAL_IMAGE_SUFFIXES = {
     ".png",
     ".jpg",
     ".jpeg",
+    ".heic",
     ".gif",
     ".webp",
     ".bmp",
@@ -16442,7 +16454,7 @@ def prepare_naver_blog_manual_image_files(
         if suffix not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES:
             raise RuntimeError(
                 f"지원하지 않는 이미지 형식입니다: {source.name}\n"
-                "PNG, JPG, JPEG, GIF, WEBP, BMP 파일을 선택해 주세요."
+                "PNG, JPG, JPEG, HEIC, GIF, WEBP, BMP 파일을 선택해 주세요."
             )
         destination = work_dir / f"manual_image_{index}{suffix}"
         shutil.copy2(source, destination)
@@ -22523,7 +22535,10 @@ class KeywordApp(ctk.CTk):
             filedialog.askopenfilenames(
                 title=f"N블로그 이미지 추가 (현재 {len(existing_paths)}장 · 남은 {remaining}장)",
                 filetypes=[
-                    ("이미지 파일", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"),
+                    (
+                        "이미지 파일",
+                        "*.png *.jpg *.jpeg *.heic *.HEIC *.gif *.webp *.bmp",
+                    ),
                     ("모든 파일", "*.*"),
                 ],
             )
@@ -22538,7 +22553,7 @@ class KeywordApp(ctk.CTk):
         if unsupported:
             messagebox.showwarning(
                 "지원하지 않는 이미지",
-                "PNG, JPG, JPEG, GIF, WEBP, BMP 파일만 선택할 수 있습니다.\n\n"
+                "PNG, JPG, JPEG, HEIC, GIF, WEBP, BMP 파일만 선택할 수 있습니다.\n\n"
                 + "\n".join(unsupported),
             )
             return

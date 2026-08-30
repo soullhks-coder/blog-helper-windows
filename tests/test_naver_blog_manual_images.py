@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import main
+from pillow_heif import from_pillow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +78,34 @@ class NaverBlogManualImageTests(unittest.TestCase):
             self.assertEqual(len(copied), 2)
             self.assertEqual(Path(copied[0]).read_bytes(), b"first-image")
             self.assertEqual(Path(copied[1]).read_bytes(), b"second-image")
+
+    def test_heic_image_is_preserved_for_naver_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "iPhone photo.HEIC"
+            source.write_bytes(b"original-heic-image")
+
+            copied = main.prepare_naver_blog_manual_image_files(
+                [str(source)],
+                3,
+                root / "work",
+                queue.Queue(),
+            )
+
+            self.assertEqual(len(copied), 1)
+            self.assertEqual(Path(copied[0]).suffix, ".heic")
+            self.assertEqual(Path(copied[0]).read_bytes(), b"original-heic-image")
+
+    def test_heic_image_can_be_opened_for_thumbnail_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "preview.HEIC"
+            original = main.Image.new("RGB", (12, 8), (32, 96, 160))
+            from_pillow(original).save(source)
+
+            with main.Image.open(source) as preview:
+                preview.load()
+
+            self.assertEqual(preview.size, (12, 8))
 
     def test_manual_mode_allows_zero_images(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +236,9 @@ class NaverBlogManualImageTests(unittest.TestCase):
         self.assertIn("naver_blog_manual_thumbnail_frame", build_source)
         self.assertIn("naver_blog_manual_image_button", build_source)
         self.assertIn("askopenfilenames", picker_source)
+        self.assertIn("*.heic", picker_source)
+        self.assertIn("*.HEIC", picker_source)
+        self.assertIn("HEIC", picker_source)
         self.assertIn("_naver_blog_manual_image_limit", picker_source)
         self.assertIn("merge_naver_blog_manual_image_paths", picker_source)
         self.assertIn('"이미지 수 초과"', picker_source)

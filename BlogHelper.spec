@@ -11,7 +11,7 @@ datas += [
     ("assets/blog_helper_icon.png", "assets"),
 ]
 
-for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "bsdiff4", "websocket"):
+for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries

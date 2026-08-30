@@ -15,7 +15,7 @@ datas += [
 with open("version.json", "r", encoding="utf-8") as version_file:
     app_version = str(json.load(version_file).get("version") or "1.0.4")
 
-for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "bsdiff4", "websocket"):
+for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
