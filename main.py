@@ -16357,6 +16357,31 @@ def collect_naver_blog_image_files(
     return image_paths
 
 
+def merge_naver_blog_manual_image_paths(
+    existing_paths: list[str] | tuple[str, ...] | None,
+    added_paths: list[str] | tuple[str, ...] | None,
+    max_count: int,
+) -> list[str]:
+    """Append unique manual images without exceeding the configured limit."""
+    limit = max(1, min(int(max_count or 1), 10))
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw_path in [*(existing_paths or []), *(added_paths or [])]:
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        fingerprint = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        merged.append(path)
+    if len(merged) > limit:
+        raise ValueError(
+            f"수동 이미지는 설정의 첨부 이미지 수({limit}장)까지만 추가할 수 있습니다."
+        )
+    return merged
+
+
 def prepare_naver_blog_manual_image_files(
     image_paths: list[str] | tuple[str, ...] | None,
     max_count: int,
@@ -21677,6 +21702,25 @@ class KeywordApp(ctk.CTk):
             pady=(0, 8),
             sticky="w",
         )
+        self.naver_blog_manual_thumbnail_frame = ctk.CTkFrame(
+            image_panel,
+            fg_color="transparent",
+        )
+        self.naver_blog_manual_thumbnail_frame.grid(
+            row=3,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(2, 8),
+            sticky="ew",
+        )
+        for column in range(5):
+            self.naver_blog_manual_thumbnail_frame.grid_columnconfigure(
+                column,
+                weight=1,
+                uniform="naver_manual_thumbnails",
+            )
+        self.naver_blog_manual_thumbnail_images: list[ctk.CTkImage] = []
         self.naver_blog_manual_image_summary_label = ctk.CTkLabel(
             image_panel,
             text="",
@@ -21687,7 +21731,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         )
         self.naver_blog_manual_image_summary_label.grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=4,
             padx=18,
@@ -21703,7 +21747,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
         )
         self.naver_blog_manual_image_limit_label.grid(
-            row=4,
+            row=5,
             column=0,
             columnspan=4,
             padx=18,
@@ -22231,6 +22275,132 @@ class KeywordApp(ctk.CTk):
             paths.append(path)
         return paths[: self._naver_blog_manual_image_limit()]
 
+    def _create_naver_blog_manual_thumbnail(
+        self,
+        image_path: str,
+        size: int = 78,
+    ) -> ctk.CTkImage | None:
+        if Image is None or ImageOps is None:
+            return None
+        try:
+            with Image.open(image_path) as source:
+                transposed = ImageOps.exif_transpose(source)
+                preview = ImageOps.fit(
+                    transposed.convert("RGB"),
+                    (size, size),
+                    method=Image.Resampling.LANCZOS,
+                )
+                preview.load()
+            return ctk.CTkImage(
+                light_image=preview,
+                dark_image=preview,
+                size=(size, size),
+            )
+        except Exception:
+            return None
+
+    def _render_naver_blog_manual_image_thumbnails(
+        self,
+        paths: list[str],
+        enabled: bool,
+    ) -> None:
+        if not hasattr(self, "naver_blog_manual_thumbnail_frame"):
+            return
+        frame = self.naver_blog_manual_thumbnail_frame
+        for child in frame.winfo_children():
+            child.destroy()
+        self.naver_blog_manual_thumbnail_images = []
+        if not paths:
+            ctk.CTkLabel(
+                frame,
+                text="이미지를 추가하면 여기에 미리보기가 표시됩니다.",
+                text_color="#77869a",
+                font=ctk.CTkFont(size=12),
+            ).grid(row=0, column=0, columnspan=5, pady=10, sticky="w")
+            return
+
+        palette = self._theme_palette()
+        for index, path in enumerate(paths):
+            card = ctk.CTkFrame(
+                frame,
+                width=112,
+                height=118,
+                fg_color=palette["input"],
+                corner_radius=12,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            card.grid(
+                row=index // 5,
+                column=index % 5,
+                padx=(0 if index % 5 == 0 else 6, 0),
+                pady=(0, 6),
+                sticky="n",
+            )
+            card.grid_propagate(False)
+            thumbnail = self._create_naver_blog_manual_thumbnail(path)
+            if thumbnail is not None:
+                self.naver_blog_manual_thumbnail_images.append(thumbnail)
+                preview_label = ctk.CTkLabel(
+                    card,
+                    text="",
+                    image=thumbnail,
+                    width=78,
+                    height=78,
+                )
+            else:
+                preview_label = ctk.CTkLabel(
+                    card,
+                    text="미리보기\n불가",
+                    width=78,
+                    height=78,
+                    fg_color=palette["card"],
+                    corner_radius=8,
+                    text_color=palette["subtext"],
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                )
+            preview_label.place(x=17, y=8)
+            filename = Path(path).name
+            display_name = filename if len(filename) <= 16 else f"{filename[:13]}…"
+            ctk.CTkLabel(
+                card,
+                text=display_name,
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=10),
+                width=100,
+                anchor="center",
+            ).place(x=6, y=90)
+            ctk.CTkButton(
+                card,
+                text="×",
+                width=24,
+                height=24,
+                corner_radius=12,
+                fg_color="#b23b45",
+                hover_color="#932f38",
+                font=ctk.CTkFont(size=16, weight="bold"),
+                state="normal" if enabled else "disabled",
+                command=lambda selected_path=path: self._remove_naver_blog_manual_image(
+                    selected_path
+                ),
+            ).place(relx=1.0, x=-4, y=4, anchor="ne")
+
+    def _remove_naver_blog_manual_image(self, image_path: str) -> None:
+        normalized_target = os.path.normcase(
+            os.path.abspath(os.path.expanduser(str(image_path or "")))
+        )
+        self.naver_blog_manual_image_paths = [
+            path
+            for path in self._current_naver_blog_manual_image_paths()
+            if os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+            != normalized_target
+        ]
+        self.wordpress_settings.naver_blog_manual_image_paths = list(
+            self.naver_blog_manual_image_paths
+        )
+        self._refresh_naver_blog_manual_image_controls()
+        self._save_naver_blog_settings(silent=True)
+
     def _refresh_naver_blog_manual_image_controls(self) -> None:
         image_mode = normalize_naver_blog_image_mode(
             self.naver_blog_image_mode_var.get()
@@ -22243,22 +22413,24 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.naver_blog_image_mode = image_mode
         self.wordpress_settings.naver_blog_manual_image_paths = list(paths)
         manual_enabled = image_mode == NAVER_BLOG_IMAGE_MODE_MANUAL
-        control_state = "normal" if manual_enabled else "disabled"
+        remaining = max(0, limit - len(paths))
         if hasattr(self, "naver_blog_manual_image_button"):
-            self.naver_blog_manual_image_button.configure(state=control_state)
+            self.naver_blog_manual_image_button.configure(
+                text=f"컴퓨터에서 이미지 추가 (남은 {remaining}장)",
+                state="normal" if manual_enabled and remaining > 0 else "disabled",
+            )
         if hasattr(self, "naver_blog_manual_image_clear_button"):
             self.naver_blog_manual_image_clear_button.configure(
                 state="normal" if manual_enabled and paths else "disabled"
             )
+        self._render_naver_blog_manual_image_thumbnails(paths, manual_enabled)
         if hasattr(self, "naver_blog_manual_image_summary_label"):
-            if paths:
-                lines = [f"선택 {len(paths)}/{limit}장"]
-                for index, path in enumerate(paths, start=1):
-                    missing = " (파일 없음)" if not Path(path).is_file() else ""
-                    lines.append(f"{index}. {Path(path).name}{missing}")
-                summary = "\n".join(lines)
-            else:
-                summary = f"선택된 이미지 없음 (0/{limit}장)"
+            missing_count = sum(1 for path in paths if not Path(path).is_file())
+            summary = (
+                f"선택 {len(paths)}/{limit}장 · 여러 번 나누어 추가할 수 있습니다."
+            )
+            if missing_count:
+                summary += f" · 찾을 수 없는 파일 {missing_count}개"
             self.naver_blog_manual_image_summary_label.configure(
                 text=summary,
                 text_color="#a7b3c4" if manual_enabled else "#77869a",
@@ -22267,7 +22439,7 @@ class KeywordApp(ctk.CTk):
             self.naver_blog_manual_image_limit_label.configure(
                 text=(
                     f"설정 탭의 첨부 이미지 수 기준으로 최대 {limit}장까지 선택할 수 있습니다. "
-                    "0장부터 최대치 이하까지 선택한 이미지 그대로 첨부합니다."
+                    "사진을 여러 번 나누어 추가하거나 썸네일의 × 버튼으로 개별 삭제할 수 있습니다."
                 )
             )
 
@@ -22288,9 +22460,17 @@ class KeywordApp(ctk.CTk):
 
     def _choose_naver_blog_manual_images(self) -> None:
         limit = self._naver_blog_manual_image_limit()
+        existing_paths = self._current_naver_blog_manual_image_paths()
+        remaining = max(0, limit - len(existing_paths))
+        if remaining <= 0:
+            messagebox.showinfo(
+                "이미지 추가 완료",
+                f"설정한 최대 이미지 수 {limit}장을 모두 선택했습니다.",
+            )
+            return
         selected_paths = list(
             filedialog.askopenfilenames(
-                title=f"N블로그 첨부 이미지 선택 (최대 {limit}장)",
+                title=f"N블로그 이미지 추가 (현재 {len(existing_paths)}장 · 남은 {remaining}장)",
                 filetypes=[
                     ("이미지 파일", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"),
                     ("모든 파일", "*.*"),
@@ -22298,13 +22478,6 @@ class KeywordApp(ctk.CTk):
             )
         )
         if not selected_paths:
-            return
-        if len(selected_paths) > limit:
-            messagebox.showwarning(
-                "이미지 수 초과",
-                f"설정 탭의 첨부 이미지 수는 최대 {limit}장입니다.\n"
-                f"{limit}장 이하로 다시 선택해 주세요.",
-            )
             return
         unsupported = [
             Path(path).name
@@ -22318,7 +22491,20 @@ class KeywordApp(ctk.CTk):
                 + "\n".join(unsupported),
             )
             return
-        self.naver_blog_manual_image_paths = [str(path) for path in selected_paths]
+        try:
+            merged_paths = merge_naver_blog_manual_image_paths(
+                existing_paths,
+                selected_paths,
+                limit,
+            )
+        except ValueError:
+            messagebox.showwarning(
+                "이미지 수 초과",
+                f"현재 {len(existing_paths)}장이 선택되어 있어 {remaining}장만 더 추가할 수 있습니다.\n"
+                f"{remaining}장 이하로 다시 선택해 주세요.",
+            )
+            return
+        self.naver_blog_manual_image_paths = merged_paths
         self.wordpress_settings.naver_blog_manual_image_paths = list(
             self.naver_blog_manual_image_paths
         )

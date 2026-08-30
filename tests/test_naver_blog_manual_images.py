@@ -105,6 +105,38 @@ class NaverBlogManualImageTests(unittest.TestCase):
                     queue.Queue(),
                 )
 
+    def test_images_can_be_added_in_multiple_batches(self) -> None:
+        first_batch = ["/images/one.jpg", "/images/two.jpg"]
+        second_batch = ["/images/three.jpg", "/images/four.jpg"]
+
+        merged = main.merge_naver_blog_manual_image_paths(
+            first_batch,
+            second_batch,
+            5,
+        )
+
+        self.assertEqual(merged, [*first_batch, *second_batch])
+
+    def test_duplicate_images_are_ignored_when_adding_another_batch(self) -> None:
+        merged = main.merge_naver_blog_manual_image_paths(
+            ["/images/one.jpg", "/images/two.jpg"],
+            ["/images/two.jpg", "/images/three.jpg"],
+            4,
+        )
+
+        self.assertEqual(
+            merged,
+            ["/images/one.jpg", "/images/two.jpg", "/images/three.jpg"],
+        )
+
+    def test_additional_batch_cannot_exceed_remaining_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "4장"):
+            main.merge_naver_blog_manual_image_paths(
+                ["/images/one.jpg", "/images/two.jpg"],
+                ["/images/three.jpg", "/images/four.jpg", "/images/five.jpg"],
+                4,
+            )
+
     def test_manual_workflow_does_not_run_automatic_image_collector(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -157,12 +189,21 @@ class NaverBlogManualImageTests(unittest.TestCase):
             source,
             methods["_choose_naver_blog_manual_images"],
         ) or ""
+        thumbnail_source = ast.get_source_segment(
+            source,
+            methods["_render_naver_blog_manual_image_thumbnails"],
+        ) or ""
 
         self.assertIn('values=["이미지 자동", "이미지 수동"]', build_source)
-        self.assertIn('text="컴퓨터에서 이미지 선택"', build_source)
+        self.assertIn("naver_blog_manual_thumbnail_frame", build_source)
+        self.assertIn("naver_blog_manual_image_button", build_source)
         self.assertIn("askopenfilenames", picker_source)
         self.assertIn("_naver_blog_manual_image_limit", picker_source)
+        self.assertIn("merge_naver_blog_manual_image_paths", picker_source)
         self.assertIn('"이미지 수 초과"', picker_source)
+        self.assertIn("_create_naver_blog_manual_thumbnail", thumbnail_source)
+        self.assertIn('text="×"', thumbnail_source)
+        self.assertIn("_remove_naver_blog_manual_image", thumbnail_source)
 
 
 if __name__ == "__main__":
