@@ -310,21 +310,32 @@ TISTORY_COOKIE_KEEP_DAYS = 180
 NAVER_PLAYWRIGHT_PROFILE_WRITING = "blog_writing"
 NAVER_PLAYWRIGHT_PROFILE_AUTOMATION = "blog_automation"
 NAVER_PLAYWRIGHT_PROFILE_BLOG = "naver_blog"
+NAVER_PLAYWRIGHT_PROFILE_BLOG_2 = "naver_blog_2"
+NAVER_PLAYWRIGHT_PROFILE_BLOG_3 = "naver_blog_3"
 NAVER_PLAYWRIGHT_PROFILE_KIN = "naver_kin"
+NAVER_BLOG_PROFILE_SCOPES = (
+    NAVER_PLAYWRIGHT_PROFILE_BLOG,
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_2,
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_3,
+)
 NAVER_PLAYWRIGHT_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_WRITING,
     NAVER_PLAYWRIGHT_PROFILE_AUTOMATION,
-    NAVER_PLAYWRIGHT_PROFILE_BLOG,
+    *NAVER_BLOG_PROFILE_SCOPES,
     NAVER_PLAYWRIGHT_PROFILE_KIN,
 )
 NAVER_WRITING_CHROME_PROFILE_DIR = DATA_DIR / "Naver Writing Chrome Profile"
 NAVER_AUTOMATION_CHROME_PROFILE_DIR = DATA_DIR / "Naver Automation Chrome Profile"
-# Keep the existing NBlog path so current NBlog users retain their login.
+# Keep the existing NBlog path as Blog 1 so current users retain their login.
 NAVER_BLOG_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog Chrome Profile"
+NAVER_BLOG_2_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 2 Chrome Profile"
+NAVER_BLOG_3_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 3 Chrome Profile"
 NAVER_KIN_CHROME_PROFILE_DIR = DATA_DIR / "Naver Kin Chrome Profile"
 NAVER_WRITING_STORAGE_STATE_FILE = DATA_DIR / "naver-writing-storage-state.json"
 NAVER_AUTOMATION_STORAGE_STATE_FILE = DATA_DIR / "naver-automation-storage-state.json"
 NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
+NAVER_BLOG_2_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-2-storage-state.json"
+NAVER_BLOG_3_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-3-storage-state.json"
 NAVER_KIN_STORAGE_STATE_FILE = DATA_DIR / "naver-kin-storage-state.json"
 NAVER_PLAYWRIGHT_PROFILE_PATHS = {
     NAVER_PLAYWRIGHT_PROFILE_WRITING: (
@@ -338,6 +349,14 @@ NAVER_PLAYWRIGHT_PROFILE_PATHS = {
     NAVER_PLAYWRIGHT_PROFILE_BLOG: (
         NAVER_BLOG_CHROME_PROFILE_DIR,
         NAVER_BLOG_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_2: (
+        NAVER_BLOG_2_CHROME_PROFILE_DIR,
+        NAVER_BLOG_2_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_3: (
+        NAVER_BLOG_3_CHROME_PROFILE_DIR,
+        NAVER_BLOG_3_STORAGE_STATE_FILE,
     ),
     NAVER_PLAYWRIGHT_PROFILE_KIN: (
         NAVER_KIN_CHROME_PROFILE_DIR,
@@ -2468,12 +2487,7 @@ class AppStateStore:
                 }
             ]
         naver_profiles = payload.get("naver_blog_profiles", [])
-        if not isinstance(naver_profiles, list) or not naver_profiles:
-            naver_profiles = [
-                {"name": "블로그 1", "blog_id": "", "nickname": "", "write_url": "", "profile_path": "~/naver_blog/profile_1"},
-                {"name": "블로그 2", "blog_id": "", "nickname": "", "write_url": "", "profile_path": "~/naver_blog/profile_2"},
-                {"name": "블로그 3", "blog_id": "", "nickname": "", "write_url": "", "profile_path": "~/naver_blog/profile_3"},
-            ]
+        naver_profiles = normalize_naver_blog_profiles(naver_profiles)
         settings = WordPressSettings(
             blog_url=payload.get("blog_url", ""),
             username=username,
@@ -6698,6 +6712,45 @@ def naver_playwright_profile_paths(profile_scope: object) -> tuple[Path, Path]:
     return NAVER_PLAYWRIGHT_PROFILE_PATHS[scope]
 
 
+def naver_blog_profile_scope(
+    profile: dict | None = None,
+    index: int | None = None,
+) -> str:
+    profile = profile or {}
+    requested_scope = str(profile.get("profile_scope") or "").strip().lower()
+    if requested_scope in NAVER_BLOG_PROFILE_SCOPES:
+        return requested_scope
+    if index is None:
+        name_match = re.search(r"(\d+)", str(profile.get("name") or ""))
+        if name_match:
+            index = int(name_match.group(1)) - 1
+    if isinstance(index, int) and 0 <= index < len(NAVER_BLOG_PROFILE_SCOPES):
+        return NAVER_BLOG_PROFILE_SCOPES[index]
+    return NAVER_PLAYWRIGHT_PROFILE_BLOG
+
+
+def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
+    raw_profiles = profiles if isinstance(profiles, list) else []
+    normalized_profiles: list[dict] = []
+    for index in range(3):
+        raw_profile = raw_profiles[index] if index < len(raw_profiles) else {}
+        profile = dict(raw_profile) if isinstance(raw_profile, dict) else {}
+        scope = NAVER_BLOG_PROFILE_SCOPES[index]
+        profile_dir, _state_file = naver_playwright_profile_paths(scope)
+        profile.update(
+            {
+                "name": str(profile.get("name") or f"블로그 {index + 1}"),
+                "blog_id": str(profile.get("blog_id") or ""),
+                "nickname": str(profile.get("nickname") or ""),
+                "write_url": str(profile.get("write_url") or ""),
+                "profile_scope": scope,
+                "profile_path": str(profile_dir),
+            }
+        )
+        normalized_profiles.append(profile)
+    return normalized_profiles
+
+
 def naver_webmaster_profile_scope(source_label: object) -> str:
     label = re.sub(r"\s+", "", str(source_label or ""))
     if label == "블로그자동화":
@@ -9532,6 +9585,7 @@ def run_naver_blog_playwright_bootstrap(
     body_delay_ms: int = 20,
     cancel_event: threading.Event | None = None,
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
+    profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
 ) -> tuple[bool, dict]:
     def report(message: str) -> None:
         result_queue.put(("naver_blog_progress", message))
@@ -9547,14 +9601,18 @@ def run_naver_blog_playwright_bootstrap(
         ) from exc
 
     chrome_path = require_google_chrome_executable()
+    profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
+    if profile_scope not in NAVER_BLOG_PROFILE_SCOPES:
+        profile_scope = NAVER_PLAYWRIGHT_PROFILE_BLOG
+    profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
 
-    NAVER_BLOG_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         _raise_if_naver_blog_cancelled(cancel_event)
-        report(f"N블로그 전용 Chrome을 시작합니다. 프로필: {NAVER_BLOG_CHROME_PROFILE_DIR}")
+        report(f"N블로그 전용 Chrome을 시작합니다. 프로필: {profile_dir}")
         try:
             context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
+                user_data_dir=str(profile_dir),
                 executable_path=str(chrome_path),
                 headless=False,
                 no_viewport=True,
@@ -9570,7 +9628,7 @@ def run_naver_blog_playwright_bootstrap(
             raise RuntimeError(friendly_naver_blog_automation_error(exc)) from exc
         try:
             _raise_if_naver_blog_cancelled(cancel_event)
-            saved_state = load_naver_blog_storage_state()
+            saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
                 context.add_cookies(saved_cookies)
@@ -9607,7 +9665,7 @@ def run_naver_blog_playwright_bootstrap(
                 raise RuntimeError("5분 안에 네이버 로그인이 확인되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 시도해 주세요.")
 
             _raise_if_naver_blog_cancelled(cancel_event)
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             report("네이버 로그인 상태를 확인하고 저장했습니다.")
             nickname = ""
             if blog_id:
@@ -9676,8 +9734,9 @@ def run_naver_blog_playwright_bootstrap(
                 "image_count": int(editor_result.get("image_count") or 0),
                 "work_dir": str((article_payload or {}).get("work_dir") or ""),
                 "provider": str((article_payload or {}).get("provider") or ""),
+                "profile_scope": profile_scope,
             }
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             result_queue.put(("naver_blog_editor_ready", payload))
             report(
                 "작성과 사진 첨부 완료. 내용을 확인할 수 있도록 브라우저를 열어 두었습니다."
@@ -9705,9 +9764,12 @@ def run_naver_blog_playwright_bootstrap(
             append_runtime_log("NBlog", f"브라우저 자동화 실패: {exc}\n{traceback.format_exc()}")
             raise
         finally:
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             context.close()
-            append_runtime_log("NBlog", "N블로그 전용 Chrome 컨텍스트를 종료했습니다.")
+            append_runtime_log(
+                "NBlog",
+                f"N블로그 전용 Chrome 컨텍스트를 종료했습니다. 프로필={profile_scope}",
+            )
 
 
 def _find_naver_search_advisor_url_input(page):
@@ -16360,6 +16422,7 @@ class NaverBlogBootstrapWorker(threading.Thread):
         work_folder: str = "",
         body_delay_ms: int = 20,
         automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI,
+        profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
     ) -> None:
         super().__init__(daemon=True)
         self.write_url = write_url
@@ -16372,6 +16435,9 @@ class NaverBlogBootstrapWorker(threading.Thread):
         self.work_folder = str(work_folder or "").strip()
         self.body_delay_ms = max(0, min(int(body_delay_ms or 20), 100))
         self.automation_mode = normalize_naver_blog_automation_mode(automation_mode)
+        self.profile_scope = naver_blog_profile_scope(
+            {"profile_scope": profile_scope}
+        )
         self.cancel_event = threading.Event()
         self.article_payload: dict | None = None
 
@@ -16407,6 +16473,7 @@ class NaverBlogBootstrapWorker(threading.Thread):
                 body_delay_ms=self.body_delay_ms,
                 automation_mode=self.automation_mode,
                 cancel_event=self.cancel_event,
+                profile_scope=self.profile_scope,
             )
             if success:
                 append_runtime_log("NBlog", "자동화 작업 완료")
@@ -21714,19 +21781,9 @@ class KeywordApp(ctk.CTk):
         self._finish_theme_paint(force=True)
 
     def _naver_blog_profiles_from_state(self) -> list[dict]:
-        profiles = list(self.wordpress_settings.naver_blog_profiles or [])
-        while len(profiles) < 3:
-            index = len(profiles) + 1
-            profiles.append(
-                {
-                    "name": f"블로그 {index}",
-                    "blog_id": "",
-                    "nickname": "",
-                    "write_url": "",
-                    "profile_path": f"~/naver_blog/profile_{index}",
-                }
-            )
-        return profiles[:3]
+        return normalize_naver_blog_profiles(
+            self.wordpress_settings.naver_blog_profiles
+        )
 
     def _refresh_naver_profile_cards(self) -> None:
         if not hasattr(self, "naver_profile_cards_frame"):
@@ -21864,12 +21921,15 @@ class KeywordApp(ctk.CTk):
         profiles = self._naver_blog_profiles_from_state()
         if 0 <= index < len(profiles):
             name = str(profiles[index].get("name") or f"블로그 {index + 1}")
+            profile_scope = NAVER_BLOG_PROFILE_SCOPES[index]
+            profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
             profiles[index] = {
                 "name": name,
                 "blog_id": "",
                 "nickname": "",
                 "write_url": "",
-                "profile_path": f"~/naver_blog/profile_{index + 1}",
+                "profile_scope": profile_scope,
+                "profile_path": str(profile_dir),
             }
             for field_key in ("blog_id", "nickname", "write_url"):
                 var = getattr(self, "naver_blog_profile_vars", {}).get(
@@ -22085,6 +22145,7 @@ class KeywordApp(ctk.CTk):
                 messagebox.showwarning("기본 작성 모델 설정 필요", validation_error)
                 return
         write_url = build_naver_blog_write_url(profile, self.wordpress_settings.naver_blog_write_url)
+        profile_scope = naver_blog_profile_scope(profile)
         if hasattr(self, "naver_blog_start_button"):
             self.naver_blog_start_button.configure(
                 state="disabled",
@@ -22110,6 +22171,7 @@ class KeywordApp(ctk.CTk):
             work_folder=self.wordpress_settings.naver_blog_work_folder,
             body_delay_ms=self.wordpress_settings.naver_blog_body_delay_ms,
             automation_mode=self.wordpress_settings.naver_blog_automation_mode,
+            profile_scope=profile_scope,
         )
         self.naver_blog_worker.start()
 
@@ -22118,11 +22180,15 @@ class KeywordApp(ctk.CTk):
         write_url = ""
         nickname = ""
         blog_id = ""
+        payload_profile_scope = ""
         if isinstance(payload, dict):
             message = str(payload.get("message") or "네이버 블로그 로그인 상태를 저장했습니다.")
             write_url = str(payload.get("write_url") or "").strip()
             nickname = str(payload.get("nickname") or "").strip()
             blog_id = self._normalize_naver_blog_id(str(payload.get("blog_id") or ""))
+            requested_scope = str(payload.get("profile_scope") or "").strip().lower()
+            if requested_scope in NAVER_BLOG_PROFILE_SCOPES:
+                payload_profile_scope = requested_scope
         if not write_url and blog_id:
             write_url = f"https://blog.naver.com/{blog_id}?Redirect=Write&"
         if write_url:
@@ -22132,31 +22198,61 @@ class KeywordApp(ctk.CTk):
                 if hasattr(self, "naver_blog_active_profile_var")
                 else self.wordpress_settings.naver_blog_active_profile
             )
-            for index, profile in enumerate(profiles):
-                if str(profile.get("name") or "") == active_name:
-                    if blog_id:
-                        profile["blog_id"] = blog_id
-                    profile["write_url"] = write_url
-                    if nickname:
-                        profile["nickname"] = nickname
-                    blog_id_var = getattr(self, "naver_blog_profile_vars", {}).get(f"{index}:blog_id")
-                    if blog_id_var is not None and blog_id:
-                        blog_id_var.set(blog_id)
-                    var = getattr(self, "naver_blog_profile_vars", {}).get(f"{index}:write_url")
-                    if var is not None:
-                        var.set(write_url)
-                    nickname_var = getattr(self, "naver_blog_profile_vars", {}).get(f"{index}:nickname")
-                    if nickname_var is not None and nickname:
-                        nickname_var.set(nickname)
-                    break
+            target_index = next(
+                (
+                    index
+                    for index, profile in enumerate(profiles)
+                    if payload_profile_scope
+                    and naver_blog_profile_scope(profile, index)
+                    == payload_profile_scope
+                ),
+                None,
+            )
+            if target_index is None:
+                target_index = next(
+                    (
+                        index
+                        for index, profile in enumerate(profiles)
+                        if str(profile.get("name") or "") == active_name
+                    ),
+                    0,
+                )
+            target_profile = profiles[target_index]
+            target_name = str(
+                target_profile.get("name") or f"블로그 {target_index + 1}"
+            )
+            if blog_id:
+                target_profile["blog_id"] = blog_id
+            target_profile["write_url"] = write_url
+            if nickname:
+                target_profile["nickname"] = nickname
+            blog_id_var = getattr(self, "naver_blog_profile_vars", {}).get(
+                f"{target_index}:blog_id"
+            )
+            if blog_id_var is not None and blog_id:
+                blog_id_var.set(blog_id)
+            write_url_var = getattr(self, "naver_blog_profile_vars", {}).get(
+                f"{target_index}:write_url"
+            )
+            if write_url_var is not None:
+                write_url_var.set(write_url)
+            nickname_var = getattr(self, "naver_blog_profile_vars", {}).get(
+                f"{target_index}:nickname"
+            )
+            if nickname_var is not None and nickname:
+                nickname_var.set(nickname)
             self.wordpress_settings.naver_blog_profiles = profiles
-            self.wordpress_settings.naver_blog_write_url = write_url
-            if hasattr(self, "naver_blog_write_url_entry"):
-                self.naver_blog_write_url_entry.delete(0, "end")
-                self.naver_blog_write_url_entry.insert(0, write_url)
+            if target_name == active_name:
+                self.wordpress_settings.naver_blog_write_url = write_url
+                if hasattr(self, "naver_blog_write_url_entry"):
+                    self.naver_blog_write_url_entry.delete(0, "end")
+                    self.naver_blog_write_url_entry.insert(0, write_url)
             AppStateStore.save(self.wordpress_settings, save_secrets=False)
             nickname_text = f" 닉네임 '{nickname}'도 저장했습니다." if nickname else " 닉네임은 자동 추출하지 못해 기존 값을 유지했습니다."
-            message = f"{message} 글쓰기 URL을 저장했습니다.{nickname_text}"
+            message = (
+                f"{message} {target_name} 전용 프로필과 글쓰기 URL을 저장했습니다."
+                f"{nickname_text}"
+            )
         return message
 
     def _format_naver_kin_interval_label(self, minutes: int | str | None) -> str:

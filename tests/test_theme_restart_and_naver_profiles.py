@@ -80,16 +80,30 @@ class ThemeRestartTests(unittest.TestCase):
 
 
 class NaverPlaywrightProfileTests(unittest.TestCase):
-    def test_four_menu_profiles_use_unique_directories_and_state_files(self) -> None:
+    def test_menu_and_nblog_profiles_use_unique_directories_and_state_files(self) -> None:
         paths = [
             main.naver_playwright_profile_paths(scope)
             for scope in main.NAVER_PLAYWRIGHT_PROFILE_SCOPES
         ]
 
-        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 4)
-        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 4)
+        self.assertEqual(len(main.NAVER_PLAYWRIGHT_PROFILE_SCOPES), 6)
+        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 6)
+        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 6)
         self.assertEqual(
             main.naver_playwright_profile_paths(main.NAVER_PLAYWRIGHT_PROFILE_BLOG)[0],
+            main.NAVER_BLOG_CHROME_PROFILE_DIR,
+        )
+
+    def test_three_nblog_slots_have_separate_browser_and_cookie_paths(self) -> None:
+        paths = [
+            main.naver_playwright_profile_paths(scope)
+            for scope in main.NAVER_BLOG_PROFILE_SCOPES
+        ]
+
+        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 3)
+        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 3)
+        self.assertEqual(
+            paths[0][0],
             main.NAVER_BLOG_CHROME_PROFILE_DIR,
         )
 
@@ -150,6 +164,27 @@ class NaverPlaywrightProfileTests(unittest.TestCase):
             worker.published_url,
             result_queue,
             profile_scope=main.NAVER_PLAYWRIGHT_PROFILE_AUTOMATION,
+        )
+
+    def test_nblog_worker_passes_selected_blog_profile_scope(self) -> None:
+        result_queue = queue.Queue()
+        worker = main.NaverBlogBootstrapWorker(
+            "https://blog.naver.com/mom?Redirect=Write&",
+            "mom",
+            result_queue,
+            profile_scope=main.NAVER_PLAYWRIGHT_PROFILE_BLOG_2,
+        )
+
+        with patch.object(
+            main,
+            "run_naver_blog_playwright_bootstrap",
+            return_value=(True, {"message": "완료"}),
+        ) as bootstrap:
+            worker.run()
+
+        self.assertEqual(
+            bootstrap.call_args.kwargs["profile_scope"],
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG_2,
         )
 
     def test_automation_publish_queue_keeps_automation_profile_scope(self) -> None:
