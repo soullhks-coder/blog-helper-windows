@@ -390,6 +390,29 @@ NAVER_BLOG_MANUAL_IMAGE_SUFFIXES = {
     ".webp",
     ".bmp",
 }
+NAVER_BLOG_REMOVE_ICON_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAERlWElmTU0A"
+    "KgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAIKADAAQAAAAB"
+    "AAAAIAAAAACshmLzAAAD1ElEQVRYCb1XS0tbURDuvYka09hEYqSCpSpuorgS66oFMRuXKW4UyR"
+    "/QnRuX7iqIu/YPhIBvu3PlLyiIdCFx4QsaG5ogiUnUmJtH5wudy8n1vpTYszmPeXwzc+fMmSu9"
+    "sjmWl5flaDTa0U6jWq22lUqlFhoyxBVFqba2tiqyLD/QuJubmysQf9WOasmKaXR0tIUAfblczs"
+    "uAVjKgOxyOnMvluj48PFTM+B1GRHicSCS6KpVKT7lcbieFlsaKumq1WhtFptPr9ToymcytSBPX"
+    "ukrhdT6ff0chdYrMz12TMYrH40noReNRBPr6+lzkdW+zwGG0JEkOyhnPyMhI8fLysiw60mAAPG"
+    "82OIPBCIqqmxy8TSaTaoLWs5iZmhl21inOZERLoVDoRX7xuZoDg4ODAafT2cmEl5wpObNnZ2cp"
+    "YNQtQeitwEOh0BuqAyErw8ADXjM+us4+YKoGFItFv5kAFK6trUXHxsa+7e3thY14d3d3P4MHvF"
+    "ZGoLZAD5JQ9vv9PUZKGZwqXRA8gUAgNDk5ebW5uXkiygB8aGjoC86oZgRI7uPp6en++fn5g8jH"
+    "a9SJ+fn5rDwwMNDBh3pzJBL5wOBMDwaDK2IkRHDmgQxkea+d6bbJsVjMIw0PD7+ljek329nZCR"
+    "PfilZJPB5fIk8k9lykHx8fL01PT38Xz7RrlGuJvHmPcGiJ2r2REVo+7O2Ag4+u5QMVPLmejTgw"
+    "G/AGis14QLMLDl5gy/gW2NgZVkY8BRx4wLYNzgZS2NTixWc8k0e8tD3LlAhqXbaS0st2UUZ7O"
+    "0Sa3hrYMhUE04aBBa3Ame8pRgAbSahbKFghZiNwfHO9xLRrBLDlexoimHaN2m52z40SE0ZYvR3"
+    "UpNzJVCrzZnlASn5Qo9lQdrXZrmcENSBxyGodEvdTU1MFvAU19G0UjnaRyGvUctR0qv+f6MXs0"
+    "oIz39bW1snExMRVd3d3COCLi4uRg4ODHNO1M6rg9vZ2vt4R9ff30xOtGPYCbAQ9RD9nZmb2tcp"
+    "4DyPGx8dPVldXv5qBg9/tdv9GZ6Te6f/ZkNCvRebo6CgNQ9TKQWG+pkahoWEEQ7MHfmAYHLpVA"
+    "2iNv5tfL2kEwEl/QnSqoSvGN6Fvc08hek1FQjROlHnWGuD0d5WkJ7wkKngEQn17sdmRYM+hWwT"
+    "HuiECTEQkUqnUjc/nk4yuJ/NazUi4cDicXF9fr+jxqrdAj4gzdK9oWq26JlEehY28viHjs3q/Yw"
+    "284kZvjWik0+nCwsJC5uLiQqHcqL+eBCKjHYPMv0paovmOqmZ2dnb2z8bGRsMfkJ5unP0Fywjn"
+    "QCukb04AAAAASUVORK5CYII="
+)
 
 
 def _application_restart_environment() -> dict[str, str]:
@@ -21714,11 +21737,10 @@ class KeywordApp(ctk.CTk):
             pady=(2, 8),
             sticky="ew",
         )
-        for column in range(5):
+        for column in range(8):
             self.naver_blog_manual_thumbnail_frame.grid_columnconfigure(
                 column,
-                weight=1,
-                uniform="naver_manual_thumbnails",
+                weight=0,
             )
         self.naver_blog_manual_thumbnail_images: list[ctk.CTkImage] = []
         self.naver_blog_manual_image_summary_label = ctk.CTkLabel(
@@ -22278,7 +22300,7 @@ class KeywordApp(ctk.CTk):
     def _create_naver_blog_manual_thumbnail(
         self,
         image_path: str,
-        size: int = 78,
+        size: int = 40,
     ) -> ctk.CTkImage | None:
         if Image is None or ImageOps is None:
             return None
@@ -22299,6 +22321,27 @@ class KeywordApp(ctk.CTk):
         except Exception:
             return None
 
+    def _load_naver_blog_remove_icon(self) -> ctk.CTkImage | None:
+        cached = getattr(self, "naver_blog_manual_remove_icon", None)
+        if cached is not None:
+            return cached
+        if Image is None:
+            return None
+        try:
+            with Image.open(
+                io.BytesIO(base64.b64decode(NAVER_BLOG_REMOVE_ICON_PNG_BASE64))
+            ) as source:
+                icon_image = source.convert("RGBA").copy()
+            cached = ctk.CTkImage(
+                light_image=icon_image,
+                dark_image=icon_image,
+                size=(20, 20),
+            )
+            self.naver_blog_manual_remove_icon = cached
+            return cached
+        except Exception:
+            return None
+
     def _render_naver_blog_manual_image_thumbnails(
         self,
         paths: list[str],
@@ -22316,24 +22359,25 @@ class KeywordApp(ctk.CTk):
                 text="이미지를 추가하면 여기에 미리보기가 표시됩니다.",
                 text_color="#77869a",
                 font=ctk.CTkFont(size=12),
-            ).grid(row=0, column=0, columnspan=5, pady=10, sticky="w")
+            ).grid(row=0, column=0, columnspan=8, pady=8, sticky="w")
             return
 
         palette = self._theme_palette()
+        remove_icon = self._load_naver_blog_remove_icon()
         for index, path in enumerate(paths):
             card = ctk.CTkFrame(
                 frame,
-                width=112,
-                height=118,
+                width=66,
+                height=74,
                 fg_color=palette["input"],
                 corner_radius=12,
                 border_width=1,
                 border_color=palette["border"],
             )
             card.grid(
-                row=index // 5,
-                column=index % 5,
-                padx=(0 if index % 5 == 0 else 6, 0),
+                row=index // 8,
+                column=index % 8,
+                padx=(0 if index % 8 == 0 else 6, 0),
                 pady=(0, 6),
                 sticky="n",
             )
@@ -22345,45 +22389,52 @@ class KeywordApp(ctk.CTk):
                     card,
                     text="",
                     image=thumbnail,
-                    width=78,
-                    height=78,
+                    width=40,
+                    height=40,
                 )
             else:
                 preview_label = ctk.CTkLabel(
                     card,
                     text="미리보기\n불가",
-                    width=78,
-                    height=78,
+                    width=40,
+                    height=40,
                     fg_color=palette["card"],
                     corner_radius=8,
                     text_color=palette["subtext"],
-                    font=ctk.CTkFont(size=11, weight="bold"),
+                    font=ctk.CTkFont(size=9, weight="bold"),
                 )
-            preview_label.place(x=17, y=8)
+            preview_label.place(x=13, y=6)
             filename = Path(path).name
-            display_name = filename if len(filename) <= 16 else f"{filename[:13]}…"
+            display_name = filename if len(filename) <= 10 else f"{filename[:7]}…"
             ctk.CTkLabel(
                 card,
                 text=display_name,
                 text_color=palette["text"],
-                font=ctk.CTkFont(size=10),
-                width=100,
+                font=ctk.CTkFont(size=9),
+                width=58,
                 anchor="center",
-            ).place(x=6, y=90)
-            ctk.CTkButton(
-                card,
-                text="×",
-                width=24,
-                height=24,
-                corner_radius=12,
-                fg_color="#b23b45",
-                hover_color="#932f38",
-                font=ctk.CTkFont(size=16, weight="bold"),
-                state="normal" if enabled else "disabled",
-                command=lambda selected_path=path: self._remove_naver_blog_manual_image(
+            ).place(x=4, y=51)
+            remove_button_kwargs = {
+                "text": "" if remove_icon is not None else "×",
+                "width": 22,
+                "height": 22,
+                "corner_radius": 11,
+                "fg_color": "transparent",
+                "hover_color": palette["hover"],
+                "font": ctk.CTkFont(size=14, weight="bold"),
+                "state": "normal" if enabled else "disabled",
+                "command": lambda selected_path=path: self._remove_naver_blog_manual_image(
                     selected_path
                 ),
-            ).place(relx=1.0, x=-4, y=4, anchor="ne")
+            }
+            if remove_icon is not None:
+                remove_button_kwargs["image"] = remove_icon
+            ctk.CTkButton(card, **remove_button_kwargs).place(
+                relx=1.0,
+                x=-1,
+                y=1,
+                anchor="ne",
+            )
 
     def _remove_naver_blog_manual_image(self, image_path: str) -> None:
         normalized_target = os.path.normcase(

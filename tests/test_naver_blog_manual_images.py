@@ -1,4 +1,5 @@
 import ast
+import base64
 import queue
 import tempfile
 import unittest
@@ -193,6 +194,14 @@ class NaverBlogManualImageTests(unittest.TestCase):
             source,
             methods["_render_naver_blog_manual_image_thumbnails"],
         ) or ""
+        thumbnail_loader_source = ast.get_source_segment(
+            source,
+            methods["_create_naver_blog_manual_thumbnail"],
+        ) or ""
+        remove_icon_source = ast.get_source_segment(
+            source,
+            methods["_load_naver_blog_remove_icon"],
+        ) or ""
 
         self.assertIn('values=["이미지 자동", "이미지 수동"]', build_source)
         self.assertIn("naver_blog_manual_thumbnail_frame", build_source)
@@ -202,8 +211,18 @@ class NaverBlogManualImageTests(unittest.TestCase):
         self.assertIn("merge_naver_blog_manual_image_paths", picker_source)
         self.assertIn('"이미지 수 초과"', picker_source)
         self.assertIn("_create_naver_blog_manual_thumbnail", thumbnail_source)
-        self.assertIn('text="×"', thumbnail_source)
+        self.assertIn('size: int = 40', thumbnail_loader_source)
+        self.assertIn("remove_button_kwargs", thumbnail_source)
+        self.assertIn('remove_button_kwargs["image"]', thumbnail_source)
         self.assertIn("_remove_naver_blog_manual_image", thumbnail_source)
+        self.assertIn("NAVER_BLOG_REMOVE_ICON_PNG_BASE64", remove_icon_source)
+        self.assertIn("size=(20, 20)", remove_icon_source)
+
+    def test_attached_remove_icon_is_embedded_as_png(self) -> None:
+        icon_bytes = base64.b64decode(main.NAVER_BLOG_REMOVE_ICON_PNG_BASE64)
+
+        self.assertTrue(icon_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertGreater(len(icon_bytes), 1000)
 
 
 if __name__ == "__main__":
