@@ -307,8 +307,43 @@ CODEX_DEFAULT_WRITING_MODEL_MIGRATION = "1.1.46:default-writing-model-codex"
 UPDATE_PROBE_INTERVAL_MS = 5 * 60_000
 UPDATE_PROBE_RETRY_MS = 60_000
 TISTORY_COOKIE_KEEP_DAYS = 180
+NAVER_PLAYWRIGHT_PROFILE_WRITING = "blog_writing"
+NAVER_PLAYWRIGHT_PROFILE_AUTOMATION = "blog_automation"
+NAVER_PLAYWRIGHT_PROFILE_BLOG = "naver_blog"
+NAVER_PLAYWRIGHT_PROFILE_KIN = "naver_kin"
+NAVER_PLAYWRIGHT_PROFILE_SCOPES = (
+    NAVER_PLAYWRIGHT_PROFILE_WRITING,
+    NAVER_PLAYWRIGHT_PROFILE_AUTOMATION,
+    NAVER_PLAYWRIGHT_PROFILE_BLOG,
+    NAVER_PLAYWRIGHT_PROFILE_KIN,
+)
+NAVER_WRITING_CHROME_PROFILE_DIR = DATA_DIR / "Naver Writing Chrome Profile"
+NAVER_AUTOMATION_CHROME_PROFILE_DIR = DATA_DIR / "Naver Automation Chrome Profile"
+# Keep the existing NBlog path so current NBlog users retain their login.
 NAVER_BLOG_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog Chrome Profile"
+NAVER_KIN_CHROME_PROFILE_DIR = DATA_DIR / "Naver Kin Chrome Profile"
+NAVER_WRITING_STORAGE_STATE_FILE = DATA_DIR / "naver-writing-storage-state.json"
+NAVER_AUTOMATION_STORAGE_STATE_FILE = DATA_DIR / "naver-automation-storage-state.json"
 NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
+NAVER_KIN_STORAGE_STATE_FILE = DATA_DIR / "naver-kin-storage-state.json"
+NAVER_PLAYWRIGHT_PROFILE_PATHS = {
+    NAVER_PLAYWRIGHT_PROFILE_WRITING: (
+        NAVER_WRITING_CHROME_PROFILE_DIR,
+        NAVER_WRITING_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_AUTOMATION: (
+        NAVER_AUTOMATION_CHROME_PROFILE_DIR,
+        NAVER_AUTOMATION_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_BLOG: (
+        NAVER_BLOG_CHROME_PROFILE_DIR,
+        NAVER_BLOG_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_KIN: (
+        NAVER_KIN_CHROME_PROFILE_DIR,
+        NAVER_KIN_STORAGE_STATE_FILE,
+    ),
+}
 NAVER_BLOG_COOKIE_KEEP_DAYS = 180
 NAVER_BLOG_AUTOMATION_MODE_SEMI = "semi"
 NAVER_BLOG_AUTOMATION_MODE_FULL = "full"
@@ -319,6 +354,40 @@ NAVER_BLOG_AUTOMATION_MODE_LABELS = {
 NAVER_BLOG_AUTOMATION_MODE_BY_LABEL = {
     label: value for value, label in NAVER_BLOG_AUTOMATION_MODE_LABELS.items()
 }
+
+
+def _application_restart_environment() -> dict[str, str]:
+    """Return an environment safe for launching a fresh PyInstaller process."""
+    environment = dict(os.environ)
+    for variable_name in tuple(environment):
+        if variable_name.startswith("_PYI_") or variable_name == "_MEIPASS2":
+            environment.pop(variable_name, None)
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
+
+
+def launch_application_restart() -> subprocess.Popen:
+    """Start a fresh copy of the current app before the current UI exits."""
+    environment = _application_restart_environment()
+    if is_frozen_app():
+        executable = Path(sys.executable).resolve()
+        command = [str(executable), *sys.argv[1:]]
+        working_directory = executable.parent
+    else:
+        command = [sys.executable, str(SCRIPT_DIR / "main.py"), *sys.argv[1:]]
+        working_directory = SCRIPT_DIR
+
+    kwargs = {
+        "cwd": str(working_directory),
+        "env": environment,
+        "close_fds": True,
+        "stdin": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **kwargs)
 NAVER_KIN_QUESTION_LIST_URL = "https://kin.naver.com/qna/questionList.naver"
 NAVER_KIN_DEBUG_LOG_FILE = DATA_DIR / "naver-kin-debug.log"
 NAVER_SEARCH_ADVISOR_CRAWL_URL = (
@@ -6615,21 +6684,47 @@ def normalize_naver_blog_storage_state(state: dict) -> dict:
     return normalized_state
 
 
-def load_naver_blog_storage_state() -> dict:
-    if not NAVER_BLOG_STORAGE_STATE_FILE.exists():
+def normalize_naver_playwright_profile_scope(value: object) -> str:
+    scope = str(value or "").strip().lower()
+    if scope in NAVER_PLAYWRIGHT_PROFILE_SCOPES:
+        return scope
+    return NAVER_PLAYWRIGHT_PROFILE_BLOG
+
+
+def naver_playwright_profile_paths(profile_scope: object) -> tuple[Path, Path]:
+    scope = normalize_naver_playwright_profile_scope(profile_scope)
+    return NAVER_PLAYWRIGHT_PROFILE_PATHS[scope]
+
+
+def naver_webmaster_profile_scope(source_label: object) -> str:
+    label = re.sub(r"\s+", "", str(source_label or ""))
+    if label == "블로그자동화":
+        return NAVER_PLAYWRIGHT_PROFILE_AUTOMATION
+    return NAVER_PLAYWRIGHT_PROFILE_WRITING
+
+
+def load_naver_blog_storage_state(
+    profile_scope: object = NAVER_PLAYWRIGHT_PROFILE_BLOG,
+) -> dict:
+    _profile_dir, state_file = naver_playwright_profile_paths(profile_scope)
+    if not state_file.exists():
         return {"cookies": [], "origins": []}
     try:
-        state = json.loads(NAVER_BLOG_STORAGE_STATE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return {"cookies": [], "origins": []}
     return normalize_naver_blog_storage_state(state)
 
 
-def save_naver_blog_storage_state(context) -> None:
+def save_naver_blog_storage_state(
+    context,
+    profile_scope: object = NAVER_PLAYWRIGHT_PROFILE_BLOG,
+) -> None:
     try:
+        _profile_dir, state_file = naver_playwright_profile_paths(profile_scope)
         state = context.storage_state()
         normalized_state = normalize_naver_blog_storage_state(state)
-        NAVER_BLOG_STORAGE_STATE_FILE.write_text(
+        state_file.write_text(
             json.dumps(normalized_state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -9759,8 +9854,11 @@ def run_naver_search_advisor_playwright(
     published_url: str,
     result_queue: queue.Queue,
     login_timeout_seconds: int = 300,
+    profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_WRITING,
 ) -> tuple[bool, str]:
     """Submit a newly published WordPress URL to Naver Search Advisor."""
+    profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
+    profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
     published_url = str(published_url or "").strip()
     parsed_url = urlparse(published_url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
@@ -9779,12 +9877,15 @@ def run_naver_search_advisor_playwright(
         ) from exc
 
     chrome_path = require_google_chrome_executable()
-    NAVER_BLOG_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    append_runtime_log("naver-search-advisor", f"수집 요청 시작: {published_url}")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    append_runtime_log(
+        "naver-search-advisor",
+        f"수집 요청 시작: {published_url} (프로필={profile_scope}, 경로={profile_dir})",
+    )
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
+            user_data_dir=str(profile_dir),
             executable_path=str(chrome_path),
             headless=False,
             no_viewport=True,
@@ -9796,7 +9897,7 @@ def run_naver_search_advisor_playwright(
             ],
         )
         try:
-            saved_state = load_naver_blog_storage_state()
+            saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
                 try:
@@ -9914,7 +10015,7 @@ def run_naver_search_advisor_playwright(
                     "전용 Chrome에서 로그인한 뒤 다시 시도해 주세요."
                 )
 
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             result_queue.put(
                 (
                     "naver_search_advisor_progress",
@@ -9986,7 +10087,7 @@ def run_naver_search_advisor_playwright(
             append_runtime_log("naver-search-advisor", f"화면 응답 시간 초과: {exc}")
             raise RuntimeError(f"네이버 서치어드바이저 화면 응답 시간이 초과되었습니다: {exc}") from exc
         finally:
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             context.close()
             append_runtime_log("naver-search-advisor", "전용 Chrome 종료 완료")
 
@@ -10667,9 +10768,12 @@ def run_naver_kin_playwright_bootstrap(
         ) from exc
 
     chrome_path = require_google_chrome_executable()
+    profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
 
     target_url = (question_list_url or NAVER_KIN_QUESTION_LIST_URL).strip() or NAVER_KIN_QUESTION_LIST_URL
-    NAVER_BLOG_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("NKin", f"전용 Chrome 프로필: {profile_dir}")
 
     def extract_question_body(detail_page) -> str:
         selectors = (
@@ -10847,7 +10951,7 @@ def run_naver_kin_playwright_bootstrap(
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
+            user_data_dir=str(profile_dir),
             executable_path=str(chrome_path),
             headless=False,
             no_viewport=True,
@@ -10859,7 +10963,7 @@ def run_naver_kin_playwright_bootstrap(
             ],
         )
         try:
-            saved_state = load_naver_blog_storage_state()
+            saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
                 try:
@@ -10982,7 +11086,7 @@ def run_naver_kin_playwright_bootstrap(
                 )
             )
 
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             return True, {
                 "message": "N지식인 질문 목록 접근 뼈대가 준비되었습니다.",
                 "current_url": page.url,
@@ -10992,7 +11096,7 @@ def run_naver_kin_playwright_bootstrap(
             }
         finally:
             try:
-                save_naver_blog_storage_state(context)
+                save_naver_blog_storage_state(context, profile_scope)
             except Exception:
                 pass
             context.close()
@@ -11643,7 +11747,10 @@ def run_naver_kin_answer_playwright(
             pass
         return False
 
-    NAVER_BLOG_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("NKin", f"답변 자동화 전용 Chrome 프로필: {profile_dir}")
     page = None
     detail_screen_opened = False
     answer_screen_opened = False
@@ -11651,7 +11758,7 @@ def run_naver_kin_answer_playwright(
     success_hold_completed = False
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(NAVER_BLOG_CHROME_PROFILE_DIR),
+            user_data_dir=str(profile_dir),
             executable_path=str(chrome_path),
             headless=False,
             no_viewport=True,
@@ -11663,7 +11770,7 @@ def run_naver_kin_answer_playwright(
             ],
         )
         try:
-            saved_state = load_naver_blog_storage_state()
+            saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
                 try:
@@ -11696,7 +11803,7 @@ def run_naver_kin_answer_playwright(
             else:
                 raise RuntimeError("5분 안에 네이버 로그인이 확인되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 실행해 주세요.")
 
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             result_queue.put(("naver_kin_auto_progress", "로그인 확인 완료. 지식인 질문 상세로 이동합니다..."))
             put_naver_kin_action_log(result_queue, f"지식인 질문 상세페이지로 이동합니다: {question_url}")
             page.goto(question_url, wait_until="domcontentloaded")
@@ -11706,7 +11813,7 @@ def run_naver_kin_answer_playwright(
             append_naver_kin_debug_log(f"detail_ready url={page.url} title={question_title[:120]}")
             put_naver_kin_action_log(result_queue, f"지식인 상세페이지 도착: {page.url}")
             if preflight_only:
-                save_naver_blog_storage_state(context)
+                save_naver_blog_storage_state(context, profile_scope)
                 put_naver_kin_action_log(result_queue, "지식인 질문 상세 사전검사를 통과했습니다.")
                 return True, "지식인 질문 상세 사전검사를 통과했습니다."
 
@@ -11737,7 +11844,7 @@ def run_naver_kin_answer_playwright(
             put_naver_kin_action_log(result_queue, "상단 파란색 등록 버튼 클릭을 시도했습니다.")
 
             page.wait_for_timeout(2200)
-            save_naver_blog_storage_state(context)
+            save_naver_blog_storage_state(context, profile_scope)
             hold_seconds = max(0, int(post_submit_hold_seconds or 0))
             if hold_seconds:
                 result_queue.put((
@@ -11755,7 +11862,7 @@ def run_naver_kin_answer_playwright(
             raise
         finally:
             try:
-                save_naver_blog_storage_state(context)
+                save_naver_blog_storage_state(context, profile_scope)
             except Exception:
                 pass
             if (submit_attempted or answer_screen_opened or detail_screen_opened) and not success_hold_completed and page is not None:
@@ -16309,11 +16416,13 @@ class NaverSearchAdvisorWorker(threading.Thread):
         result_queue: queue.Queue,
         show_feedback: bool = True,
         enabled_tools: list[str] | tuple[str, ...] | None = None,
+        profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_WRITING,
     ) -> None:
         super().__init__(daemon=True)
         self.published_url = str(published_url or "").strip()
         self.result_queue = result_queue
         self.show_feedback = bool(show_feedback)
+        self.profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
         requested_tools = WEBMASTER_TOOL_KEYS if enabled_tools is None else enabled_tools
         self.enabled_tools = tuple(
             tool for tool in WEBMASTER_TOOL_KEYS if tool in set(requested_tools)
@@ -16327,6 +16436,7 @@ class NaverSearchAdvisorWorker(threading.Thread):
                 naver_success, naver_message = run_naver_search_advisor_playwright(
                     self.published_url,
                     self.result_queue,
+                    profile_scope=self.profile_scope,
                 )
                 if naver_success:
                     completed_messages.append(str(naver_message or "네이버 수집 요청을 완료했습니다."))
@@ -17660,6 +17770,7 @@ class KeywordApp(ctk.CTk):
         self._theme_paint_refresh_job = None
         self._theme_paint_last_run = 0.0
         self._theme_painted_widgets = weakref.WeakSet()
+        self._theme_restart_pending = False
         self._automation_queue_render_signature = None
         self._automation_queue_refresh_job = None
         self._last_remote_queue_snapshot_signature = None
@@ -18796,7 +18907,53 @@ class KeywordApp(ctk.CTk):
                 self.theme_status_label.configure(text=f"{theme} 적용 및 저장 완료", text_color=palette["accent"])
 
     def _on_theme_changed(self, theme_name: str) -> None:
-        self._apply_app_theme(theme_name, save=True)
+        theme = self._normalize_app_theme(theme_name)
+        previous_theme = self._normalize_app_theme(
+            getattr(self.wordpress_settings, "app_theme", "블랙테마")
+        )
+        if self._theme_restart_pending or theme == previous_theme:
+            return
+
+        try:
+            latest_settings = self._read_wordpress_settings(include_prompts=False)
+            latest_settings.app_theme = theme
+            self.wordpress_settings = latest_settings
+            AppStateStore.save(latest_settings, save_secrets=False)
+        except Exception:
+            self.wordpress_settings.app_theme = theme
+            AppStateStore.update_fields(app_theme=theme)
+
+        self._theme_restart_pending = True
+        if hasattr(self, "theme_menu"):
+            self.theme_menu.configure(state="disabled")
+        if hasattr(self, "theme_status_label"):
+            self.theme_status_label.configure(
+                text=f"{theme} 저장 완료 · 프로그램을 다시 시작합니다...",
+                text_color=self._theme_palette(previous_theme)["accent"],
+            )
+        self.after(350, self._restart_after_theme_change)
+
+    def _restart_after_theme_change(self) -> None:
+        try:
+            worker = getattr(self, "naver_blog_worker", None)
+            if worker is not None and worker.is_alive():
+                worker.cancel()
+            launch_application_restart()
+        except Exception as exc:
+            self._theme_restart_pending = False
+            if hasattr(self, "theme_menu"):
+                self.theme_menu.configure(state="normal")
+            if hasattr(self, "theme_status_label"):
+                self.theme_status_label.configure(
+                    text="테마는 저장했지만 자동 재시작에 실패했습니다.",
+                    text_color="#ff6b6b",
+                )
+            messagebox.showerror(
+                "프로그램 재시작 실패",
+                f"테마 설정은 저장했습니다. 프로그램을 직접 다시 실행해 주세요.\n\n{exc}",
+            )
+            return
+        self._on_app_close()
 
     def _build_layout(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -20190,7 +20347,10 @@ class KeywordApp(ctk.CTk):
 
         ctk.CTkLabel(
             card,
-            text="프로그램 전체 분위기를 선택합니다. 블랙테마는 현재 스타일, 화이트테마는 밝은 배경 중심으로 적용됩니다.",
+            text=(
+                "프로그램 전체 분위기를 선택합니다. 블랙테마는 현재 스타일, 화이트테마는 밝은 배경 중심입니다.\n"
+                "기능이 안정적으로 작동하도록 선택값을 저장한 뒤 프로그램이 자동으로 다시 시작됩니다."
+            ),
             text_color="#a7b3c4",
             font=ctk.CTkFont(size=14),
             wraplength=760,
@@ -20222,7 +20382,7 @@ class KeywordApp(ctk.CTk):
 
         self.theme_status_label = ctk.CTkLabel(
             card,
-            text="테마 설정값은 자동 저장됩니다.",
+            text="테마를 변경하면 설정을 저장하고 프로그램을 자동 재시작합니다.",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
@@ -35285,26 +35445,37 @@ class KeywordApp(ctk.CTk):
         published_url: str,
         show_feedback: bool = True,
         enabled_tools: list[str] | tuple[str, ...] | None = None,
+        profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_WRITING,
     ) -> None:
         published_url = str(published_url or "").strip()
         if not published_url:
             return
-        active_url = (
-            self.naver_search_advisor_worker.published_url
+        profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
+        active_key = (
+            (
+                self.naver_search_advisor_worker.published_url,
+                self.naver_search_advisor_worker.profile_scope,
+            )
             if self.naver_search_advisor_worker
-            else ""
+            else ("", "")
         )
-        pending_urls = {
-            str(item.get("published_url") or "")
+        pending_keys = {
+            (
+                str(item.get("published_url") or ""),
+                normalize_naver_playwright_profile_scope(
+                    item.get("profile_scope") or NAVER_PLAYWRIGHT_PROFILE_WRITING
+                ),
+            )
             for item in self.naver_search_advisor_pending_urls
         }
-        if published_url == active_url or published_url in pending_urls:
+        if (published_url, profile_scope) == active_key or (published_url, profile_scope) in pending_keys:
             return
         self.naver_search_advisor_pending_urls.append(
             {
                 "published_url": published_url,
                 "show_feedback": bool(show_feedback),
                 "enabled_tools": list(WEBMASTER_TOOL_KEYS if enabled_tools is None else enabled_tools),
+                "profile_scope": profile_scope,
             }
         )
         self._start_next_naver_search_advisor_submission()
@@ -35341,16 +35512,19 @@ class KeywordApp(ctk.CTk):
             )
             return published_url
         selected_labels = "·".join(WEBMASTER_TOOL_LABELS[tool] for tool in enabled_tools)
+        profile_scope = naver_webmaster_profile_scope(source_label)
         append_runtime_log(
             "webmaster-queue",
-            f"{source_label} 워드프레스 공개발행 완료 - {selected_labels} 수집 요청 대기열 추가: {published_url}",
+            f"{source_label} 워드프레스 공개발행 완료 - {selected_labels} 수집 요청 대기열 추가: "
+            f"{published_url} (네이버 프로필={profile_scope})",
         )
         self.after(
             250,
-            lambda url=published_url, feedback=show_feedback, tools=tuple(enabled_tools): self._queue_naver_search_advisor_submission(
+            lambda url=published_url, feedback=show_feedback, tools=tuple(enabled_tools), scope=profile_scope: self._queue_naver_search_advisor_submission(
                 url,
                 show_feedback=feedback,
                 enabled_tools=tools,
+                profile_scope=scope,
             ),
         )
         return published_url
@@ -35367,6 +35541,9 @@ class KeywordApp(ctk.CTk):
             self.result_queue,
             show_feedback=bool(pending.get("show_feedback", True)),
             enabled_tools=pending.get("enabled_tools"),
+            profile_scope=str(
+                pending.get("profile_scope") or NAVER_PLAYWRIGHT_PROFILE_WRITING
+            ),
         )
         self.naver_search_advisor_worker.start()
 

@@ -71,7 +71,8 @@ class WritingCompletionFlowTests(unittest.TestCase):
             self.methods["run_naver_search_advisor_playwright"],
         )
         self.assertIn("NAVER_SEARCH_ADVISOR_CRAWL_URL", method_source)
-        self.assertIn("NAVER_BLOG_CHROME_PROFILE_DIR", method_source)
+        self.assertIn("naver_playwright_profile_paths", method_source)
+        self.assertIn("user_data_dir=str(profile_dir)", method_source)
         self.assertIn("url_input.fill(published_url)", method_source)
         self.assertIn("confirm_button.click()", method_source)
         self.assertIn("context.close()", method_source)
