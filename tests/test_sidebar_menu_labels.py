@@ -18,6 +18,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
             {
                 "writing": "블로그글쓰기",
                 "automation": "블로그자동화",
+                "naver_blog": "N블로그자동화",
                 "naver_kin": "N지식인자동화",
                 "public_data": "공공데이터",
                 "prompts": "프롬프트관리",
@@ -36,6 +37,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
 
         self.assertEqual(labels["writing"], "✍️ 블로그글쓰기")
         self.assertEqual(labels["automation"], "블로그자동화")
+        self.assertEqual(labels["naver_blog"], "N블로그자동화")
         self.assertEqual(labels["settings"], "⚙️ 환경설정")
 
     def test_custom_menu_labels_are_persisted(self) -> None:
@@ -45,6 +47,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
                 sidebar_menu_labels=main.normalize_sidebar_menu_labels(
                     {
                         "writing": "✍️ 블로그글쓰기",
+                        "naver_blog": "🟢 N블로그자동화",
                         "settings": "⚙️ 환경설정",
                     }
                 )
@@ -64,6 +67,10 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertEqual(
             loaded.sidebar_menu_labels["writing"],
             "✍️ 블로그글쓰기",
+        )
+        self.assertEqual(
+            loaded.sidebar_menu_labels["naver_blog"],
+            "🟢 N블로그자동화",
         )
         self.assertEqual(
             loaded.sidebar_menu_labels["settings"],
@@ -101,6 +108,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertIn("_on_sidebar_menu_label_changed", menu_source)
         self.assertIn("sidebar_menu_label", layout_source)
         self.assertIn("writing_nav_button", apply_source)
+        self.assertIn("naver_blog_nav_button", apply_source)
         self.assertIn("settings_nav_button", apply_source)
 
 

@@ -405,6 +405,7 @@ NAVER_BLOG_MANUAL_IMAGE_SUFFIXES = {
 SIDEBAR_MENU_DEFAULT_LABELS = {
     "writing": "블로그글쓰기",
     "automation": "블로그자동화",
+    "naver_blog": "N블로그자동화",
     "naver_kin": "N지식인자동화",
     "public_data": "공공데이터",
     "prompts": "프롬프트관리",
@@ -19344,7 +19345,10 @@ class KeywordApp(ctk.CTk):
 
         self.naver_blog_nav_button = ctk.CTkButton(
             self.sidebar_frame,
-            text="N블로그자동화",
+            text=sidebar_menu_label(
+                self.wordpress_settings.sidebar_menu_labels,
+                "naver_blog",
+            ),
             anchor="w",
             height=56,
             corner_radius=14,
@@ -20856,6 +20860,7 @@ class KeywordApp(ctk.CTk):
         button_names = {
             "writing": "writing_nav_button",
             "automation": "automation_nav_button",
+            "naver_blog": "naver_blog_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
             "prompts": "prompt_nav_button",
