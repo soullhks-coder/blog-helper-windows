@@ -2386,6 +2386,7 @@ class PromptFileStore:
         defaults = {item["platform"]: item for item in cls.default_prompt_sets(settings)}
         normalized: list[dict] = []
         seen_ids: set[str] = set()
+        seen_names: dict[str, set[str]] = {platform: set() for platform in defaults}
         for item in prompt_sets or []:
             if not isinstance(item, dict):
                 continue
@@ -2396,7 +2397,13 @@ class PromptFileStore:
             if prompt_id in seen_ids:
                 prompt_id = f"{platform}-{int(time.time() * 1000)}-{len(seen_ids)}"
             seen_ids.add(prompt_id)
-            name = str(item.get("name") or "기본").strip() or "기본"
+            base_name = str(item.get("name") or "기본").strip() or "기본"
+            name = base_name
+            suffix = 2
+            while name in seen_names[platform]:
+                name = f"{base_name} ({suffix})"
+                suffix += 1
+            seen_names[platform].add(name)
             fallback = defaults[platform]
             normalized.append(
                 {
@@ -2450,6 +2457,47 @@ class PromptFileStore:
             "naver_blog_conversion_rules": DEFAULT_NAVER_BLOG_CONVERSION_RULES,
             "naver_kin_answer_prompt": DEFAULT_NAVER_KIN_ANSWER_PROMPT,
         }[attribute]
+
+
+def create_independent_prompt_set(
+    prompt_sets: list[dict],
+    platform: str,
+    name: str,
+    title_prompt: str,
+    article_prompt: str,
+) -> tuple[list[dict], dict]:
+    """Append a new prompt without mutating the currently selected prompt."""
+    copied_sets = [dict(item) for item in prompt_sets if isinstance(item, dict)]
+    base_name = str(name or "").strip() or "새 프롬프트"
+    if base_name == "기본":
+        base_name = "새 프롬프트"
+    existing_names = {
+        str(item.get("name") or "").strip()
+        for item in copied_sets
+        if item.get("platform") == platform
+    }
+    unique_name = base_name
+    suffix = 2
+    while unique_name in existing_names:
+        unique_name = f"{base_name} ({suffix})"
+        suffix += 1
+
+    existing_ids = {str(item.get("id") or "") for item in copied_sets}
+    timestamp = time.time_ns()
+    prompt_id = f"{platform}-{timestamp}"
+    id_suffix = 2
+    while prompt_id in existing_ids:
+        prompt_id = f"{platform}-{timestamp}-{id_suffix}"
+        id_suffix += 1
+    created = {
+        "id": prompt_id,
+        "platform": platform,
+        "name": unique_name,
+        "title_prompt": str(title_prompt or "").strip(),
+        "article_prompt": str(article_prompt or "").strip(),
+    }
+    copied_sets.append(created)
+    return copied_sets, created
 
 
 def resolve_naver_kin_wordpress_prompt_set(settings: WordPressSettings) -> dict:
@@ -26813,26 +26861,29 @@ class KeywordApp(ctk.CTk):
         self._on_prompt_text_changed()
 
     def _add_prompt_set(self, platform: str) -> None:
-        self._save_active_prompt_set_to_memory(platform)
         base_name = self.prompt_name_entries[platform].get().strip() or "새 프롬프트"
-        prompt_id = f"{platform}-{int(time.time() * 1000)}"
-        self.wordpress_settings.prompt_sets.append(
-            {
-                "id": prompt_id,
-                "platform": platform,
-                "name": base_name if base_name != "기본" else "새 프롬프트",
-                "title_prompt": self.prompt_title_boxes[platform].get("1.0", "end").strip(),
-                "article_prompt": self.prompt_article_boxes[platform].get("1.0", "end").strip(),
-            }
+        self.wordpress_settings.prompt_sets, created = create_independent_prompt_set(
+            self._prompt_sets(),
+            platform,
+            base_name,
+            self.prompt_title_boxes[platform].get("1.0", "end").strip(),
+            self.prompt_article_boxes[platform].get("1.0", "end").strip(),
         )
+        prompt_id = str(created.get("id") or "")
         self.active_prompt_set_ids[platform] = prompt_id
+        if platform == "naver_blog":
+            self._apply_naver_blog_prompt_set(created)
         self._refresh_prompt_set_menus()
         self._load_prompt_set_into_boxes(platform)
+        PromptFileStore.save_prompt_sets(self.wordpress_settings.prompt_sets)
         if platform == "naver_blog":
-            created = self._prompt_set_by_id(prompt_id)
-            if created:
-                self._apply_naver_blog_prompt_set(created)
-        self.prompt_feedback_label.configure(text="새 프롬프트가 추가되었습니다. 저장 버튼을 누르면 반영됩니다.", text_color="#f4c95d")
+            self._apply_naver_blog_prompt_set(created, persist=True)
+        else:
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self.prompt_feedback_label.configure(
+            text="새 프롬프트가 기존 항목과 분리되어 추가·저장되었습니다.",
+            text_color="#48d980",
+        )
 
     def _update_prompt_set(self, platform: str) -> None:
         prompt_id = self.active_prompt_set_ids.get(platform)

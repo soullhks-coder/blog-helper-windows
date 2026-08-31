@@ -83,6 +83,102 @@ class NaverBlogPromptManagementTests(unittest.TestCase):
         self.assertEqual(len(naver_blog_sets), 2)
         self.assertEqual(naver_blog_sets[1]["name"], "연예이슈")
 
+    def test_new_prompt_does_not_overwrite_selected_prompt(self) -> None:
+        existing = [
+            {
+                "id": "naver-blog-existing",
+                "platform": "naver_blog",
+                "name": "기존 프롬프트",
+                "title_prompt": "기존 제목 지침",
+                "article_prompt": "기존 본문 지침",
+            }
+        ]
+
+        prompt_sets, created = main.create_independent_prompt_set(
+            existing,
+            "naver_blog",
+            "신규 프롬프트",
+            "완전히 다른 제목 지침",
+            "완전히 다른 본문 지침",
+        )
+
+        self.assertEqual(existing[0]["title_prompt"], "기존 제목 지침")
+        self.assertEqual(prompt_sets[0]["article_prompt"], "기존 본문 지침")
+        self.assertEqual(created["name"], "신규 프롬프트")
+        self.assertEqual(created["title_prompt"], "완전히 다른 제목 지침")
+        self.assertNotEqual(created["id"], existing[0]["id"])
+
+    def test_duplicate_prompt_names_are_disambiguated_per_platform(self) -> None:
+        existing = [
+            {
+                "id": "naver-blog-review",
+                "platform": "naver_blog",
+                "name": "리뷰",
+                "title_prompt": "제목 1",
+                "article_prompt": "본문 1",
+            }
+        ]
+
+        prompt_sets, created = main.create_independent_prompt_set(
+            existing,
+            "naver_blog",
+            "리뷰",
+            "제목 2",
+            "본문 2",
+        )
+        normalized = main.PromptFileStore.normalize_prompt_sets(
+            prompt_sets
+            + [
+                {
+                    "id": "naver-blog-review-3",
+                    "platform": "naver_blog",
+                    "name": "리뷰",
+                    "title_prompt": "제목 3",
+                    "article_prompt": "본문 3",
+                }
+            ],
+            main.WordPressSettings(),
+        )
+        names = [item["name"] for item in normalized if item["platform"] == "naver_blog"]
+
+        self.assertEqual(created["name"], "리뷰 (2)")
+        self.assertEqual(names, ["리뷰", "리뷰 (2)", "리뷰 (3)"])
+
+    def test_add_action_does_not_save_new_text_into_active_prompt_first(self) -> None:
+        source = self._method_source("_add_prompt_set")
+
+        self.assertNotIn("_save_active_prompt_set_to_memory", source)
+        self.assertIn("create_independent_prompt_set", source)
+        self.assertIn("PromptFileStore.save_prompt_sets", source)
+
+    def test_separate_naver_blog_prompts_survive_file_round_trip(self) -> None:
+        settings = main.WordPressSettings()
+        original = main.PromptFileStore.default_prompt_sets(settings)
+        original, created = main.create_independent_prompt_set(
+            original,
+            "naver_blog",
+            "엄마 계정용",
+            "엄마 계정 전용 제목",
+            "엄마 계정 전용 본문",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt_dir = Path(directory)
+            prompt_sets_file = prompt_dir / "prompt_sets.json"
+            with (
+                patch.object(main, "PROMPT_STORAGE_DIR", prompt_dir),
+                patch.object(main, "PROMPT_SETS_FILE", prompt_sets_file),
+                patch.object(main.PromptFileStore, "_ensure_desktop_shortcut"),
+            ):
+                main.PromptFileStore.save_prompt_sets(original)
+                loaded = main.PromptFileStore.load_prompt_sets(settings)
+
+        loaded_default = next(item for item in loaded if item["id"] == "naver-blog-default")
+        loaded_created = next(item for item in loaded if item["id"] == created["id"])
+        self.assertNotEqual(loaded_default["article_prompt"], loaded_created["article_prompt"])
+        self.assertEqual(loaded_created["title_prompt"], "엄마 계정 전용 제목")
+        self.assertEqual(loaded_created["article_prompt"], "엄마 계정 전용 본문")
+
     def test_naver_blog_prompt_files_round_trip_in_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             prompt_dir = Path(directory)
