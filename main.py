@@ -153,6 +153,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_UPLOAD_DIR = DATA_DIR / "Generated Uploads"
 DESIGN_ASSET_DIR = DATA_DIR / "Design Assets"
 STATE_FILE = DATA_DIR / "app_state.json"
+DAILY_PUBLISH_COUNTS_FILE = DATA_DIR / "daily-publish-counts.json"
 FESTIVAL_STATE_FILE = DATA_DIR / "visitkorea_festival_state.json"
 FESTIVAL_POSTER_DIR = DATA_DIR / "Festival Posters"
 WELFARE_STATE_FILE = DATA_DIR / "bokjiro_welfare_state.json"
@@ -2089,6 +2090,157 @@ def build_meta_description(topic: str, keyword: str) -> str:
     return description[:155]
 
 
+def normalize_daily_publish_limit(value: object) -> int:
+    try:
+        parsed = int(str(value or "0").strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(parsed, 999))
+
+
+class DailyPublishLimitStore:
+    """Track successful public posts per local day and per blog account."""
+
+    PLATFORM_LABELS = {
+        "wordpress": "워드프레스",
+        "tistory": "티스토리",
+        "blogspot": "블로그스팟",
+    }
+    _lock = threading.RLock()
+    _reservations: dict[str, int] = {}
+
+    @classmethod
+    def _today(cls) -> str:
+        return time.strftime("%Y-%m-%d")
+
+    @classmethod
+    def _account_key(cls, platform: str, account: str) -> str:
+        account_parts = []
+        for part in str(account or "default").split("|"):
+            normalized_part = re.sub(r"\s+", "", part).casefold()
+            normalized_part = re.sub(r"^https?://", "", normalized_part)
+            account_parts.append(normalized_part.rstrip("/"))
+        normalized_account = "|".join(account_parts)
+        digest = hashlib.sha256(
+            f"{platform}\0{normalized_account}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"{platform}:{digest}"
+
+    @classmethod
+    def _load_today_counts(cls) -> dict[str, int]:
+        if not DAILY_PUBLISH_COUNTS_FILE.exists():
+            return {}
+        try:
+            payload = json.loads(
+                DAILY_PUBLISH_COUNTS_FILE.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict) or payload.get("date") != cls._today():
+            return {}
+        raw_counts = payload.get("counts", {})
+        if not isinstance(raw_counts, dict):
+            return {}
+        counts: dict[str, int] = {}
+        for key, value in raw_counts.items():
+            try:
+                counts[str(key)] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return counts
+
+    @classmethod
+    def _save_today_counts(cls, counts: dict[str, int]) -> None:
+        DAILY_PUBLISH_COUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = DAILY_PUBLISH_COUNTS_FILE.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {"date": cls._today(), "counts": counts},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary_path.replace(DAILY_PUBLISH_COUNTS_FILE)
+
+    @classmethod
+    def count(cls, platform: str, account: str) -> int:
+        with cls._lock:
+            return cls._load_today_counts().get(
+                cls._account_key(platform, account),
+                0,
+            )
+
+    @classmethod
+    def ensure_can_publish(
+        cls,
+        platform: str,
+        account: str,
+        limit: object,
+    ) -> int:
+        normalized_limit = normalize_daily_publish_limit(limit)
+        with cls._lock:
+            account_key = cls._account_key(platform, account)
+            current_count = cls._load_today_counts().get(account_key, 0)
+            pending_count = cls._reservations.get(account_key, 0)
+            if normalized_limit and current_count + pending_count >= normalized_limit:
+                platform_label = cls.PLATFORM_LABELS.get(platform, platform)
+                pending_text = (
+                    f" · 발행 중 {pending_count}개 포함" if pending_count else ""
+                )
+                raise RuntimeError(
+                    f"{platform_label} 오늘 하루 발행 글 수를 초과했습니다. "
+                    f"(오늘 {current_count}개{pending_text} / 설정 한도 {normalized_limit}개)"
+                )
+            return current_count
+
+    @classmethod
+    def reserve_publish(
+        cls,
+        platform: str,
+        account: str,
+        limit: object,
+    ) -> str:
+        with cls._lock:
+            cls.ensure_can_publish(platform, account, limit)
+            account_key = cls._account_key(platform, account)
+            cls._reservations[account_key] = (
+                cls._reservations.get(account_key, 0) + 1
+            )
+            return account_key
+
+    @classmethod
+    def cancel_reservation(cls, reservation_key: str) -> None:
+        if not reservation_key:
+            return
+        with cls._lock:
+            remaining = cls._reservations.get(reservation_key, 0) - 1
+            if remaining > 0:
+                cls._reservations[reservation_key] = remaining
+            else:
+                cls._reservations.pop(reservation_key, None)
+
+    @classmethod
+    def record_reserved_success(
+        cls,
+        platform: str,
+        account: str,
+        reservation_key: str,
+    ) -> int:
+        with cls._lock:
+            cls.cancel_reservation(reservation_key)
+            return cls.record_success(platform, account)
+
+    @classmethod
+    def record_success(cls, platform: str, account: str) -> int:
+        with cls._lock:
+            counts = cls._load_today_counts()
+            account_key = cls._account_key(platform, account)
+            counts[account_key] = counts.get(account_key, 0) + 1
+            cls._save_today_counts(counts)
+            return counts[account_key]
+
+
 @dataclass
 class KeywordInsight:
     keyword: str
@@ -2109,6 +2261,7 @@ class WordPressSettings:
     category_names: list[str] = field(default_factory=list)
     category_ids: list[int] = field(default_factory=list)
     post_mode: str = "임시저장"
+    wordpress_daily_publish_limit: int = 0
     webmaster_submit_naver: bool = True
     webmaster_submit_daum: bool = True
     webmaster_submit_google: bool = True
@@ -2147,8 +2300,10 @@ class WordPressSettings:
     blogspot_redirect_uri: str = "http://localhost"
     blogspot_refresh_token: str = ""
     blogspot_access_token: str = ""
+    blogspot_daily_publish_limit: int = 0
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
+    tistory_daily_publish_limit: int = 0
     tistory_input_mode: str = TEXT_INPUT_MODE_FAST
     tistory_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     tistory_reference_image_protection_mode: bool = False
@@ -2632,6 +2787,9 @@ class AppStateStore:
             category_names=payload.get("category_names", []),
             category_ids=payload.get("category_ids", []),
             post_mode=payload.get("post_mode", "임시저장"),
+            wordpress_daily_publish_limit=normalize_daily_publish_limit(
+                payload.get("wordpress_daily_publish_limit", 0)
+            ),
             webmaster_submit_naver=bool(payload.get("webmaster_submit_naver", True)),
             webmaster_submit_daum=bool(payload.get("webmaster_submit_daum", True)),
             webmaster_submit_google=bool(payload.get("webmaster_submit_google", True)),
@@ -2672,8 +2830,14 @@ class AppStateStore:
             blogspot_redirect_uri=payload.get("blogspot_redirect_uri", "http://localhost"),
             blogspot_refresh_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN) or blogspot_refresh_token_fallback,
             blogspot_access_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_ACCOUNT) or blogspot_fallback,
+            blogspot_daily_publish_limit=normalize_daily_publish_limit(
+                payload.get("blogspot_daily_publish_limit", 0)
+            ),
             tistory_blog_url=payload.get("tistory_blog_url", ""),
             tistory_write_url=payload.get("tistory_write_url", ""),
+            tistory_daily_publish_limit=normalize_daily_publish_limit(
+                payload.get("tistory_daily_publish_limit", 0)
+            ),
             tistory_input_mode=(
                 payload.get("tistory_input_mode")
                 if payload.get("tistory_input_mode") in TEXT_INPUT_MODE_OPTIONS
@@ -3188,6 +3352,15 @@ class WordPressClient:
         slug: str | None = None,
         excerpt: str | None = None,
     ) -> dict:
+        is_public_publish = str(status or "").strip().lower() == "publish"
+        daily_account = f"{self.base_url}|{self.settings.username}"
+        reservation_key = ""
+        if is_public_publish:
+            reservation_key = DailyPublishLimitStore.reserve_publish(
+                "wordpress",
+                daily_account,
+                self.settings.wordpress_daily_publish_limit,
+            )
         payload = {
             "title": title,
             "content": content,
@@ -3207,17 +3380,30 @@ class WordPressClient:
         if excerpt:
             payload["excerpt"] = excerpt
 
-        created = self._request_json(
-            "/wp-json/wp/v2/posts",
-            method="POST",
-            body=payload,
-        )
-        return {
-            "post_id": created.get("id"),
-            "link": created.get("link"),
-            "status": created.get("status", status),
-            "title": created.get("title", {}).get("rendered", title),
-        }
+        try:
+            created = self._request_json(
+                "/wp-json/wp/v2/posts",
+                method="POST",
+                body=payload,
+            )
+            result = {
+                "post_id": created.get("id"),
+                "link": created.get("link"),
+                "status": created.get("status", status),
+                "title": created.get("title", {}).get("rendered", title),
+            }
+            if is_public_publish:
+                result["daily_publish_count"] = (
+                    DailyPublishLimitStore.record_reserved_success(
+                        "wordpress",
+                        daily_account,
+                        reservation_key,
+                    )
+                )
+                reservation_key = ""
+            return result
+        finally:
+            DailyPublishLimitStore.cancel_reservation(reservation_key)
 
     def _request_json(self, path: str, method: str = "GET", body: dict | None = None):
         url = f"{self.base_url}{path}"
@@ -3315,12 +3501,16 @@ class BlogspotClient:
         client_id: str = "",
         client_secret: str = "",
         refresh_token: str = "",
+        daily_publish_limit: int = 0,
     ) -> None:
         self.blog_id = blog_id.strip()
         self.access_token = access_token.strip()
         self.client_id = client_id.strip()
         self.client_secret = client_secret.strip()
         self.refresh_token = refresh_token.strip()
+        self.daily_publish_limit = normalize_daily_publish_limit(
+            daily_publish_limit
+        )
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
         if not self.blog_id:
             raise RuntimeError("블로그스팟 Blog ID를 입력해 주세요.")
@@ -3364,6 +3554,14 @@ class BlogspotClient:
         return token
 
     def publish_post(self, title: str, content: str, status: str = "draft") -> dict:
+        is_public_publish = str(status or "").strip().lower() != "draft"
+        reservation_key = ""
+        if is_public_publish:
+            reservation_key = DailyPublishLimitStore.reserve_publish(
+                "blogspot",
+                self.blog_id,
+                self.daily_publish_limit,
+            )
         url = f"{self.API_ROOT}/blogs/{quote_plus(self.blog_id)}/posts/"
         if status != "draft":
             url += "?isDraft=false"
@@ -3387,17 +3585,29 @@ class BlogspotClient:
             with urlopen(request, timeout=30, context=self.ssl_context) as response:
                 text = response.read().decode("utf-8", errors="ignore")
                 created = json.loads(text) if text else {}
-                return {
+                result = {
                     "post_id": created.get("id"),
                     "link": created.get("url") or created.get("selfLink"),
                     "status": "draft" if status == "draft" else "publish",
                     "title": created.get("title", title),
                 }
+                if is_public_publish:
+                    result["daily_publish_count"] = (
+                        DailyPublishLimitStore.record_reserved_success(
+                            "blogspot",
+                            self.blog_id,
+                            reservation_key,
+                        )
+                    )
+                    reservation_key = ""
+                return result
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"블로그스팟 등록 실패 ({exc.code}): {detail[:300]}") from exc
         except URLError as exc:
             raise RuntimeError(f"블로그스팟 API에 연결할 수 없습니다: {exc.reason}") from exc
+        finally:
+            DailyPublishLimitStore.cancel_reservation(reservation_key)
 
 
 class ThreadsClient:
@@ -16954,6 +17164,11 @@ class NaverKinAutomationWorker(threading.Thread):
                 )
             if not self.settings.blog_url or not self.settings.username or not self.settings.app_password:
                 raise RuntimeError("워드프레스 연결 정보가 없습니다. 환경설정에서 워드프레스 연결을 먼저 확인해 주세요.")
+            DailyPublishLimitStore.ensure_can_publish(
+                "wordpress",
+                f"{self.settings.blog_url}|{self.settings.username}",
+                self.settings.wordpress_daily_publish_limit,
+            )
 
             put_naver_kin_action_log(self.result_queue, f"선택한 지식인 질문: {question_title}")
             self.result_queue.put(("naver_kin_auto_progress", "지식인 질문 상세페이지 접근 가능 여부를 먼저 확인합니다..."))
@@ -17306,6 +17521,7 @@ class TistoryAutomationWorker(threading.Thread):
         ads_slot_id: str = DEFAULT_TISTORY_AD_SLOT_ID,
         ads_position: str = TISTORY_AD_POSITION_ABOVE,
         ads_count: int = 1,
+        daily_publish_limit: int = 0,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -17334,10 +17550,21 @@ class TistoryAutomationWorker(threading.Thread):
         self.ads_slot_id = normalize_tistory_ad_slot_id(ads_slot_id)
         self.ads_position = normalize_tistory_ad_position(ads_position)
         self.ads_count = normalize_tistory_ad_count(ads_count)
+        self.daily_publish_limit = normalize_daily_publish_limit(
+            daily_publish_limit
+        )
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
+        reservation_key = ""
         try:
+            daily_account = self.public_blog_url or self.write_url
+            if self.publish_after_input:
+                reservation_key = DailyPublishLimitStore.reserve_publish(
+                    "tistory",
+                    daily_account,
+                    self.daily_publish_limit,
+                )
             thumbnail_data_url = ""
             thumbnail_content_url = ""
             native_image_files: dict[str, str] = {}
@@ -17489,12 +17716,25 @@ class TistoryAutomationWorker(threading.Thread):
                         "published_url": "",
                         "save_mode": self.save_mode,
                     }
+                if (
+                    done_payload["save_mode"] == TISTORY_SAVE_MODE_PUBLISH
+                    and done_payload["published_url"]
+                ):
+                    done_payload["daily_publish_count"] = (
+                        DailyPublishLimitStore.record_reserved_success(
+                            "tistory",
+                            daily_account,
+                            reservation_key,
+                        )
+                    )
+                    reservation_key = ""
                 self.result_queue.put(("tistory_automation_done", done_payload))
             else:
                 self.result_queue.put(("tistory_automation_error", message))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("tistory_automation_error", str(exc)))
         finally:
+            DailyPublishLimitStore.cancel_reservation(reservation_key)
             cleanup_generated_upload_images(reference_image_paths)
             cleanup_tistory_automation_files()
 
@@ -17687,6 +17927,29 @@ class PublishPipelineWorker(threading.Thread):
             cleanup_paths.extend(extract_inline_image_paths(self.article_html))
             cleanup_paths.extend(extract_inline_image_paths(prepared_article_html))
             target_platforms = set(self.settings.target_platforms or ["wordpress"])
+            is_public_post = self.settings.post_mode != "임시저장"
+            if is_public_post and "wordpress" in target_platforms:
+                DailyPublishLimitStore.ensure_can_publish(
+                    "wordpress",
+                    f"{self.settings.blog_url}|{self.settings.username}",
+                    self.settings.wordpress_daily_publish_limit,
+                )
+            if is_public_post and "blogspot" in target_platforms:
+                DailyPublishLimitStore.ensure_can_publish(
+                    "blogspot",
+                    self.settings.blogspot_blog_id,
+                    self.settings.blogspot_daily_publish_limit,
+                )
+            if (
+                "tistory" in target_platforms
+                and self.settings.tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+            ):
+                DailyPublishLimitStore.ensure_can_publish(
+                    "tistory",
+                    self.settings.tistory_blog_url
+                    or self.settings.tistory_write_url,
+                    self.settings.tistory_daily_publish_limit,
+                )
             if "wordpress" in target_platforms and self.settings.blog_url and self.settings.username and self.settings.app_password:
                 self.result_queue.put(("publish_progress", (0.15, "썸네일 파일을 준비하고 있습니다...")))
                 wordpress_client = WordPressClient(self.settings)
@@ -17822,6 +18085,7 @@ class PublishPipelineWorker(threading.Thread):
                     client_id=self.settings.blogspot_client_id,
                     client_secret=self.settings.blogspot_client_secret,
                     refresh_token=self.settings.blogspot_refresh_token,
+                    daily_publish_limit=self.settings.blogspot_daily_publish_limit,
                 ).publish_post(
                     title=self.title,
                     content=blogspot_content,
@@ -23805,6 +24069,7 @@ class KeywordApp(ctk.CTk):
             messagebox.showwarning("N지식인 자동화 준비 실패", str(payload))
 
     def _handle_naver_kin_automation_done(self, payload: dict) -> None:
+        self._refresh_daily_publish_limit_statuses()
         question_url = str(payload.get("question_url") or "").strip()
         for question in self.naver_kin_questions:
             if str(question.get("url") or "").strip() == question_url:
@@ -27007,6 +27272,145 @@ class KeywordApp(ctk.CTk):
             "blogspot": (settings.blogspot_title_prompt_template, settings.blogspot_article_prompt_template),
         }.get(platform, (settings.wordpress_title_prompt_template, settings.wordpress_article_prompt_template))
 
+    def _build_daily_publish_limit_control(
+        self,
+        parent,
+        row: int,
+        platform: str,
+    ) -> tuple[ctk.CTkEntry, ctk.CTkLabel]:
+        frame = ctk.CTkFrame(
+            parent,
+            corner_radius=16,
+            fg_color=("#e8eff9", "#111b2b"),
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        frame.grid(row=row, column=0, padx=24, pady=(0, 16), sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            frame,
+            text="하루 글 발행 수",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=(16, 12), pady=(14, 7), sticky="w")
+        entry = ctk.CTkEntry(
+            frame,
+            width=130,
+            height=38,
+            corner_radius=12,
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+            fg_color=("#f7f9fc", "#0c1525"),
+            placeholder_text="예: 15",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        entry.grid(row=0, column=1, padx=(0, 16), pady=(12, 7), sticky="e")
+        status_label = ctk.CTkLabel(
+            frame,
+            text="오늘 0개 발행 · 제한 없음",
+            anchor="w",
+            justify="left",
+            text_color=("#607089", "#9aa7bb"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        status_label.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 4),
+            sticky="ew",
+        )
+        ctk.CTkLabel(
+            frame,
+            text="0은 제한 없음입니다. 이 프로그램에서 공개 발행에 성공한 글만 계정별로 계산합니다.",
+            anchor="w",
+            justify="left",
+            text_color=("#607089", "#9aa7bb"),
+            wraplength=850,
+            font=ctk.CTkFont(size=12),
+        ).grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 13),
+            sticky="ew",
+        )
+        return entry, status_label
+
+    def _daily_publish_account(self, platform: str) -> str:
+        if platform == "wordpress":
+            blog_url = (
+                self.blog_url_entry.get().strip()
+                if hasattr(self, "blog_url_entry")
+                else self.wordpress_settings.blog_url
+            )
+            username = (
+                self.username_entry.get().strip()
+                if hasattr(self, "username_entry")
+                else self.wordpress_settings.username
+            )
+            return f"{blog_url}|{username}"
+        if platform == "tistory":
+            blog_url = (
+                self.tistory_blog_url_entry.get().strip()
+                if hasattr(self, "tistory_blog_url_entry")
+                else self.wordpress_settings.tistory_blog_url
+            )
+            write_url = (
+                self.tistory_write_url_entry.get().strip()
+                if hasattr(self, "tistory_write_url_entry")
+                else self.wordpress_settings.tistory_write_url
+            )
+            return blog_url or write_url
+        blog_id = (
+            self.blogspot_blog_id_entry.get().strip()
+            if hasattr(self, "blogspot_blog_id_entry")
+            else self.wordpress_settings.blogspot_blog_id
+        )
+        return blog_id
+
+    def _refresh_daily_publish_limit_statuses(self) -> None:
+        controls = {
+            "wordpress": (
+                "wordpress_daily_publish_limit_entry",
+                "wordpress_daily_publish_limit_status_label",
+            ),
+            "tistory": (
+                "tistory_daily_publish_limit_entry",
+                "tistory_daily_publish_limit_status_label",
+            ),
+            "blogspot": (
+                "blogspot_daily_publish_limit_entry",
+                "blogspot_daily_publish_limit_status_label",
+            ),
+        }
+        for platform, (entry_name, label_name) in controls.items():
+            entry = getattr(self, entry_name, None)
+            label = getattr(self, label_name, None)
+            if entry is None or label is None:
+                continue
+            limit = normalize_daily_publish_limit(entry.get())
+            normalized_text = str(limit)
+            if entry.get().strip() != normalized_text:
+                entry.delete(0, "end")
+                entry.insert(0, normalized_text)
+            count = DailyPublishLimitStore.count(
+                platform,
+                self._daily_publish_account(platform),
+            )
+            if limit:
+                remaining = max(0, limit - count)
+                label.configure(
+                    text=f"오늘 {count}/{limit}개 발행 · 남은 수량 {remaining}개",
+                    text_color="#ffb86b" if remaining == 0 else ("#315f93", "#6dadff"),
+                )
+            else:
+                label.configure(
+                    text=f"오늘 {count}개 발행 · 제한 없음",
+                    text_color=("#607089", "#9aa7bb"),
+                )
+
     def _build_wordpress_card(self) -> None:
         title = ctk.CTkLabel(
             self.wp_card,
@@ -27166,8 +27570,17 @@ class KeywordApp(ctk.CTk):
             sticky="w",
         )
 
+        (
+            self.wordpress_daily_publish_limit_entry,
+            self.wordpress_daily_publish_limit_status_label,
+        ) = self._build_daily_publish_limit_control(
+            self.wp_card,
+            row=16,
+            platform="wordpress",
+        )
+
         button_row = ctk.CTkFrame(self.wp_card, fg_color="transparent")
-        button_row.grid(row=16, column=0, padx=24, pady=(18, 0), sticky="ew")
+        button_row.grid(row=18, column=0, padx=24, pady=(18, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         self.wp_save_button = ctk.CTkButton(
@@ -27217,7 +27630,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.wp_status_label.grid(row=17, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.wp_status_label.grid(row=19, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_gpt_card(self) -> None:
         title = ctk.CTkLabel(
@@ -27943,8 +28356,17 @@ class KeywordApp(ctk.CTk):
         )
         helper.grid(row=11, column=0, padx=24, pady=(16, 18), sticky="ew")
 
+        (
+            self.blogspot_daily_publish_limit_entry,
+            self.blogspot_daily_publish_limit_status_label,
+        ) = self._build_daily_publish_limit_control(
+            self.blogspot_card,
+            row=12,
+            platform="blogspot",
+        )
+
         button_row = ctk.CTkFrame(self.blogspot_card, fg_color="transparent")
-        button_row.grid(row=12, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=14, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -28030,7 +28452,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.blogspot_status_label.grid(row=13, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.blogspot_status_label.grid(row=15, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_tistory_card(self) -> None:
         title = ctk.CTkLabel(
@@ -28336,8 +28758,17 @@ class KeywordApp(ctk.CTk):
             sticky="w",
         )
 
+        (
+            self.tistory_daily_publish_limit_entry,
+            self.tistory_daily_publish_limit_status_label,
+        ) = self._build_daily_publish_limit_control(
+            self.tistory_card,
+            row=9,
+            platform="tistory",
+        )
+
         button_row = ctk.CTkFrame(self.tistory_card, fg_color="transparent")
-        button_row.grid(row=9, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=11, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -28384,7 +28815,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.tistory_status_label.grid(row=10, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.tistory_status_label.grid(row=12, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_threads_card(self) -> None:
         ctk.CTkLabel(
@@ -31743,6 +32174,10 @@ class KeywordApp(ctk.CTk):
         self.category_menu.set(self.wordpress_settings.category_name or "카테고리 없음")
         self._refresh_category_checkboxes()
         self.post_mode_menu.set(self.wordpress_settings.post_mode)
+        self.wordpress_daily_publish_limit_entry.insert(
+            0,
+            str(self.wordpress_settings.wordpress_daily_publish_limit),
+        )
         self.webmaster_naver_var.set(self.wordpress_settings.webmaster_submit_naver)
         self.webmaster_daum_var.set(self.wordpress_settings.webmaster_submit_daum)
         self.webmaster_google_var.set(self.wordpress_settings.webmaster_submit_google)
@@ -31785,6 +32220,10 @@ class KeywordApp(ctk.CTk):
             self.writing_inline_images_provider_menu.set(self.wordpress_settings.inline_images_provider or "Imagen API")
         self.tistory_blog_url_entry.insert(0, self.wordpress_settings.tistory_blog_url)
         self.tistory_write_url_entry.insert(0, self.wordpress_settings.tistory_write_url)
+        self.tistory_daily_publish_limit_entry.insert(
+            0,
+            str(self.wordpress_settings.tistory_daily_publish_limit),
+        )
         self.tistory_input_mode_var.set(
             normalize_text_input_mode(self.wordpress_settings.tistory_input_mode)
         )
@@ -31819,6 +32258,11 @@ class KeywordApp(ctk.CTk):
         self.blogspot_client_id_entry.insert(0, self.wordpress_settings.blogspot_client_id)
         self.blogspot_redirect_uri_entry.insert(0, self.wordpress_settings.blogspot_redirect_uri or "http://localhost")
         self.blogspot_client_secret_entry.insert(0, self.wordpress_settings.blogspot_client_secret)
+        self.blogspot_daily_publish_limit_entry.insert(
+            0,
+            str(self.wordpress_settings.blogspot_daily_publish_limit),
+        )
+        self._refresh_daily_publish_limit_statuses()
         self.threads_user_id_entry.insert(0, self.wordpress_settings.threads_user_id)
         self.threads_access_token_entry.insert(0, self.wordpress_settings.threads_access_token)
         self.threads_auto_publish_var.set(self.wordpress_settings.threads_auto_publish)
@@ -32685,6 +33129,11 @@ class KeywordApp(ctk.CTk):
             ],
             category_ids=[category_id for category_id, variable in self.category_vars.items() if variable.get()],
             post_mode=self.post_mode_menu.get(),
+            wordpress_daily_publish_limit=normalize_daily_publish_limit(
+                self.wordpress_daily_publish_limit_entry.get()
+                if hasattr(self, "wordpress_daily_publish_limit_entry")
+                else self.wordpress_settings.wordpress_daily_publish_limit
+            ),
             webmaster_submit_naver=bool(self.webmaster_naver_var.get()),
             webmaster_submit_daum=bool(self.webmaster_daum_var.get()),
             webmaster_submit_google=bool(self.webmaster_google_var.get()),
@@ -32734,8 +33183,18 @@ class KeywordApp(ctk.CTk):
             blogspot_redirect_uri=self.blogspot_redirect_uri_entry.get().strip() or "http://localhost",
             blogspot_refresh_token=self.wordpress_settings.blogspot_refresh_token,
             blogspot_access_token=self.wordpress_settings.blogspot_access_token,
+            blogspot_daily_publish_limit=normalize_daily_publish_limit(
+                self.blogspot_daily_publish_limit_entry.get()
+                if hasattr(self, "blogspot_daily_publish_limit_entry")
+                else self.wordpress_settings.blogspot_daily_publish_limit
+            ),
             tistory_blog_url=self.tistory_blog_url_entry.get().strip(),
             tistory_write_url=self.tistory_write_url_entry.get().strip(),
+            tistory_daily_publish_limit=normalize_daily_publish_limit(
+                self.tistory_daily_publish_limit_entry.get()
+                if hasattr(self, "tistory_daily_publish_limit_entry")
+                else self.wordpress_settings.tistory_daily_publish_limit
+            ),
             tistory_input_mode=normalize_text_input_mode(
                 self.tistory_input_mode_var.get()
             ),
@@ -32962,6 +33421,7 @@ class KeywordApp(ctk.CTk):
             self._validate_wordpress_inputs(settings, allow_empty_password=False)
             self.wordpress_settings = settings
             AppStateStore.save(settings)
+            self._refresh_daily_publish_limit_statuses()
             self._set_wp_status("● 설정 저장 완료", "#48d980")
             self._update_quick_status(
                 "설정 저장됨",
@@ -33144,7 +33604,10 @@ class KeywordApp(ctk.CTk):
         self.webmaster_naver_var.set(True)
         self.webmaster_daum_var.set(True)
         self.webmaster_google_var.set(True)
+        self.wordpress_daily_publish_limit_entry.delete(0, "end")
+        self.wordpress_daily_publish_limit_entry.insert(0, "0")
         AppStateStore.save(self.wordpress_settings)
+        self._refresh_daily_publish_limit_statuses()
         KeychainStore.delete_secret(f"{KEYCHAIN_WP_PREFIX}{previous_username}")
         self._set_wp_status("● 설정 초기화 완료", "#9da7ba")
         self._update_quick_status("워드프레스 연결 전", "새로운 연결 정보를 입력해 주세요.", "#9da7ba")
@@ -33153,6 +33616,7 @@ class KeywordApp(ctk.CTk):
         settings = self._read_wordpress_settings()
         self.wordpress_settings = settings
         AppStateStore.save(settings)
+        self._refresh_daily_publish_limit_statuses()
         self.blogspot_status_label.configure(text="● 블로그스팟 설정 저장 완료", text_color="#48d980")
         self._update_quick_status("블로그스팟 저장됨", "Blog ID와 OAuth Client 정보를 저장했습니다.", "#48d980")
 
@@ -33305,6 +33769,7 @@ class KeywordApp(ctk.CTk):
             return
         self.wordpress_settings = settings
         AppStateStore.save(settings)
+        self._refresh_daily_publish_limit_statuses()
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
         self._update_quick_status(
             "티스토리 저장됨",
@@ -33475,6 +33940,8 @@ class KeywordApp(ctk.CTk):
         self.tistory_ads_slot_entry.insert(0, DEFAULT_TISTORY_AD_SLOT_ID)
         self.tistory_ads_position_menu.set(TISTORY_AD_POSITION_ABOVE)
         self.tistory_ads_count_menu.set("1")
+        self.tistory_daily_publish_limit_entry.delete(0, "end")
+        self.tistory_daily_publish_limit_entry.insert(0, "0")
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
         self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
@@ -33485,11 +33952,13 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_ads_slot_id = DEFAULT_TISTORY_AD_SLOT_ID
         self.wordpress_settings.tistory_ads_position = TISTORY_AD_POSITION_ABOVE
         self.wordpress_settings.tistory_ads_count = 1
+        self.wordpress_settings.tistory_daily_publish_limit = 0
         self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_save_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
+        self._refresh_daily_publish_limit_statuses()
         self.tistory_status_label.configure(text="● 티스토리 초기화 완료", text_color="#9aa7bb")
         self._update_quick_status("티스토리 초기화", "새로운 티스토리 주소를 입력해 주세요.", "#9aa7bb")
 
@@ -33526,13 +33995,17 @@ class KeywordApp(ctk.CTk):
         self.blogspot_redirect_uri_entry.insert(0, "http://localhost")
         self.blogspot_client_secret_entry.delete(0, "end")
         self.blogspot_auth_code_entry.delete(0, "end")
+        self.blogspot_daily_publish_limit_entry.delete(0, "end")
+        self.blogspot_daily_publish_limit_entry.insert(0, "0")
         self.wordpress_settings.blogspot_blog_id = ""
         self.wordpress_settings.blogspot_client_id = ""
         self.wordpress_settings.blogspot_client_secret = ""
         self.wordpress_settings.blogspot_redirect_uri = "http://localhost"
         self.wordpress_settings.blogspot_refresh_token = ""
         self.wordpress_settings.blogspot_access_token = ""
+        self.wordpress_settings.blogspot_daily_publish_limit = 0
         AppStateStore.save(self.wordpress_settings)
+        self._refresh_daily_publish_limit_statuses()
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_ACCOUNT)
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET)
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN)
@@ -35235,6 +35708,7 @@ class KeywordApp(ctk.CTk):
             ads_slot_id=settings.tistory_ads_slot_id,
             ads_position=settings.tistory_ads_position,
             ads_count=settings.tistory_ads_count,
+            daily_publish_limit=settings.tistory_daily_publish_limit,
         )
         self.tistory_automation_worker.start()
 
@@ -35974,6 +36448,7 @@ class KeywordApp(ctk.CTk):
                         tistory_message = str(payload or "티스토리 자동화를 완료했습니다.")
                         tistory_published_url = ""
                         tistory_save_mode = TISTORY_SAVE_MODE_PUBLISH
+                    self._refresh_daily_publish_limit_statuses()
                     if tistory_published_url:
                         self._remember_published_post_url("tistory", tistory_published_url)
                     self._stop_writing_auto_progress()
@@ -36255,6 +36730,7 @@ class KeywordApp(ctk.CTk):
         )
 
     def _handle_wordpress_publish_success(self, payload: dict) -> None:
+        self._refresh_daily_publish_limit_statuses()
         status_text = "초안 저장" if payload.get("status") == "draft" else "즉시 발행"
         link = payload.get("link")
         self._set_wp_status(f"● 워드프레스 {status_text} 완료", "#48d980")
@@ -36393,6 +36869,7 @@ class KeywordApp(ctk.CTk):
         self._save_ui_state()
 
     def _handle_publish_pipeline_success(self, payload: dict) -> None:
+        self._refresh_daily_publish_limit_statuses()
         cleanup_paths = list(payload.get("cleanup_paths") or [])
         self.pending_upload_cleanup_paths = cleanup_paths
         tistory_worker_started = False
@@ -36485,6 +36962,7 @@ class KeywordApp(ctk.CTk):
                         ads_count=normalize_tistory_ad_count(
                             self.tistory_ads_count_menu.get()
                         ),
+                        daily_publish_limit=self.wordpress_settings.tistory_daily_publish_limit,
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
@@ -36516,6 +36994,7 @@ class KeywordApp(ctk.CTk):
             self._show_writing_complete_dialog()
 
     def _handle_automation_publish_success(self, payload: dict) -> None:
+        self._refresh_daily_publish_limit_statuses()
         completed_item_id = self.active_automation_upload_item_id
         item = self._find_automation_queue_item(completed_item_id)
         title = str(item.get("title") or "자동화 글") if item else "자동화 글"
@@ -36582,6 +37061,7 @@ class KeywordApp(ctk.CTk):
                         ads_count=normalize_tistory_ad_count(
                             self.tistory_ads_count_menu.get()
                         ),
+                        daily_publish_limit=self.wordpress_settings.tistory_daily_publish_limit,
                     )
                     self.active_automation_tistory_pending = True
                     self.tistory_automation_worker.start()
