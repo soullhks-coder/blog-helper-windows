@@ -40,6 +40,33 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertEqual(labels["naver_blog"], "N블로그자동화")
         self.assertEqual(labels["settings"], "⚙️ 환경설정")
 
+    def test_bootstrap_icon_defaults_cover_every_sidebar_menu(self) -> None:
+        self.assertEqual(
+            set(main.SIDEBAR_MENU_DEFAULT_ICONS),
+            set(main.SIDEBAR_MENU_DEFAULT_LABELS),
+        )
+        self.assertEqual(
+            main.SIDEBAR_MENU_DEFAULT_ICONS["writing"],
+            "pencil-square",
+        )
+        self.assertEqual(
+            main.BOOTSTRAP_ICON_CODEPOINTS["pencil-square"],
+            0xF4CA,
+        )
+
+    def test_bootstrap_icon_selection_supports_none_and_rejects_unknown_names(self) -> None:
+        icons = main.normalize_sidebar_menu_icons(
+            {
+                "writing": "",
+                "automation": "stars",
+                "settings": "not-a-bootstrap-icon",
+            }
+        )
+
+        self.assertEqual(icons["writing"], "")
+        self.assertEqual(icons["automation"], "stars")
+        self.assertEqual(icons["settings"], "gear")
+
     def test_custom_menu_labels_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "app_state.json"
@@ -50,7 +77,14 @@ class SidebarMenuLabelTests(unittest.TestCase):
                         "naver_blog": "🟢 N블로그자동화",
                         "settings": "⚙️ 환경설정",
                     }
-                )
+                ),
+                sidebar_menu_icons=main.normalize_sidebar_menu_icons(
+                    {
+                        "writing": "stars",
+                        "naver_blog": "image",
+                        "settings": "",
+                    }
+                ),
             )
             with (
                 patch.object(main, "STATE_FILE", state_file),
@@ -76,6 +110,21 @@ class SidebarMenuLabelTests(unittest.TestCase):
             loaded.sidebar_menu_labels["settings"],
             "⚙️ 환경설정",
         )
+        self.assertEqual(loaded.sidebar_menu_icons["writing"], "stars")
+        self.assertEqual(loaded.sidebar_menu_icons["naver_blog"], "image")
+        self.assertEqual(loaded.sidebar_menu_icons["settings"], "")
+
+    def test_bootstrap_icon_font_is_bundled_and_can_render_pencil_square(self) -> None:
+        self.assertTrue(main.BOOTSTRAP_ICONS_FONT_PATH.is_file())
+        app = type("AppStub", (), {"_sidebar_icon_image_cache": {}})()
+
+        image = main.KeywordApp._bootstrap_sidebar_icon_image(
+            app,
+            "pencil-square",
+            "#6dadff",
+        )
+
+        self.assertIsNotNone(image)
 
     def test_theme_page_exposes_menu_settings_below_theme_settings(self) -> None:
         source = MAIN_PATH.read_text(encoding="utf-8")
@@ -106,6 +155,8 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertIn('text="메뉴 설정"', menu_source)
         self.assertIn("SIDEBAR_MENU_DEFAULT_LABELS.items()", menu_source)
         self.assertIn("_on_sidebar_menu_label_changed", menu_source)
+        self.assertIn("BOOTSTRAP_ICON_OPTIONS", menu_source)
+        self.assertIn("_on_sidebar_menu_icon_changed", menu_source)
         self.assertIn("sidebar_menu_label", layout_source)
         self.assertIn("writing_nav_button", apply_source)
         self.assertIn("naver_blog_nav_button", apply_source)

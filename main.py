@@ -48,9 +48,11 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog
 
 try:
-    from PIL import Image, ImageOps, ImageTk
+    from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 except ImportError:  # pragma: no cover - 기존 Tk 이미지 처리로 대체
     Image = None
+    ImageDraw = None
+    ImageFont = None
     ImageOps = None
     ImageTk = None
 
@@ -454,6 +456,59 @@ SIDEBAR_MENU_DEFAULT_LABELS = {
     "prompts": "프롬프트관리",
     "settings": "환경설정",
 }
+BOOTSTRAP_ICONS_VERSION = "1.13.1"
+BOOTSTRAP_ICONS_FONT_PATH = RESOURCE_DIR / "assets" / "bootstrap-icons.woff"
+BOOTSTRAP_ICON_CODEPOINTS = {
+    "bar-chart": 0xF17E,
+    "briefcase": 0xF1CC,
+    "calendar-check": 0xF1E2,
+    "camera": 0xF220,
+    "chat-square-text": 0xF264,
+    "database": 0xF8C4,
+    "gear": 0xF3E5,
+    "globe2": 0xF3EF,
+    "house": 0xF425,
+    "image": 0xF42A,
+    "journal-text": 0xF444,
+    "lightning-charge": 0xF46D,
+    "pencil-square": 0xF4CA,
+    "person-check": 0xF4D6,
+    "robot": 0xF6B1,
+    "search": 0xF52A,
+    "stars": 0xF589,
+}
+BOOTSTRAP_ICON_OPTIONS = {
+    "아이콘 없음": "",
+    "연필 · bi-pencil-square": "pencil-square",
+    "로봇 · bi-robot": "robot",
+    "문서 · bi-journal-text": "journal-text",
+    "사용자 확인 · bi-person-check": "person-check",
+    "데이터베이스 · bi-database": "database",
+    "대화문 · bi-chat-square-text": "chat-square-text",
+    "설정 · bi-gear": "gear",
+    "홈 · bi-house": "house",
+    "지구본 · bi-globe2": "globe2",
+    "별 · bi-stars": "stars",
+    "번개 · bi-lightning-charge": "lightning-charge",
+    "달력 · bi-calendar-check": "calendar-check",
+    "차트 · bi-bar-chart": "bar-chart",
+    "검색 · bi-search": "search",
+    "카메라 · bi-camera": "camera",
+    "이미지 · bi-image": "image",
+    "가방 · bi-briefcase": "briefcase",
+}
+BOOTSTRAP_ICON_LABELS_BY_NAME = {
+    icon_name: label for label, icon_name in BOOTSTRAP_ICON_OPTIONS.items()
+}
+SIDEBAR_MENU_DEFAULT_ICONS = {
+    "writing": "pencil-square",
+    "automation": "robot",
+    "naver_blog": "journal-text",
+    "naver_kin": "person-check",
+    "public_data": "database",
+    "prompts": "chat-square-text",
+    "settings": "gear",
+}
 
 
 def normalize_sidebar_menu_labels(value: object) -> dict[str, str]:
@@ -468,6 +523,25 @@ def sidebar_menu_label(value: object, page_name: str) -> str:
     return normalize_sidebar_menu_labels(value).get(
         page_name,
         SIDEBAR_MENU_DEFAULT_LABELS.get(page_name, page_name),
+    )
+
+
+def normalize_sidebar_menu_icons(value: object) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    normalized: dict[str, str] = {}
+    for key, default_icon in SIDEBAR_MENU_DEFAULT_ICONS.items():
+        icon_name = str(source.get(key, default_icon) or "").strip()
+        if not icon_name or icon_name in BOOTSTRAP_ICON_CODEPOINTS:
+            normalized[key] = icon_name
+        else:
+            normalized[key] = default_icon
+    return normalized
+
+
+def sidebar_menu_icon(value: object, page_name: str) -> str:
+    return normalize_sidebar_menu_icons(value).get(
+        page_name,
+        SIDEBAR_MENU_DEFAULT_ICONS.get(page_name, ""),
     )
 
 
@@ -2480,6 +2554,9 @@ class WordPressSettings:
     sidebar_menu_labels: dict[str, str] = field(
         default_factory=lambda: dict(SIDEBAR_MENU_DEFAULT_LABELS)
     )
+    sidebar_menu_icons: dict[str, str] = field(
+        default_factory=lambda: dict(SIDEBAR_MENU_DEFAULT_ICONS)
+    )
 
 
 class PromptFileStore:
@@ -3061,6 +3138,9 @@ class AppStateStore:
             app_title=payload.get("app_title", "현기쿠"),
             sidebar_menu_labels=normalize_sidebar_menu_labels(
                 payload.get("sidebar_menu_labels", {})
+            ),
+            sidebar_menu_icons=normalize_sidebar_menu_icons(
+                payload.get("sidebar_menu_icons", {})
             ),
         )
         settings = PromptFileStore.load_into(settings)
@@ -18473,6 +18553,8 @@ class KeywordApp(ctk.CTk):
         self.app_title_var = tk.StringVar(value=self.wordpress_settings.app_title or "현기쿠")
         self._app_title_save_job = None
         self._sidebar_menu_label_save_job = None
+        self._sidebar_icon_image_cache: dict[tuple[str, str], ctk.CTkImage] = {}
+        self._bootstrap_icon_font = None
         self._last_text_input_at = 0.0
         self._theme_paint_defer_job = None
         self._reference_count_job = None
@@ -21226,31 +21308,55 @@ class KeywordApp(ctk.CTk):
         )
         card.grid(row=1, column=0, pady=(18, 0), sticky="ew")
         card.grid_columnconfigure(1, weight=1)
+        card.grid_columnconfigure(2, weight=1)
 
         ctk.CTkLabel(
             card,
             text="메뉴 설정",
             font=ctk.CTkFont(size=26, weight="bold"),
             text_color="#6dadff",
-        ).grid(row=0, column=0, columnspan=2, padx=28, pady=(28, 8), sticky="w")
+        ).grid(row=0, column=0, columnspan=3, padx=28, pady=(28, 8), sticky="w")
         ctk.CTkLabel(
             card,
             text=(
-                "사이드 메뉴에 표시할 이름을 수정할 수 있습니다. 이모지도 그대로 저장됩니다.\n"
-                "예: ✍️ 블로그글쓰기 · ⚙️ 환경설정"
+                "사이드 메뉴 이름과 Bootstrap 아이콘을 각각 설정할 수 있습니다.\n"
+                "선택한 아이콘은 즉시 반영되며 이모지가 포함된 메뉴 이름도 그대로 저장됩니다."
             ),
             text_color="#a7b3c4",
             font=ctk.CTkFont(size=14),
             justify="left",
-        ).grid(row=1, column=0, columnspan=2, padx=28, pady=(0, 20), sticky="w")
+        ).grid(row=1, column=0, columnspan=3, padx=28, pady=(0, 18), sticky="w")
+
+        ctk.CTkLabel(
+            card,
+            text="메뉴",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=2, column=0, padx=(28, 16), pady=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            card,
+            text="표시 이름",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=2, column=1, padx=(0, 12), pady=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            card,
+            text="Bootstrap 아이콘",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=2, column=2, padx=(0, 28), pady=(0, 8), sticky="w")
 
         saved_labels = normalize_sidebar_menu_labels(
             self.wordpress_settings.sidebar_menu_labels
         )
+        saved_icons = normalize_sidebar_menu_icons(
+            self.wordpress_settings.sidebar_menu_icons
+        )
         self.sidebar_menu_label_vars: dict[str, tk.StringVar] = {}
+        self.sidebar_menu_icon_vars: dict[str, tk.StringVar] = {}
         for row, (page_name, default_label) in enumerate(
             SIDEBAR_MENU_DEFAULT_LABELS.items(),
-            start=2,
+            start=3,
         ):
             ctk.CTkLabel(
                 card,
@@ -21279,18 +21385,50 @@ class KeywordApp(ctk.CTk):
             entry.grid(
                 row=row,
                 column=1,
-                padx=(0, 28),
+                padx=(0, 12),
                 pady=(0, 12),
                 sticky="ew",
             )
             entry.bind("<KeyRelease>", self._on_sidebar_menu_label_changed)
 
-        action_row = len(SIDEBAR_MENU_DEFAULT_LABELS) + 2
+            icon_label = BOOTSTRAP_ICON_LABELS_BY_NAME.get(
+                saved_icons[page_name],
+                "아이콘 없음",
+            )
+            icon_var = tk.StringVar(value=icon_label)
+            self.sidebar_menu_icon_vars[page_name] = icon_var
+            icon_menu = ctk.CTkOptionMenu(
+                card,
+                variable=icon_var,
+                values=list(BOOTSTRAP_ICON_OPTIONS),
+                height=42,
+                corner_radius=14,
+                fg_color="#0b1220",
+                button_color="#314761",
+                button_hover_color="#3f5c7f",
+                dropdown_fg_color="#0b1220",
+                dropdown_hover_color="#3468e8",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                dropdown_font=ctk.CTkFont(size=13),
+                command=lambda selected, name=page_name: self._on_sidebar_menu_icon_changed(
+                    name,
+                    selected,
+                ),
+            )
+            icon_menu.grid(
+                row=row,
+                column=2,
+                padx=(0, 28),
+                pady=(0, 12),
+                sticky="ew",
+            )
+
+        action_row = len(SIDEBAR_MENU_DEFAULT_LABELS) + 3
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
         button_frame.grid(
             row=action_row,
             column=0,
-            columnspan=2,
+            columnspan=3,
             padx=28,
             pady=(4, 10),
             sticky="ew",
@@ -21317,14 +21455,14 @@ class KeywordApp(ctk.CTk):
 
         self.sidebar_menu_settings_status_label = ctk.CTkLabel(
             card,
-            text="입력한 이름은 사이드 메뉴에 즉시 반영되고 자동 저장됩니다.",
+            text="입력한 이름과 선택한 아이콘은 사이드 메뉴에 즉시 반영되고 자동 저장됩니다.",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         self.sidebar_menu_settings_status_label.grid(
             row=action_row + 1,
             column=0,
-            columnspan=2,
+            columnspan=3,
             padx=28,
             pady=(0, 28),
             sticky="w",
@@ -21362,6 +21500,88 @@ class KeywordApp(ctk.CTk):
             if button is not None:
                 button.configure(text=normalized[page_name])
 
+    def _current_sidebar_menu_icons(self) -> dict[str, str]:
+        if not hasattr(self, "sidebar_menu_icon_vars"):
+            return normalize_sidebar_menu_icons(
+                getattr(self.wordpress_settings, "sidebar_menu_icons", {})
+            )
+        return normalize_sidebar_menu_icons(
+            {
+                page_name: BOOTSTRAP_ICON_OPTIONS.get(icon_var.get(), "")
+                for page_name, icon_var in self.sidebar_menu_icon_vars.items()
+            }
+        )
+
+    def _bootstrap_sidebar_icon_image(
+        self,
+        icon_name: str,
+        color: str,
+    ) -> ctk.CTkImage | None:
+        if (
+            not icon_name
+            or icon_name not in BOOTSTRAP_ICON_CODEPOINTS
+            or Image is None
+            or ImageDraw is None
+            or ImageFont is None
+            or not BOOTSTRAP_ICONS_FONT_PATH.exists()
+        ):
+            return None
+        cache_key = (icon_name, color.lower())
+        cached = self._sidebar_icon_image_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            canvas_size = 72
+            font = getattr(self, "_bootstrap_icon_font", None)
+            if font is None:
+                font = ImageFont.truetype(str(BOOTSTRAP_ICONS_FONT_PATH), 56)
+                self._bootstrap_icon_font = font
+            glyph = chr(BOOTSTRAP_ICON_CODEPOINTS[icon_name])
+            icon = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(icon)
+            bounds = draw.textbbox((0, 0), glyph, font=font)
+            glyph_width = bounds[2] - bounds[0]
+            glyph_height = bounds[3] - bounds[1]
+            position = (
+                (canvas_size - glyph_width) / 2 - bounds[0],
+                (canvas_size - glyph_height) / 2 - bounds[1],
+            )
+            draw.text(position, glyph, font=font, fill=color)
+            rendered = ctk.CTkImage(
+                light_image=icon,
+                dark_image=icon,
+                size=(21, 21),
+            )
+        except Exception:
+            return None
+        self._sidebar_icon_image_cache[cache_key] = rendered
+        return rendered
+
+    def _apply_sidebar_menu_icons(self, icons: object | None = None) -> None:
+        normalized = normalize_sidebar_menu_icons(
+            icons
+            if icons is not None
+            else getattr(self.wordpress_settings, "sidebar_menu_icons", {})
+        )
+        palette = self._theme_palette()
+        button_names = {
+            "writing": "writing_nav_button",
+            "automation": "automation_nav_button",
+            "naver_blog": "naver_blog_nav_button",
+            "naver_kin": "naver_kin_nav_button",
+            "public_data": "public_data_nav_button",
+            "prompts": "prompt_nav_button",
+            "settings": "settings_nav_button",
+        }
+        active_page = getattr(self, "current_page", "writing")
+        for page_name, button_name in button_names.items():
+            button = getattr(self, button_name, None)
+            if button is None:
+                continue
+            color = palette["accent"] if page_name == active_page else palette["muted"]
+            image = self._bootstrap_sidebar_icon_image(normalized[page_name], color)
+            button.configure(image=image, compound="left")
+
     def _on_sidebar_menu_label_changed(self, event=None) -> None:
         self._mark_text_input_activity(event)
         labels = self._current_sidebar_menu_labels()
@@ -21378,36 +21598,64 @@ class KeywordApp(ctk.CTk):
             lambda: self._save_sidebar_menu_labels(silent=True),
         )
 
+    def _on_sidebar_menu_icon_changed(self, page_name: str, selected: str) -> None:
+        if page_name not in SIDEBAR_MENU_DEFAULT_ICONS:
+            return
+        icons = self._current_sidebar_menu_icons()
+        self.wordpress_settings.sidebar_menu_icons = icons
+        self._apply_sidebar_menu_icons(icons)
+        if hasattr(self, "sidebar_menu_settings_status_label"):
+            self.sidebar_menu_settings_status_label.configure(
+                text="아이콘 변경됨 · 잠시 후 자동 저장됩니다.",
+                text_color="#6dadff",
+            )
+        if self._sidebar_menu_label_save_job is not None:
+            self.after_cancel(self._sidebar_menu_label_save_job)
+        self._sidebar_menu_label_save_job = self.after(
+            300,
+            lambda: self._save_sidebar_menu_labels(silent=True),
+        )
+
     def _save_sidebar_menu_labels(self, silent: bool = False) -> None:
         if self._sidebar_menu_label_save_job is not None:
             self.after_cancel(self._sidebar_menu_label_save_job)
             self._sidebar_menu_label_save_job = None
         labels = self._current_sidebar_menu_labels()
+        icons = self._current_sidebar_menu_icons()
         self.wordpress_settings.sidebar_menu_labels = labels
+        self.wordpress_settings.sidebar_menu_icons = icons
         if hasattr(self, "sidebar_menu_label_vars"):
             for page_name, label_var in self.sidebar_menu_label_vars.items():
                 if label_var.get() != labels[page_name]:
                     label_var.set(labels[page_name])
         self._apply_sidebar_menu_labels(labels)
+        self._apply_sidebar_menu_icons(icons)
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
         if hasattr(self, "sidebar_menu_settings_status_label"):
             self.sidebar_menu_settings_status_label.configure(
-                text="메뉴 이름 자동 저장됨" if silent else "메뉴 이름 저장 완료",
+                text="메뉴 설정 자동 저장됨" if silent else "메뉴 설정 저장 완료",
                 text_color="#48d980",
             )
         if not silent:
             self._update_quick_status(
                 "메뉴 설정 저장됨",
-                "이모지를 포함한 사이드 메뉴 이름을 저장했습니다.",
+                "사이드 메뉴 이름과 Bootstrap 아이콘을 저장했습니다.",
                 "#48d980",
             )
 
     def _reset_sidebar_menu_labels(self) -> None:
         defaults = dict(SIDEBAR_MENU_DEFAULT_LABELS)
+        default_icons = dict(SIDEBAR_MENU_DEFAULT_ICONS)
         if hasattr(self, "sidebar_menu_label_vars"):
             for page_name, label_var in self.sidebar_menu_label_vars.items():
                 label_var.set(defaults[page_name])
+        if hasattr(self, "sidebar_menu_icon_vars"):
+            for page_name, icon_var in self.sidebar_menu_icon_vars.items():
+                icon_var.set(
+                    BOOTSTRAP_ICON_LABELS_BY_NAME[default_icons[page_name]]
+                )
         self.wordpress_settings.sidebar_menu_labels = defaults
+        self.wordpress_settings.sidebar_menu_icons = default_icons
         self._save_sidebar_menu_labels()
 
     def _save_basic_settings(self, silent: bool = False) -> None:
@@ -32424,6 +32672,7 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "sidebar_title"):
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠")
         self._apply_sidebar_menu_labels(self.wordpress_settings.sidebar_menu_labels)
+        self._apply_sidebar_menu_icons(self.wordpress_settings.sidebar_menu_icons)
         self.blog_url_entry.insert(0, self.wordpress_settings.blog_url)
         self.username_entry.insert(0, self.wordpress_settings.username)
         self.password_entry.insert(0, self.wordpress_settings.app_password)
@@ -32703,6 +32952,8 @@ class KeywordApp(ctk.CTk):
                 fg_color=palette["selected"] if name == page_name else "transparent",
                 hover_color=palette["hover"],
             )
+        if hasattr(self, "_apply_sidebar_menu_icons"):
+            self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)
         if page_name == "automation":
             if self._is_windows_dark_theme():
@@ -33665,6 +33916,7 @@ class KeywordApp(ctk.CTk):
             )
             or "현기쿠",
             sidebar_menu_labels=self._current_sidebar_menu_labels(),
+            sidebar_menu_icons=self._current_sidebar_menu_icons(),
         )
         if settings.category_name == "카테고리 없음":
             settings.category_id = None
