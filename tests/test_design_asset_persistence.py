@@ -112,6 +112,8 @@ class WritingUiRegressionTests(unittest.TestCase):
 
         self.assertNotIn("sidebar_divider", self.source)
         self.assertIn('fg_color=palette["sidebar"]', layout_source)
+        self.assertIn('anchor="center"', layout_source)
+        self.assertIn('self.sidebar_title.grid(row=0, column=0, pady=(28, 26), sticky="ew")', layout_source)
         self.assertIn('"shell": "#05080e"', palette_source)
         self.assertIn('"sidebar": "#0a111b"', palette_source)
 

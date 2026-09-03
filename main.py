@@ -19885,8 +19885,10 @@ class KeywordApp(ctk.CTk):
             text=self.wordpress_settings.app_title or "현기쿠",
             text_color="#6dadff",
             font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="center",
+            justify="center",
         )
-        self.sidebar_title.grid(row=0, column=0, padx=30, pady=(28, 26), sticky="w")
+        self.sidebar_title.grid(row=0, column=0, pady=(28, 26), sticky="ew")
 
         self.writing_nav_button = ctk.CTkButton(
             self.sidebar_frame,
