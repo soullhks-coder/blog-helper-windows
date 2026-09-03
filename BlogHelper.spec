@@ -39,9 +39,20 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+splash = Splash(
+    "assets/blog_helper_icon.png",
+    binaries=a.binaries,
+    datas=a.datas,
+    max_img_size=(320, 320),
+    always_on_top=True,
+    center="active",
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,
+    splash.binaries,
     a.binaries,
     a.datas,
     [],

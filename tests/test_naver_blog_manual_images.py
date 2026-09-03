@@ -102,6 +102,8 @@ class NaverBlogManualImageTests(unittest.TestCase):
             original = main.Image.new("RGB", (12, 8), (32, 96, 160))
             from_pillow(original).save(source)
 
+            self.assertTrue(main._ensure_heif_opener_registered())
+
             with main.Image.open(source) as preview:
                 preview.load()
 

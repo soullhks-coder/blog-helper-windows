@@ -34,6 +34,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
+from startup_guard import acquire_windows_single_instance, release_windows_single_instance
+
+
+# Run before third-party GUI/media imports. A second Windows double-click is
+# rejected before it spends time importing the full application.
+_WINDOWS_SINGLE_INSTANCE_MUTEX = acquire_windows_single_instance()
+
 import customtkinter as ctk
 import certifi
 import tkinter as tk
@@ -47,21 +54,10 @@ except ImportError:  # pragma: no cover - 기존 Tk 이미지 처리로 대체
     ImageOps = None
     ImageTk = None
 
-try:
-    from pillow_heif import register_heif_opener
-except ImportError:  # pragma: no cover - HEIC는 원본 첨부하고 미리보기만 생략
-    register_heif_opener = None
-
-if Image is not None and register_heif_opener is not None:
-    try:
-        register_heif_opener()
-    except Exception:  # pragma: no cover - HEIC 외 이미지 기능은 계속 사용
-        pass
-
-try:
-    from yt_dlp import YoutubeDL
-except ImportError:  # pragma: no cover - runtime handling
-    YoutubeDL = None
+register_heif_opener = None
+_HEIF_OPENER_IMPORT_ATTEMPTED = False
+YoutubeDL = None
+_YOUTUBE_DL_IMPORT_ATTEMPTED = False
 
 from app_updater import (
     APP_VERSION,
@@ -91,6 +87,52 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 ctk.set_widget_scaling(0.82)
 ctk.set_window_scaling(0.82)
+
+
+def _ensure_heif_opener_registered() -> bool:
+    """Load HEIC support only when a HEIC preview is actually requested."""
+    global register_heif_opener, _HEIF_OPENER_IMPORT_ATTEMPTED
+    if register_heif_opener is not None:
+        return True
+    if _HEIF_OPENER_IMPORT_ATTEMPTED or Image is None:
+        return False
+    _HEIF_OPENER_IMPORT_ATTEMPTED = True
+    try:
+        from pillow_heif import register_heif_opener as imported_opener
+
+        imported_opener()
+        register_heif_opener = imported_opener
+        return True
+    except Exception:  # pragma: no cover - 원본 첨부는 가능하고 미리보기만 생략
+        return False
+
+
+def _load_youtube_dl_class():
+    """Load yt-dlp on first keyword analysis instead of during app startup."""
+    global YoutubeDL, _YOUTUBE_DL_IMPORT_ATTEMPTED
+    if YoutubeDL is not None:
+        return YoutubeDL
+    if _YOUTUBE_DL_IMPORT_ATTEMPTED:
+        return None
+    _YOUTUBE_DL_IMPORT_ATTEMPTED = True
+    try:
+        from yt_dlp import YoutubeDL as imported_youtube_dl
+
+        YoutubeDL = imported_youtube_dl
+    except ImportError:  # pragma: no cover - runtime handling
+        YoutubeDL = None
+    return YoutubeDL
+
+
+def _close_packaged_startup_splash() -> None:
+    if os.name != "nt" or not is_frozen_app():
+        return
+    try:
+        import pyi_splash
+
+        pyi_splash.close()
+    except (ImportError, RuntimeError):
+        pass
 
 
 def _pointer_is_inside_widget(widget, event=None) -> bool:
@@ -13416,10 +13458,12 @@ class KeywordAnalyzer:
     ]
 
     def __init__(self) -> None:
-        if YoutubeDL is None:
+        youtube_dl_class = _load_youtube_dl_class()
+        if youtube_dl_class is None:
             raise RuntimeError(
                 "yt-dlp가 설치되어 있지 않습니다. 터미널에서 `pip install customtkinter yt-dlp`를 실행해 주세요."
             )
+        self.youtube_dl_class = youtube_dl_class
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def analyze(
@@ -13506,7 +13550,7 @@ class KeywordAnalyzer:
             "nocheckcertificate": True,
         }
         try:
-            with YoutubeDL(options) as ydl:
+            with self.youtube_dl_class(options) as ydl:
                 payload = ydl.extract_info(f"ytsearch8:{query}", download=False)
         except Exception:
             return []
@@ -19578,12 +19622,20 @@ class KeywordApp(ctk.CTk):
         self.after(350, self._restart_after_theme_change)
 
     def _restart_after_theme_change(self) -> None:
+        global _WINDOWS_SINGLE_INSTANCE_MUTEX
+        released_windows_mutex = False
         try:
             worker = getattr(self, "naver_blog_worker", None)
             if worker is not None and worker.is_alive():
                 worker.cancel()
+            if os.name == "nt" and _WINDOWS_SINGLE_INSTANCE_MUTEX:
+                release_windows_single_instance(_WINDOWS_SINGLE_INSTANCE_MUTEX)
+                _WINDOWS_SINGLE_INSTANCE_MUTEX = None
+                released_windows_mutex = True
             launch_application_restart()
         except Exception as exc:
+            if released_windows_mutex:
+                _WINDOWS_SINGLE_INSTANCE_MUTEX = acquire_windows_single_instance()
             self._theme_restart_pending = False
             if hasattr(self, "theme_menu"):
                 self.theme_menu.configure(state="normal")
@@ -22973,6 +23025,8 @@ class KeywordApp(ctk.CTk):
     ) -> ctk.CTkImage | None:
         if Image is None or ImageOps is None:
             return None
+        if Path(image_path).suffix.lower() == ".heic":
+            _ensure_heif_opener_registered()
         try:
             with Image.open(image_path) as source:
                 transposed = ImageOps.exif_transpose(source)
@@ -37479,6 +37533,7 @@ if __name__ == "__main__":
             restart_test_app.title("BlogHelper updater restart test")
             restart_test_app.geometry("420x180")
             ctk.CTkLabel(restart_test_app, text="Windows 재실행 확인").pack(expand=True)
+            _close_packaged_startup_splash()
             marker_path.write_text(f"restarted pid={os.getpid()} window=1\n", encoding="utf-8")
             restart_test_app.after(10_000, restart_test_app.destroy)
             restart_test_app.mainloop()
@@ -37487,4 +37542,5 @@ if __name__ == "__main__":
             time.sleep(8)
     else:
         app = KeywordApp()
+        _close_packaged_startup_splash()
         app.mainloop()

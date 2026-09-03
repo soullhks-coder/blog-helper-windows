@@ -65,6 +65,34 @@ class ThemeRestartTests(unittest.TestCase):
 
         self.assertEqual(events, ["launched", "closed"])
 
+    def test_windows_restart_releases_single_instance_mutex_before_launch(self) -> None:
+        events = []
+        app = SimpleNamespace(
+            naver_blog_worker=None,
+            _on_app_close=lambda: events.append("closed"),
+        )
+        previous_handle = main._WINDOWS_SINGLE_INSTANCE_MUTEX
+        try:
+            main._WINDOWS_SINGLE_INSTANCE_MUTEX = 765
+            with (
+                patch.object(main.os, "name", "nt"),
+                patch.object(
+                    main,
+                    "release_windows_single_instance",
+                    side_effect=lambda handle: events.append(("released", handle)),
+                ),
+                patch.object(
+                    main,
+                    "launch_application_restart",
+                    side_effect=lambda: events.append("launched"),
+                ),
+            ):
+                main.KeywordApp._restart_after_theme_change(app)
+        finally:
+            main._WINDOWS_SINGLE_INSTANCE_MUTEX = previous_handle
+
+        self.assertEqual(events, [("released", 765), "launched", "closed"])
+
     def test_source_restart_uses_python_and_main_script(self) -> None:
         with (
             patch.object(main, "is_frozen_app", return_value=False),
