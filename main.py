@@ -458,6 +458,8 @@ SIDEBAR_MENU_DEFAULT_LABELS = {
 }
 BOOTSTRAP_ICONS_VERSION = "1.13.1"
 BOOTSTRAP_ICONS_FONT_PATH = RESOURCE_DIR / "assets" / "bootstrap-icons.woff"
+BOOTSTRAP_ICONS_CSS_PATH = RESOURCE_DIR / "assets" / "bootstrap-icons.css"
+_BOOTSTRAP_ICON_CATALOG_CACHE: dict[str, int] | None = None
 BOOTSTRAP_ICON_CODEPOINTS = {
     "bar-chart": 0xF17E,
     "briefcase": 0xF1CC,
@@ -526,15 +528,87 @@ def sidebar_menu_label(value: object, page_name: str) -> str:
     )
 
 
+def bootstrap_icon_catalog() -> dict[str, int]:
+    global _BOOTSTRAP_ICON_CATALOG_CACHE
+    if _BOOTSTRAP_ICON_CATALOG_CACHE is not None:
+        return _BOOTSTRAP_ICON_CATALOG_CACHE
+    catalog = dict(BOOTSTRAP_ICON_CODEPOINTS)
+    try:
+        stylesheet = BOOTSTRAP_ICONS_CSS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        stylesheet = ""
+    for icon_name, hexadecimal in re.findall(
+        r'\.bi-([a-z0-9-]+)::before\s*\{\s*content:\s*"\\([0-9a-fA-F]+)"',
+        stylesheet,
+    ):
+        catalog[icon_name] = int(hexadecimal, 16)
+    _BOOTSTRAP_ICON_CATALOG_CACHE = catalog
+    return catalog
+
+
+def normalize_bootstrap_icon_spec(value: object) -> str | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+    if len(raw_value) > 10_000:
+        return None
+    if raw_value in BOOTSTRAP_ICON_OPTIONS:
+        raw_value = BOOTSTRAP_ICON_OPTIONS[raw_value]
+        if not raw_value:
+            return ""
+
+    catalog = bootstrap_icon_catalog()
+    lowered = raw_value.lower()
+    class_names = re.findall(r"\bbi-([a-z0-9]+(?:-[a-z0-9]+)*)\b", lowered)
+    for icon_name in reversed(class_names):
+        if icon_name in catalog:
+            return icon_name
+    direct_name = lowered[3:] if lowered.startswith("bi-") else lowered
+    if direct_name in catalog:
+        return direct_name
+
+    codepoint_match = re.fullmatch(r"(?i)u\+([0-9a-f]{4,6})", raw_value)
+    if codepoint_match is None:
+        codepoint_match = re.fullmatch(r"(?i)\\(?:u)?([0-9a-f]{4,6})", raw_value)
+    if codepoint_match is None:
+        codepoint_match = re.fullmatch(r"(?i)&#x([0-9a-f]{4,6});?", raw_value)
+    if codepoint_match is not None:
+        codepoint = int(codepoint_match.group(1), 16)
+    elif re.fullmatch(r"&#[0-9]{1,7};?", raw_value):
+        codepoint = int(re.sub(r"\D", "", raw_value), 10)
+    elif len(raw_value) == 1:
+        codepoint = ord(raw_value)
+    else:
+        return None
+    if 0xE000 <= codepoint <= 0xF8FF:
+        return f"U+{codepoint:04X}"
+    return None
+
+
+def bootstrap_icon_codepoint(value: object) -> int | None:
+    normalized = normalize_bootstrap_icon_spec(value)
+    if not normalized:
+        return None
+    if normalized.startswith("U+"):
+        return int(normalized[2:], 16)
+    return bootstrap_icon_catalog().get(normalized)
+
+
+def bootstrap_icon_input_display(value: object) -> str:
+    normalized = normalize_bootstrap_icon_spec(value)
+    if not normalized:
+        return "아이콘 없음"
+    if normalized.startswith("U+"):
+        return normalized
+    return BOOTSTRAP_ICON_LABELS_BY_NAME.get(normalized, f"bi-{normalized}")
+
+
 def normalize_sidebar_menu_icons(value: object) -> dict[str, str]:
     source = value if isinstance(value, dict) else {}
     normalized: dict[str, str] = {}
     for key, default_icon in SIDEBAR_MENU_DEFAULT_ICONS.items():
-        icon_name = str(source.get(key, default_icon) or "").strip()
-        if not icon_name or icon_name in BOOTSTRAP_ICON_CODEPOINTS:
-            normalized[key] = icon_name
-        else:
-            normalized[key] = default_icon
+        icon_spec = normalize_bootstrap_icon_spec(source.get(key, default_icon))
+        normalized[key] = default_icon if icon_spec is None else icon_spec
     return normalized
 
 
@@ -21322,6 +21396,7 @@ class KeywordApp(ctk.CTk):
             card,
             text=(
                 "사이드 메뉴 이름과 Bootstrap 아이콘을 각각 설정할 수 있습니다.\n"
+                "목록에서 선택하거나 bi-pencil-square, U+F4CA처럼 직접 입력할 수 있습니다.\n"
                 "선택한 아이콘은 즉시 반영되며 이모지가 포함된 메뉴 이름도 그대로 저장됩니다."
             ),
             text_color="#a7b3c4",
@@ -21343,7 +21418,7 @@ class KeywordApp(ctk.CTk):
         ).grid(row=2, column=1, padx=(0, 12), pady=(0, 8), sticky="w")
         ctk.CTkLabel(
             card,
-            text="Bootstrap 아이콘",
+            text="Bootstrap 아이콘 · 선택/직접 입력",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=2, column=2, padx=(0, 28), pady=(0, 8), sticky="w")
@@ -21393,25 +21468,25 @@ class KeywordApp(ctk.CTk):
             )
             entry.bind("<KeyRelease>", self._on_sidebar_menu_label_changed)
 
-            icon_label = BOOTSTRAP_ICON_LABELS_BY_NAME.get(
-                saved_icons[page_name],
-                "아이콘 없음",
-            )
+            icon_label = bootstrap_icon_input_display(saved_icons[page_name])
             icon_var = tk.StringVar(value=icon_label)
             self.sidebar_menu_icon_vars[page_name] = icon_var
-            icon_menu = ctk.CTkOptionMenu(
+            icon_menu = ctk.CTkComboBox(
                 card,
                 variable=icon_var,
                 values=list(BOOTSTRAP_ICON_OPTIONS),
                 height=42,
                 corner_radius=14,
                 fg_color="#0b1220",
+                border_color="#334760",
                 button_color="#314761",
                 button_hover_color="#3f5c7f",
                 dropdown_fg_color="#0b1220",
                 dropdown_hover_color="#3468e8",
+                text_color="#e6edf7",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 dropdown_font=ctk.CTkFont(size=13),
+                justify="left",
                 command=lambda selected, name=page_name: self._on_sidebar_menu_icon_changed(
                     name,
                     selected,
@@ -21423,6 +21498,20 @@ class KeywordApp(ctk.CTk):
                 padx=(0, 28),
                 pady=(0, 12),
                 sticky="ew",
+            )
+            icon_menu.bind(
+                "<Return>",
+                lambda event, name=page_name: self._on_sidebar_menu_icon_manual_input(
+                    name,
+                    event,
+                ),
+            )
+            icon_menu.bind(
+                "<FocusOut>",
+                lambda event, name=page_name: self._on_sidebar_menu_icon_manual_input(
+                    name,
+                    event,
+                ),
             )
 
         action_row = len(SIDEBAR_MENU_DEFAULT_LABELS) + 3
@@ -21507,12 +21596,14 @@ class KeywordApp(ctk.CTk):
             return normalize_sidebar_menu_icons(
                 getattr(self.wordpress_settings, "sidebar_menu_icons", {})
             )
-        return normalize_sidebar_menu_icons(
-            {
-                page_name: BOOTSTRAP_ICON_OPTIONS.get(icon_var.get(), "")
-                for page_name, icon_var in self.sidebar_menu_icon_vars.items()
-            }
+        icons = normalize_sidebar_menu_icons(
+            getattr(self.wordpress_settings, "sidebar_menu_icons", {})
         )
+        for page_name, icon_var in self.sidebar_menu_icon_vars.items():
+            icon_spec = normalize_bootstrap_icon_spec(icon_var.get())
+            if icon_spec is not None:
+                icons[page_name] = icon_spec
+        return icons
 
     def _bootstrap_sidebar_icon_image(
         self,
@@ -21521,14 +21612,17 @@ class KeywordApp(ctk.CTk):
     ) -> ctk.CTkImage | None:
         if (
             not icon_name
-            or icon_name not in BOOTSTRAP_ICON_CODEPOINTS
             or Image is None
             or ImageDraw is None
             or ImageFont is None
             or not BOOTSTRAP_ICONS_FONT_PATH.exists()
         ):
             return None
-        cache_key = (icon_name, color.lower())
+        codepoint = bootstrap_icon_codepoint(icon_name)
+        if codepoint is None:
+            return None
+        normalized_icon = normalize_bootstrap_icon_spec(icon_name) or ""
+        cache_key = (normalized_icon, color.lower())
         cached = self._sidebar_icon_image_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -21538,7 +21632,7 @@ class KeywordApp(ctk.CTk):
             if font is None:
                 font = ImageFont.truetype(str(BOOTSTRAP_ICONS_FONT_PATH), 56)
                 self._bootstrap_icon_font = font
-            glyph = chr(BOOTSTRAP_ICON_CODEPOINTS[icon_name])
+            glyph = chr(codepoint)
             icon = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
             draw = ImageDraw.Draw(icon)
             bounds = draw.textbbox((0, 0), glyph, font=font)
@@ -21603,7 +21697,29 @@ class KeywordApp(ctk.CTk):
     def _on_sidebar_menu_icon_changed(self, page_name: str, selected: str) -> None:
         if page_name not in SIDEBAR_MENU_DEFAULT_ICONS:
             return
+        if hasattr(self, "sidebar_menu_icon_vars"):
+            self.sidebar_menu_icon_vars[page_name].set(selected)
+        self._on_sidebar_menu_icon_manual_input(page_name)
+
+    def _on_sidebar_menu_icon_manual_input(self, page_name: str, event=None) -> None:
+        if page_name not in SIDEBAR_MENU_DEFAULT_ICONS:
+            return
+        if event is not None:
+            self._mark_text_input_activity(event)
+        icon_var = getattr(self, "sidebar_menu_icon_vars", {}).get(page_name)
+        raw_value = icon_var.get() if icon_var is not None else ""
+        icon_spec = normalize_bootstrap_icon_spec(raw_value)
+        if icon_spec is None:
+            if hasattr(self, "sidebar_menu_settings_status_label"):
+                self.sidebar_menu_settings_status_label.configure(
+                    text=(
+                        "아이콘 형식을 확인해 주세요. 예: bi-pencil-square · U+F4CA · \\F4CA"
+                    ),
+                    text_color="#ff6b6b",
+                )
+            return
         icons = self._current_sidebar_menu_icons()
+        icons[page_name] = icon_spec
         self.wordpress_settings.sidebar_menu_icons = icons
         self._apply_sidebar_menu_icons(icons)
         if hasattr(self, "sidebar_menu_settings_status_label"):
@@ -21654,7 +21770,7 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "sidebar_menu_icon_vars"):
             for page_name, icon_var in self.sidebar_menu_icon_vars.items():
                 icon_var.set(
-                    BOOTSTRAP_ICON_LABELS_BY_NAME[default_icons[page_name]]
+                    bootstrap_icon_input_display(default_icons[page_name])
                 )
         self.wordpress_settings.sidebar_menu_labels = defaults
         self.wordpress_settings.sidebar_menu_icons = default_icons

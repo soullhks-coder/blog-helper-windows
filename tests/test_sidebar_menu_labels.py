@@ -67,6 +67,34 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertEqual(icons["automation"], "stars")
         self.assertEqual(icons["settings"], "gear")
 
+    def test_bootstrap_icon_manual_input_accepts_classes_html_and_codepoints(self) -> None:
+        expected = "pencil-square"
+        for value in (
+            "bi-pencil-square",
+            "pencil-square",
+            '<i class="bi bi-pencil-square"></i>',
+            '<svg class="bi bi-pencil-square"></svg>',
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(main.normalize_bootstrap_icon_spec(value), expected)
+
+        for value in ("U+F4CA", r"\F4CA", r"\uF4CA", "&#xF4CA;"):
+            with self.subTest(value=value):
+                self.assertEqual(main.normalize_bootstrap_icon_spec(value), "U+F4CA")
+                self.assertEqual(main.bootstrap_icon_codepoint(value), 0xF4CA)
+
+    def test_manual_input_can_use_icons_outside_the_curated_dropdown(self) -> None:
+        self.assertTrue(main.BOOTSTRAP_ICONS_CSS_PATH.is_file())
+        self.assertGreater(len(main.bootstrap_icon_catalog()), 2_000)
+        self.assertEqual(
+            main.normalize_bootstrap_icon_spec("bi-airplane-engines"),
+            "airplane-engines",
+        )
+        self.assertEqual(
+            main.bootstrap_icon_codepoint("airplane-engines"),
+            0xF7CB,
+        )
+
     def test_custom_menu_labels_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "app_state.json"
@@ -80,7 +108,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
                 ),
                 sidebar_menu_icons=main.normalize_sidebar_menu_icons(
                     {
-                        "writing": "stars",
+                        "writing": "airplane-engines",
                         "naver_blog": "image",
                         "settings": "",
                     }
@@ -110,7 +138,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
             loaded.sidebar_menu_labels["settings"],
             "⚙️ 환경설정",
         )
-        self.assertEqual(loaded.sidebar_menu_icons["writing"], "stars")
+        self.assertEqual(loaded.sidebar_menu_icons["writing"], "airplane-engines")
         self.assertEqual(loaded.sidebar_menu_icons["naver_blog"], "image")
         self.assertEqual(loaded.sidebar_menu_icons["settings"], "")
 
@@ -156,7 +184,11 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertIn("SIDEBAR_MENU_DEFAULT_LABELS.items()", menu_source)
         self.assertIn("_on_sidebar_menu_label_changed", menu_source)
         self.assertIn("BOOTSTRAP_ICON_OPTIONS", menu_source)
+        self.assertIn("ctk.CTkComboBox", menu_source)
+        self.assertIn('"<Return>"', menu_source)
+        self.assertIn('"<FocusOut>"', menu_source)
         self.assertIn("_on_sidebar_menu_icon_changed", menu_source)
+        self.assertIn("_on_sidebar_menu_icon_manual_input", menu_source)
         self.assertIn("sidebar_menu_label", layout_source)
         self.assertIn("writing_nav_button", apply_source)
         self.assertIn("naver_blog_nav_button", apply_source)

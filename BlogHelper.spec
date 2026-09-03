@@ -10,6 +10,7 @@ datas += [
     ("version.json", "."),
     ("assets/blog_helper_icon.png", "assets"),
     ("assets/bootstrap-icons.woff", "assets"),
+    ("assets/bootstrap-icons.css", "assets"),
     ("assets/bootstrap-icons-LICENSE.txt", "assets"),
 ]
 
