@@ -135,6 +135,25 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
         )
         self.assertEqual(len({profile["profile_path"] for profile in profiles}), 3)
 
+    def test_writing_choices_show_only_registered_blogs(self) -> None:
+        choices = main.selectable_naver_blog_profiles(
+            [
+                {"name": "블로그 1", "blog_id": "mine"},
+                {"name": "블로그 2", "write_url": "https://blog.naver.com/mom"},
+                {"name": "블로그 3"},
+            ]
+        )
+
+        self.assertEqual(
+            [profile["name"] for profile in choices],
+            ["블로그 1", "블로그 2"],
+        )
+
+    def test_writing_choices_keep_all_slots_when_none_are_registered(self) -> None:
+        choices = main.selectable_naver_blog_profiles([])
+
+        self.assertEqual(len(choices), 3)
+
     def test_profile_check_starts_browser_with_clicked_blog_scope(self) -> None:
         profiles = main.normalize_naver_blog_profiles(
             [
@@ -218,12 +237,24 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
             source,
             methods["_build_naver_blog_settings_tab"],
         ) or ""
+        writing_source = ast.get_source_segment(
+            source,
+            methods["_build_naver_blog_writing_tab"],
+        ) or ""
+        writing_choices_source = ast.get_source_segment(
+            source,
+            methods["_refresh_naver_blog_writing_profile_choices"],
+        ) or ""
 
         self.assertIn("CTkRadioButton", build_source)
         self.assertIn("_set_naver_active_profile", build_source)
         self.assertIn('entry.bind(', build_source)
         self.assertIn("_on_naver_profile_field_changed", build_source)
         self.assertIn("글작성 메뉴에 즉시 반영", settings_source)
+        self.assertIn("naver_blog_writing_profile_frame", writing_source)
+        self.assertIn("작성할 블로그", writing_choices_source)
+        self.assertIn("CTkRadioButton", writing_choices_source)
+        self.assertIn("_set_naver_active_profile", writing_choices_source)
 
 
 if __name__ == "__main__":

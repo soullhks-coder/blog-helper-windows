@@ -7152,6 +7152,18 @@ def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
     return normalized_profiles
 
 
+def selectable_naver_blog_profiles(profiles: object) -> list[dict]:
+    """Prefer configured NBlog slots, while keeping setup possible when all are empty."""
+    normalized_profiles = normalize_naver_blog_profiles(profiles)
+    registered_profiles = [
+        profile
+        for profile in normalized_profiles
+        if str(profile.get("blog_id") or "").strip()
+        or str(profile.get("write_url") or "").strip()
+    ]
+    return registered_profiles or normalized_profiles
+
+
 def naver_webmaster_profile_scope(source_label: object) -> str:
     label = re.sub(r"\s+", "", str(source_label or ""))
     if label == "블로그자동화":
@@ -22354,12 +22366,29 @@ class KeywordApp(ctk.CTk):
         self._update_naver_blog_reference_count()
 
         url_panel = self._naver_panel(parent, "URL 글쓰기 (설정)", 1)
-        ctk.CTkLabel(url_panel, text="글쓰기 URL", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
+        active_profile = self.wordpress_settings.naver_blog_active_profile or "블로그 1"
+        if not hasattr(self, "naver_blog_active_profile_var"):
+            self.naver_blog_active_profile_var = tk.StringVar(value=active_profile)
+        self.naver_blog_writing_profile_frame = ctk.CTkFrame(
+            url_panel,
+            fg_color="transparent",
+        )
+        self.naver_blog_writing_profile_frame.grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 8),
+            sticky="ew",
+        )
+        self._refresh_naver_blog_writing_profile_choices()
+
+        ctk.CTkLabel(url_panel, text="글쓰기 URL", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
         self.naver_blog_write_url_entry = ctk.CTkEntry(url_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
-        self.naver_blog_write_url_entry.grid(row=1, column=1, columnspan=2, padx=(0, 10), pady=8, sticky="ew")
+        self.naver_blog_write_url_entry.grid(row=2, column=1, columnspan=2, padx=(0, 10), pady=8, sticky="ew")
         self.naver_blog_write_url_entry.insert(0, self.wordpress_settings.naver_blog_write_url)
-        ctk.CTkButton(url_panel, text="저장하기", width=96, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._save_naver_blog_settings).grid(row=1, column=3, padx=(0, 18), pady=8)
-        ctk.CTkLabel(url_panel, text="글 주제", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
+        ctk.CTkButton(url_panel, text="저장하기", width=96, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._save_naver_blog_settings).grid(row=2, column=3, padx=(0, 18), pady=8)
+        ctk.CTkLabel(url_panel, text="글 주제", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, padx=18, pady=8, sticky="w")
         self.naver_blog_publish_name_entry = ctk.CTkEntry(
             url_panel,
             height=36,
@@ -22368,7 +22397,7 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             placeholder_text="예: 이번 주 연예 이슈 정리",
         )
-        self.naver_blog_publish_name_entry.grid(row=2, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
+        self.naver_blog_publish_name_entry.grid(row=3, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
         self.naver_blog_publish_name_entry.insert(0, self.wordpress_settings.naver_blog_publish_name)
 
         image_panel = self._naver_panel(parent, "이미지 첨부", 2)
@@ -22798,6 +22827,58 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.naver_blog_profiles
         )
 
+    def _refresh_naver_blog_writing_profile_choices(self) -> None:
+        if not hasattr(self, "naver_blog_writing_profile_frame"):
+            return
+        frame = self.naver_blog_writing_profile_frame
+        for child in frame.winfo_children():
+            child.destroy()
+
+        profiles = (
+            self._current_naver_blog_profiles()
+            if hasattr(self, "naver_blog_profile_vars")
+            else self._naver_blog_profiles_from_state()
+        )
+        choices = selectable_naver_blog_profiles(profiles)
+        if not choices:
+            return
+
+        active_name = str(
+            self.naver_blog_active_profile_var.get()
+            if hasattr(self, "naver_blog_active_profile_var")
+            else self.wordpress_settings.naver_blog_active_profile
+        )
+        choice_names = [str(profile.get("name") or "") for profile in choices]
+        if active_name not in choice_names:
+            active_name = choice_names[0]
+            self.wordpress_settings.naver_blog_active_profile = active_name
+            self.naver_blog_active_profile_var.set(active_name)
+            self._sync_naver_blog_write_url_from_profile(active_name, persist=False)
+
+        ctk.CTkLabel(
+            frame,
+            text="작성할 블로그",
+            text_color=self._theme_palette()["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 16), sticky="w")
+        for column, profile in enumerate(choices, start=1):
+            name = str(profile.get("name") or f"블로그 {column}")
+            detail = str(profile.get("nickname") or profile.get("blog_id") or "미등록")
+            frame.grid_columnconfigure(column, weight=1, uniform="writing_profiles")
+            ctk.CTkRadioButton(
+                frame,
+                text=f"{name} · {detail}",
+                variable=self.naver_blog_active_profile_var,
+                value=name,
+                command=lambda value=name: self._set_naver_active_profile(value),
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).grid(
+                row=0,
+                column=column,
+                padx=(0, 12),
+                sticky="w",
+            )
+
     def _refresh_naver_profile_cards(self) -> None:
         if not hasattr(self, "naver_profile_cards_frame"):
             return
@@ -22805,7 +22886,10 @@ class KeywordApp(ctk.CTk):
             child.destroy()
         self.naver_blog_profile_vars = {}
         active_profile = self.wordpress_settings.naver_blog_active_profile or "블로그 1"
-        self.naver_blog_active_profile_var = tk.StringVar(value=active_profile)
+        if hasattr(self, "naver_blog_active_profile_var"):
+            self.naver_blog_active_profile_var.set(active_profile)
+        else:
+            self.naver_blog_active_profile_var = tk.StringVar(value=active_profile)
         profiles = self._naver_blog_profiles_from_state()
         for index, profile in enumerate(profiles):
             name = str(profile.get("name") or f"블로그 {index + 1}")
@@ -22858,6 +22942,7 @@ class KeywordApp(ctk.CTk):
             ).grid(row=0, column=1, padx=(0, 6), sticky="ew")
             ctk.CTkButton(button_row, text="초기화", height=32, fg_color="#596579", command=lambda idx=index: self._reset_naver_profile(idx)).grid(row=0, column=2, sticky="ew")
         self._sync_naver_blog_write_url_from_profile(active_profile, persist=False)
+        self._refresh_naver_blog_writing_profile_choices()
         self._finish_theme_paint()
 
     def _set_naver_active_profile(self, profile_name: str) -> None:
@@ -22920,6 +23005,7 @@ class KeywordApp(ctk.CTk):
 
     def _on_naver_profile_field_changed(self, profile_name: str) -> None:
         self.wordpress_settings.naver_blog_profiles = self._current_naver_blog_profiles()
+        self._refresh_naver_blog_writing_profile_choices()
         active_name = (
             self.naver_blog_active_profile_var.get()
             if hasattr(self, "naver_blog_active_profile_var")
@@ -23650,6 +23736,8 @@ class KeywordApp(ctk.CTk):
                 if hasattr(self, "naver_blog_write_url_entry"):
                     self.naver_blog_write_url_entry.delete(0, "end")
                     self.naver_blog_write_url_entry.insert(0, write_url)
+            if hasattr(self, "naver_blog_writing_profile_frame"):
+                self._refresh_naver_blog_writing_profile_choices()
             AppStateStore.save(self.wordpress_settings, save_secrets=False)
             nickname_text = f" 닉네임 '{nickname}'도 저장했습니다." if nickname else " 닉네임은 자동 추출하지 못해 기존 값을 유지했습니다."
             message = (
