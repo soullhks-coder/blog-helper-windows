@@ -3,6 +3,7 @@ import queue
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -31,6 +32,53 @@ class DailyPublishLimitTests(unittest.TestCase):
         self.assertEqual(main.normalize_daily_publish_limit("15"), 15)
         self.assertEqual(main.normalize_daily_publish_limit(-3), 0)
         self.assertEqual(main.normalize_daily_publish_limit(5000), 999)
+
+    def test_completion_usage_text_includes_count_limit_and_remaining(self) -> None:
+        self.assertEqual(
+            main.format_daily_publish_usage(1, 30),
+            "오늘 1/30개 발행 · 남은 수량 29개",
+        )
+        self.assertEqual(
+            main.format_daily_publish_usage(4, 0),
+            "오늘 4개 발행 · 제한 없음",
+        )
+
+    def test_completion_usage_rows_are_split_by_wordpress_and_tistory(self) -> None:
+        app = SimpleNamespace(
+            writing_completion_platforms=["wordpress", "tistory"],
+            wordpress_settings=main.WordPressSettings(
+                target_platforms=["wordpress", "tistory"],
+                wordpress_daily_publish_limit=30,
+                tistory_daily_publish_limit=15,
+            ),
+            _daily_publish_account=lambda platform: f"{platform}-account",
+        )
+
+        with patch.object(
+            main.DailyPublishLimitStore,
+            "count",
+            side_effect=lambda platform, _account: {
+                "wordpress": 1,
+                "tistory": 4,
+            }[platform],
+        ):
+            rows = main.KeywordApp._writing_completion_daily_publish_usage_rows(app)
+
+        self.assertEqual(
+            rows,
+            [
+                ("워드프레스", "오늘 1/30개 발행 · 남은 수량 29개", 29),
+                ("티스토리", "오늘 4/15개 발행 · 남은 수량 11개", 11),
+            ],
+        )
+
+    def test_completion_dialog_renders_daily_usage_rows(self) -> None:
+        source = self._method_source("_show_writing_complete_dialog")
+
+        self.assertIn("_writing_completion_daily_publish_usage_rows", source)
+        self.assertIn("오늘 공개 발행 현황", source)
+        self.assertIn("platform_label", source)
+        self.assertIn("usage_text", source)
 
     def test_counts_are_separated_by_tistory_account_and_limit_is_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

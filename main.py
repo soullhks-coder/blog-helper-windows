@@ -2140,6 +2140,21 @@ def normalize_daily_publish_limit(value: object) -> int:
     return max(0, min(parsed, 999))
 
 
+def format_daily_publish_usage(count: object, limit: object) -> str:
+    try:
+        normalized_count = max(0, int(count))
+    except (TypeError, ValueError):
+        normalized_count = 0
+    normalized_limit = normalize_daily_publish_limit(limit)
+    if normalized_limit:
+        remaining = max(0, normalized_limit - normalized_count)
+        return (
+            f"오늘 {normalized_count}/{normalized_limit}개 발행"
+            f" · 남은 수량 {remaining}개"
+        )
+    return f"오늘 {normalized_count}개 발행 · 제한 없음"
+
+
 class DailyPublishLimitStore:
     """Track successful public posts per local day and per blog account."""
 
@@ -18416,6 +18431,7 @@ class KeywordApp(ctk.CTk):
         self.generated_article_html = ""
         self.last_published_url = ""
         self.last_published_urls: dict[str, str] = {}
+        self.writing_completion_platforms: list[str] = []
         self.automation_queue = list(self.wordpress_settings.automation_queue or [])
         self.password_visible = False
         self.current_page = "writing"
@@ -18807,11 +18823,12 @@ class KeywordApp(ctk.CTk):
                 pass
             return
 
+        daily_usage_rows = self._writing_completion_daily_publish_usage_rows()
         palette = self._theme_palette()
         dialog = ctk.CTkToplevel(self)
         self.writing_complete_dialog = dialog
         dialog.title("글작성 완료")
-        dialog.geometry("540x300")
+        dialog.geometry(f"600x{350 + (len(daily_usage_rows) * 34)}")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.configure(fg_color=palette["shell"])
@@ -18839,6 +18856,58 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             font=ctk.CTkFont(size=24, weight="bold"),
         ).pack(padx=24, pady=(0, 8))
+
+        if daily_usage_rows:
+            usage_frame = ctk.CTkFrame(
+                card,
+                corner_radius=14,
+                fg_color=palette["input"],
+                border_width=1,
+                border_color=palette["border"],
+            )
+            usage_frame.pack(fill="x", padx=28, pady=(2, 12))
+            usage_frame.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                usage_frame,
+                text="오늘 공개 발행 현황",
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(
+                row=0,
+                column=0,
+                columnspan=2,
+                padx=16,
+                pady=(11, 5),
+                sticky="w",
+            )
+            for row, (platform_label, usage_text, remaining) in enumerate(
+                daily_usage_rows,
+                start=1,
+            ):
+                ctk.CTkLabel(
+                    usage_frame,
+                    text=platform_label,
+                    text_color=palette["text"],
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                ).grid(
+                    row=row,
+                    column=0,
+                    padx=(16, 14),
+                    pady=(0, 9),
+                    sticky="w",
+                )
+                ctk.CTkLabel(
+                    usage_frame,
+                    text=usage_text,
+                    text_color="#ffb86b" if remaining == 0 else palette["accent"],
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                ).grid(
+                    row=row,
+                    column=1,
+                    padx=(0, 16),
+                    pady=(0, 9),
+                    sticky="e",
+                )
         ctk.CTkLabel(
             card,
             text="확인을 누르면 작성 단계를 처음부터 다시 시작할 수 있습니다.",
@@ -18900,7 +18969,53 @@ class KeywordApp(ctk.CTk):
             dialog.destroy()
         self._clear_festival_writing_context()
         self._clear_welfare_writing_context()
+        self.writing_completion_platforms = []
         self._reset_writing_accordion_state()
+
+    def _writing_completion_daily_publish_usage_rows(
+        self,
+    ) -> list[tuple[str, str, int | None]]:
+        platforms = list(getattr(self, "writing_completion_platforms", []) or [])
+        if not platforms:
+            platforms = list(
+                getattr(self.wordpress_settings, "target_platforms", [])
+                or []
+            )
+        configurations = {
+            "wordpress": (
+                "워드프레스",
+                self.wordpress_settings.wordpress_daily_publish_limit,
+            ),
+            "tistory": (
+                "티스토리",
+                self.wordpress_settings.tistory_daily_publish_limit,
+            ),
+        }
+        rows: list[tuple[str, str, int | None]] = []
+        seen: set[str] = set()
+        for platform in platforms:
+            if platform in seen or platform not in configurations:
+                continue
+            seen.add(platform)
+            platform_label, limit = configurations[platform]
+            count = DailyPublishLimitStore.count(
+                platform,
+                self._daily_publish_account(platform),
+            )
+            normalized_limit = normalize_daily_publish_limit(limit)
+            remaining = (
+                max(0, normalized_limit - count)
+                if normalized_limit
+                else None
+            )
+            rows.append(
+                (
+                    platform_label,
+                    format_daily_publish_usage(count, normalized_limit),
+                    remaining,
+                )
+            )
+        return rows
 
     def _show_reference_collection_complete_dialog(self, keyword: str, count: int) -> None:
         if self.reference_collection_dialog and self.reference_collection_dialog.winfo_exists():
@@ -27544,12 +27659,12 @@ class KeywordApp(ctk.CTk):
             if limit:
                 remaining = max(0, limit - count)
                 label.configure(
-                    text=f"오늘 {count}/{limit}개 발행 · 남은 수량 {remaining}개",
+                    text=format_daily_publish_usage(count, limit),
                     text_color="#ffb86b" if remaining == 0 else ("#315f93", "#6dadff"),
                 )
             else:
                 label.configure(
-                    text=f"오늘 {count}개 발행 · 제한 없음",
+                    text=format_daily_publish_usage(count, limit),
                     text_color=("#607089", "#9aa7bb"),
                 )
 
@@ -35745,6 +35860,11 @@ class KeywordApp(ctk.CTk):
         self.publish_status_label.configure(text="업로드 작업을 시작했습니다. 잠시만 기다려 주세요.", text_color="#6dadff")
         self.last_published_url = ""
         self.last_published_urls = {}
+        self.writing_completion_platforms = [
+            platform
+            for platform in settings.target_platforms
+            if platform in {"wordpress", "tistory"}
+        ]
         if hasattr(self, "open_published_post_button"):
             self.open_published_post_button.configure(state="disabled")
         self.publish_progress_bar.configure(mode="indeterminate")
@@ -35826,6 +35946,7 @@ class KeywordApp(ctk.CTk):
         self._set_writing_progress(4, "티스토리 전용 Chrome에서 글 자동입력을 준비하고 있습니다.", 0.08)
         self.last_published_url = ""
         self.last_published_urls = {}
+        self.writing_completion_platforms = ["tistory"]
         if hasattr(self, "open_published_post_button"):
             self.open_published_post_button.configure(state="disabled")
         self.tistory_automation_worker = TistoryAutomationWorker(
