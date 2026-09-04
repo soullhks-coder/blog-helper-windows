@@ -125,5 +125,65 @@ class WritingUiRegressionTests(unittest.TestCase):
         self.assertIn("self._automation_publish_interval_minutes()) * 60", interval_source)
 
 
+class AiSettingsUiRegressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = MAIN_PATH.read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.source)
+        cls.methods = {
+            node.name: node
+            for node in ast.walk(cls.tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    def _method_source(self, method_name: str) -> str:
+        return ast.get_source_segment(self.source, self.methods[method_name]) or ""
+
+    def test_ai_settings_use_one_theme_aware_card_system(self) -> None:
+        build_source = self._method_source("_build_settings_page")
+        style_source = self._method_source("_style_ai_settings_cards")
+
+        self.assertIn('palette = self._theme_palette()', build_source)
+        self.assertIn('text="AI 서비스 연결"', build_source)
+        self.assertIn('fg_color=palette["panel"]', build_source)
+        self.assertIn('border_color=palette["border"]', build_source)
+        self.assertIn("self._style_ai_settings_cards()", build_source)
+        self.assertNotIn("settings_active_line", build_source)
+        self.assertIn("ctk.CTkEntry", style_source)
+        self.assertIn("ctk.CTkOptionMenu", style_source)
+        self.assertIn("ctk.CTkTextbox", style_source)
+        self.assertIn('fg_color=palette["input"]', style_source)
+
+    def test_ai_platform_tabs_keep_all_existing_destinations_and_callbacks(self) -> None:
+        build_source = self._method_source("_build_settings_page")
+        switch_source = self._method_source("_switch_settings_tab")
+        expected_tabs = (
+            "wordpress",
+            "tistory",
+            "blogspot",
+            "threads",
+            "gpt",
+            "gemini",
+            "imagen",
+            "codex",
+        )
+
+        for tab_name in expected_tabs:
+            self.assertIn(f'self._switch_settings_tab("{tab_name}")', build_source)
+            self.assertIn(f'"{tab_name}":', switch_source)
+        self.assertIn("card_map[tab_name].tkraise()", switch_source)
+        self.assertIn("button.configure(", switch_source)
+        self.assertIn('border_color=palette["accent"] if selected', switch_source)
+
+    def test_ai_settings_content_uses_the_flexible_row(self) -> None:
+        layout_source = self._method_source("_build_layout")
+        section_source = self._method_source("_switch_settings_section")
+
+        self.assertIn("self.settings_page.grid_rowconfigure(2, weight=1)", layout_source)
+        self.assertIn("self.settings_scroll.grid(row=2", section_source)
+        self.assertIn("self.basic_scroll.grid(row=2", section_source)
+        self.assertIn("self.theme_scroll.grid(row=2", section_source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20164,7 +20164,7 @@ class KeywordApp(ctk.CTk):
         self.settings_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
         self.settings_page.grid(row=0, column=0, sticky="nsew")
         self.settings_page.grid_columnconfigure(0, weight=1)
-        self.settings_page.grid_rowconfigure(3, weight=1)
+        self.settings_page.grid_rowconfigure(2, weight=1)
 
         self._build_settings_page()
 
@@ -20208,8 +20208,15 @@ class KeywordApp(ctk.CTk):
 
     def _build_settings_page(self) -> None:
         self.settings_section = "ai"
-        section_header = ctk.CTkFrame(self.settings_page, fg_color="transparent")
-        section_header.grid(row=0, column=0, padx=28, pady=(22, 4), sticky="ew")
+        palette = self._theme_palette()
+        section_header = ctk.CTkFrame(
+            self.settings_page,
+            fg_color=palette["panel"],
+            corner_radius=18,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        section_header.grid(row=0, column=0, padx=28, pady=(22, 8), sticky="ew")
         section_header.grid_columnconfigure(0, weight=1, uniform="settings_sections")
         section_header.grid_columnconfigure(1, weight=1, uniform="settings_sections")
         section_header.grid_columnconfigure(2, weight=1, uniform="settings_sections")
@@ -20217,201 +20224,222 @@ class KeywordApp(ctk.CTk):
         self.settings_basic_section_button = ctk.CTkButton(
             section_header,
             text="기본설정",
-            height=40,
-            corner_radius=14,
+            height=42,
+            corner_radius=13,
             fg_color="transparent",
-            hover_color="#111826",
-            text_color="#9aa7bb",
+            hover_color=palette["hover"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=16, weight="bold"),
             command=lambda: self._switch_settings_section("basic"),
         )
-        self.settings_basic_section_button.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.settings_basic_section_button.grid(row=0, column=0, padx=(6, 4), pady=6, sticky="ew")
 
         self.settings_theme_section_button = ctk.CTkButton(
             section_header,
             text="테마",
-            height=40,
-            corner_radius=14,
+            height=42,
+            corner_radius=13,
             fg_color="transparent",
-            hover_color="#111826",
-            text_color="#9aa7bb",
+            hover_color=palette["hover"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=16, weight="bold"),
             command=lambda: self._switch_settings_section("theme"),
         )
-        self.settings_theme_section_button.grid(row=0, column=1, padx=8, sticky="ew")
+        self.settings_theme_section_button.grid(row=0, column=1, padx=4, pady=6, sticky="ew")
 
         self.settings_ai_section_button = ctk.CTkButton(
             section_header,
             text="AI",
-            height=40,
-            corner_radius=14,
-            fg_color="#0f1724",
-            hover_color="#111826",
-            text_color="#6dadff",
+            height=42,
+            corner_radius=13,
+            fg_color=palette["selected"],
+            hover_color=palette["hover"],
+            text_color=palette["accent"],
             font=ctk.CTkFont(size=16, weight="bold"),
             command=lambda: self._switch_settings_section("ai"),
         )
-        self.settings_ai_section_button.grid(row=0, column=2, padx=(8, 0), sticky="ew")
+        self.settings_ai_section_button.grid(row=0, column=2, padx=(4, 6), pady=6, sticky="ew")
 
-        header = ctk.CTkFrame(self.settings_page, fg_color="transparent")
+        header = ctk.CTkFrame(
+            self.settings_page,
+            fg_color=palette["panel"],
+            corner_radius=22,
+            border_width=1,
+            border_color=palette["border"],
+        )
         header.grid(row=1, column=0, padx=28, pady=(8, 10), sticky="ew")
         for column in range(4):
             header.grid_columnconfigure(column, weight=1, uniform="settings_tabs")
         self.settings_ai_tabs_header = header
 
+        ctk.CTkLabel(
+            header,
+            text="AI 서비스 연결",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=17, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, padx=(16, 8), pady=(13, 7), sticky="w")
+        ctk.CTkLabel(
+            header,
+            text="발행 채널 · 생성 모델 · 소셜 연동",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=2, columnspan=2, padx=(8, 16), pady=(13, 7), sticky="e")
+
         self.wp_top_tab = ctk.CTkButton(
             header,
-            text="◉ 워드프레스",
+            text="● 워드프레스",
             width=0,
-            height=42,
-            corner_radius=0,
-            fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#6dadff",
+            height=40,
+            corner_radius=12,
+            fg_color=palette["selected"],
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["accent"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("wordpress"),
         )
-        self.wp_top_tab.grid(row=0, column=0, padx=4, sticky="ew")
+        self.wp_top_tab.grid(row=1, column=0, padx=(14, 5), pady=5, sticky="ew")
 
         self.tistory_top_tab = ctk.CTkButton(
             header,
-            text="◻ 티스토리",
+            text="○ 티스토리",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("tistory"),
         )
-        self.tistory_top_tab.grid(row=0, column=1, padx=4, sticky="ew")
+        self.tistory_top_tab.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
         self.blogspot_top_tab = ctk.CTkButton(
             header,
-            text="◻ 블로그스팟",
+            text="○ 블로그스팟",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("blogspot"),
         )
-        self.blogspot_top_tab.grid(row=0, column=2, padx=4, sticky="ew")
+        self.blogspot_top_tab.grid(row=1, column=2, padx=5, pady=5, sticky="ew")
 
         self.gpt_top_tab = ctk.CTkButton(
             header,
-            text="◻ GPT API",
+            text="○ GPT API",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("gpt"),
         )
-        self.gpt_top_tab.grid(row=1, column=0, padx=4, sticky="ew")
+        self.gpt_top_tab.grid(row=2, column=0, padx=(14, 5), pady=(5, 14), sticky="ew")
 
         self.gemini_top_tab = ctk.CTkButton(
             header,
-            text="◻ 제미나이 API",
+            text="○ 제미나이 API",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("gemini"),
         )
-        self.gemini_top_tab.grid(row=1, column=1, padx=4, sticky="ew")
+        self.gemini_top_tab.grid(row=2, column=1, padx=5, pady=(5, 14), sticky="ew")
 
         self.imagen_top_tab = ctk.CTkButton(
             header,
-            text="◻ Imagen API",
+            text="○ Imagen API",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("imagen"),
         )
-        self.imagen_top_tab.grid(row=1, column=2, padx=4, sticky="ew")
+        self.imagen_top_tab.grid(row=2, column=2, padx=5, pady=(5, 14), sticky="ew")
 
         self.codex_top_tab = ctk.CTkButton(
             header,
-            text="◻ Codex CLI",
+            text="○ Codex CLI",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("codex"),
         )
-        self.codex_top_tab.grid(row=1, column=3, padx=4, sticky="ew")
+        self.codex_top_tab.grid(row=2, column=3, padx=(5, 14), pady=(5, 14), sticky="ew")
 
         self.threads_top_tab = ctk.CTkButton(
             header,
-            text="◻ Threads",
+            text="○ Threads",
             width=0,
-            height=42,
-            corner_radius=0,
+            height=40,
+            corner_radius=12,
             fg_color="transparent",
-            hover=False,
-            border_width=0,
-            text_color="#a1a9b7",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._switch_settings_tab("threads"),
         )
-        self.threads_top_tab.grid(row=0, column=3, padx=4, sticky="ew")
-
-        self.settings_ai_track = ctk.CTkFrame(self.settings_page, fg_color="#1f2a39", height=2, corner_radius=0)
-        self.settings_ai_track.grid(row=2, column=0, padx=28, sticky="ew")
-
-        self.settings_active_line = ctk.CTkFrame(self.settings_page, fg_color="#6dadff", height=3, width=300, corner_radius=0)
-        self.settings_active_line.place(x=250, y=162)
+        self.threads_top_tab.grid(row=1, column=3, padx=(5, 14), pady=5, sticky="ew")
 
         self.settings_scroll = ctk.CTkScrollableFrame(self.settings_page, fg_color="transparent")
-        self.settings_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
+        self.settings_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
         self.settings_scroll.grid_columnconfigure(0, weight=1)
 
         self.basic_scroll = ctk.CTkScrollableFrame(self.settings_page, fg_color="transparent")
-        self.basic_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
+        self.basic_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
         self.basic_scroll.grid_columnconfigure(0, weight=4)
         self.basic_scroll.grid_columnconfigure(1, weight=2)
         self._build_basic_settings_card()
 
         self.theme_scroll = ctk.CTkScrollableFrame(self.settings_page, fg_color="transparent")
-        self.theme_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
+        self.theme_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
         self.theme_scroll.grid_columnconfigure(0, weight=1)
         self._build_theme_settings_card()
 
         content = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         content.grid(row=0, column=0, sticky="ew")
-        content.grid_columnconfigure(0, weight=4)
-        content.grid_columnconfigure(1, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_columnconfigure(1, weight=0, minsize=238)
         content.grid_rowconfigure(0, weight=1)
 
         self.wp_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.wp_card.grid(row=0, column=0, sticky="nsew")
         self.wp_card.grid_columnconfigure(0, weight=1)
@@ -20419,10 +20447,10 @@ class KeywordApp(ctk.CTk):
 
         self.tistory_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.tistory_card.grid(row=0, column=0, sticky="nsew")
         self.tistory_card.grid_columnconfigure(0, weight=1)
@@ -20430,10 +20458,10 @@ class KeywordApp(ctk.CTk):
 
         self.gpt_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.gpt_card.grid(row=0, column=0, sticky="nsew")
         self.gpt_card.grid_columnconfigure(0, weight=1)
@@ -20441,10 +20469,10 @@ class KeywordApp(ctk.CTk):
 
         self.gemini_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.gemini_card.grid(row=0, column=0, sticky="nsew")
         self.gemini_card.grid_columnconfigure(0, weight=1)
@@ -20452,10 +20480,10 @@ class KeywordApp(ctk.CTk):
 
         self.imagen_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.imagen_card.grid(row=0, column=0, sticky="nsew")
         self.imagen_card.grid_columnconfigure(0, weight=1)
@@ -20463,10 +20491,10 @@ class KeywordApp(ctk.CTk):
 
         self.codex_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.codex_card.grid(row=0, column=0, sticky="nsew")
         self.codex_card.grid_columnconfigure(0, weight=1)
@@ -20474,10 +20502,10 @@ class KeywordApp(ctk.CTk):
 
         self.blogspot_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.blogspot_card.grid(row=0, column=0, sticky="nsew")
         self.blogspot_card.grid_columnconfigure(0, weight=1)
@@ -20485,68 +20513,203 @@ class KeywordApp(ctk.CTk):
 
         self.threads_card = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.threads_card.grid(row=0, column=0, sticky="nsew")
         self.threads_card.grid_columnconfigure(0, weight=1)
         self._build_threads_card()
 
-        status_panel = ctk.CTkFrame(
+        self.settings_status_panel = ctk.CTkFrame(
             content,
-            fg_color="#222c3b",
-            corner_radius=28,
+            fg_color=palette["panel"],
+            corner_radius=24,
             border_width=1,
-            border_color="#334760",
-            width=220,
+            border_color=palette["border"],
+            width=238,
         )
+        status_panel = self.settings_status_panel
         status_panel.grid(row=0, column=1, padx=(16, 0), sticky="nsew")
         status_panel.grid_columnconfigure(0, weight=1)
 
         panel_title = ctk.CTkLabel(
             status_panel,
-            text="저장 상태",
-            font=ctk.CTkFont(size=22, weight="bold"),
+            text="현재 선택",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        panel_title.grid(row=0, column=0, padx=20, pady=(24, 12), sticky="w")
+        panel_title.grid(row=0, column=0, padx=20, pady=(22, 8), sticky="w")
+
+        self.settings_quick_status_card = ctk.CTkFrame(
+            status_panel,
+            fg_color=palette["selected"],
+            corner_radius=16,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        self.settings_quick_status_card.grid(row=1, column=0, padx=14, pady=(0, 16), sticky="ew")
+        self.settings_quick_status_card.grid_columnconfigure(0, weight=1)
 
         self.quick_status_label = ctk.CTkLabel(
-            status_panel,
+            self.settings_quick_status_card,
             text="워드프레스 연결 전",
             justify="left",
             anchor="w",
             wraplength=180,
-            text_color="#9aa7bb",
-            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.quick_status_label.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
+        self.quick_status_label.grid(row=0, column=0, padx=14, pady=(14, 7), sticky="ew")
 
         self.quick_status_detail = ctk.CTkLabel(
-            status_panel,
+            self.settings_quick_status_card,
             text="입력값은 클라이언트에 저장됩니다.",
             justify="left",
             anchor="w",
             wraplength=180,
-            text_color="#c3cfdf",
-            font=ctk.CTkFont(size=14),
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=13),
         )
-        self.quick_status_detail.grid(row=2, column=0, padx=20, pady=(0, 14), sticky="ew")
+        self.quick_status_detail.grid(row=1, column=0, padx=14, pady=(0, 14), sticky="ew")
+
+        ctk.CTkLabel(
+            status_panel,
+            text="로컬 저장 항목",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=2, column=0, padx=20, pady=(0, 9), sticky="w")
 
         save_info = ctk.CTkLabel(
             status_panel,
-            text="저장 항목\n• 워드프레스 연결\n• 티스토리 글쓰기 URL\n• 블로그스팟 정보\n• Threads OAuth\n• 포스팅 방식\n• GPT/Gemini/Imagen API",
+            text="• 워드프레스 연결\n• 티스토리 글쓰기 URL\n• 블로그스팟 정보\n• Threads OAuth\n• 포스팅 방식\n• GPT/Gemini/Imagen API",
             justify="left",
             anchor="nw",
             wraplength=180,
-            text_color="#d8e0ea",
-            font=ctk.CTkFont(size=14),
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=13),
         )
         save_info.grid(row=3, column=0, padx=20, pady=(0, 20), sticky="nw")
 
+        self._style_ai_settings_cards()
+
         self._switch_settings_tab("wordpress")
         self._switch_settings_section("ai")
+
+    def _style_ai_settings_cards(self) -> None:
+        """Apply one calm, theme-aware visual system without replacing functional widgets."""
+        palette = self._theme_palette()
+        cards = (
+            self.wp_card,
+            self.tistory_card,
+            self.blogspot_card,
+            self.gpt_card,
+            self.gemini_card,
+            self.imagen_card,
+            self.codex_card,
+            self.threads_card,
+        )
+        inset_colors = {
+            "#111826",
+            "#111b2b",
+            "#e8eff9",
+            "#0c1525",
+            "#263247",
+        }
+        neutral_button_colors = {
+            "#314761",
+            "#3b4658",
+            "#4d5a70",
+            "#596579",
+            "#d7e3f4",
+        }
+
+        def style_tree(widget) -> None:
+            for child in widget.winfo_children():
+                try:
+                    if isinstance(child, ctk.CTkScrollableFrame):
+                        child.configure(
+                            fg_color=palette["selected"],
+                            border_width=1,
+                            border_color=palette["border"],
+                            corner_radius=16,
+                        )
+                        self._paint_scrollable_background(child, palette["selected"])
+                    elif isinstance(child, ctk.CTkFrame):
+                        foreground = child.cget("fg_color")
+                        if self._color_matches(foreground, inset_colors):
+                            child.configure(
+                                fg_color=palette["selected"],
+                                border_width=1,
+                                border_color=palette["border"],
+                                corner_radius=16,
+                            )
+                    elif isinstance(child, ctk.CTkEntry):
+                        child.configure(
+                            fg_color=palette["input"],
+                            border_width=1,
+                            border_color=palette["border"],
+                            text_color=palette["text"],
+                            placeholder_text_color=palette["muted"],
+                            corner_radius=14,
+                        )
+                    elif isinstance(child, ctk.CTkTextbox):
+                        child.configure(
+                            fg_color=palette["input"],
+                            border_width=1,
+                            border_color=palette["border"],
+                            text_color=palette["text"],
+                            corner_radius=14,
+                        )
+                    elif isinstance(child, ctk.CTkOptionMenu):
+                        child.configure(
+                            fg_color=palette["input"],
+                            button_color=palette["button"],
+                            button_hover_color=palette["button_hover"],
+                            dropdown_fg_color=palette["panel"],
+                            dropdown_hover_color=palette["selected"],
+                            text_color=palette["text"],
+                            corner_radius=14,
+                        )
+                    elif isinstance(child, ctk.CTkComboBox):
+                        child.configure(
+                            fg_color=palette["input"],
+                            border_color=palette["border"],
+                            button_color=palette["button"],
+                            button_hover_color=palette["button_hover"],
+                            dropdown_fg_color=palette["panel"],
+                            dropdown_hover_color=palette["selected"],
+                            text_color=palette["text"],
+                            corner_radius=14,
+                        )
+                    elif isinstance(child, ctk.CTkButton):
+                        if self._color_matches(child.cget("fg_color"), neutral_button_colors):
+                            child.configure(
+                                fg_color=palette["button"],
+                                hover_color=palette["button_hover"],
+                                text_color=palette["text"],
+                            )
+                        child.configure(corner_radius=14)
+                    elif isinstance(child, ctk.CTkLabel):
+                        text = str(child.cget("text") or "")
+                        if child.master in cards and text.startswith("◉ "):
+                            child.configure(
+                                text=text.removeprefix("◉ "),
+                                text_color=palette["text"],
+                                font=ctk.CTkFont(size=25, weight="bold"),
+                            )
+                except (tk.TclError, ValueError):
+                    pass
+                style_tree(child)
+
+        for card in cards:
+            card.configure(
+                fg_color=palette["panel"],
+                border_color=palette["border"],
+                corner_radius=24,
+            )
+            style_tree(card)
 
     def _build_basic_settings_card(self) -> None:
         card = ctk.CTkFrame(
@@ -33317,22 +33480,18 @@ class KeywordApp(ctk.CTk):
         self.settings_scroll.grid_remove()
         if self.settings_section in {"basic", "theme"}:
             self.settings_ai_tabs_header.grid_remove()
-            self.settings_ai_track.grid_remove()
-            self.settings_active_line.place_forget()
         else:
             self.settings_ai_tabs_header.grid()
-            self.settings_ai_track.grid()
-            self.settings_active_line.place(x=250, y=162)
 
         if self.settings_section == "basic":
-            self.basic_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
+            self.basic_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
             self._update_quick_status("기본설정", "프로그램 공통 설정을 저장합니다.", palette["accent"])
             self._load_version_catalog()
         elif self.settings_section == "theme":
-            self.theme_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
+            self.theme_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
             self._update_quick_status("테마 설정", "블랙/화이트 테마를 선택하고 자동 저장합니다.", palette["accent"])
         else:
-            self.settings_scroll.grid(row=3, column=0, padx=28, pady=(20, 26), sticky="nsew")
+            self.settings_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
         self._finish_theme_paint()
 
     def _switch_settings_tab(self, tab_name: str) -> None:
@@ -33351,31 +33510,42 @@ class KeywordApp(ctk.CTk):
         if tab_name in card_map:
             card_map[tab_name].tkraise()
 
-        self.wp_top_tab.configure(text_color=palette["accent"] if tab_name == "wordpress" else palette["muted"])
-        self.tistory_top_tab.configure(text_color=palette["accent"] if tab_name == "tistory" else palette["muted"])
-        self.gpt_top_tab.configure(text_color=palette["accent"] if tab_name == "gpt" else palette["muted"])
-        self.gemini_top_tab.configure(text_color=palette["accent"] if tab_name == "gemini" else palette["muted"])
-        self.imagen_top_tab.configure(text_color=palette["accent"] if tab_name == "imagen" else palette["muted"])
-        self.codex_top_tab.configure(text_color=palette["accent"] if tab_name == "codex" else palette["muted"])
-        self.blogspot_top_tab.configure(text_color=palette["accent"] if tab_name == "blogspot" else palette["muted"])
-        self.threads_top_tab.configure(text_color=palette["accent"] if tab_name == "threads" else palette["muted"])
+        tab_buttons = {
+            "wordpress": (self.wp_top_tab, "워드프레스"),
+            "tistory": (self.tistory_top_tab, "티스토리"),
+            "blogspot": (self.blogspot_top_tab, "블로그스팟"),
+            "threads": (self.threads_top_tab, "Threads"),
+            "gpt": (self.gpt_top_tab, "GPT API"),
+            "gemini": (self.gemini_top_tab, "제미나이 API"),
+            "imagen": (self.imagen_top_tab, "Imagen API"),
+            "codex": (self.codex_top_tab, "Codex CLI"),
+        }
+        for key, (button, label) in tab_buttons.items():
+            selected = key == tab_name
+            button.configure(
+                text=f"{'●' if selected else '○'} {label}",
+                fg_color=palette["selected"] if selected else "transparent",
+                hover_color=palette["hover"],
+                border_color=palette["accent"] if selected else palette["border"],
+                text_color=palette["accent"] if selected else palette["muted"],
+            )
 
         if tab_name == "wordpress":
-            self._update_quick_status("워드프레스 설정", "블로그 연결 정보와 카테고리를 저장합니다.", "#6dadff")
+            self._update_quick_status("워드프레스 설정", "블로그 연결 정보와 카테고리를 저장합니다.", palette["accent"])
         elif tab_name == "tistory":
-            self._update_quick_status("티스토리 설정", "글쓰기 화면을 열고 HTML 본문을 준비하는 화면 기반 연동입니다.", "#6dadff")
+            self._update_quick_status("티스토리 설정", "글쓰기 화면을 열고 HTML 본문을 준비하는 화면 기반 연동입니다.", palette["accent"])
         elif tab_name == "gpt":
-            self._update_quick_status("GPT API 설정", "OpenAI API 키와 기본 모델을 클라이언트에 저장합니다.", "#6dadff")
+            self._update_quick_status("GPT API 설정", "OpenAI API 키와 기본 모델을 클라이언트에 저장합니다.", palette["accent"])
         elif tab_name == "gemini":
-            self._update_quick_status("제미나이 API 설정", "Gemini API 키와 기본 모델을 클라이언트에 저장합니다.", "#6dadff")
+            self._update_quick_status("제미나이 API 설정", "Gemini API 키와 기본 모델을 클라이언트에 저장합니다.", palette["accent"])
         elif tab_name == "imagen":
-            self._update_quick_status("Imagen API 설정", "본문 카드뉴스 이미지 생성 API 키를 클라이언트에 저장합니다.", "#6dadff")
+            self._update_quick_status("Imagen API 설정", "본문 카드뉴스 이미지 생성 API 키를 클라이언트에 저장합니다.", palette["accent"])
         elif tab_name == "codex":
-            self._update_quick_status("Codex CLI 설정", "썸네일 배경 이미지 프롬프트 설계에 Codex CLI를 사용합니다.", "#6dadff")
+            self._update_quick_status("Codex CLI 설정", "썸네일 배경 이미지 프롬프트 설계에 Codex CLI를 사용합니다.", palette["accent"])
         elif tab_name == "blogspot":
-            self._update_quick_status("블로그스팟 설정", "Blog ID와 Google OAuth Client 정보를 저장해 Blogger API를 연결합니다.", "#6dadff")
+            self._update_quick_status("블로그스팟 설정", "Blog ID와 Google OAuth Client 정보를 저장해 Blogger API를 연결합니다.", palette["accent"])
         elif tab_name == "threads":
-            self._update_quick_status("Threads 설정", "Meta OAuth 인증과 Threads 사용자 연결 상태를 관리합니다.", "#6dadff")
+            self._update_quick_status("Threads 설정", "Meta OAuth 인증과 Threads 사용자 연결 상태를 관리합니다.", palette["accent"])
         self._finish_theme_paint()
 
     def _on_gpt_model_changed(self, model_name: str) -> None:
