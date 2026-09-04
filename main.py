@@ -374,6 +374,10 @@ NAVER_BLOG_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_BLOG_2,
     NAVER_PLAYWRIGHT_PROFILE_BLOG_3,
 )
+NAVER_BLOG_DEFAULT_PROMPT_ID = "naver-blog-default"
+NAVER_BLOG_DEFAULT_PROFILE_PROMPT_IDS = {
+    scope: NAVER_BLOG_DEFAULT_PROMPT_ID for scope in NAVER_BLOG_PROFILE_SCOPES
+}
 NAVER_PLAYWRIGHT_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_WRITING,
     NAVER_PLAYWRIGHT_PROFILE_AUTOMATION,
@@ -2535,7 +2539,10 @@ class WordPressSettings:
     naver_blog_automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI
     naver_blog_work_folder: str = ""
     naver_blog_prompt_type: str = "공통"
-    naver_blog_prompt_id: str = "naver-blog-default"
+    naver_blog_prompt_id: str = NAVER_BLOG_DEFAULT_PROMPT_ID
+    naver_blog_profile_prompt_ids: dict[str, str] = field(
+        default_factory=lambda: dict(NAVER_BLOG_DEFAULT_PROFILE_PROMPT_IDS)
+    )
     naver_blog_topic_category: str = "선택안함"
     naver_blog_reference_text: str = ""
     naver_blog_title_prompt: str = DEFAULT_NAVER_BLOG_TITLE_PROMPT
@@ -2902,6 +2909,7 @@ class AppStateStore:
         "tistory_write_url",
         "naver_blog_profiles",
         "naver_blog_active_profile",
+        "naver_blog_profile_prompt_ids",
         "naver_blog_write_url",
         "naver_blog_publish_name",
         "naver_blog_work_folder",
@@ -3102,7 +3110,19 @@ class AppStateStore:
             ),
             naver_blog_work_folder=payload.get("naver_blog_work_folder", ""),
             naver_blog_prompt_type=payload.get("naver_blog_prompt_type", "공통"),
-            naver_blog_prompt_id=payload.get("naver_blog_prompt_id", "naver-blog-default"),
+            naver_blog_prompt_id=payload.get(
+                "naver_blog_prompt_id",
+                NAVER_BLOG_DEFAULT_PROMPT_ID,
+            ),
+            naver_blog_profile_prompt_ids=normalize_naver_blog_profile_prompt_ids(
+                payload.get("naver_blog_profile_prompt_ids", {}),
+                profiles=naver_profiles,
+                active_profile=payload.get("naver_blog_active_profile", "블로그 1"),
+                legacy_prompt_id=payload.get(
+                    "naver_blog_prompt_id",
+                    NAVER_BLOG_DEFAULT_PROMPT_ID,
+                ),
+            ),
             naver_blog_topic_category=payload.get("naver_blog_topic_category", "선택안함"),
             naver_blog_reference_text=str(
                 payload.get("naver_blog_reference_text", "") or ""
@@ -7319,6 +7339,65 @@ def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
         )
         normalized_profiles.append(profile)
     return normalized_profiles
+
+
+def naver_blog_profile_scope_for_name(
+    profiles: object,
+    profile_name: object,
+) -> str:
+    normalized_profiles = normalize_naver_blog_profiles(profiles)
+    requested_name = str(profile_name or "").strip()
+    for index, profile in enumerate(normalized_profiles):
+        if str(profile.get("name") or "").strip() == requested_name:
+            return naver_blog_profile_scope(profile, index)
+    return NAVER_PLAYWRIGHT_PROFILE_BLOG
+
+
+def normalize_naver_blog_profile_prompt_ids(
+    value: object,
+    *,
+    profiles: object = None,
+    active_profile: object = "블로그 1",
+    legacy_prompt_id: object = NAVER_BLOG_DEFAULT_PROMPT_ID,
+) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    normalized_profiles = normalize_naver_blog_profiles(profiles)
+    normalized: dict[str, str] = {}
+    has_saved_prompt = False
+    for index, profile in enumerate(normalized_profiles):
+        scope = naver_blog_profile_scope(profile, index)
+        profile_name = str(profile.get("name") or f"블로그 {index + 1}")
+        prompt_id = str(source.get(scope) or source.get(profile_name) or "").strip()
+        if prompt_id:
+            has_saved_prompt = True
+        normalized[scope] = prompt_id or NAVER_BLOG_DEFAULT_PROMPT_ID
+
+    if not has_saved_prompt:
+        active_scope = naver_blog_profile_scope_for_name(
+            normalized_profiles,
+            active_profile,
+        )
+        normalized[active_scope] = (
+            str(legacy_prompt_id or "").strip() or NAVER_BLOG_DEFAULT_PROMPT_ID
+        )
+    return normalized
+
+
+def naver_blog_prompt_id_for_profile(
+    profile_prompt_ids: object,
+    profiles: object,
+    profile_name: object,
+    *,
+    legacy_prompt_id: object = NAVER_BLOG_DEFAULT_PROMPT_ID,
+) -> str:
+    normalized = normalize_naver_blog_profile_prompt_ids(
+        profile_prompt_ids,
+        profiles=profiles,
+        active_profile=profile_name,
+        legacy_prompt_id=legacy_prompt_id,
+    )
+    scope = naver_blog_profile_scope_for_name(profiles, profile_name)
+    return normalized.get(scope, NAVER_BLOG_DEFAULT_PROMPT_ID)
 
 
 def selectable_naver_blog_profiles(profiles: object) -> list[dict]:
@@ -23210,6 +23289,77 @@ class KeywordApp(ctk.CTk):
             command=self._open_prompt_folder,
         ).grid(row=0, column=2, padx=(10, 0), sticky="e")
 
+    def _active_naver_blog_profile_name(self) -> str:
+        return str(
+            self.naver_blog_active_profile_var.get()
+            if hasattr(self, "naver_blog_active_profile_var")
+            else self.wordpress_settings.naver_blog_active_profile
+        ).strip() or "블로그 1"
+
+    def _current_naver_blog_profile_prompt_ids(self) -> dict[str, str]:
+        profiles = (
+            self._current_naver_blog_profiles()
+            if hasattr(self, "_current_naver_blog_profiles")
+            else self.wordpress_settings.naver_blog_profiles
+        )
+        return normalize_naver_blog_profile_prompt_ids(
+            getattr(self.wordpress_settings, "naver_blog_profile_prompt_ids", {}),
+            profiles=profiles,
+            active_profile=self._active_naver_blog_profile_name(),
+            legacy_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
+        )
+
+    def _remember_naver_blog_prompt_for_profile(
+        self,
+        prompt_id: str,
+        profile_name: str | None = None,
+    ) -> None:
+        prompt_id = str(prompt_id or "").strip()
+        if not prompt_id:
+            return
+        profiles = (
+            self._current_naver_blog_profiles()
+            if hasattr(self, "_current_naver_blog_profiles")
+            else self.wordpress_settings.naver_blog_profiles
+        )
+        active_name = profile_name or self._active_naver_blog_profile_name()
+        prompt_ids = self._current_naver_blog_profile_prompt_ids()
+        scope = naver_blog_profile_scope_for_name(profiles, active_name)
+        prompt_ids[scope] = prompt_id
+        self.wordpress_settings.naver_blog_profile_prompt_ids = prompt_ids
+
+    def _restore_naver_blog_prompt_for_profile(
+        self,
+        profile_name: str,
+        persist: bool = False,
+    ) -> dict | None:
+        profiles = (
+            self._current_naver_blog_profiles()
+            if hasattr(self, "_current_naver_blog_profiles")
+            else self.wordpress_settings.naver_blog_profiles
+        )
+        prompt_id = naver_blog_prompt_id_for_profile(
+            getattr(self.wordpress_settings, "naver_blog_profile_prompt_ids", {}),
+            profiles,
+            profile_name,
+            legacy_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
+        )
+        selected = self._prompt_set_by_id(prompt_id)
+        if not selected or selected.get("platform") != "naver_blog":
+            selected = next(
+                (
+                    item
+                    for item in self._prompt_sets()
+                    if item.get("platform") == "naver_blog"
+                ),
+                None,
+            )
+        if selected:
+            self._apply_naver_blog_prompt_set(selected)
+        if persist:
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        return selected
+
     def _open_naver_blog_prompt_manager(self) -> None:
         selected_id = str(self.wordpress_settings.naver_blog_prompt_id or "")
         if selected_id:
@@ -23229,6 +23379,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.naver_blog_prompt_type = prompt_name
         self.wordpress_settings.naver_blog_title_prompt = title_prompt
         self.wordpress_settings.naver_blog_topic_prompt = article_prompt
+        self._remember_naver_blog_prompt_for_profile(prompt_id)
         if hasattr(self, "naver_blog_prompt_type_menu"):
             self.naver_blog_prompt_type_menu.set(self._prompt_set_label(prompt_set))
         if hasattr(self, "active_prompt_set_ids"):
@@ -23247,7 +23398,14 @@ class KeywordApp(ctk.CTk):
             return
         values = self._naver_blog_prompt_menu_values()
         self.naver_blog_prompt_type_menu.configure(values=values)
-        selected = self._prompt_set_by_id(str(self.wordpress_settings.naver_blog_prompt_id or ""))
+        profile_name = self._active_naver_blog_profile_name()
+        prompt_id = naver_blog_prompt_id_for_profile(
+            getattr(self.wordpress_settings, "naver_blog_profile_prompt_ids", {}),
+            self.wordpress_settings.naver_blog_profiles,
+            profile_name,
+            legacy_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
+        )
+        selected = self._prompt_set_by_id(prompt_id)
         if not selected or selected.get("platform") != "naver_blog":
             selected = next(
                 (item for item in self._prompt_sets() if item.get("platform") == "naver_blog"),
@@ -23264,8 +23422,12 @@ class KeywordApp(ctk.CTk):
             return
         self._apply_naver_blog_prompt_set(selected, persist=True)
         if hasattr(self, "naver_blog_status_label"):
+            profile_name = self._active_naver_blog_profile_name()
             self.naver_blog_status_label.configure(
-                text=f"현재 상태: {selected.get('name') or '기본'} 프롬프트 선택 완료",
+                text=(
+                    f"현재 상태: {profile_name} · "
+                    f"{selected.get('name') or '기본'} 프롬프트 저장 완료"
+                ),
                 text_color="#48d980",
             )
 
@@ -23335,6 +23497,7 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.naver_blog_active_profile = active_name
             self.naver_blog_active_profile_var.set(active_name)
             self._sync_naver_blog_write_url_from_profile(active_name, persist=False)
+            self._restore_naver_blog_prompt_for_profile(active_name, persist=False)
 
         ctk.CTkLabel(
             frame,
@@ -23427,11 +23590,28 @@ class KeywordApp(ctk.CTk):
         self._finish_theme_paint()
 
     def _set_naver_active_profile(self, profile_name: str) -> None:
-        write_url = self._sync_naver_blog_write_url_from_profile(profile_name, persist=True)
+        write_url = self._sync_naver_blog_write_url_from_profile(
+            profile_name,
+            persist=False,
+        )
+        selected_prompt = None
+        restore_prompt = getattr(
+            self,
+            "_restore_naver_blog_prompt_for_profile",
+            None,
+        )
+        if callable(restore_prompt):
+            selected_prompt = restore_prompt(profile_name, persist=False)
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
         if hasattr(self, "naver_blog_status_label"):
             url_status = write_url or "글쓰기 URL 미설정"
+            prompt_status = (
+                f" · {selected_prompt.get('name') or '기본'} 프롬프트 자동 선택"
+                if selected_prompt
+                else ""
+            )
             self.naver_blog_status_label.configure(
-                text=f"현재 상태: {profile_name} 선택 · {url_status}",
+                text=f"현재 상태: {profile_name} 선택{prompt_status} · {url_status}",
                 text_color="#48d980" if write_url else "#ffb86b",
             )
 
@@ -23518,6 +23698,9 @@ class KeywordApp(ctk.CTk):
                 if var is not None:
                     var.set("")
             self.wordpress_settings.naver_blog_profiles = profiles
+            prompt_ids = self._current_naver_blog_profile_prompt_ids()
+            prompt_ids[profile_scope] = NAVER_BLOG_DEFAULT_PROMPT_ID
+            self.wordpress_settings.naver_blog_profile_prompt_ids = prompt_ids
             self._sync_naver_blog_write_url_from_profile(
                 self.wordpress_settings.naver_blog_active_profile,
                 persist=False,
@@ -32951,7 +33134,12 @@ class KeywordApp(ctk.CTk):
             )
             for platform in ("wordpress", "tistory", "naver_blog", "blogspot"):
                 preferred_id = (
-                    self.wordpress_settings.naver_blog_prompt_id
+                    naver_blog_prompt_id_for_profile(
+                        self.wordpress_settings.naver_blog_profile_prompt_ids,
+                        self.wordpress_settings.naver_blog_profiles,
+                        self.wordpress_settings.naver_blog_active_profile,
+                        legacy_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
+                    )
                     if platform == "naver_blog"
                     else ""
                 )
@@ -33878,6 +34066,7 @@ class KeywordApp(ctk.CTk):
             naver_blog_work_folder=self.naver_blog_work_folder_entry.get().strip() if hasattr(self, "naver_blog_work_folder_entry") else self.wordpress_settings.naver_blog_work_folder,
             naver_blog_prompt_type=self.naver_blog_prompt_type_menu.get() if hasattr(self, "naver_blog_prompt_type_menu") else self.wordpress_settings.naver_blog_prompt_type,
             naver_blog_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
+            naver_blog_profile_prompt_ids=self._current_naver_blog_profile_prompt_ids(),
             naver_blog_topic_category=self.naver_blog_topic_category_menu.get() if hasattr(self, "naver_blog_topic_category_menu") else self.wordpress_settings.naver_blog_topic_category,
             naver_blog_reference_text=(
                 self.naver_blog_reference_textbox.get("1.0", "end").strip()
@@ -34774,7 +34963,10 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.article_prompt_template = DEFAULT_WORDPRESS_ARTICLE_PROMPT
         self.wordpress_settings.prompt_sets = PromptFileStore.default_prompt_sets(self.wordpress_settings)
         self.wordpress_settings.selected_prompt_id = self.wordpress_settings.prompt_sets[0]["id"]
-        self.wordpress_settings.naver_blog_prompt_id = "naver-blog-default"
+        self.wordpress_settings.naver_blog_prompt_id = NAVER_BLOG_DEFAULT_PROMPT_ID
+        self.wordpress_settings.naver_blog_profile_prompt_ids = dict(
+            NAVER_BLOG_DEFAULT_PROFILE_PROMPT_IDS
+        )
         self.wordpress_settings.naver_blog_prompt_type = "기본"
         for platform in ("wordpress", "tistory", "naver_blog", "blogspot"):
             active = next((item for item in self.wordpress_settings.prompt_sets if item.get("platform") == platform), None)

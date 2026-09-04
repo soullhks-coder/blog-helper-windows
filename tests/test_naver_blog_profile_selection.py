@@ -55,11 +55,21 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
             naver_blog_profile_vars=profile_vars,
             naver_blog_active_profile_var=_ValueStub(active),
             naver_blog_write_url_entry=_EntryStub("old-url"),
+            naver_blog_prompt_type_menu=_ValueStub(""),
+            active_prompt_set_ids={},
         )
         for method_name in (
             "_naver_blog_profiles_from_state",
             "_current_naver_blog_profiles",
             "_normalize_naver_blog_id",
+            "_active_naver_blog_profile_name",
+            "_current_naver_blog_profile_prompt_ids",
+            "_remember_naver_blog_prompt_for_profile",
+            "_restore_naver_blog_prompt_for_profile",
+            "_apply_naver_blog_prompt_set",
+            "_prompt_sets",
+            "_prompt_set_by_id",
+            "_prompt_set_label",
             "_sync_naver_blog_write_url_from_profile",
             "_set_naver_active_profile",
         ):
@@ -119,6 +129,63 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
         expected = "https://blog.naver.com/second?Redirect=Write&"
         self.assertEqual(app.naver_blog_write_url_entry.get(), expected)
         self.assertEqual(app.naver_blog_profile_vars["1:write_url"].get(), expected)
+
+    def test_radio_selection_restores_each_blogs_last_used_prompt(self) -> None:
+        app = self._app_stub(
+            [
+                {"name": "블로그 1", "blog_id": "mine"},
+                {"name": "블로그 2", "blog_id": "mom"},
+                {"name": "블로그 3", "blog_id": "third"},
+            ]
+        )
+        app.wordpress_settings.prompt_sets = [
+            {
+                "id": "naver-blog-mine",
+                "platform": "naver_blog",
+                "name": "내 프롬프트",
+                "title_prompt": "내 제목",
+                "article_prompt": "내 본문",
+            },
+            {
+                "id": "naver-blog-mom",
+                "platform": "naver_blog",
+                "name": "엄마 프롬프트",
+                "title_prompt": "엄마 제목",
+                "article_prompt": "엄마 본문",
+            },
+        ]
+        app.wordpress_settings.naver_blog_profile_prompt_ids = {
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG: "naver-blog-mine",
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG_2: "naver-blog-mom",
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG_3: "naver-blog-mine",
+        }
+
+        with patch.object(main.AppStateStore, "save") as save:
+            app._set_naver_active_profile("블로그 2")
+
+        self.assertEqual(
+            app.wordpress_settings.naver_blog_prompt_id,
+            "naver-blog-mom",
+        )
+        self.assertEqual(
+            app.naver_blog_prompt_type_menu.get(),
+            "N블로그 · 엄마 프롬프트",
+        )
+        self.assertEqual(app.wordpress_settings.naver_blog_title_prompt, "엄마 제목")
+        self.assertEqual(app.wordpress_settings.naver_blog_topic_prompt, "엄마 본문")
+        save.assert_called_once_with(app.wordpress_settings, save_secrets=False)
+
+        with patch.object(main.AppStateStore, "save"):
+            app._set_naver_active_profile("블로그 1")
+
+        self.assertEqual(
+            app.wordpress_settings.naver_blog_prompt_id,
+            "naver-blog-mine",
+        )
+        self.assertEqual(
+            app.naver_blog_prompt_type_menu.get(),
+            "N블로그 · 내 프롬프트",
+        )
 
     def test_existing_profiles_are_migrated_to_three_distinct_browser_scopes(self) -> None:
         profiles = main.normalize_naver_blog_profiles(

@@ -83,6 +83,61 @@ class NaverBlogPromptManagementTests(unittest.TestCase):
         self.assertEqual(len(naver_blog_sets), 2)
         self.assertEqual(naver_blog_sets[1]["name"], "연예이슈")
 
+    def test_legacy_prompt_is_migrated_only_to_the_active_blog(self) -> None:
+        profiles = main.normalize_naver_blog_profiles(
+            [
+                {"name": "블로그 1", "blog_id": "mine"},
+                {"name": "블로그 2", "blog_id": "mom"},
+                {"name": "블로그 3", "blog_id": "third"},
+            ]
+        )
+
+        prompt_ids = main.normalize_naver_blog_profile_prompt_ids(
+            {},
+            profiles=profiles,
+            active_profile="블로그 2",
+            legacy_prompt_id="naver-blog-mom",
+        )
+
+        self.assertEqual(
+            prompt_ids[main.NAVER_PLAYWRIGHT_PROFILE_BLOG],
+            main.NAVER_BLOG_DEFAULT_PROMPT_ID,
+        )
+        self.assertEqual(
+            prompt_ids[main.NAVER_PLAYWRIGHT_PROFILE_BLOG_2],
+            "naver-blog-mom",
+        )
+        self.assertEqual(
+            prompt_ids[main.NAVER_PLAYWRIGHT_PROFILE_BLOG_3],
+            main.NAVER_BLOG_DEFAULT_PROMPT_ID,
+        )
+
+    def test_each_blogs_last_prompt_survives_settings_round_trip(self) -> None:
+        prompt_ids = {
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG: "naver-blog-mine",
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG_2: "naver-blog-mom",
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG_3: "naver-blog-third",
+        }
+        settings = main.WordPressSettings(
+            naver_blog_profile_prompt_ids=prompt_ids,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(
+                    main.PromptFileStore,
+                    "load_into",
+                    side_effect=lambda value: value,
+                ),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+
+        self.assertEqual(loaded.naver_blog_profile_prompt_ids, prompt_ids)
+
     def test_new_prompt_does_not_overwrite_selected_prompt(self) -> None:
         existing = [
             {
