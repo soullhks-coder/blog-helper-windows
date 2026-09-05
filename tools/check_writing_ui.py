@@ -77,6 +77,10 @@ def main() -> None:
         try:
             app.geometry("1500x1000+30+35")
             app._switch_page("writing")
+            # Initialize the native window before scheduling the quit timer.
+            # CTk's first Windows mainloop can pump events during setup and
+            # consume that timer before Tk's actual event loop has started.
+            app.update()
             settle()
             assert app._selected_writing_targets() == ["wordpress", "tistory"]
             assert not hasattr(app, "writing_auto_progress_status")
