@@ -1654,6 +1654,27 @@ def naver_kin_question_ready(question: dict | None) -> bool:
     )
 
 
+def normalize_naver_kin_question_url(value: str | None) -> str:
+    """Validate and normalize a single Naver Knowledge iN question URL."""
+    candidate = str(value or "").strip()
+    if not candidate:
+        raise ValueError("지식인 질문 URL을 입력해 주세요.")
+    if not re.match(r"^https?://", candidate, flags=re.I):
+        candidate = "https://" + candidate.lstrip("/")
+    parsed = urlparse(candidate)
+    hostname = (parsed.hostname or "").lower()
+    lowered = candidate.lower()
+    if hostname != "kin.naver.com" and not hostname.endswith(".kin.naver.com"):
+        raise ValueError("kin.naver.com의 지식인 질문 URL만 사용할 수 있습니다.")
+    if not (
+        "/qna/detail.naver" in (parsed.path or "").lower()
+        or "docid=" in lowered
+        or "questionid=" in lowered
+    ):
+        raise ValueError("목록 URL이 아닌 지식인 질문 상세 URL을 입력해 주세요.")
+    return candidate
+
+
 def build_keyword_focused_article_html(topic: str, keyword: str) -> str:
     safe_topic = escape(topic)
     safe_keyword = escape(keyword)
@@ -2557,6 +2578,7 @@ class WordPressSettings:
     naver_blog_generation_model: str = "[CLI] Codex"
     naver_blog_image_model: str = "[CLI IMG] Codex"
     naver_kin_question_list_url: str = NAVER_KIN_QUESTION_LIST_URL
+    naver_kin_direct_question_url: str = ""
     naver_kin_sort_mode: str = "최신순"
     naver_kin_collect_interval_minutes: int = 60
     naver_kin_answer_interval_minutes: int = 30
@@ -3145,6 +3167,7 @@ class AppStateStore:
             naver_blog_generation_model=payload.get("naver_blog_generation_model", "[CLI] Codex"),
             naver_blog_image_model=payload.get("naver_blog_image_model", "[CLI IMG] Codex"),
             naver_kin_question_list_url=payload.get("naver_kin_question_list_url", NAVER_KIN_QUESTION_LIST_URL),
+            naver_kin_direct_question_url=payload.get("naver_kin_direct_question_url", ""),
             naver_kin_sort_mode=payload.get("naver_kin_sort_mode", "최신순"),
             naver_kin_collect_interval_minutes=payload.get("naver_kin_collect_interval_minutes", 60),
             naver_kin_answer_interval_minutes=payload.get("naver_kin_answer_interval_minutes", 30),
@@ -11509,6 +11532,196 @@ def run_google_search_console_playwright(
             append_runtime_log("google-search-console", "전용 Chrome 종료 및 로그인 프로필 저장 완료")
 
 
+def extract_naver_kin_question_from_page(page, question_url: str) -> dict:
+    """Extract one question title and body from an already loaded detail page."""
+    title = ""
+    for selector in (
+        ".questionDetail .c-heading__title",
+        ".end_question .c-heading__title",
+        ".qna_detail_question .c-heading__title",
+        ".questionTitle",
+        "[class*='questionTitle']",
+        ".c-heading__title",
+    ):
+        try:
+            candidates = page.locator(selector)
+            for index in range(min(candidates.count(), 6)):
+                candidate = candidates.nth(index)
+                if not candidate.is_visible(timeout=500):
+                    continue
+                title = clean_naver_kin_question_title(candidate.inner_text(timeout=900))
+                if len(title) >= 2:
+                    break
+            if len(title) >= 2:
+                break
+        except Exception:
+            continue
+    if not title:
+        for selector, attribute in (
+            ("meta[property='og:title']", "content"),
+            ("meta[name='twitter:title']", "content"),
+        ):
+            try:
+                title = clean_naver_kin_question_title(
+                    page.locator(selector).first.get_attribute(attribute)
+                )
+                if len(title) >= 2:
+                    break
+            except Exception:
+                continue
+    if not title:
+        try:
+            title = clean_naver_kin_question_title(page.title())
+        except Exception:
+            title = ""
+
+    body = ""
+    for selector in (
+        ".questionDetail",
+        "div.questionDetail",
+        ".c-heading__content",
+        "div.c-heading__content",
+        ".end_question .questionDetail",
+        ".qna_detail_question",
+        ".question-content",
+        "div[class*='QuestionContent']",
+        "div[class*='question_content']",
+        "div[class*='questionText']",
+        "div.se-main-container",
+        "div#content .question",
+    ):
+        try:
+            candidates = page.locator(selector)
+            for index in range(min(candidates.count(), 8)):
+                candidate = candidates.nth(index)
+                if not candidate.is_visible(timeout=500):
+                    continue
+                extracted = clean_naver_kin_question_body(
+                    candidate.inner_text(timeout=1200),
+                    title,
+                )
+                if len(extracted) >= 20:
+                    body = extracted
+                    break
+            if body:
+                break
+        except Exception:
+            continue
+    if not body:
+        try:
+            fallback = page.evaluate(
+                """
+                () => {
+                  const visible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                  };
+                  const selectors = [
+                    '[class*="QuestionContent"]', '[class*="question_content"]',
+                    '[class*="questionText"]', '.questionDetail', '.c-heading__content',
+                    '.qna_detail_question', '.question-content'
+                  ];
+                  const values = [];
+                  for (const selector of selectors) {
+                    for (const node of document.querySelectorAll(selector)) {
+                      if (!visible(node)) continue;
+                      const text = String(node.innerText || '').replace(/\\s+/g, ' ').trim();
+                      if (text.length >= 20 && text.length <= 5000) values.push(text);
+                    }
+                  }
+                  values.sort((a, b) => b.length - a.length);
+                  return values[0] || '';
+                }
+                """
+            )
+            body = clean_naver_kin_question_body(str(fallback or ""), title)
+        except Exception:
+            body = ""
+
+    question = {
+        "title": title[:160],
+        "question_text": body[:3500],
+        "url": str(getattr(page, "url", "") or question_url).strip(),
+        "collected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if not naver_kin_question_ready(question):
+        if not title:
+            raise RuntimeError("지식인 질문 제목을 찾지 못했습니다.")
+        if len(body) < 20:
+            raise RuntimeError("지식인 질문 본문을 충분히 수집하지 못했습니다.")
+        raise RuntimeError("입력한 주소가 현재 열 수 있는 지식인 질문 상세 URL이 아닙니다.")
+    return question
+
+
+def run_naver_kin_single_question_playwright(
+    question_url: str,
+    result_queue: queue.Queue,
+) -> tuple[bool, dict | str]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+
+    try:
+        target_url = normalize_naver_kin_question_url(question_url)
+    except ValueError as exc:
+        return False, str(exc)
+    chrome_path = require_google_chrome_executable()
+    profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("NKin", f"단건 질문 수집 전용 Chrome 프로필: {profile_dir}")
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            executable_path=str(chrome_path),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        try:
+            saved_state = load_naver_blog_storage_state(profile_scope)
+            saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
+            if saved_cookies:
+                try:
+                    context.add_cookies(saved_cookies)
+                except Exception:
+                    pass
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(12_000)
+            page.set_default_navigation_timeout(45_000)
+            result_queue.put(("naver_kin_direct_progress", "입력한 지식인 질문 URL로 이동하고 있습니다..."))
+            page.goto(target_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(1400)
+            try:
+                normalize_naver_kin_question_url(page.url)
+            except ValueError as exc:
+                return False, f"질문 상세페이지로 이동하지 못했습니다: {exc}"
+            result_queue.put(("naver_kin_direct_progress", "질문 제목과 본문을 수집하고 있습니다..."))
+            question = extract_naver_kin_question_from_page(page, target_url)
+            save_naver_blog_storage_state(context, profile_scope)
+            return True, question
+        except Exception as exc:
+            append_naver_kin_debug_log(f"single_question_collect_error url={target_url} error={exc}")
+            return False, str(exc)
+        finally:
+            try:
+                save_naver_blog_storage_state(context, profile_scope)
+            except Exception:
+                pass
+            context.close()
+
+
 def run_naver_kin_playwright_bootstrap(
     question_list_url: str,
     sort_mode: str,
@@ -17442,6 +17655,26 @@ class NaverKinBootstrapWorker(threading.Thread):
             self.result_queue.put(("naver_kin_error", str(exc)))
 
 
+class NaverKinQuestionCollectorWorker(threading.Thread):
+    def __init__(self, question_url: str, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.question_url = question_url
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            success, payload = run_naver_kin_single_question_playwright(
+                self.question_url,
+                self.result_queue,
+            )
+            if success:
+                self.result_queue.put(("naver_kin_direct_collected", payload))
+            else:
+                self.result_queue.put(("naver_kin_direct_error", payload))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("naver_kin_direct_error", str(exc)))
+
+
 class NaverKinAutomationWorker(threading.Thread):
     def __init__(self, settings: WordPressSettings, question: dict, result_queue: queue.Queue) -> None:
         super().__init__(daemon=True)
@@ -18546,6 +18779,10 @@ class KeywordApp(ctk.CTk):
         self.writing_progress_message = "작업을 시작하면 단계별 진행 상황이 여기에 표시됩니다."
         self.writing_progress_state = "idle"
         self.writing_fixed_stage_labels: dict[int, ctk.CTkLabel] = {}
+        self.naver_kin_progress_fraction = 0.0
+        self.naver_kin_progress_message = "작업을 시작하면 진행 상황이 여기에 표시됩니다."
+        self.naver_kin_progress_state = "idle"
+        self.naver_kin_direct_mode = False
 
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_probe_worker: ReleaseVersionProbeWorker | None = None
@@ -18589,6 +18826,7 @@ class KeywordApp(ctk.CTk):
         self.naver_search_advisor_worker: NaverSearchAdvisorWorker | None = None
         self.naver_search_advisor_pending_urls: list[dict] = []
         self.naver_kin_worker: NaverKinBootstrapWorker | None = None
+        self.naver_kin_direct_worker: NaverKinQuestionCollectorWorker | None = None
         self.naver_kin_automation_worker: NaverKinAutomationWorker | None = None
         self.threads_auth_worker: ThreadsAuthWorker | None = None
         self.thumbnail_ai_worker: ThumbnailAIWorker | None = None
@@ -19832,6 +20070,12 @@ class KeywordApp(ctk.CTk):
                 self._paint_scrollable_background(category_frame, palette["input"])
             self._apply_white_contrast_overrides()
             self._refresh_writing_section_completion_styles()
+            if hasattr(self, "naver_kin_fixed_progress_bar"):
+                self._set_naver_kin_progress(
+                    self.naver_kin_progress_message,
+                    self.naver_kin_progress_fraction,
+                    state=self.naver_kin_progress_state,
+                )
         except Exception:
             pass
 
@@ -22623,15 +22867,9 @@ class KeywordApp(ctk.CTk):
             text_color="#6dadff",
             font=ctk.CTkFont(size=28, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            header,
-            text="네이버 지식인 최신 질문을 확인하고, 워드프레스 글 URL을 답변으로 연결하는 자동화 뼈대입니다.",
-            text_color="#a7b3c4",
-            font=ctk.CTkFont(size=14),
-        ).grid(row=1, column=0, pady=(6, 0), sticky="w")
 
         self.naver_kin_scroll = ctk.CTkScrollableFrame(self.naver_kin_page, fg_color="transparent")
-        self.naver_kin_scroll.grid(row=1, column=0, padx=28, pady=(0, 26), sticky="nsew")
+        self.naver_kin_scroll.grid(row=1, column=0, padx=28, pady=(0, 12), sticky="nsew")
         self.naver_kin_scroll.grid_columnconfigure(0, weight=1)
 
         setup_card = ctk.CTkFrame(
@@ -22699,7 +22937,7 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_save_button.grid(row=1, column=2, padx=(0, 10), pady=8, sticky="e")
         self.naver_kin_start_button = ctk.CTkButton(
             setup_card,
-            text="질문 목록 확인",
+            text="질문 목록 수집",
             width=150,
             height=40,
             corner_radius=12,
@@ -22739,6 +22977,58 @@ class KeywordApp(ctk.CTk):
         )
         self._refresh_naver_kin_wordpress_prompt_menu()
 
+        ctk.CTkLabel(
+            setup_card,
+            text="지식인 URL",
+            text_color="#dce6f3",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=3, column=0, padx=18, pady=8, sticky="w")
+        self.naver_kin_direct_url_entry = ctk.CTkEntry(
+            setup_card,
+            height=40,
+            corner_radius=12,
+            fg_color="#111826",
+            border_width=1,
+            border_color="#314761",
+            placeholder_text="https://kin.naver.com/qna/detail.naver?...",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.naver_kin_direct_url_entry.grid(
+            row=3,
+            column=1,
+            columnspan=2,
+            padx=(0, 10),
+            pady=8,
+            sticky="ew",
+        )
+        if self.wordpress_settings.naver_kin_direct_question_url:
+            self.naver_kin_direct_url_entry.insert(
+                0,
+                self.wordpress_settings.naver_kin_direct_question_url,
+            )
+        self.naver_kin_direct_url_entry.bind(
+            "<KeyRelease>",
+            lambda _event: self._save_naver_kin_settings(silent=True),
+        )
+        self.naver_kin_direct_collect_button = ctk.CTkButton(
+            setup_card,
+            text="수집",
+            width=110,
+            height=40,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._start_naver_kin_direct_automation,
+        )
+        self.naver_kin_direct_collect_button.grid(
+            row=3,
+            column=3,
+            padx=(0, 18),
+            pady=8,
+            sticky="e",
+        )
+
         self.naver_kin_status_label = ctk.CTkLabel(
             setup_card,
             text="현재 상태: 대기 중",
@@ -22746,7 +23036,7 @@ class KeywordApp(ctk.CTk):
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self.naver_kin_status_label.grid(row=3, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
+        self.naver_kin_status_label.grid(row=4, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
 
         schedule_card = ctk.CTkFrame(
             self.naver_kin_scroll,
@@ -22844,34 +23134,6 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_automation_button.grid(row=3, column=4, columnspan=2, padx=(0, 18), pady=(0, 16), sticky="e")
         self._update_naver_kin_next_run_label()
 
-        flow_card = ctk.CTkFrame(
-            self.naver_kin_scroll,
-            fg_color="#111826",
-            corner_radius=18,
-            border_width=1,
-            border_color="#243247",
-        )
-        flow_card.grid(row=2, column=0, pady=(14, 0), sticky="ew")
-        flow_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            flow_card,
-            text="자동화 흐름",
-            text_color="#dce6f3",
-            font=ctk.CTkFont(size=17, weight="bold"),
-        ).grid(row=0, column=0, padx=18, pady=(16, 8), sticky="w")
-        ctk.CTkLabel(
-            flow_card,
-            text=(
-                "1. 지식인 질문 목록을 최신순으로 확인\n"
-                "2. 질문을 선택해 워드프레스용 글감으로 사용\n"
-                "3. 워드프레스에 답변형 글 발행\n"
-                "4. 발행 URL을 지식인 답변 템플릿에 넣어 등록"
-            ),
-            justify="left",
-            text_color="#a7b3c4",
-            font=ctk.CTkFont(size=14),
-        ).grid(row=1, column=0, padx=18, pady=(0, 16), sticky="w")
-
         template_card = ctk.CTkFrame(
             self.naver_kin_scroll,
             fg_color="#1d2635",
@@ -22879,7 +23141,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#314761",
         )
-        template_card.grid(row=3, column=0, pady=(14, 0), sticky="ew")
+        template_card.grid(row=2, column=0, pady=(14, 0), sticky="ew")
         template_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             template_card,
@@ -22889,7 +23151,7 @@ class KeywordApp(ctk.CTk):
         ).grid(row=0, column=0, padx=18, pady=(16, 6), sticky="w")
         ctk.CTkLabel(
             template_card,
-            text="{url} 자리에는 워드프레스 발행 URL이 들어가도록 다음 단계에서 연결합니다.",
+            text="{url} 자리에는 공개 발행된 워드프레스 글 URL이 자동으로 들어갑니다.",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, padx=18, pady=(0, 8), sticky="w")
@@ -22919,7 +23181,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#314761",
         )
-        log_card.grid(row=4, column=0, pady=(14, 0), sticky="ew")
+        log_card.grid(row=3, column=0, pady=(14, 0), sticky="ew")
         log_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             log_card,
@@ -22957,7 +23219,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#314761",
         )
-        questions_card.grid(row=5, column=0, pady=(14, 0), sticky="ew")
+        questions_card.grid(row=4, column=0, pady=(14, 0), sticky="ew")
         questions_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             questions_card,
@@ -22969,6 +23231,88 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_question_frame.grid(row=1, column=0, padx=18, pady=(0, 18), sticky="ew")
         self.naver_kin_question_frame.grid_columnconfigure(0, weight=1)
         self._render_naver_kin_questions(self.naver_kin_questions)
+
+        palette = self._theme_palette()
+        self.naver_kin_fixed_progress_panel = ctk.CTkFrame(
+            self.naver_kin_page,
+            fg_color=palette["panel"],
+            corner_radius=16,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        self.naver_kin_fixed_progress_panel.grid(
+            row=2,
+            column=0,
+            padx=28,
+            pady=(0, 18),
+            sticky="ew",
+        )
+        self.naver_kin_fixed_progress_panel.grid_columnconfigure(1, weight=1)
+        self.naver_kin_fixed_progress_badge = ctk.CTkLabel(
+            self.naver_kin_fixed_progress_panel,
+            text="대기 중",
+            width=76,
+            height=28,
+            corner_radius=10,
+            fg_color=palette["button"],
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.naver_kin_fixed_progress_badge.grid(
+            row=0,
+            column=0,
+            padx=(16, 12),
+            pady=(12, 6),
+            sticky="w",
+        )
+        self.naver_kin_fixed_progress_message = ctk.CTkLabel(
+            self.naver_kin_fixed_progress_panel,
+            text=self.naver_kin_progress_message,
+            anchor="w",
+            justify="left",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.naver_kin_fixed_progress_message.grid(
+            row=0,
+            column=1,
+            pady=(12, 6),
+            sticky="ew",
+        )
+        self.naver_kin_fixed_progress_percent = ctk.CTkLabel(
+            self.naver_kin_fixed_progress_panel,
+            text="0%",
+            width=48,
+            anchor="e",
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.naver_kin_fixed_progress_percent.grid(
+            row=0,
+            column=2,
+            padx=(10, 16),
+            pady=(12, 6),
+            sticky="e",
+        )
+        self.naver_kin_fixed_progress_bar = ctk.CTkProgressBar(
+            self.naver_kin_fixed_progress_panel,
+            height=10,
+            corner_radius=6,
+            progress_color="#2f6fed",
+        )
+        self.naver_kin_fixed_progress_bar.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            padx=16,
+            pady=(0, 12),
+            sticky="ew",
+        )
+        self._set_naver_kin_progress(
+            self.naver_kin_progress_message,
+            self.naver_kin_progress_fraction,
+            state=self.naver_kin_progress_state,
+        )
 
     def _naver_panel(self, parent, title: str, row: int) -> ctk.CTkFrame:
         palette = self._theme_palette()
@@ -24758,6 +25102,95 @@ class KeywordApp(ctk.CTk):
             return "표시할 진행 로그가 없습니다."
         return "\n".join(logs[-max(1, int(limit or 35)):])
 
+    def _set_naver_kin_progress(
+        self,
+        message: str,
+        progress: float | None = None,
+        *,
+        state: str = "active",
+    ) -> None:
+        if state == "complete":
+            fraction = 1.0
+        elif state == "idle":
+            fraction = 0.0
+        elif progress is None:
+            fraction = min(0.96, max(0.03, float(getattr(self, "naver_kin_progress_fraction", 0.0)) + 0.03))
+        else:
+            requested = max(0.0, min(1.0, float(progress)))
+            fraction = max(float(getattr(self, "naver_kin_progress_fraction", 0.0)), requested)
+        self.naver_kin_progress_fraction = fraction
+        self.naver_kin_progress_message = str(message or "진행 상황을 확인하고 있습니다.").strip()
+        self.naver_kin_progress_state = state
+        if not hasattr(self, "naver_kin_fixed_progress_bar"):
+            return
+
+        palette = self._theme_palette()
+        is_white = self._normalize_app_theme(self.wordpress_settings.app_theme) == "화이트테마"
+        active_bg = "#dbeafe" if is_white else "#1f4a78"
+        active_text = "#1d4ed8" if is_white else "#9ac8ff"
+        done_bg = "#dcfce7" if is_white else "#17422d"
+        done_text = "#187a40" if is_white else "#66e39a"
+        error_bg = "#fee2e2" if is_white else "#52252a"
+        error_text = "#b42318" if is_white else "#ff8b8b"
+        if state == "complete":
+            badge_text, badge_bg, badge_color = "완료", done_bg, done_text
+        elif state == "error":
+            badge_text, badge_bg, badge_color = "오류", error_bg, error_text
+        elif state == "idle":
+            badge_text, badge_bg, badge_color = "대기 중", palette["button"], palette["text"]
+        else:
+            badge_text, badge_bg, badge_color = "진행 중", active_bg, active_text
+
+        self.naver_kin_fixed_progress_panel.configure(
+            fg_color=palette["panel"],
+            border_color=palette["border"],
+        )
+        self.naver_kin_fixed_progress_badge.configure(
+            text=badge_text,
+            fg_color=badge_bg,
+            text_color=badge_color,
+        )
+        self.naver_kin_fixed_progress_message.configure(
+            text=self.naver_kin_progress_message,
+            text_color=error_text if state == "error" else palette["text"],
+        )
+        self.naver_kin_fixed_progress_percent.configure(
+            text=f"{round(fraction * 100)}%",
+            text_color=error_text if state == "error" else (done_text if state == "complete" else palette["accent"]),
+        )
+        self.naver_kin_fixed_progress_bar.configure(
+            progress_color="#e05252" if state == "error" else ("#1faa55" if state == "complete" else "#2f6fed")
+        )
+        self.naver_kin_fixed_progress_bar.set(fraction)
+
+    def _naver_kin_progress_value(self, message: str) -> float | None:
+        text = str(message or "")
+        checkpoints = (
+            (("질문 URL로 이동", "질문 목록으로 이동"), 0.05),
+            (("질문 제목과 본문", "질문 본문 수집", "상세 본문"), 0.15),
+            (("접근 가능 여부", "로그인 상태"), 0.24),
+            (("글 작성 프롬프트", "워드프레스 프롬프트"), 0.32),
+            (("SEO 정보",), 0.43),
+            (("썸네일",), 0.52),
+            (("카드뉴스",), 0.64),
+            (("공개발행",), 0.75),
+            (("답변을 작성", "답변 문구"), 0.84),
+            (("답변 입력 영역", "답변 에디터", "답변 본문 입력"), 0.91),
+            (("답변 등록 버튼",), 0.97),
+        )
+        for needles, value in checkpoints:
+            if any(needle in text for needle in needles):
+                return value
+        return None
+
+    def _set_naver_kin_direct_button_state(self, running: bool, text: str = "") -> None:
+        if not hasattr(self, "naver_kin_direct_collect_button"):
+            return
+        self.naver_kin_direct_collect_button.configure(
+            state="disabled" if running else "normal",
+            text=text or ("진행 중..." if running else "수집"),
+        )
+
     def _toggle_naver_kin_automation(self) -> None:
         if self.naver_kin_automation_running:
             self.naver_kin_automation_running = False
@@ -24774,6 +25207,14 @@ class KeywordApp(ctk.CTk):
             self._update_naver_kin_next_run_label()
             if hasattr(self, "naver_kin_status_label"):
                 self.naver_kin_status_label.configure(text="현재 상태: N지식인 자동화를 중지했습니다.", text_color="#ffcc66")
+            return
+
+        if self.naver_kin_direct_mode or (
+            self.naver_kin_direct_worker is not None and self.naver_kin_direct_worker.is_alive()
+        ) or (
+            self.naver_kin_automation_worker is not None and self.naver_kin_automation_worker.is_alive()
+        ):
+            messagebox.showinfo("진행 중", "입력한 지식인 URL 작업을 마친 뒤 예약 자동화를 시작해 주세요.")
             return
 
         self._save_naver_kin_settings(silent=True)
@@ -24831,6 +25272,64 @@ class KeywordApp(ctk.CTk):
                 return question
         return None
 
+    def _start_naver_kin_question_worker(
+        self,
+        question: dict,
+        *,
+        direct_mode: bool = False,
+        preserve_log: bool = False,
+    ) -> bool:
+        try:
+            settings = self._read_wordpress_settings()
+            self._validate_wordpress_inputs(settings, allow_empty_password=False)
+            model_error = writing_model_validation_error(settings)
+            if model_error:
+                raise RuntimeError(model_error)
+            settings.target_platforms = ["wordpress"]
+            settings.post_mode = "공개발행"
+            settings.naver_kin_answer_prompt = self._current_naver_kin_answer_prompt()
+            settings.naver_kin_answer_template = (
+                self.naver_kin_answer_template_box.get("1.0", "end").strip()
+                if hasattr(self, "naver_kin_answer_template_box")
+                else settings.naver_kin_answer_template
+            ) or "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}"
+        except RuntimeError as exc:
+            if not direct_mode:
+                self.naver_kin_automation_running = False
+                self._set_naver_kin_automation_button_state()
+                self.naver_kin_next_run_at = 0
+                self._update_naver_kin_next_run_label()
+            else:
+                self.naver_kin_direct_mode = False
+                self._set_naver_kin_direct_button_state(False)
+            if hasattr(self, "naver_kin_status_label"):
+                self.naver_kin_status_label.configure(text=f"현재 상태: 자동화 시작 실패 - {exc}", text_color="#ff6b6b")
+            self._set_naver_kin_progress(f"자동화 시작 실패: {exc}", state="error")
+            messagebox.showerror("N지식인 자동화 설정 오류", str(exc))
+            return False
+
+        question["automation_status"] = "진행 중"
+        question["automation_started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._persist_naver_kin_schedule_state()
+        self._render_naver_kin_questions(self.naver_kin_questions)
+        if not preserve_log:
+            self._clear_naver_kin_run_log()
+        self._append_naver_kin_run_log(f"자동화 시작: {question.get('title', '질문')}")
+        self._append_naver_kin_run_log("워드프레스 글 발행 준비를 시작합니다.")
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(
+                text=f"현재 상태: '{question.get('title', '질문')}' 워드프레스 글 발행과 지식인 답변을 진행합니다.",
+                text_color="#6dadff",
+            )
+        self.naver_kin_direct_mode = bool(direct_mode)
+        if direct_mode:
+            self._set_naver_kin_direct_button_state(True, "작성 중...")
+        self.naver_kin_progress_fraction = 0.2
+        self._set_naver_kin_progress("워드프레스 글 발행을 준비하고 있습니다...", 0.22)
+        self.naver_kin_automation_worker = NaverKinAutomationWorker(settings, question, self.result_queue)
+        self.naver_kin_automation_worker.start()
+        return True
+
     def _run_naver_kin_automation_once(self) -> None:
         self._naver_kin_automation_job = None
         if not self.naver_kin_automation_running:
@@ -24875,44 +25374,7 @@ class KeywordApp(ctk.CTk):
             )
             return
 
-        try:
-            settings = self._read_wordpress_settings()
-            self._validate_wordpress_inputs(settings, allow_empty_password=False)
-            model_error = writing_model_validation_error(settings)
-            if model_error:
-                raise RuntimeError(model_error)
-            settings.target_platforms = ["wordpress"]
-            settings.post_mode = "공개발행"
-            settings.naver_kin_answer_prompt = self._current_naver_kin_answer_prompt()
-            settings.naver_kin_answer_template = (
-                self.naver_kin_answer_template_box.get("1.0", "end").strip()
-                if hasattr(self, "naver_kin_answer_template_box")
-                else settings.naver_kin_answer_template
-            ) or "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}"
-        except RuntimeError as exc:
-            self.naver_kin_automation_running = False
-            self._set_naver_kin_automation_button_state()
-            self.naver_kin_next_run_at = 0
-            self._update_naver_kin_next_run_label()
-            if hasattr(self, "naver_kin_status_label"):
-                self.naver_kin_status_label.configure(text=f"현재 상태: 자동화 시작 실패 - {exc}", text_color="#ff6b6b")
-            messagebox.showerror("N지식인 자동화 설정 오류", str(exc))
-            return
-
-        question["automation_status"] = "진행 중"
-        question["automation_started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._persist_naver_kin_schedule_state()
-        self._render_naver_kin_questions(self.naver_kin_questions)
-        self._clear_naver_kin_run_log()
-        self._append_naver_kin_run_log(f"자동화 시작: {question.get('title', '질문')}")
-        self._append_naver_kin_run_log("1단계: 워드프레스 글 발행 준비를 시작합니다.")
-        if hasattr(self, "naver_kin_status_label"):
-            self.naver_kin_status_label.configure(
-                text=f"현재 상태: '{question.get('title', '질문')}' 워드프레스 글 발행과 지식인 답변을 진행합니다.",
-                text_color="#6dadff",
-            )
-        self.naver_kin_automation_worker = NaverKinAutomationWorker(settings, question, self.result_queue)
-        self.naver_kin_automation_worker.start()
+        self._start_naver_kin_question_worker(question)
 
     def _on_naver_kin_interval_changed(self) -> None:
         self._update_naver_kin_schedule_summary()
@@ -24922,6 +25384,10 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "naver_kin_url_entry"):
             self.wordpress_settings.naver_kin_question_list_url = (
                 self.naver_kin_url_entry.get().strip() or NAVER_KIN_QUESTION_LIST_URL
+            )
+        if hasattr(self, "naver_kin_direct_url_entry"):
+            self.wordpress_settings.naver_kin_direct_question_url = (
+                self.naver_kin_direct_url_entry.get().strip()
             )
         if hasattr(self, "naver_kin_sort_menu"):
             self.wordpress_settings.naver_kin_sort_mode = self.naver_kin_sort_menu.get()
@@ -24952,13 +25418,122 @@ class KeywordApp(ctk.CTk):
         if not silent and hasattr(self, "naver_kin_status_label"):
             self.naver_kin_status_label.configure(text="현재 상태: N지식인 설정 저장 완료", text_color="#48d980")
 
+    def _start_naver_kin_direct_automation(self) -> None:
+        running_workers = (
+            self.naver_kin_worker,
+            self.naver_kin_direct_worker,
+            self.naver_kin_automation_worker,
+        )
+        if self.naver_kin_automation_running or any(
+            worker is not None and worker.is_alive() for worker in running_workers
+        ):
+            messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 다시 실행해 주세요.")
+            return
+        try:
+            question_url = normalize_naver_kin_question_url(
+                self.naver_kin_direct_url_entry.get() if hasattr(self, "naver_kin_direct_url_entry") else ""
+            )
+        except ValueError as exc:
+            self._set_naver_kin_progress(str(exc), state="error")
+            messagebox.showwarning("지식인 URL 확인", str(exc))
+            return
+
+        if hasattr(self, "naver_kin_direct_url_entry"):
+            self.naver_kin_direct_url_entry.delete(0, "end")
+            self.naver_kin_direct_url_entry.insert(0, question_url)
+        self._save_naver_kin_settings(silent=True)
+        self.naver_kin_direct_mode = True
+        self.naver_kin_progress_fraction = 0.0
+        self._clear_naver_kin_run_log()
+        self._append_naver_kin_run_log("입력한 지식인 질문의 제목과 본문 수집을 시작합니다.")
+        self._set_naver_kin_direct_button_state(True, "수집 중...")
+        self._set_naver_kin_progress("입력한 지식인 질문 URL로 이동하고 있습니다...", 0.03)
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(
+                text="현재 상태: 입력한 지식인 질문을 수집하는 중...",
+                text_color="#6dadff",
+            )
+        self.naver_kin_direct_worker = NaverKinQuestionCollectorWorker(
+            question_url,
+            self.result_queue,
+        )
+        self.naver_kin_direct_worker.start()
+
+    def _handle_naver_kin_direct_collected(self, payload) -> None:
+        self.naver_kin_direct_worker = None
+        if not isinstance(payload, dict):
+            self._handle_naver_kin_direct_error("수집된 지식인 질문 정보가 올바르지 않습니다.")
+            return
+        title = clean_naver_kin_question_title(payload.get("title"))
+        question_text = clean_naver_kin_question_body(payload.get("question_text"), title)
+        question_url = str(payload.get("url") or "").strip()
+        question = {
+            "title": title,
+            "question_text": question_text,
+            "url": question_url,
+            "collected_at": str(payload.get("collected_at") or time.strftime("%Y-%m-%d %H:%M:%S")),
+            "automation_status": "",
+            "wordpress_url": "",
+            "wordpress_title": "",
+            "answered_at": "",
+        }
+        if not naver_kin_question_ready(question):
+            self._handle_naver_kin_direct_error("질문 제목과 본문을 충분히 수집하지 못했습니다.")
+            return
+
+        existing = [
+            item for item in self.naver_kin_questions
+            if str(item.get("url") or "").strip() != question_url
+        ]
+        self.naver_kin_questions = [question, *existing]
+        self.wordpress_settings.naver_kin_last_questions = list(self.naver_kin_questions)
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self._render_naver_kin_questions(self.naver_kin_questions)
+        self._append_naver_kin_run_log(f"질문 수집 완료: {title}")
+        self._append_naver_kin_run_log(f"질문 본문 {len(question_text)}자 확인 완료")
+        self._set_naver_kin_progress("질문 수집 완료 · 워드프레스 글 작성을 준비합니다...", 0.2)
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(
+                text=f"현재 상태: '{title}' 수집 완료 · 워드프레스 글 작성을 시작합니다.",
+                text_color="#6dadff",
+            )
+        self._start_naver_kin_question_worker(
+            question,
+            direct_mode=True,
+            preserve_log=True,
+        )
+
+    def _handle_naver_kin_direct_error(self, payload) -> None:
+        error_message = str(payload or "지식인 질문 수집에 실패했습니다.").strip()
+        self.naver_kin_direct_worker = None
+        self.naver_kin_direct_mode = False
+        self._set_naver_kin_direct_button_state(False)
+        self._append_naver_kin_run_log(f"질문 수집 오류: {error_message}")
+        self._set_naver_kin_progress(f"질문 수집 실패: {error_message}", state="error")
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(
+                text=f"현재 상태: 질문 수집 실패 - {error_message}",
+                text_color="#ff6b6b",
+            )
+        self._update_quick_status("N지식인 질문 수집 오류", error_message, "#ff6b6b")
+        messagebox.showwarning("N지식인 질문 수집 실패", error_message)
+
     def _start_naver_kin_bootstrap(self) -> None:
+        if self.naver_kin_direct_mode or (
+            self.naver_kin_direct_worker is not None and self.naver_kin_direct_worker.is_alive()
+        ) or (
+            self.naver_kin_automation_worker is not None and self.naver_kin_automation_worker.is_alive()
+        ):
+            messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 질문 목록을 수집해 주세요.")
+            return
         if self.naver_kin_worker and self.naver_kin_worker.is_alive():
-            messagebox.showinfo("진행 중", "N지식인 질문 목록 확인이 이미 진행 중입니다.")
+            messagebox.showinfo("진행 중", "N지식인 질문 목록 수집이 이미 진행 중입니다.")
             return
         self._save_naver_kin_settings(silent=True)
+        self.naver_kin_progress_fraction = 0.0
+        self._set_naver_kin_progress("질문 목록 수집을 준비하고 있습니다...", 0.02)
         if hasattr(self, "naver_kin_start_button"):
-            self.naver_kin_start_button.configure(state="disabled", text="확인 중...")
+            self.naver_kin_start_button.configure(state="disabled", text="수집 중...")
         if hasattr(self, "naver_kin_status_label"):
             self.naver_kin_status_label.configure(text="현재 상태: N지식인 질문 목록을 여는 중...", text_color="#6dadff")
         self._update_quick_status("N지식인 자동화 준비", "전용 Chrome으로 질문 목록과 최신순 정렬을 확인합니다.", "#6dadff")
@@ -24971,7 +25546,7 @@ class KeywordApp(ctk.CTk):
 
     def _handle_naver_kin_done(self, payload) -> None:
         if hasattr(self, "naver_kin_start_button"):
-            self.naver_kin_start_button.configure(state="normal", text="질문 목록 확인")
+            self.naver_kin_start_button.configure(state="normal", text="질문 목록 수집")
         self.naver_kin_worker = None
         questions = payload.get("questions", []) if isinstance(payload, dict) else []
         previous_by_url = {
@@ -25023,6 +25598,7 @@ class KeywordApp(ctk.CTk):
                 text_color="#48d980",
             )
         self._update_quick_status("N지식인 준비 완료", message, "#48d980")
+        self._set_naver_kin_progress(message, state="complete")
         if self.naver_kin_automation_running:
             if self._next_naver_kin_question_for_automation() is not None:
                 self.naver_kin_next_action = "answer"
@@ -25037,11 +25613,12 @@ class KeywordApp(ctk.CTk):
 
     def _handle_naver_kin_error(self, payload) -> None:
         if hasattr(self, "naver_kin_start_button"):
-            self.naver_kin_start_button.configure(state="normal", text="질문 목록 확인")
+            self.naver_kin_start_button.configure(state="normal", text="질문 목록 수집")
         self.naver_kin_worker = None
         if hasattr(self, "naver_kin_status_label"):
-            self.naver_kin_status_label.configure(text="현재 상태: N지식인 질문 목록 확인 실패", text_color="#ff6b6b")
+            self.naver_kin_status_label.configure(text="현재 상태: N지식인 질문 목록 수집 실패", text_color="#ff6b6b")
         self._update_quick_status("N지식인 오류", str(payload), "#ff6b6b")
+        self._set_naver_kin_progress(f"질문 목록 수집 실패: {payload}", state="error")
         if self.naver_kin_automation_running:
             self._schedule_next_naver_kin_automation(
                 delay_minutes=self._naver_kin_collect_interval_minutes(),
@@ -25062,6 +25639,10 @@ class KeywordApp(ctk.CTk):
                 question["answered_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 break
         self.naver_kin_automation_worker = None
+        was_direct = bool(self.naver_kin_direct_mode)
+        self.naver_kin_direct_mode = False
+        if was_direct:
+            self._set_naver_kin_direct_button_state(False)
         self._persist_naver_kin_schedule_state()
         self._render_naver_kin_questions(self.naver_kin_questions)
         wordpress_url = str(payload.get("wordpress_url") or "").strip()
@@ -25075,6 +25656,7 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "naver_kin_status_label"):
             self.naver_kin_status_label.configure(text=f"현재 상태: {message}", text_color="#48d980")
         self._append_naver_kin_run_log(message)
+        self._set_naver_kin_progress(message, state="complete")
         self._update_quick_status("N지식인 자동화 완료", message, "#48d980")
         messagebox.showinfo(
             "N지식인 자동화 진행 로그",
@@ -25103,11 +25685,16 @@ class KeywordApp(ctk.CTk):
                 question["error_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 break
         self.naver_kin_automation_worker = None
+        was_direct = bool(self.naver_kin_direct_mode)
+        self.naver_kin_direct_mode = False
+        if was_direct:
+            self._set_naver_kin_direct_button_state(False)
         self._persist_naver_kin_schedule_state()
         self._render_naver_kin_questions(self.naver_kin_questions)
         if hasattr(self, "naver_kin_status_label"):
             self.naver_kin_status_label.configure(text=f"현재 상태: N지식인 자동화 오류 - {error_message}", text_color="#ff6b6b")
         self._append_naver_kin_run_log(f"오류 발생: {error_message}")
+        self._set_naver_kin_progress(f"자동화 실패: {error_message}", state="error")
         self._update_quick_status("N지식인 자동화 오류", error_message, "#ff6b6b")
         messagebox.showwarning(
             "N지식인 자동화 오류",
@@ -25136,7 +25723,7 @@ class KeywordApp(ctk.CTk):
         if not questions:
             ctk.CTkLabel(
                 self.naver_kin_question_frame,
-                text="아직 확인된 질문이 없습니다. 위의 '질문 목록 확인' 버튼으로 최신 질문을 가져와 주세요.",
+                text="아직 수집된 질문이 없습니다. 위의 '질문 목록 수집' 버튼으로 최신 질문을 가져와 주세요.",
                 text_color="#9aa7bb",
                 anchor="w",
                 justify="left",
@@ -34391,6 +34978,11 @@ class KeywordApp(ctk.CTk):
                 if hasattr(self, "naver_kin_url_entry")
                 else self.wordpress_settings.naver_kin_question_list_url
             ) or NAVER_KIN_QUESTION_LIST_URL,
+            naver_kin_direct_question_url=(
+                self.naver_kin_direct_url_entry.get().strip()
+                if hasattr(self, "naver_kin_direct_url_entry")
+                else self.wordpress_settings.naver_kin_direct_question_url
+            ),
             naver_kin_sort_mode=(
                 self.naver_kin_sort_menu.get()
                 if hasattr(self, "naver_kin_sort_menu")
@@ -37692,14 +38284,34 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "naver_kin_progress":
                     if hasattr(self, "naver_kin_status_label"):
                         self.naver_kin_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")
+                    self._set_naver_kin_progress(
+                        str(payload),
+                        self._naver_kin_progress_value(str(payload)),
+                    )
                 elif event_type == "naver_kin_done":
                     self._handle_naver_kin_done(payload)
                 elif event_type == "naver_kin_error":
                     self._handle_naver_kin_error(payload)
+                elif event_type == "naver_kin_direct_progress":
+                    if hasattr(self, "naver_kin_status_label"):
+                        self.naver_kin_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")
+                    self._append_naver_kin_run_log(str(payload))
+                    self._set_naver_kin_progress(
+                        str(payload),
+                        self._naver_kin_progress_value(str(payload)),
+                    )
+                elif event_type == "naver_kin_direct_collected":
+                    self._handle_naver_kin_direct_collected(payload)
+                elif event_type == "naver_kin_direct_error":
+                    self._handle_naver_kin_direct_error(payload)
                 elif event_type == "naver_kin_auto_progress":
                     if hasattr(self, "naver_kin_status_label"):
                         self.naver_kin_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")
                     self._append_naver_kin_run_log(str(payload))
+                    self._set_naver_kin_progress(
+                        str(payload),
+                        self._naver_kin_progress_value(str(payload)),
+                    )
                     self._update_naver_kin_next_run_label()
                 elif event_type == "naver_kin_auto_log":
                     self._append_naver_kin_run_log(str(payload))

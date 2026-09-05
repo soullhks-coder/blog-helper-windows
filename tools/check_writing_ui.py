@@ -52,8 +52,8 @@ def main() -> None:
         errors = []
         app.report_callback_exception = lambda *error: errors.append(error)
 
-        def settle():
-            app.after(160, app.quit)
+        def settle(delay_ms=160):
+            app.after(delay_ms, app.quit)
             app.mainloop()
             app.update_idletasks()
             assert not errors, errors
@@ -194,6 +194,44 @@ def main() -> None:
             assert app.active_writing_section == "topic"
             assert not app.writing_completed_sections
             assert app.writing_section_cards["topic"].winfo_ismapped()
+
+            # Naver Knowledge iN keeps direct URL collection and progress visible
+            # in both themes without exercising a real account or network.
+            app._switch_page("naver_kin")
+            settle(700)
+            visible_texts = []
+            pending = [app.naver_kin_page]
+            while pending:
+                widget = pending.pop()
+                pending.extend(widget.winfo_children())
+                try:
+                    visible_texts.append(str(widget.cget("text")))
+                except Exception:
+                    pass
+            visible_copy = "\n".join(visible_texts)
+            assert "네이버 지식인 최신 질문을 확인하고" not in visible_copy
+            assert "자동화 흐름" not in visible_copy
+            assert app.naver_kin_start_button.cget("text") == "질문 목록 수집"
+            assert app.naver_kin_direct_collect_button.cget("text") == "수집"
+            assert app.naver_kin_fixed_progress_panel.winfo_ismapped()
+            assert all(
+                not frame.winfo_ismapped()
+                for name, frame in app._page_frame_map().items()
+                if name != "naver_kin"
+            )
+            app.naver_kin_scroll._parent_canvas.yview_moveto(0)
+            settle()
+            fixed_y = app.naver_kin_fixed_progress_panel.winfo_rooty()
+            app.naver_kin_scroll._parent_canvas.yview_moveto(1)
+            settle()
+            assert app.naver_kin_fixed_progress_panel.winfo_rooty() == fixed_y
+            app._set_naver_kin_progress("워드프레스 글 발행을 준비하고 있습니다...", 0.42)
+            assert app.naver_kin_fixed_progress_bar.get() == 0.42
+            assert app.naver_kin_fixed_progress_percent.cget("text") == "42%"
+            app._set_naver_kin_progress("N지식인 답변 등록 완료", state="complete")
+            assert app.naver_kin_fixed_progress_bar.get() == 1.0
+            assert app.naver_kin_fixed_progress_badge.cget("text") == "완료"
+            print(f"{sys.platform} {args.theme}: Naver Knowledge iN direct URL and fixed progress UI passed")
             assert not errors, errors
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:

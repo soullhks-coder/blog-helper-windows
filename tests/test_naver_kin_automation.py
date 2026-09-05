@@ -1,4 +1,5 @@
 import ast
+import queue
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,6 +62,79 @@ class NaverKinAutomationTests(unittest.TestCase):
 
         self.assertTrue(main.naver_kin_question_ready(ready))
         self.assertFalse(main.naver_kin_question_ready(title_only))
+
+    def test_single_question_url_validation_accepts_detail_only(self) -> None:
+        normalized = main.normalize_naver_kin_question_url(
+            "kin.naver.com/qna/detail.naver?d1id=1&docId=123"
+        )
+
+        self.assertEqual(
+            normalized,
+            "https://kin.naver.com/qna/detail.naver?d1id=1&docId=123",
+        )
+        with self.assertRaisesRegex(ValueError, "질문 상세 URL"):
+            main.normalize_naver_kin_question_url(
+                "https://kin.naver.com/qna/questionList.naver"
+            )
+        with self.assertRaisesRegex(ValueError, "kin.naver.com"):
+            main.normalize_naver_kin_question_url(
+                "https://example.com/qna/detail.naver?docId=123"
+            )
+
+    def test_single_question_page_extracts_title_and_body(self) -> None:
+        class FakeLocator:
+            def __init__(self, text: str = "", attribute: str = "") -> None:
+                self.text = text
+                self.attribute = attribute
+
+            @property
+            def first(self):
+                return self
+
+            def count(self):
+                return 1 if self.text or self.attribute else 0
+
+            def nth(self, _index):
+                return self
+
+            def is_visible(self, timeout=0):
+                return True
+
+            def inner_text(self, timeout=0):
+                return self.text
+
+            def get_attribute(self, _name):
+                return self.attribute
+
+        class FakePage:
+            url = "https://kin.naver.com/qna/detail.naver?docId=123"
+
+            def locator(self, selector):
+                if selector == ".questionDetail .c-heading__title":
+                    return FakeLocator("청년도약계좌 가입 조건")
+                if selector == ".questionDetail":
+                    return FakeLocator(
+                        "청년도약계좌 가입 조건: 신청하려는데 소득 조건과 필요한 준비 서류가 무엇인지 궁금합니다."
+                    )
+                return FakeLocator()
+
+            def title(self):
+                return "네이버 지식iN"
+
+            def evaluate(self, _script):
+                return ""
+
+        question = main.extract_naver_kin_question_from_page(
+            FakePage(),
+            FakePage.url,
+        )
+
+        self.assertEqual(question["title"], "청년도약계좌 가입 조건")
+        self.assertEqual(
+            question["question_text"],
+            "신청하려는데 소득 조건과 필요한 준비 서류가 무엇인지 궁금합니다.",
+        )
+        self.assertTrue(main.naver_kin_question_ready(question))
 
     def test_naver_kin_uses_explicit_wordpress_prompt(self) -> None:
         settings = main.WordPressSettings(
@@ -125,6 +199,7 @@ class NaverKinAutomationTests(unittest.TestCase):
                 naver_kin_wordpress_prompt_id="wordpress-kin",
                 naver_kin_next_action="collect",
                 naver_kin_next_run_at=12345.0,
+                naver_kin_direct_question_url="https://kin.naver.com/qna/detail.naver?docId=456",
             )
             with (
                 patch.object(main, "STATE_FILE", state_file),
@@ -139,6 +214,10 @@ class NaverKinAutomationTests(unittest.TestCase):
             self.assertEqual(loaded.naver_kin_wordpress_prompt_id, "wordpress-kin")
             self.assertEqual(loaded.naver_kin_next_action, "collect")
             self.assertEqual(loaded.naver_kin_next_run_at, 12345.0)
+            self.assertEqual(
+                loaded.naver_kin_direct_question_url,
+                "https://kin.naver.com/qna/detail.naver?docId=456",
+            )
 
     def test_collector_opens_detail_pages_and_extracts_body(self) -> None:
         source = self._method_source("run_naver_kin_playwright_bootstrap")
@@ -183,6 +262,36 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("wordpress_article_prompt_template", worker_source)
         self.assertIn("build_naver_kin_answer_text", worker_source)
         self.assertTrue(source)
+
+    def test_single_url_worker_collects_then_emits_question(self) -> None:
+        result_queue = queue.Queue()
+        question = {
+            "title": "청년도약계좌 가입 조건",
+            "question_text": "신청하려는데 소득 조건과 필요한 준비 서류가 무엇인지 궁금합니다.",
+            "url": "https://kin.naver.com/qna/detail.naver?docId=123",
+        }
+        with patch.object(
+            main,
+            "run_naver_kin_single_question_playwright",
+            return_value=(True, question),
+        ):
+            worker = main.NaverKinQuestionCollectorWorker(question["url"], result_queue)
+            worker.run()
+
+        self.assertEqual(result_queue.get_nowait(), ("naver_kin_direct_collected", question))
+
+    def test_naver_kin_page_has_direct_url_flow_and_fixed_progress(self) -> None:
+        source = self._method_source("_build_naver_kin_page")
+        direct_handler = self._method_source("_handle_naver_kin_direct_collected")
+
+        self.assertNotIn("네이버 지식인 최신 질문을 확인하고", source)
+        self.assertNotIn('text="자동화 흐름"', source)
+        self.assertNotIn("1. 지식인 질문 목록", source)
+        self.assertIn('text="질문 목록 수집"', source)
+        self.assertIn('text="지식인 URL"', source)
+        self.assertIn("naver_kin_direct_collect_button", source)
+        self.assertIn("naver_kin_fixed_progress_bar", source)
+        self.assertIn("_start_naver_kin_question_worker", direct_handler)
 
 
 if __name__ == "__main__":
