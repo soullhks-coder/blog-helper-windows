@@ -47,6 +47,14 @@ splash = Splash(
     binaries=a.binaries,
     datas=a.datas,
     max_img_size=(320, 320),
+    # Keep a clear startup message visible while the one-file executable is loading.
+    # Coordinates are based on the resized 320 x 320 splash image; the lower area
+    # is dark enough for this centered, two-line white message to remain legible.
+    text_pos=(80, 306),
+    text_size=-16,
+    text_font="{Malgun Gothic}",
+    text_color="#FFFFFF",
+    text_default="실행중...\n잠시만기다려주세요.",
     always_on_top=True,
     center="active",
 )
