@@ -515,6 +515,12 @@ SIDEBAR_MENU_DEFAULT_ICONS = {
     "prompts": "chat-square-text",
     "settings": "gear",
 }
+WRITING_STAGE_LABELS = {
+    "topic": "키워드 찾기",
+    "keyword": "참고 수집",
+    "article": "글 확인·수정",
+    "publish": "썸네일·발행",
+}
 
 
 def normalize_sidebar_menu_labels(value: object) -> dict[str, str]:
@@ -18706,7 +18712,7 @@ class KeywordApp(ctk.CTk):
         self.app_title_var = tk.StringVar(value=self.wordpress_settings.app_title or "현기쿠")
         self._app_title_save_job = None
         self._sidebar_menu_label_save_job = None
-        self._sidebar_icon_image_cache: dict[tuple[str, str], ctk.CTkImage] = {}
+        self._sidebar_icon_image_cache: dict[tuple[str, str, int], ctk.CTkImage] = {}
         self._bootstrap_icon_font = None
         self._last_text_input_at = 0.0
         self._theme_paint_defer_job = None
@@ -19639,6 +19645,10 @@ class KeywordApp(ctk.CTk):
 
     def _retint_widget_tree(self, widget, palette: dict[str, str]) -> None:
         for child in widget.winfo_children():
+            # These writing surfaces set every control color from their own
+            # theme palette, including preview canvases and semantic buttons.
+            if getattr(child, "_uses_writing_design_theme", False):
+                continue
             if child in self._theme_painted_widgets:
                 self._retint_widget_tree(child, palette)
                 continue
@@ -21851,6 +21861,7 @@ class KeywordApp(ctk.CTk):
         self,
         icon_name: str,
         color: str,
+        size: int = 21,
     ) -> ctk.CTkImage | None:
         if (
             not icon_name
@@ -21864,7 +21875,7 @@ class KeywordApp(ctk.CTk):
         if codepoint is None:
             return None
         normalized_icon = normalize_bootstrap_icon_spec(icon_name) or ""
-        cache_key = (normalized_icon, color.lower())
+        cache_key = (normalized_icon, color.lower(), size)
         cached = self._sidebar_icon_image_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -21888,7 +21899,7 @@ class KeywordApp(ctk.CTk):
             rendered = ctk.CTkImage(
                 light_image=icon,
                 dark_image=icon,
-                size=(21, 21),
+                size=(size, size),
             )
         except Exception:
             return None
@@ -22112,6 +22123,7 @@ class KeywordApp(ctk.CTk):
         self._save_basic_settings()
 
     def _build_writing_page(self) -> None:
+        palette = self._theme_palette()
         header = ctk.CTkFrame(self.writing_page, fg_color="transparent")
         header.grid(row=0, column=0, padx=28, pady=(26, 12), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
@@ -22141,16 +22153,8 @@ class KeywordApp(ctk.CTk):
         )
         self.writing_auto_progress_switch.grid(row=0, column=0, sticky="w")
 
-        self.writing_auto_progress_status = ctk.CTkLabel(
-            auto_row,
-            text="1·2단계는 직접 선택하고 3·4단계를 자동 진행합니다.",
-            text_color="#a7b3c4",
-            font=ctk.CTkFont(size=13),
-        )
-        self.writing_auto_progress_status.grid(row=0, column=1, padx=(12, 0), sticky="w")
-
-        target_row = ctk.CTkFrame(header, fg_color="transparent")
-        target_row.grid(row=2, column=0, pady=(8, 0), sticky="w")
+        target_row = ctk.CTkFrame(auto_row, fg_color="transparent")
+        target_row.grid(row=0, column=1, padx=(20, 0), sticky="w")
         ctk.CTkLabel(
             target_row,
             text="자동 발행 대상",
@@ -22179,10 +22183,25 @@ class KeywordApp(ctk.CTk):
 
         self._refresh_writing_auto_progress_ui()
 
+        self.writing_step_headers = {}
+        self.writing_step_icons = {}
+        self.writing_step_header_columns = None
+        self.writing_step_rail = ctk.CTkFrame(header, fg_color="transparent")
+        self.writing_step_rail._uses_writing_design_theme = True
+        self.writing_step_rail.grid(row=2, column=0, pady=(16, 0), sticky="ew")
+        self.writing_step_rail.bind("<Configure>", self._layout_writing_step_headers, add="+")
+
         self.writing_scroll = ctk.CTkScrollableFrame(self.writing_page, fg_color="transparent")
         self.writing_scroll.grid(row=1, column=0, padx=28, pady=(0, 10), sticky="nsew")
         self.writing_scroll.grid_columnconfigure(0, weight=1)
         self._build_writing_workflow(self.writing_scroll)
+
+        self.writing_collapsed_hint = ctk.CTkLabel(
+            self.writing_scroll,
+            text="위에서 진행할 단계를 열어 주세요.",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14),
+        )
 
         self._build_fixed_writing_progress_panel()
 
@@ -22232,12 +22251,14 @@ class KeywordApp(ctk.CTk):
 
         stage_row = ctk.CTkFrame(panel, fg_color="transparent")
         stage_row.grid(row=1, column=0, columnspan=3, padx=16, pady=(0, 7), sticky="ew")
-        stage_names = ("1 키워드 찾기", "2 참고 수집", "3 글 작성", "4 썸네일·발행")
+        stage_names = tuple(WRITING_STAGE_LABELS.values())
         for index, stage_name in enumerate(stage_names, start=1):
             stage_row.grid_columnconfigure(index - 1, weight=1, uniform="writing_progress_stage")
             label = ctk.CTkLabel(
                 stage_row,
                 text=stage_name,
+                image=self._bootstrap_sidebar_icon_image(f"{index}-circle", palette["muted"], 16),
+                compound="left",
                 height=26,
                 corner_radius=9,
                 fg_color=palette["input"],
@@ -22317,7 +22338,7 @@ class KeywordApp(ctk.CTk):
         error_bg = "#fee2e2" if is_white else "#52252a"
         error_text = "#b42318" if is_white else "#ff8b8b"
 
-        badge_text = "완료" if state == "complete" else ("오류" if state == "error" else f"{stage}단계")
+        badge_text = "완료" if state == "complete" else ("오류" if state == "error" else "진행 중")
         badge_bg = done_bg if state == "complete" else (error_bg if state == "error" else active_bg)
         badge_text_color = done_text if state == "complete" else (error_text if state == "error" else active_text)
         if state == "idle":
@@ -22327,6 +22348,9 @@ class KeywordApp(ctk.CTk):
 
         self.writing_fixed_stage_badge.configure(
             text=badge_text,
+            image=self._bootstrap_sidebar_icon_image(f"{stage}-circle-fill", badge_text_color, 16)
+            if state == "active" else None,
+            compound="left",
             fg_color=badge_bg,
             text_color=badge_text_color,
         )
@@ -22354,30 +22378,19 @@ class KeywordApp(ctk.CTk):
                 fg_color, text_color = active_bg, active_text
             else:
                 fg_color, text_color = palette["input"], palette["muted"]
-            label.configure(fg_color=fg_color, text_color=text_color)
+            label.configure(
+                fg_color=fg_color,
+                text_color=text_color,
+                image=self._bootstrap_sidebar_icon_image(
+                    f"{index}-circle{'-fill' if completed or active else ''}", text_color, 16
+                ),
+            )
 
     def _refresh_writing_auto_progress_ui(self) -> None:
         if not hasattr(self, "writing_auto_progress_switch"):
             return
         enabled = bool(self.writing_auto_progress_var.get())
         self.writing_auto_progress_switch.configure(text=f"자동진행 {'ON' if enabled else 'OFF'}")
-        if not hasattr(self, "writing_auto_progress_status"):
-            return
-        if self.writing_auto_run_active:
-            stage_labels = {
-                "keyword": "선택한 키워드의 참고내용을 수집하는 중입니다.",
-                "article": "프롬프트에 따라 글을 작성하는 중입니다.",
-                "publish": "썸네일·카드뉴스를 준비해 선택한 블로그에 발행하는 중입니다.",
-            }
-            text = stage_labels.get(self.writing_auto_stage, "자동진행을 준비하고 있습니다.")
-            color = "#48d980"
-        elif enabled:
-            text = "1·2단계에서 키워드를 직접 선택하면 3·4단계를 자동 진행합니다."
-            color = "#6dadff"
-        else:
-            text = "각 단계를 직접 확인하며 진행합니다."
-            color = "#a7b3c4"
-        self.writing_auto_progress_status.configure(text=text, text_color=color)
 
     def _on_writing_auto_progress_toggled(self) -> None:
         if not self.writing_auto_progress_var.get():
@@ -29922,7 +29935,7 @@ class KeywordApp(ctk.CTk):
         topic_card = self._create_writing_section(
             parent=parent,
             section_key="topic",
-            title="1. 주제 입력 및 키워드 찾기",
+            title="주제 입력 및 키워드 찾기",
             row=0,
             opened=True,
         )
@@ -30096,7 +30109,7 @@ class KeywordApp(ctk.CTk):
         keyword_card = self._create_writing_section(
             parent=parent,
             section_key="keyword",
-            title="2. 추천 키워드 선택",
+            title="추천 키워드 선택",
             row=1,
             opened=False,
         )
@@ -30354,7 +30367,7 @@ class KeywordApp(ctk.CTk):
         article_card = self._create_writing_section(
             parent=parent,
             section_key="article",
-            title="3. 생성된 글 확인 및 수정",
+            title="생성된 글 확인 및 수정",
             row=2,
             opened=False,
         )
@@ -30431,55 +30444,19 @@ class KeywordApp(ctk.CTk):
         publish_card = self._create_writing_section(
             parent=parent,
             section_key="publish",
-            title="4. 썸네일 제작",
+            title="썸네일·본문 카드뉴스 제작",
             row=3,
             opened=False,
         )
 
-        thumbnail_workspace = ctk.CTkFrame(
-            publish_card,
-            fg_color="#222c3b",
-            corner_radius=18,
-            border_width=1,
-            border_color="#304158",
+        (thumbnail_workspace, thumbnail_header, preview_panel, editor_panel,
+         self.thumbnail_preview_canvas) = self._create_writing_design_workspace(
+            publish_card, 0, "썸네일 제작", "미리보기에서 문구와 배경을 확인하고 디자인을 조정하세요."
         )
-        thumbnail_workspace.grid(row=0, column=0, padx=18, pady=(18, 14), sticky="ew")
-        thumbnail_workspace.grid_columnconfigure(0, weight=1, uniform="thumbnail_workspace")
-        thumbnail_workspace.grid_columnconfigure(1, weight=1, uniform="thumbnail_workspace")
-
-        preview_panel = ctk.CTkFrame(thumbnail_workspace, fg_color="transparent")
-        preview_panel.grid(row=0, column=0, padx=(16, 10), pady=16, sticky="nsew")
-        preview_panel.grid_columnconfigure(0, weight=1)
-
-        preview_label = ctk.CTkLabel(
-            preview_panel,
-            text="썸네일 미리보기",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        preview_label.grid(row=0, column=0, pady=(0, 12), sticky="w")
-
-        preview_container = ctk.CTkFrame(
-            preview_panel,
-            fg_color="#f3f5f8",
-            corner_radius=18,
-            border_width=1,
-            border_color="#d6dde7",
-        )
-        preview_container.grid(row=1, column=0, sticky="n")
-        preview_container.grid_columnconfigure(0, weight=1)
-
-        self.thumbnail_preview_canvas = tk.Canvas(
-            preview_container,
-            width=380,
-            height=380,
-            bg="#ffffff",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.thumbnail_preview_canvas.grid(row=0, column=0, padx=14, pady=14)
+        self.thumbnail_design_workspace = thumbnail_workspace
 
         self.save_thumbnail_button = ctk.CTkButton(
-            preview_panel,
+            thumbnail_header,
             text="썸네일 저장",
             width=170,
             height=48,
@@ -30490,20 +30467,16 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
             command=self._save_thumbnail_image,
         )
-        self.save_thumbnail_button.grid(row=2, column=0, pady=(18, 0), sticky="w")
-
-        editor_panel = ctk.CTkFrame(thumbnail_workspace, fg_color="transparent")
-        editor_panel.grid(row=0, column=1, padx=(10, 16), pady=16, sticky="nsew")
-        editor_panel.grid_columnconfigure(0, weight=1)
+        self.save_thumbnail_button.grid(row=0, column=1, padx=(12, 0), sticky="e")
 
         thumbnail_intro = ctk.CTkLabel(
             editor_panel,
-            text="첨부해주신 흐름처럼 텍스트, 배경 이미지, 색상, 크기를 조정해서 직접 썸네일을 만들 수 있습니다.",
+            text="텍스트 편집",
             anchor="w",
             justify="left",
             wraplength=540,
             text_color="#c4cede",
-            font=ctk.CTkFont(size=14),
+            font=ctk.CTkFont(size=14, weight="bold"),
         )
         thumbnail_intro.grid(row=0, column=0, pady=(0, 10), sticky="ew")
 
@@ -30729,27 +30702,11 @@ class KeywordApp(ctk.CTk):
         self.thumbnail_shadow_menu.grid(row=0, column=3, sticky="ew")
         self.thumbnail_shadow_menu.set("강한 그림자")
 
-        cardnews_panel = ctk.CTkFrame(
-            publish_card,
-            fg_color="#111826",
-            corner_radius=18,
-            border_width=1,
-            border_color="#304158",
+        (cardnews_panel, cardnews_header, body_cardnews_preview_card, cardnews_right_panel,
+         self.body_cardnews_preview_canvas) = self._create_writing_design_workspace(
+            publish_card, 1, "본문 카드뉴스 제작", "슬라이드별 제목과 디자인을 조정한 뒤 본문에 반영하세요."
         )
-        cardnews_panel.grid(row=1, column=0, padx=18, pady=(0, 14), sticky="ew")
-        cardnews_panel.grid_columnconfigure(0, weight=1, uniform="cardnews_workspace")
-        cardnews_panel.grid_columnconfigure(1, weight=1, uniform="cardnews_workspace")
-
-        cardnews_header = ctk.CTkFrame(cardnews_panel, fg_color="transparent")
-        cardnews_header.grid(row=0, column=0, columnspan=2, padx=16, pady=(14, 8), sticky="ew")
-        cardnews_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            cardnews_header,
-            text="본문 카드뉴스 제작",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        self.cardnews_design_workspace = cardnews_panel
 
         self.generate_cardnews_button = ctk.CTkButton(
             cardnews_header,
@@ -30765,7 +30722,7 @@ class KeywordApp(ctk.CTk):
         self.generate_cardnews_button.grid(row=0, column=1, padx=(10, 0), sticky="e")
 
         self.cardnews_status_label = ctk.CTkLabel(
-            cardnews_panel,
+            cardnews_right_panel,
             text="글이 완성되면 H2 기준 슬라이드가 자동 준비됩니다. 디자인을 조정한 뒤 생성하면 본문에도 자동 반영됩니다.",
             text_color="#aab7c8",
             anchor="w",
@@ -30773,42 +30730,10 @@ class KeywordApp(ctk.CTk):
             wraplength=860,
             font=ctk.CTkFont(size=13),
         )
-        self.cardnews_status_label.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
-
-        body_cardnews_preview_card = ctk.CTkFrame(cardnews_panel, fg_color="#182235", corner_radius=16)
-        body_cardnews_preview_card.grid(row=2, column=0, padx=(16, 8), pady=(0, 10), sticky="nsew")
-        body_cardnews_preview_card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            body_cardnews_preview_card,
-            text="카드뉴스 미리보기",
-            text_color="#f1f5fb",
-            anchor="w",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=14, pady=(12, 8), sticky="w")
-
-        body_cardnews_preview_container = ctk.CTkFrame(
-            body_cardnews_preview_card,
-            fg_color="#f3f5f8",
-            corner_radius=18,
-            border_width=1,
-            border_color="#d6dde7",
-        )
-        body_cardnews_preview_container.grid(row=1, column=0, padx=14, pady=(0, 8), sticky="n")
-        body_cardnews_preview_container.grid_columnconfigure(0, weight=1)
-
-        self.body_cardnews_preview_canvas = tk.Canvas(
-            body_cardnews_preview_container,
-            width=320,
-            height=320,
-            bg="#ffffff",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.body_cardnews_preview_canvas.grid(row=0, column=0, padx=12, pady=12)
+        self.cardnews_status_label.grid(row=3, column=0, pady=(0, 12), sticky="ew")
 
         cardnews_slide_nav = ctk.CTkFrame(body_cardnews_preview_card, fg_color="transparent")
-        cardnews_slide_nav.grid(row=2, column=0, padx=14, pady=(0, 12), sticky="ew")
+        cardnews_slide_nav.grid(row=2, column=0, pady=(12, 0), sticky="ew")
         cardnews_slide_nav.grid_columnconfigure(1, weight=1)
 
         self.cardnews_prev_button = ctk.CTkButton(
@@ -30844,10 +30769,6 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._move_cardnews_slide(1),
         )
         self.cardnews_next_button.grid(row=0, column=2, padx=(8, 0), sticky="e")
-
-        cardnews_right_panel = ctk.CTkFrame(cardnews_panel, fg_color="transparent")
-        cardnews_right_panel.grid(row=2, column=1, padx=(8, 16), pady=(0, 10), sticky="new")
-        cardnews_right_panel.grid_columnconfigure(0, weight=1)
 
         cardnews_edit_grid = ctk.CTkFrame(cardnews_right_panel, fg_color="#0b1220", corner_radius=16)
         cardnews_edit_grid.grid(row=0, column=0, pady=(0, 10), sticky="ew")
@@ -31098,6 +31019,9 @@ class KeywordApp(ctk.CTk):
         )
         self.cardnews_list_label.grid(row=2, column=0, pady=(0, 4), sticky="ew")
 
+        for workspace in (thumbnail_workspace, cardnews_panel):
+            self._style_writing_design_workspace(workspace)
+
         publish_row = ctk.CTkFrame(publish_card, fg_color="transparent")
         publish_row.grid(row=2, column=0, padx=18, pady=(0, 10), sticky="ew")
         publish_row.grid_columnconfigure(1, weight=1)
@@ -31155,6 +31079,12 @@ class KeywordApp(ctk.CTk):
         )
         self.open_published_post_button.grid(row=0, column=3, padx=(10, 0), sticky="e")
         self.open_published_post_button.configure(state="disabled")
+        publish_row._action_columns = None
+        publish_row.bind(
+            "<Configure>",
+            lambda event: self._layout_writing_publish_actions(publish_row, event.width),
+            add="+",
+        )
 
         self.writing_reference_protection_switch = ctk.CTkSwitch(
             publish_card,
@@ -31268,39 +31198,61 @@ class KeywordApp(ctk.CTk):
         row: int,
         opened: bool,
     ) -> ctk.CTkFrame:
+        palette = self._theme_palette()
         card = ctk.CTkFrame(
             parent,
-            fg_color="#222c3b",
+            fg_color=palette["card"],
             corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         card.grid(row=row, column=0, pady=(0, 16), sticky="ew")
         card.grid_columnconfigure(0, weight=1)
 
-        header = ctk.CTkFrame(card, fg_color="transparent")
-        header.grid(row=0, column=0, padx=20, pady=(16, 8), sticky="ew")
-        header.grid_columnconfigure(0, weight=1)
+        # Accordion headers live outside the scrolling bodies, so even a long
+        # image editor cannot push the other stages out of reach.
+        header = ctk.CTkFrame(
+            self.writing_step_rail, fg_color=palette["panel"],
+            corner_radius=14, border_width=1, border_color=palette["border"],
+        )
+        header.grid_columnconfigure(1, weight=1)
+        self.writing_step_headers[section_key] = header
+        icon = ctk.CTkLabel(
+            header, text="", width=28,
+            image=self._bootstrap_sidebar_icon_image(f"{row + 1}-circle", palette["accent"], 24),
+        )
+        icon.grid(row=0, column=0, padx=(12, 7), pady=12)
+        self.writing_step_icons[section_key] = icon
 
         title_label = ctk.CTkLabel(
             header,
-            text=title,
-            font=ctk.CTkFont(size=20, weight="bold"),
+            text=WRITING_STAGE_LABELS[section_key],
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
         )
-        title_label.grid(row=0, column=0, sticky="w")
+        title_label.grid(row=0, column=1, sticky="w")
+        for control in (header, title_label, icon):
+            control.bind("<Button-1>", lambda _event, key=section_key: self._toggle_writing_section(key), add="+")
 
         toggle_button = ctk.CTkButton(
             header,
             text="접기" if opened else "열기",
-            width=88,
-            height=34,
-            corner_radius=12,
-            fg_color="#314761",
-            hover_color="#3f5c7f",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            width=48,
+            height=30,
+            corner_radius=10,
+            fg_color=palette["button"],
+            hover_color=palette["button_hover"],
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=11, weight="bold"),
             command=lambda key=section_key: self._toggle_writing_section(key),
         )
-        toggle_button.grid(row=0, column=1, sticky="e")
+        toggle_button.grid(row=0, column=2, padx=(6, 10), pady=10, sticky="e")
+
+        ctk.CTkLabel(
+            card, text=title, text_color=palette["text"],
+            image=self._bootstrap_sidebar_icon_image(f"{row + 1}-circle", palette["accent"], 24),
+            compound="left", font=ctk.CTkFont(size=20, weight="bold"),
+        ).grid(row=0, column=0, padx=24, pady=(18, 8), sticky="w")
 
         body = ctk.CTkFrame(card, fg_color="transparent")
         body.grid(row=1, column=0, sticky="ew")
@@ -31317,13 +31269,34 @@ class KeywordApp(ctk.CTk):
             self.active_writing_section = section_key
         else:
             body.grid_remove()
+            card.grid_remove()
+
+        self._layout_writing_step_headers()
 
         return body
+
+    def _layout_writing_step_headers(self, _event=None) -> None:
+        rail = self.writing_step_rail
+        available_width = rail.winfo_width() / rail._get_widget_scaling()
+        columns = 4 if available_width >= 960 else 2
+        signature = (columns, len(self.writing_step_headers))
+        if signature == self.writing_step_header_columns:
+            return
+        self.writing_step_header_columns = signature
+        for column in range(4):
+            rail.grid_columnconfigure(column, weight=1 if column < columns else 0,
+                                      uniform="writing_step" if column < columns else "")
+        for index, header in enumerate(self.writing_step_headers.values()):
+            header.grid(row=index // columns, column=index % columns,
+                        padx=(0, 8) if index % columns < columns - 1 else 0,
+                        pady=(0, 6), sticky="ew")
 
     def _toggle_writing_section(self, section_key: str) -> None:
         if self.active_writing_section == section_key:
             self._set_writing_section_open(section_key, False)
             self.active_writing_section = ""
+            self._refresh_writing_section_completion_styles()
+            self.writing_collapsed_hint.grid(row=4, column=0, pady=36)
             return
 
         self._open_writing_section(section_key)
@@ -31334,6 +31307,9 @@ class KeywordApp(ctk.CTk):
         for key in self.writing_section_bodies:
             self._set_writing_section_open(key, key == section_key)
         self.active_writing_section = section_key
+        if hasattr(self, "writing_collapsed_hint"):
+            self.writing_collapsed_hint.grid_remove()
+        self._refresh_writing_section_completion_styles()
         self.after(80, lambda key=section_key: self._scroll_writing_section_into_view(key))
 
     def _mark_writing_sections_before(self, section_key: str) -> None:
@@ -31361,6 +31337,9 @@ class KeywordApp(ctk.CTk):
         for key in self.writing_section_bodies:
             self._set_writing_section_open(key, key == "topic")
         self.active_writing_section = "topic"
+        if hasattr(self, "writing_collapsed_hint"):
+            self.writing_collapsed_hint.grid_remove()
+        self._refresh_writing_section_completion_styles()
         self._set_writing_progress(
             1,
             "작업을 시작하면 단계별 진행 상황이 여기에 표시됩니다.",
@@ -31379,7 +31358,7 @@ class KeywordApp(ctk.CTk):
         completed_title = "#187a40" if is_white_theme else "#66e39a"
         for key, card in self.writing_section_cards.items():
             completed = key in self.writing_completed_sections
-            title = self.writing_section_titles.get(key, "")
+            title = WRITING_STAGE_LABELS[key]
             title_label = self.writing_section_title_labels.get(key)
             toggle_button = self.writing_section_toggle_buttons.get(key)
             try:
@@ -31399,6 +31378,18 @@ class KeywordApp(ctk.CTk):
                         hover_color="#168f48" if completed else palette["button_hover"],
                         text_color="#ffffff" if completed else palette["text"],
                     )
+                header = self.writing_step_headers[key]
+                opened = self.active_writing_section == key
+                color = completed_title if completed else palette["accent"] if opened else palette["muted"]
+                header.configure(
+                    fg_color=completed_card if completed else palette["selected"] if opened else palette["panel"],
+                    border_color=completed_border if completed else palette["accent"] if opened else palette["border"],
+                )
+                title_label.configure(text=f"{title} ✓" if completed else title)
+                step = tuple(WRITING_STAGE_LABELS).index(key) + 1
+                self.writing_step_icons[key].configure(
+                    image=self._bootstrap_sidebar_icon_image(f"{step}-circle{'-fill' if opened or completed else ''}", color, 24)
+                )
             except Exception:
                 continue
 
@@ -31447,11 +31438,162 @@ class KeywordApp(ctk.CTk):
             return
 
         if opened:
+            self.writing_section_cards[section_key].grid()
             body.grid()
             button.configure(text="접기")
         else:
             body.grid_remove()
+            self.writing_section_cards[section_key].grid_remove()
             button.configure(text="열기")
+
+    def _create_writing_design_workspace(self, parent, row: int, title: str, subtitle: str):
+        palette = self._theme_palette()
+        workspace = ctk.CTkFrame(
+            parent, fg_color=palette["panel"], corner_radius=18,
+            border_width=1, border_color=palette["border"],
+        )
+        workspace._uses_writing_design_theme = True
+        workspace.grid(row=row, column=0, padx=18, pady=(10, 16), sticky="ew")
+        workspace.grid_columnconfigure(0, weight=1)
+        workspace.grid_columnconfigure(1, weight=1)
+        header = ctk.CTkFrame(workspace, fg_color="transparent")
+        header.grid(row=0, column=0, columnspan=2, padx=18, pady=(18, 8), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header, text=title, text_color=palette["text"],
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        helper = ctk.CTkLabel(
+            workspace, text=subtitle, anchor="w", justify="left", wraplength=600,
+            text_color=palette["muted"], font=ctk.CTkFont(size=13),
+        )
+        helper.grid(row=1, column=0, columnspan=2, padx=18, pady=(0, 16), sticky="ew")
+        preview = ctk.CTkFrame(workspace, fg_color="transparent")
+        preview.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            preview, text="미리보기", text_color=palette["subtext"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, pady=(0, 10), sticky="w")
+        canvas_shell = ctk.CTkFrame(
+            preview, fg_color=palette["shell"], corner_radius=16,
+            border_width=1, border_color=palette["border"],
+        )
+        canvas_shell.grid(row=1, column=0, sticky="n")
+        canvas = tk.Canvas(
+            canvas_shell, width=self._writing_design_preview_limit(),
+            height=self._writing_design_preview_limit(), bg="#ffffff",
+            highlightthickness=0, bd=0,
+        )
+        canvas.grid(row=0, column=0, padx=12, pady=12)
+        editor = ctk.CTkFrame(workspace, fg_color="transparent")
+        editor.grid_columnconfigure(0, weight=1)
+        workspace._design_preview = preview
+        workspace._design_editor = editor
+        workspace._design_columns = None
+        workspace.bind(
+            "<Configure>",
+            lambda event: self._layout_writing_design_workspace(workspace, event.width),
+            add="+",
+        )
+        self._layout_writing_design_workspace(workspace, 1)
+        return workspace, header, preview, editor, canvas
+
+    def _layout_writing_design_workspace(self, workspace, width: int) -> None:
+        columns = 2 if width / workspace._get_widget_scaling() >= 960 else 1
+        if workspace._design_columns == columns:
+            return
+        workspace._design_columns = columns
+        workspace.grid_columnconfigure(0, weight=0 if columns == 2 else 1)
+        workspace.grid_columnconfigure(1, weight=1 if columns == 2 else 0)
+        workspace._design_preview.grid(
+            row=2, column=0, padx=(18, 12) if columns == 2 else 18,
+            pady=(0, 18), sticky="new",
+        )
+        workspace._design_editor.grid(
+            row=2 if columns == 2 else 3, column=1 if columns == 2 else 0,
+            padx=(12, 18) if columns == 2 else 18, pady=(0, 18), sticky="new",
+        )
+
+    def _writing_design_preview_limit(self) -> int:
+        # Tk canvases use physical pixels; match CTk's Windows DPI/macOS scaling.
+        return max(160, round(320 * self.writing_scroll._get_widget_scaling()))
+
+    def _layout_writing_publish_actions(self, row, width: int) -> None:
+        columns = 4 if width / row._get_widget_scaling() >= 700 else 2
+        if row._action_columns == columns:
+            return
+        row._action_columns = columns
+        buttons = (self.publish_pipeline_button, self.queue_post_button,
+                   self.tistory_retry_button, self.open_published_post_button)
+        for column in range(4):
+            row.grid_columnconfigure(column, weight=1 if column < columns else 0,
+                                     uniform="publish_action" if column < columns else "")
+        for index, button in enumerate(buttons):
+            button.grid(row=index // columns, column=index % columns,
+                        padx=(0, 10) if index % columns < columns - 1 else 0,
+                        pady=(0, 8), sticky="ew")
+
+    def _style_writing_design_workspace(self, workspace) -> None:
+        """Style editor controls only; artwork colors and export sizes stay independent."""
+        palette = self._theme_palette()
+        primary_commands = {
+            "_save_thumbnail_image", "_show_thumbnail_preview",
+            "_generate_body_cardnews_images", "_generate_thumbnail_background_with_ai",
+        }
+
+        def style_tree(parent):
+            for child in parent.winfo_children():
+                if isinstance(child, ctk.CTkFrame) and child.cget("fg_color") != "transparent":
+                    child.configure(fg_color=palette["shell"], corner_radius=14,
+                                    border_width=1, border_color=palette["border"])
+                elif isinstance(child, ctk.CTkButton):
+                    primary = getattr(child.cget("command"), "__name__", "") in primary_commands
+                    child.configure(
+                        height=40, corner_radius=12,
+                        fg_color="#2563eb" if primary else palette["button"],
+                        hover_color="#1d4ed8" if primary else palette["button_hover"],
+                        text_color="#ffffff" if primary else palette["text"],
+                        text_color_disabled=palette["muted"],
+                        font=ctk.CTkFont(size=13, weight="bold"),
+                    )
+                elif isinstance(child, ctk.CTkOptionMenu):
+                    child.configure(
+                        height=40, corner_radius=12, fg_color=palette["input"],
+                        button_color=palette["button"], button_hover_color=palette["button_hover"],
+                        dropdown_fg_color=palette["panel"], dropdown_hover_color=palette["selected"],
+                        dropdown_text_color=palette["text"], text_color=palette["text"],
+                        text_color_disabled=palette["muted"],
+                        font=ctk.CTkFont(size=13), dropdown_font=ctk.CTkFont(size=13),
+                    )
+                elif isinstance(child, (ctk.CTkEntry, ctk.CTkTextbox)):
+                    child.configure(
+                        fg_color=palette["input"], border_width=1, border_color=palette["border"],
+                        text_color=palette["text"], corner_radius=12, font=ctk.CTkFont(size=13),
+                    )
+                    if isinstance(child, ctk.CTkEntry):
+                        child.configure(height=40, placeholder_text_color=palette["muted"])
+                elif isinstance(child, ctk.CTkCheckBox):
+                    child.configure(text_color=palette["text"], fg_color="#2563eb",
+                                    hover_color="#1d4ed8", checkmark_color="#ffffff",
+                                    border_color=palette["muted"], font=ctk.CTkFont(size=13))
+                elif isinstance(child, ctk.CTkSlider):
+                    child.configure(fg_color=palette["border"], progress_color="#2563eb",
+                                    button_color=palette["accent"], button_hover_color="#1d4ed8")
+                elif isinstance(child, ctk.CTkLabel):
+                    color = child.cget("text_color")
+                    muted = self._color_matches(color, {"#9aa7bb", "#c4cede", "#aab7c8", "#667085"})
+                    child.configure(text_color=palette["muted"] if muted else palette["text"])
+                    if child.cget("wraplength") or child.cget("textvariable"):
+                        child.configure(wraplength=440, justify="left")
+                        child.bind(
+                            "<Configure>",
+                            lambda event, label=child: label.configure(
+                                wraplength=max(80, int(label.winfo_width() / label._get_widget_scaling()) - 8)
+                            ), add="+",
+                        )
+                style_tree(child)
+
+        style_tree(workspace)
 
     def _thumbnail_labeled_menu(
         self,
@@ -31498,31 +31640,7 @@ class KeywordApp(ctk.CTk):
         values: list[str],
         command: Callable[[str], None],
     ) -> ctk.CTkOptionMenu:
-        card = ctk.CTkFrame(parent, fg_color="transparent")
-        card.grid(row=row, column=column, padx=(0, 12) if column == 0 else (12, 0), pady=(0, 12), sticky="ew")
-        card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            card,
-            text=title,
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=4, pady=(0, 6), sticky="w")
-
-        menu = ctk.CTkOptionMenu(
-            card,
-            values=values,
-            height=42,
-            corner_radius=12,
-            fg_color="#111826",
-            button_color="#111826",
-            button_hover_color="#1d2940",
-            dropdown_fg_color="#273142",
-            dropdown_hover_color="#3468e8",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=command,
-        )
-        menu.grid(row=1, column=0, sticky="ew")
-        return menu
+        return self._thumbnail_labeled_menu(parent, row, column, title, values, command)
 
     def _fill_thumbnail_text_from_article_title(self) -> None:
         title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
@@ -32207,7 +32325,7 @@ class KeywordApp(ctk.CTk):
         font_size = max(20, self._safe_int(self.thumbnail_font_size_entry.get(), 56))
         text_value = self.thumbnail_prompt_preview.get("1.0", "end").strip()
         actual_text_lines = self._thumbnail_text_lines(text_value, width, font_size)
-        preview_limit = 380
+        preview_limit = self._writing_design_preview_limit()
         scale = min(preview_limit / width, preview_limit / height, 1)
         preview_width = max(160, round(width * scale))
         preview_height = max(160, round(height * scale))
@@ -32226,7 +32344,7 @@ class KeywordApp(ctk.CTk):
             return
         self._draw_body_cardnews_on_canvas(
             self.body_cardnews_preview_canvas,
-            preview_limit=320,
+            preview_limit=self._writing_design_preview_limit(),
             photo_attr="body_cardnews_preview_background_photo",
         )
 

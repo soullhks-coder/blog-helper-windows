@@ -82,6 +82,10 @@ jobs:
         shell: pwsh
         run: python tools/test_windows_update_installer.py
 
+      - name: Check writing UI in dark and light themes
+        shell: pwsh
+        run: python tools/check_writing_ui.py
+
       - name: Build BlogHelper.exe
         shell: pwsh
         run: |
@@ -145,6 +149,9 @@ jobs:
           python -m py_compile main.py
           python -m py_compile app_updater.py
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
+
+      - name: Check writing UI in dark and light themes
+        run: python tools/check_writing_ui.py
 
       - name: Build BlogHelper.app
         run: |

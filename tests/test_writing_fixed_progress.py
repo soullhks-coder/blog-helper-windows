@@ -33,8 +33,8 @@ class WritingFixedProgressTests(unittest.TestCase):
     def test_panel_displays_all_four_workflow_stages(self) -> None:
         panel_source = self._method_source("_build_fixed_writing_progress_panel")
 
-        for label in ("1 키워드 찾기", "2 참고 수집", "3 글 작성", "4 썸네일·발행"):
-            self.assertIn(label, panel_source)
+        self.assertIn("WRITING_STAGE_LABELS.values()", panel_source)
+        self.assertIn('f"{index}-circle"', panel_source)
 
     def test_overall_progress_combines_stage_and_stage_fraction(self) -> None:
         progress_source = self._method_source("_set_writing_progress")
