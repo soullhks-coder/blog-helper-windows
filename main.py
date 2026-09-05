@@ -2580,6 +2580,7 @@ class WordPressSettings:
     naver_kin_question_list_url: str = NAVER_KIN_QUESTION_LIST_URL
     naver_kin_direct_question_url: str = ""
     naver_kin_reference_text: str = ""
+    naver_kin_automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI
     naver_kin_sort_mode: str = "최신순"
     naver_kin_collect_interval_minutes: int = 60
     naver_kin_answer_interval_minutes: int = 30
@@ -3170,6 +3171,12 @@ class AppStateStore:
             naver_kin_question_list_url=payload.get("naver_kin_question_list_url", NAVER_KIN_QUESTION_LIST_URL),
             naver_kin_direct_question_url=payload.get("naver_kin_direct_question_url", ""),
             naver_kin_reference_text=str(payload.get("naver_kin_reference_text", "") or ""),
+            naver_kin_automation_mode=normalize_naver_blog_automation_mode(
+                payload.get(
+                    "naver_kin_automation_mode",
+                    NAVER_BLOG_AUTOMATION_MODE_SEMI,
+                )
+            ),
             naver_kin_sort_mode=payload.get("naver_kin_sort_mode", "최신순"),
             naver_kin_collect_interval_minutes=payload.get("naver_kin_collect_interval_minutes", 60),
             naver_kin_answer_interval_minutes=payload.get("naver_kin_answer_interval_minutes", 30),
@@ -12136,6 +12143,7 @@ def run_naver_kin_answer_playwright(
     post_submit_hold_seconds: int = 8,
     question_title: str = "",
     preflight_only: bool = False,
+    automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
 ) -> tuple[bool, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -12780,7 +12788,12 @@ def run_naver_kin_answer_playwright(
             pass
         return False
 
-    def wait_for_answer_submission(target_page, inserted_text: str, timeout_seconds: int = 25) -> tuple[bool, str]:
+    def wait_for_answer_submission(
+        target_page,
+        inserted_text: str,
+        timeout_seconds: int = 25,
+        allow_editor_disappearance: bool = True,
+    ) -> tuple[bool, str]:
         sample = re.sub(r"\s+", " ", inserted_text).strip()[:36]
         deadline = time.time() + max(8, int(timeout_seconds or 25))
         while time.time() < deadline:
@@ -12827,7 +12840,11 @@ def run_naver_kin_answer_playwright(
                 return False, f"네이버 답변 등록 확인이 필요합니다: {dialog_text[:180]}"
             if state.get("answerPresent"):
                 return True, "지식인 답변 등록을 완료했습니다."
-            if not state.get("editorVisible") and state.get("detailVisible"):
+            if (
+                allow_editor_disappearance
+                and not state.get("editorVisible")
+                and state.get("detailVisible")
+            ):
                 return True, "지식인 답변 등록을 완료했습니다."
             try:
                 target_page.wait_for_timeout(700)
@@ -12836,6 +12853,7 @@ def run_naver_kin_answer_playwright(
         return False, "등록 버튼을 눌렀지만 완료 여부를 확인하지 못했습니다. 열린 Chrome의 답변 화면을 확인해 주세요."
 
     profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    automation_mode = normalize_naver_blog_automation_mode(automation_mode)
     profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
     profile_dir.mkdir(parents=True, exist_ok=True)
     append_runtime_log("NKin", f"답변 자동화 전용 Chrome 프로필: {profile_dir}")
@@ -12921,23 +12939,46 @@ def run_naver_kin_answer_playwright(
                 raise RuntimeError("지식인 답변 입력칸을 찾지 못했습니다. 화면 구조가 바뀌었거나 로그인이 필요할 수 있습니다.")
             put_naver_kin_action_log(result_queue, "답변 에디터에 답변 본문을 입력했습니다.")
 
-            result_queue.put(("naver_kin_auto_progress", "지식인 답변 등록 버튼을 누르는 중입니다..."))
-            clicked = click_naver_kin_register(page)
-            if not clicked:
-                raise RuntimeError("지식인 답변 등록 버튼을 찾지 못했습니다. 답변은 입력됐을 수 있으니 화면을 확인해 주세요.")
-            submit_attempted = True
-            put_naver_kin_action_log(result_queue, "상단 파란색 등록 버튼 클릭을 시도했습니다.")
+            if automation_mode == NAVER_BLOG_AUTOMATION_MODE_SEMI:
+                result_queue.put((
+                    "naver_kin_auto_progress",
+                    "반자동 작성 완료 · 답변 내용을 확인한 뒤 네이버의 등록 버튼을 직접 눌러 주세요.",
+                ))
+                put_naver_kin_action_log(
+                    result_queue,
+                    "반자동 모드로 답변 입력을 완료했습니다. 사용자의 수동 등록을 기다립니다.",
+                )
+                while True:
+                    if page.is_closed():
+                        raise RuntimeError("답변을 등록하기 전에 지식인 브라우저가 닫혔습니다.")
+                    submitted, submission_message = wait_for_answer_submission(
+                        page,
+                        answer_text,
+                        timeout_seconds=10,
+                        allow_editor_disappearance=False,
+                    )
+                    if submitted:
+                        break
+                    if "자동입력 방지문자" in submission_message:
+                        result_queue.put(("naver_kin_auto_progress", submission_message))
+            else:
+                result_queue.put(("naver_kin_auto_progress", "지식인 답변 등록 버튼을 누르는 중입니다..."))
+                clicked = click_naver_kin_register(page)
+                if not clicked:
+                    raise RuntimeError("지식인 답변 등록 버튼을 찾지 못했습니다. 답변은 입력됐을 수 있으니 화면을 확인해 주세요.")
+                submit_attempted = True
+                put_naver_kin_action_log(result_queue, "상단 파란색 등록 버튼 클릭을 시도했습니다.")
 
-            submitted, submission_message = wait_for_answer_submission(page, answer_text)
-            if not submitted:
-                raise RuntimeError(submission_message)
+                submitted, submission_message = wait_for_answer_submission(page, answer_text)
+                if not submitted:
+                    raise RuntimeError(submission_message)
             put_naver_kin_action_log(result_queue, submission_message)
             save_naver_blog_storage_state(context, profile_scope)
             hold_seconds = max(0, int(post_submit_hold_seconds or 0))
             if hold_seconds:
                 result_queue.put((
                     "naver_kin_auto_progress",
-                    f"답변 등록을 시도했습니다. 확인할 수 있도록 브라우저를 {hold_seconds}초 동안 유지합니다...",
+                    f"답변 등록을 확인했습니다. 브라우저를 {hold_seconds}초 동안 유지합니다...",
                 ))
                 page.wait_for_timeout(hold_seconds * 1000)
                 success_hold_completed = True
@@ -17988,6 +18029,7 @@ class NaverKinAutomationWorker(threading.Thread):
                 answer_text,
                 self.result_queue,
                 question_title=question_title,
+                automation_mode=self.settings.naver_kin_automation_mode,
             )
             if not success:
                 raise RuntimeError(answer_message)
@@ -23122,10 +23164,46 @@ class KeywordApp(ctk.CTk):
 
         ctk.CTkLabel(
             setup_card,
-            text="지식인 URL",
+            text="작성 방식",
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=3, column=0, padx=18, pady=8, sticky="w")
+        self.naver_kin_automation_mode_var = tk.StringVar(
+            value=NAVER_BLOG_AUTOMATION_MODE_LABELS[
+                normalize_naver_blog_automation_mode(
+                    self.wordpress_settings.naver_kin_automation_mode
+                )
+            ]
+        )
+        self.naver_kin_automation_mode_control = ctk.CTkSegmentedButton(
+            setup_card,
+            values=["반자동", "완전자동"],
+            variable=self.naver_kin_automation_mode_var,
+            command=lambda _value: self._save_naver_kin_settings(silent=True),
+            height=36,
+            corner_radius=10,
+            fg_color="#111826",
+            selected_color="#3468e8",
+            selected_hover_color="#2d5cd0",
+            unselected_color="#31445f",
+            unselected_hover_color="#3b5170",
+            text_color="#dce6f3",
+        )
+        self.naver_kin_automation_mode_control.grid(
+            row=3,
+            column=1,
+            columnspan=3,
+            padx=(0, 18),
+            pady=8,
+            sticky="ew",
+        )
+
+        ctk.CTkLabel(
+            setup_card,
+            text="지식인 URL",
+            text_color="#dce6f3",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=4, column=0, padx=18, pady=8, sticky="w")
         self.naver_kin_direct_url_entry = ctk.CTkEntry(
             setup_card,
             height=40,
@@ -23137,7 +23215,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         self.naver_kin_direct_url_entry.grid(
-            row=3,
+            row=4,
             column=1,
             columnspan=2,
             padx=(0, 10),
@@ -23165,7 +23243,7 @@ class KeywordApp(ctk.CTk):
             command=self._start_naver_kin_direct_automation,
         )
         self.naver_kin_direct_collect_button.grid(
-            row=3,
+            row=4,
             column=3,
             padx=(0, 18),
             pady=8,
@@ -23177,7 +23255,7 @@ class KeywordApp(ctk.CTk):
             text="참고 자료",
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=4, column=0, padx=18, pady=(8, 12), sticky="nw")
+        ).grid(row=5, column=0, padx=18, pady=(8, 12), sticky="nw")
         self.naver_kin_reference_textbox = ctk.CTkTextbox(
             setup_card,
             height=100,
@@ -23189,7 +23267,7 @@ class KeywordApp(ctk.CTk):
             wrap="word",
         )
         self.naver_kin_reference_textbox.grid(
-            row=4,
+            row=5,
             column=1,
             columnspan=3,
             padx=(0, 18),
@@ -23214,7 +23292,7 @@ class KeywordApp(ctk.CTk):
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self.naver_kin_status_label.grid(row=5, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
+        self.naver_kin_status_label.grid(row=6, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
 
         schedule_card = ctk.CTkFrame(
             self.naver_kin_scroll,
@@ -25570,6 +25648,12 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "naver_kin_reference_textbox"):
             self.wordpress_settings.naver_kin_reference_text = (
                 self.naver_kin_reference_textbox.get("1.0", "end").strip()
+            )
+        if hasattr(self, "naver_kin_automation_mode_var"):
+            self.wordpress_settings.naver_kin_automation_mode = (
+                normalize_naver_blog_automation_mode(
+                    self.naver_kin_automation_mode_var.get()
+                )
             )
         if hasattr(self, "naver_kin_sort_menu"):
             self.wordpress_settings.naver_kin_sort_mode = self.naver_kin_sort_menu.get()
@@ -35169,6 +35253,13 @@ class KeywordApp(ctk.CTk):
                 self.naver_kin_reference_textbox.get("1.0", "end").strip()
                 if hasattr(self, "naver_kin_reference_textbox")
                 else self.wordpress_settings.naver_kin_reference_text
+            ),
+            naver_kin_automation_mode=(
+                normalize_naver_blog_automation_mode(
+                    self.naver_kin_automation_mode_var.get()
+                )
+                if hasattr(self, "naver_kin_automation_mode_var")
+                else self.wordpress_settings.naver_kin_automation_mode
             ),
             naver_kin_sort_mode=(
                 self.naver_kin_sort_menu.get()
