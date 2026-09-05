@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+import faulthandler
 import os
 from pathlib import Path
 import subprocess
@@ -21,10 +22,11 @@ def main() -> None:
             command = [sys.executable, __file__, "--theme", theme]
             if args.screenshots:
                 command.extend(["--screenshots", str(args.screenshots)])
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, timeout=150)
         return
 
     with tempfile.TemporaryDirectory(prefix="blog-helper-writing-ui-") as directory, ExitStack() as stack:
+        faulthandler.dump_traceback_later(45, repeat=True)
         os.environ["BLOG_HELPER_DATA_DIR"] = directory
         os.environ["BLOG_HELPER_DISABLE_UPDATES"] = "1"
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,7 +46,9 @@ def main() -> None:
             "_save_ui_state", "_save_ui_state_now", "_on_window_configure",
         ):
             stack.enter_context(patch.object(app_module.KeywordApp, method, return_value=None))
+        print(f"{sys.platform} {args.theme}: constructing app", flush=True)
         app = app_module.KeywordApp()
+        print(f"{sys.platform} {args.theme}: app constructed", flush=True)
         errors = []
         app.report_callback_exception = lambda *error: errors.append(error)
 
@@ -108,6 +112,7 @@ def main() -> None:
             screenshot("top")
 
             for key in app_module.WRITING_STAGE_LABELS:
+                print(f"{sys.platform} {args.theme}: accordion {key}", flush=True)
                 if key != app.active_writing_section:
                     app.writing_section_toggle_buttons[key].invoke()
                 settle()
@@ -149,6 +154,7 @@ def main() -> None:
 
             # Both compact laptop and wider desktop layouts retain all controls.
             for geometry in ("1500x1000+30+35", "1100x900+30+35", "860x680+30+35"):
+                print(f"{sys.platform} {args.theme}: layout {geometry}", flush=True)
                 app.geometry(geometry)
                 settle()
                 assert app.writing_step_rail.winfo_width() <= app.writing_page.winfo_width()
@@ -187,6 +193,7 @@ def main() -> None:
             assert not errors, errors
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:
+            faulthandler.cancel_dump_traceback_later()
             app.destroy()
 
 
