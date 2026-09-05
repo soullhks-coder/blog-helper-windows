@@ -200,6 +200,7 @@ class NaverKinAutomationTests(unittest.TestCase):
                 naver_kin_next_action="collect",
                 naver_kin_next_run_at=12345.0,
                 naver_kin_direct_question_url="https://kin.naver.com/qna/detail.naver?docId=456",
+                naver_kin_reference_text="질문자가 직접 알려 준 참고 답변",
             )
             with (
                 patch.object(main, "STATE_FILE", state_file),
@@ -218,6 +219,10 @@ class NaverKinAutomationTests(unittest.TestCase):
                 loaded.naver_kin_direct_question_url,
                 "https://kin.naver.com/qna/detail.naver?docId=456",
             )
+            self.assertEqual(
+                loaded.naver_kin_reference_text,
+                "질문자가 직접 알려 준 참고 답변",
+            )
 
     def test_collector_opens_detail_pages_and_extracts_body(self) -> None:
         source = self._method_source("run_naver_kin_playwright_bootstrap")
@@ -231,13 +236,43 @@ class NaverKinAutomationTests(unittest.TestCase):
             source.index('for selector in ("main h1", "#content h1", "h1")'),
         )
 
-    def test_answer_editor_uses_direct_keyboard_input_without_clipboard_paste(self) -> None:
+    def test_answer_editor_supports_naver_input_buffer_without_clipboard_paste(self) -> None:
         source = self._method_source("run_naver_kin_answer_playwright")
 
-        self.assertIn("target_page.keyboard.type(line, delay=2)", source)
+        self.assertIn("#smartEditorArea .se-text-paragraph", source)
+        self.assertIn("/^input_buffer/i", source)
+        self.assertIn("target_page.keyboard.insert_text(line)", source)
         self.assertIn("editor_contains_inserted_text(frame)", source)
+        self.assertIn("success_hold_completed = True", source)
         self.assertNotIn("paste_with_system_clipboard", source)
         self.assertNotIn('keyboard.press("Meta+V")', source)
+
+    def test_answer_builder_applies_saved_template_and_reference_text(self) -> None:
+        settings = main.WordPressSettings(
+            naver_kin_answer_template="더 자세한 내용은 여기에서 확인해 보세요.\n{url}",
+        )
+        captured_prompt = ""
+
+        def fake_generate(_settings, prompt):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return "술맛은 온도와 안주, 그날의 입안 상태에 따라 다르게 느껴질 수 있어요.", "test"
+
+        with patch.object(main, "generate_text_with_writing_model", side_effect=fake_generate):
+            answer = main.build_naver_kin_answer_text(
+                settings,
+                "왜 술맛이 매번 달라지는 거죠?",
+                "참이슬과 청하가 어떤 날은 쓰고 어떤 날은 달게 느껴져요.",
+                "술맛이 달라지는 이유",
+                "https://example.com/answer",
+                "온도와 음식, 컨디션에 따른 맛 지각 차이를 정리했습니다.",
+                "차갑게 마시면 쓴맛이 덜 느껴질 수 있습니다.",
+            )
+
+        self.assertIn("차갑게 마시면 쓴맛이 덜 느껴질 수 있습니다.", captured_prompt)
+        self.assertIn("더 자세한 내용은 여기에서 확인해 보세요.", captured_prompt)
+        self.assertTrue(answer.endswith("더 자세한 내용은 여기에서 확인해 보세요.\nhttps://example.com/answer"))
+        self.assertEqual(answer.count("https://example.com/answer"), 1)
 
     def test_collect_schedule_runs_fresh_playwright_collection(self) -> None:
         source = self._method_source("_run_naver_kin_automation_once")
@@ -260,6 +295,10 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("resolve_naver_kin_wordpress_prompt_set", worker_source)
         self.assertIn("wordpress_title_prompt_template", worker_source)
         self.assertIn("wordpress_article_prompt_template", worker_source)
+        self.assertIn("naver_kin_reference_text", worker_source)
+        self.assertIn("DailyPublishLimitStore.reserve_publish", worker_source)
+        self.assertIn("DailyPublishLimitStore.record_reserved_success", worker_source)
+        self.assertIn("DailyPublishLimitStore.cancel_reservation", worker_source)
         self.assertIn("build_naver_kin_answer_text", worker_source)
         self.assertTrue(source)
 
@@ -289,6 +328,8 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertNotIn("1. 지식인 질문 목록", source)
         self.assertIn('text="질문 목록 수집"', source)
         self.assertIn('text="지식인 URL"', source)
+        self.assertIn('text="참고 자료"', source)
+        self.assertIn("naver_kin_reference_textbox", source)
         self.assertIn("naver_kin_direct_collect_button", source)
         self.assertIn("naver_kin_fixed_progress_bar", source)
         self.assertIn("_start_naver_kin_question_worker", direct_handler)

@@ -1555,7 +1555,7 @@ DEFAULT_NAVER_KIN_ANSWER_PROMPT = (
     "3. 확인 가능한 사실만 사용하고, 의료·법률·금융 내용은 확정적으로 단정하지 않습니다.\n"
     "4. 광고처럼 과장하거나 워드프레스 글을 그대로 복사하지 않습니다.\n"
     "5. HTML, 마크다운, 코드블록 없이 읽기 쉬운 일반 텍스트로 작성합니다.\n"
-    "6. 워드프레스 URL 문자열은 답변 본문에 직접 쓰지 않습니다. 프로그램이 에디터의 링크 추가 기능으로 별도 삽입합니다.\n"
+    "6. 워드프레스 URL과 저장된 마무리 템플릿은 답변 본문에 반복하지 않습니다. 프로그램이 답변 끝에 템플릿을 자동으로 이어 붙입니다.\n"
     "7. 전체 답변은 1,200자 이내로 작성합니다."
 )
 DEFAULT_CARDNEWS_PROMPT = (
@@ -2579,6 +2579,7 @@ class WordPressSettings:
     naver_blog_image_model: str = "[CLI IMG] Codex"
     naver_kin_question_list_url: str = NAVER_KIN_QUESTION_LIST_URL
     naver_kin_direct_question_url: str = ""
+    naver_kin_reference_text: str = ""
     naver_kin_sort_mode: str = "최신순"
     naver_kin_collect_interval_minutes: int = 60
     naver_kin_answer_interval_minutes: int = 30
@@ -3168,6 +3169,7 @@ class AppStateStore:
             naver_blog_image_model=payload.get("naver_blog_image_model", "[CLI IMG] Codex"),
             naver_kin_question_list_url=payload.get("naver_kin_question_list_url", NAVER_KIN_QUESTION_LIST_URL),
             naver_kin_direct_question_url=payload.get("naver_kin_direct_question_url", ""),
+            naver_kin_reference_text=str(payload.get("naver_kin_reference_text", "") or ""),
             naver_kin_sort_mode=payload.get("naver_kin_sort_mode", "최신순"),
             naver_kin_collect_interval_minutes=payload.get("naver_kin_collect_interval_minutes", 60),
             naver_kin_answer_interval_minutes=payload.get("naver_kin_answer_interval_minutes", 30),
@@ -4399,7 +4401,35 @@ def build_threads_post_text(
     return normalize_threads_post_text(generated, blog_url)
 
 
-def normalize_naver_kin_answer_text(text: str, wordpress_url: str, limit: int = 1200) -> str:
+def render_naver_kin_answer_template(
+    template: str,
+    wordpress_url: str,
+    wordpress_title: str,
+    question_title: str,
+    excerpt: str,
+) -> str:
+    source = (template or "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}").strip()
+    try:
+        rendered = source.format(
+            url=wordpress_url,
+            title=wordpress_title,
+            question=question_title,
+            excerpt=excerpt or wordpress_title,
+        )
+    except (KeyError, IndexError, ValueError):
+        rendered = f"{source}\n{wordpress_url}" if wordpress_url else source
+    rendered = rendered.strip()
+    if wordpress_url and wordpress_url not in rendered:
+        rendered = f"{rendered}\n{wordpress_url}".strip()
+    return rendered
+
+
+def normalize_naver_kin_answer_text(
+    text: str,
+    wordpress_url: str,
+    limit: int = 1200,
+    template_text: str = "",
+) -> str:
     cleaned = normalize_generated_article_html(text)
     cleaned = re.sub(r"<br\s*/?>", "\n", cleaned, flags=re.I)
     cleaned = re.sub(r"</(?:p|div|li|h[1-6])>", "\n", cleaned, flags=re.I)
@@ -4409,7 +4439,11 @@ def normalize_naver_kin_answer_text(text: str, wordpress_url: str, limit: int = 
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if wordpress_url:
         cleaned = cleaned.replace(wordpress_url, "").strip()
-        suffix = f"\n\n자세한 정리는 아래 글에 함께 남겨두었습니다.\n{wordpress_url}"
+        suffix_text = template_text.strip() or f"자세한 정리는 아래 글에 함께 남겨두었습니다.\n{wordpress_url}"
+        template_without_url = suffix_text.replace(wordpress_url, "").strip()
+        if template_without_url and cleaned.endswith(template_without_url):
+            cleaned = cleaned[: -len(template_without_url)].rstrip()
+        suffix = f"\n\n{suffix_text}"
     else:
         suffix = ""
     body_limit = max(0, limit - len(suffix))
@@ -4425,9 +4459,32 @@ def build_naver_kin_answer_text(
     wordpress_title: str,
     wordpress_url: str,
     excerpt: str,
+    reference_text: str = "",
 ) -> str:
     instructions = (settings.naver_kin_answer_prompt or DEFAULT_NAVER_KIN_ANSWER_PROMPT).strip()
     template = (settings.naver_kin_answer_template or "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}").strip()
+    rendered_template = render_naver_kin_answer_template(
+        template,
+        wordpress_url,
+        wordpress_title,
+        question_title,
+        excerpt,
+    )
+    user_reference = str(reference_text or "").strip()
+    instructions = render_prompt_template(
+        instructions,
+        "N지식인 답변",
+        question_title,
+        user_reference or question_text,
+        wordpress_title,
+    )
+    user_reference_block = (
+        "\n[사용자 참고 자료]\n"
+        f"{user_reference[:6000]}\n"
+        "사용자가 제공한 내용을 질문에 맞게 자연스럽게 반영하되, 확인되지 않은 내용은 단정하지 않습니다.\n"
+        if user_reference
+        else ""
+    )
     prompt = (
         f"{instructions}\n\n"
         "[이번 작업]\n"
@@ -4439,11 +4496,14 @@ def build_naver_kin_answer_text(
         f"제목: {wordpress_title}\n"
         f"요약: {excerpt or wordpress_title}\n"
         f"URL: {wordpress_url}\n\n"
+        f"[저장된 지식인 답변 마무리 템플릿]\n{rendered_template}\n"
+        f"{user_reference_block}\n"
         "[답변 작성 조건]\n"
         "- 질문자가 바로 이해할 수 있게 먼저 핵심 답변을 2~4문장으로 정리합니다.\n"
+        "- 기계적인 요약이나 광고 문구가 아니라 사람이 직접 경험을 설명하듯 자연스럽고 친절한 말투로 씁니다.\n"
         "- 과장, 허위 사실, 확정할 수 없는 의학/법률/금융 단정은 피합니다.\n"
         "- HTML, 마크다운, 코드블록 없이 일반 텍스트만 반환합니다.\n"
-        "- URL은 마지막에 한 번만 넣습니다.\n"
+        "- 저장된 마무리 템플릿과 URL은 프로그램이 마지막에 자동 첨부하므로 답변 본문에는 쓰지 않습니다.\n"
         "- 전체 길이는 1200자 이내로 작성합니다."
     )
     generated = ""
@@ -4453,15 +4513,14 @@ def build_naver_kin_answer_text(
         generated = ""
     if not generated:
         try:
-            generated = template.format(
-                url=wordpress_url,
-                title=wordpress_title,
-                question=question_title,
-                excerpt=excerpt or wordpress_title,
-            )
+            generated = plain_text_from_html(excerpt or wordpress_title, limit=500)
         except Exception:
-            generated = f"{question_title} 관련 내용은 아래 글에 정리했습니다.\n{wordpress_url}"
-    return normalize_naver_kin_answer_text(generated, wordpress_url)
+            generated = f"{question_title}에 관해 확인할 핵심 내용을 정리했습니다."
+    return normalize_naver_kin_answer_text(
+        generated,
+        wordpress_url,
+        template_text=rendered_template,
+    )
 
 
 def build_cardnews_prompt(title: str, keyword: str, article_html: str, index: int, count: int) -> str:
@@ -12074,7 +12133,7 @@ def run_naver_kin_answer_playwright(
     answer_text: str,
     result_queue: queue.Queue,
     login_timeout_seconds: int = 300,
-    post_submit_hold_seconds: int = 600,
+    post_submit_hold_seconds: int = 8,
     question_title: str = "",
     preflight_only: bool = False,
 ) -> tuple[bool, str]:
@@ -12397,6 +12456,9 @@ def run_naver_kin_answer_playwright(
                     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
                   };
                   const selectors = [
+                    '#smartEditorArea .se-text-paragraph',
+                    '#smartEditorArea .se-placeholder',
+                    '#smartEditorArea .se-module-text',
                     '.se_editable[contenteditable="true"]',
                     '.se-editable[contenteditable="true"]',
                     '.se-component-content [contenteditable="true"]',
@@ -12451,6 +12513,10 @@ def run_naver_kin_answer_playwright(
 
     def fill_editor(target_page, value: str) -> bool:
         selectors = (
+            "#smartEditorArea .se-text-paragraph",
+            "#smartEditorArea .se-placeholder",
+            "#smartEditorArea .se-module-text",
+            "#smartEditorArea .se-section-text",
             ".se-content[contenteditable='true']",
             ".se_editable[contenteditable='true']",
             ".se-editable[contenteditable='true']",
@@ -12486,6 +12552,8 @@ def run_naver_kin_answer_playwright(
                         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
                       };
                       const selectors = [
+                        '#smartEditorArea .se-text-paragraph',
+                        '#smartEditorArea .se-module-text',
                         '.se-content[contenteditable="true"]',
                         '.se_editable[contenteditable="true"]',
                         '.se-editable[contenteditable="true"]',
@@ -12523,37 +12591,64 @@ def run_naver_kin_answer_playwright(
 
         def activate_editor(frame, locator) -> bool:
             try:
+                is_smart_editor_target = bool(locator.evaluate(
+                    """
+                    (node) => Boolean(
+                      node.closest?.('#smartEditorArea, .qna_answer_editor') &&
+                      node.matches?.('.se-text-paragraph, .se-placeholder, .se-module-text, .se-section-text, .se-component-content')
+                    )
+                    """
+                ))
+            except Exception:
+                is_smart_editor_target = False
+            try:
                 locator.scroll_into_view_if_needed(timeout=1500)
                 locator.click(timeout=1500)
             except Exception:
-                return False
-            try:
-                locator.evaluate(
-                    """
-                    (node) => {
-                      const editable =
-                        node.closest?.('[contenteditable="true"], textarea') ||
-                        node.querySelector?.('[contenteditable="true"], textarea') ||
-                        node;
-                      editable.focus?.();
-                      editable.click?.();
-                    }
-                    """
-                )
-            except Exception:
-                pass
+                if not is_smart_editor_target:
+                    return False
+                try:
+                    locator.click(timeout=1500, force=True)
+                except Exception:
+                    return False
+            if not is_smart_editor_target:
+                try:
+                    locator.evaluate(
+                        """
+                        (node) => {
+                          const editable =
+                            node.closest?.('[contenteditable="true"], textarea') ||
+                            node.querySelector?.('[contenteditable="true"], textarea') ||
+                            node;
+                          editable.focus?.();
+                          editable.click?.();
+                        }
+                        """
+                    )
+                except Exception:
+                    pass
             try:
                 frame.wait_for_timeout(180)
                 return bool(frame.evaluate(
                     """
-                    () => {
+                    ({ allowInputBuffer }) => {
                       const active = document.activeElement;
                       if (!active) return false;
                       if (active.matches?.('textarea, input')) return true;
                       if (active.isContentEditable || active.getAttribute?.('contenteditable') === 'true') return true;
-                      return Boolean(active.closest?.('[contenteditable="true"]'));
+                      if (active.closest?.('[contenteditable="true"]')) return true;
+                      if (
+                        allowInputBuffer &&
+                        active.tagName === 'IFRAME' &&
+                        /^input_buffer/i.test(String(active.id || ''))
+                      ) return true;
+                      return Boolean(
+                        allowInputBuffer &&
+                        document.querySelector('#smartEditorArea .se-section-text.se-is-focused, #smartEditorArea .se-module-text.se-is-focused')
+                      );
                     }
-                    """
+                    """,
+                    {"allowInputBuffer": is_smart_editor_target},
                 ))
             except Exception:
                 return False
@@ -12568,14 +12663,15 @@ def run_naver_kin_answer_playwright(
                 target_page.wait_for_timeout(120)
                 put_naver_kin_action_log(
                     result_queue,
-                    f"답변 에디터를 선택했습니다. {len(value)}자를 키 입력으로 작성합니다.",
+                    f"답변 에디터를 선택했습니다. {len(value)}자를 브라우저 입력으로 작성합니다.",
                 )
                 lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
                 for line_index, line in enumerate(lines):
                     if line_index:
                         target_page.keyboard.press("Enter")
                     if line:
-                        target_page.keyboard.type(line, delay=2)
+                        target_page.keyboard.insert_text(line)
+                        target_page.wait_for_timeout(80)
                 frame.wait_for_timeout(1000)
                 if editor_contains_inserted_text(frame):
                     put_naver_kin_action_log(
@@ -12646,36 +12742,6 @@ def run_naver_kin_answer_playwright(
                     continue
         return False
 
-    def click_editor_link_toolbar(target_page) -> bool:
-        link_selectors = (
-            "button:has-text('링크')",
-            "a:has-text('링크')",
-            "[aria-label='링크']",
-            "[aria-label*='링크']",
-            "[title='링크']",
-            "[title*='링크']",
-            "button[class*='link']",
-            "[role='button']:has-text('링크')",
-        )
-        for frame in [target_page, *target_page.frames]:
-            for selector in link_selectors:
-                try:
-                    locator = frame.locator(selector).first
-                    if locator.count() <= 0:
-                        continue
-                    locator.click(timeout=1200)
-                    target_page.wait_for_timeout(600)
-                    try:
-                        if target_page.locator("input[placeholder*='URL'], input[placeholder*='링크'], input[aria-label*='링크']").count() > 0:
-                            target_page.keyboard.press("Escape")
-                            target_page.wait_for_timeout(250)
-                    except Exception:
-                        pass
-                    return True
-                except Exception:
-                    continue
-        return False
-
     def click_naver_kin_register(target_page) -> bool:
         selectors = (
             "button:has-text('답변등록')",
@@ -12713,6 +12779,61 @@ def run_naver_kin_answer_playwright(
         except Exception:
             pass
         return False
+
+    def wait_for_answer_submission(target_page, inserted_text: str, timeout_seconds: int = 25) -> tuple[bool, str]:
+        sample = re.sub(r"\s+", " ", inserted_text).strip()[:36]
+        deadline = time.time() + max(8, int(timeout_seconds or 25))
+        while time.time() < deadline:
+            try:
+                state = target_page.evaluate(
+                    """
+                    ({ sample }) => {
+                      const visible = (node) => {
+                        if (!node) return false;
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                      };
+                      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                      const editor = document.querySelector('#smartEditorArea, .qna_answer_editor');
+                      const editorVisible = visible(editor);
+                      const captcha = Array.from(document.querySelectorAll('#input_captcha, [placeholder*="자동입력"], [class*="captcha"]'))
+                        .some(visible);
+                      const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .popup, .layer_popup'))
+                        .filter(visible)
+                        .map((node) => normalize(node.innerText || node.textContent || ''))
+                        .filter(Boolean);
+                      const answerText = Array.from(document.querySelectorAll('.answerDetail, ._endContentsText, .se-viewer'))
+                        .filter((node) => !node.closest('#smartEditorArea, .qna_answer_editor'))
+                        .map((node) => normalize(node.innerText || node.textContent || ''))
+                        .join(' ');
+                      return {
+                        editorVisible,
+                        captcha,
+                        dialog: dialogs[0] || '',
+                        answerPresent: Boolean(sample && answerText.includes(sample)),
+                        detailVisible: Boolean(document.querySelector('.questionDetail, .endContent, .answerArea'))
+                      };
+                    }
+                    """,
+                    {"sample": sample},
+                )
+            except Exception:
+                state = {}
+            if state.get("captcha"):
+                return False, "네이버 자동입력 방지문자가 표시되었습니다. 열린 Chrome에서 문자를 입력한 뒤 등록을 다시 눌러 주세요."
+            dialog_text = str(state.get("dialog") or "").strip()
+            if dialog_text and any(keyword in dialog_text for keyword in ("오류", "실패", "등록할 수", "답변 불가")):
+                return False, f"네이버 답변 등록 확인이 필요합니다: {dialog_text[:180]}"
+            if state.get("answerPresent"):
+                return True, "지식인 답변 등록을 완료했습니다."
+            if not state.get("editorVisible") and state.get("detailVisible"):
+                return True, "지식인 답변 등록을 완료했습니다."
+            try:
+                target_page.wait_for_timeout(700)
+            except Exception:
+                time.sleep(0.7)
+        return False, "등록 버튼을 눌렀지만 완료 여부를 확인하지 못했습니다. 열린 Chrome의 답변 화면을 확인해 주세요."
 
     profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
     profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
@@ -12782,6 +12903,7 @@ def run_naver_kin_answer_playwright(
             if preflight_only:
                 save_naver_blog_storage_state(context, profile_scope)
                 put_naver_kin_action_log(result_queue, "지식인 질문 상세 사전검사를 통과했습니다.")
+                success_hold_completed = True
                 return True, "지식인 질문 상세 사전검사를 통과했습니다."
 
             result_queue.put(("naver_kin_auto_progress", "답변 입력 영역을 여는 중입니다..."))
@@ -12799,10 +12921,6 @@ def run_naver_kin_answer_playwright(
                 raise RuntimeError("지식인 답변 입력칸을 찾지 못했습니다. 화면 구조가 바뀌었거나 로그인이 필요할 수 있습니다.")
             put_naver_kin_action_log(result_queue, "답변 에디터에 답변 본문을 입력했습니다.")
 
-            result_queue.put(("naver_kin_auto_progress", "답변 본문 입력 완료. 에디터 링크 버튼을 한 번 누르는 중입니다..."))
-            click_editor_link_toolbar(page)
-            put_naver_kin_action_log(result_queue, "에디터 상단 링크 버튼을 한 번 눌렀습니다.")
-
             result_queue.put(("naver_kin_auto_progress", "지식인 답변 등록 버튼을 누르는 중입니다..."))
             clicked = click_naver_kin_register(page)
             if not clicked:
@@ -12810,7 +12928,10 @@ def run_naver_kin_answer_playwright(
             submit_attempted = True
             put_naver_kin_action_log(result_queue, "상단 파란색 등록 버튼 클릭을 시도했습니다.")
 
-            page.wait_for_timeout(2200)
+            submitted, submission_message = wait_for_answer_submission(page, answer_text)
+            if not submitted:
+                raise RuntimeError(submission_message)
+            put_naver_kin_action_log(result_queue, submission_message)
             save_naver_blog_storage_state(context, profile_scope)
             hold_seconds = max(0, int(post_submit_hold_seconds or 0))
             if hold_seconds:
@@ -12820,7 +12941,7 @@ def run_naver_kin_answer_playwright(
                 ))
                 page.wait_for_timeout(hold_seconds * 1000)
                 success_hold_completed = True
-            return True, "지식인 답변 등록을 시도했습니다."
+            return True, submission_message
         except PlaywrightTimeoutError as exc:
             append_naver_kin_debug_log(f"playwright_timeout url={getattr(page, 'url', '')} error={exc}")
             raise RuntimeError(f"지식인 화면 응답 시간이 초과되었습니다: {exc}") from exc
@@ -17684,6 +17805,8 @@ class NaverKinAutomationWorker(threading.Thread):
 
     def run(self) -> None:
         cleanup_paths: list[str] = []
+        wordpress_reservation_key = ""
+        wordpress_account = ""
         try:
             question_title = clean_naver_kin_question_title(self.question.get("title"))
             question_text = clean_naver_kin_question_body(
@@ -17707,9 +17830,10 @@ class NaverKinAutomationWorker(threading.Thread):
                 )
             if not self.settings.blog_url or not self.settings.username or not self.settings.app_password:
                 raise RuntimeError("워드프레스 연결 정보가 없습니다. 환경설정에서 워드프레스 연결을 먼저 확인해 주세요.")
-            DailyPublishLimitStore.ensure_can_publish(
+            wordpress_account = f"{self.settings.blog_url}|{self.settings.username}"
+            wordpress_reservation_key = DailyPublishLimitStore.reserve_publish(
                 "wordpress",
-                f"{self.settings.blog_url}|{self.settings.username}",
+                wordpress_account,
                 self.settings.wordpress_daily_publish_limit,
             )
 
@@ -17743,11 +17867,21 @@ class NaverKinAutomationWorker(threading.Thread):
             )
             topic = "N지식인 답변"
             keyword = question_title
+            user_reference = str(self.settings.naver_kin_reference_text or "").strip()
             reference_text = (
                 f"[N지식인 질문]\n{question_title}\n\n"
                 f"질문 URL: {question_url}\n\n"
                 f"질문 본문:\n{question_text or question_title}\n"
             )
+            if user_reference:
+                reference_text += (
+                    "\n[사용자 참고 자료]\n"
+                    f"{user_reference[:6000]}\n"
+                )
+                put_naver_kin_action_log(
+                    self.result_queue,
+                    f"사용자 참고 자료 {len(user_reference)}자를 워드프레스 글에 반영합니다.",
+                )
             title, article_html, provider_name = self._generate_article(topic, keyword, reference_text)
             put_naver_kin_action_log(self.result_queue, f"워드프레스 글 생성 완료: {title}")
 
@@ -17830,6 +17964,12 @@ class NaverKinAutomationWorker(threading.Thread):
             wordpress_url = str(wordpress_result.get("link") or wordpress_result.get("post_url") or "").strip()
             if not wordpress_url:
                 raise RuntimeError("워드프레스 공개발행 URL을 가져오지 못했습니다.")
+            daily_publish_count = DailyPublishLimitStore.record_reserved_success(
+                "wordpress",
+                wordpress_account,
+                wordpress_reservation_key,
+            )
+            wordpress_reservation_key = ""
             put_naver_kin_action_log(self.result_queue, f"워드프레스 공개발행 완료: {wordpress_url}")
 
             self.result_queue.put(("naver_kin_auto_progress", "프롬프트관리의 N지식인자동화 프롬프트를 참고해 지식인 답변을 작성합니다..."))
@@ -17840,6 +17980,7 @@ class NaverKinAutomationWorker(threading.Thread):
                 wordpress_title,
                 wordpress_url,
                 meta_description,
+                user_reference,
             )
             put_naver_kin_action_log(self.result_queue, "지식인 답변 문구 생성 완료. 지식인 상세페이지로 이동합니다.")
             success, answer_message = run_naver_kin_answer_playwright(
@@ -17862,6 +18003,7 @@ class NaverKinAutomationWorker(threading.Thread):
                         "provider": provider_name,
                         "thumbnail_path": str(thumbnail_path),
                         "cardnews_count": len(cardnews_urls),
+                        "daily_publish_count": daily_publish_count,
                         "cleanup_count": cleanup_generated_upload_images(cleanup_paths),
                         "message": answer_message,
                     },
@@ -17870,12 +18012,13 @@ class NaverKinAutomationWorker(threading.Thread):
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("naver_kin_auto_error", str(exc)))
         finally:
+            DailyPublishLimitStore.cancel_reservation(wordpress_reservation_key)
             cleanup_generated_upload_images(cleanup_paths)
 
     def _generate_article(self, topic: str, keyword: str, reference_text: str) -> tuple[str, str, str]:
         reference_block = (
             "\n\n[참고내용]\n"
-            "아래 지식인 질문 내용을 바탕으로 질문자의 의도를 먼저 파악하고, 확인 가능한 사실 중심으로 답변형 글을 작성하세요.\n"
+            "아래 지식인 질문과 사용자가 직접 입력한 참고 자료를 함께 바탕으로 질문자의 의도를 먼저 파악하고, 확인 가능한 사실 중심으로 답변형 글을 작성하세요.\n"
             f"{reference_text[:12000]}\n"
             "[참고내용 끝]\n"
         )
@@ -23029,6 +23172,41 @@ class KeywordApp(ctk.CTk):
             sticky="e",
         )
 
+        ctk.CTkLabel(
+            setup_card,
+            text="참고 자료",
+            text_color="#dce6f3",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=4, column=0, padx=18, pady=(8, 12), sticky="nw")
+        self.naver_kin_reference_textbox = ctk.CTkTextbox(
+            setup_card,
+            height=100,
+            corner_radius=12,
+            fg_color="#111826",
+            border_width=1,
+            border_color="#314761",
+            font=ctk.CTkFont(size=14),
+            wrap="word",
+        )
+        self.naver_kin_reference_textbox.grid(
+            row=4,
+            column=1,
+            columnspan=3,
+            padx=(0, 18),
+            pady=(8, 12),
+            sticky="ew",
+        )
+        if self.wordpress_settings.naver_kin_reference_text:
+            self.naver_kin_reference_textbox.insert(
+                "1.0",
+                self.wordpress_settings.naver_kin_reference_text,
+            )
+        self.naver_kin_reference_textbox.bind(
+            "<KeyRelease>",
+            lambda _event: self._save_naver_kin_settings(silent=True),
+        )
+        self._bind_private_mousewheel_scroll(self.naver_kin_reference_textbox)
+
         self.naver_kin_status_label = ctk.CTkLabel(
             setup_card,
             text="현재 상태: 대기 중",
@@ -23036,7 +23214,7 @@ class KeywordApp(ctk.CTk):
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self.naver_kin_status_label.grid(row=4, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
+        self.naver_kin_status_label.grid(row=5, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
 
         schedule_card = ctk.CTkFrame(
             self.naver_kin_scroll,
@@ -25388,6 +25566,10 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "naver_kin_direct_url_entry"):
             self.wordpress_settings.naver_kin_direct_question_url = (
                 self.naver_kin_direct_url_entry.get().strip()
+            )
+        if hasattr(self, "naver_kin_reference_textbox"):
+            self.wordpress_settings.naver_kin_reference_text = (
+                self.naver_kin_reference_textbox.get("1.0", "end").strip()
             )
         if hasattr(self, "naver_kin_sort_menu"):
             self.wordpress_settings.naver_kin_sort_mode = self.naver_kin_sort_menu.get()
@@ -34982,6 +35164,11 @@ class KeywordApp(ctk.CTk):
                 self.naver_kin_direct_url_entry.get().strip()
                 if hasattr(self, "naver_kin_direct_url_entry")
                 else self.wordpress_settings.naver_kin_direct_question_url
+            ),
+            naver_kin_reference_text=(
+                self.naver_kin_reference_textbox.get("1.0", "end").strip()
+                if hasattr(self, "naver_kin_reference_textbox")
+                else self.wordpress_settings.naver_kin_reference_text
             ),
             naver_kin_sort_mode=(
                 self.naver_kin_sort_menu.get()
