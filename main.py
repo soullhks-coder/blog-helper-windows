@@ -1555,7 +1555,7 @@ DEFAULT_NAVER_KIN_ANSWER_PROMPT = (
     "3. 확인 가능한 사실만 사용하고, 의료·법률·금융 내용은 확정적으로 단정하지 않습니다.\n"
     "4. 광고처럼 과장하거나 워드프레스 글을 그대로 복사하지 않습니다.\n"
     "5. HTML, 마크다운, 코드블록 없이 읽기 쉬운 일반 텍스트로 작성합니다.\n"
-    "6. 워드프레스 URL과 저장된 마무리 템플릿은 답변 본문에 반복하지 않습니다. 프로그램이 답변 끝에 템플릿을 자동으로 이어 붙입니다.\n"
+    "6. 워드프레스 URL과 저장된 마무리 템플릿은 답변 본문에 반복하지 않습니다. 프로그램이 마무리 문구와 에디터 링크를 별도로 추가합니다.\n"
     "7. 전체 답변은 1,200자 이내로 작성합니다."
 )
 DEFAULT_CARDNEWS_PROMPT = (
@@ -4446,11 +4446,17 @@ def normalize_naver_kin_answer_text(
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if wordpress_url:
         cleaned = cleaned.replace(wordpress_url, "").strip()
-        suffix_text = template_text.strip() or f"자세한 정리는 아래 글에 함께 남겨두었습니다.\n{wordpress_url}"
+        suffix_text = template_text.strip() or "자세한 정리는 아래 글에 함께 남겨두었습니다."
         template_without_url = suffix_text.replace(wordpress_url, "").strip()
+        template_without_url = re.sub(
+            r"\{\s*url\s*[}\]]",
+            "",
+            template_without_url,
+            flags=re.I,
+        ).strip()
         if template_without_url and cleaned.endswith(template_without_url):
             cleaned = cleaned[: -len(template_without_url)].rstrip()
-        suffix = f"\n\n{suffix_text}"
+        suffix = f"\n\n{template_without_url}" if template_without_url else ""
     else:
         suffix = ""
     body_limit = max(0, limit - len(suffix))
@@ -4477,6 +4483,12 @@ def build_naver_kin_answer_text(
         question_title,
         excerpt,
     )
+    answer_template_text = re.sub(
+        r"\{\s*url\s*[}\]]",
+        "",
+        rendered_template.replace(wordpress_url, ""),
+        flags=re.I,
+    ).strip()
     user_reference = str(reference_text or "").strip()
     instructions = render_prompt_template(
         instructions,
@@ -4503,14 +4515,14 @@ def build_naver_kin_answer_text(
         f"제목: {wordpress_title}\n"
         f"요약: {excerpt or wordpress_title}\n"
         f"URL: {wordpress_url}\n\n"
-        f"[저장된 지식인 답변 마무리 템플릿]\n{rendered_template}\n"
+        f"[저장된 지식인 답변 마무리 템플릿]\n{answer_template_text}\n"
         f"{user_reference_block}\n"
         "[답변 작성 조건]\n"
         "- 질문자가 바로 이해할 수 있게 먼저 핵심 답변을 2~4문장으로 정리합니다.\n"
         "- 기계적인 요약이나 광고 문구가 아니라 사람이 직접 경험을 설명하듯 자연스럽고 친절한 말투로 씁니다.\n"
         "- 과장, 허위 사실, 확정할 수 없는 의학/법률/금융 단정은 피합니다.\n"
         "- HTML, 마크다운, 코드블록 없이 일반 텍스트만 반환합니다.\n"
-        "- 저장된 마무리 템플릿과 URL은 프로그램이 마지막에 자동 첨부하므로 답변 본문에는 쓰지 않습니다.\n"
+        "- 저장된 마무리 템플릿은 프로그램이 마지막에 자동 첨부하고 URL은 링크 도구로 별도 삽입하므로 답변 본문에는 쓰지 않습니다.\n"
         "- 전체 길이는 1200자 이내로 작성합니다."
     )
     generated = ""
@@ -4526,7 +4538,7 @@ def build_naver_kin_answer_text(
     return normalize_naver_kin_answer_text(
         generated,
         wordpress_url,
-        template_text=rendered_template,
+        template_text=answer_template_text,
     )
 
 
@@ -12144,6 +12156,7 @@ def run_naver_kin_answer_playwright(
     question_title: str = "",
     preflight_only: bool = False,
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
+    wordpress_url: str = "",
 ) -> tuple[bool, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -12750,6 +12763,110 @@ def run_naver_kin_answer_playwright(
                     continue
         return False
 
+    def insert_wordpress_link_from_clipboard(target_page, link_url: str) -> bool:
+        normalized_url = str(link_url or "").strip()
+        if not normalized_url:
+            return False
+        try:
+            context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://kin.naver.com",
+            )
+        except Exception as exc:
+            append_naver_kin_debug_log(f"clipboard_permission_warning error={exc}")
+        try:
+            target_page.bring_to_front()
+            target_page.evaluate(
+                "url => navigator.clipboard.writeText(url)",
+                normalized_url,
+            )
+            put_naver_kin_action_log(
+                result_queue,
+                "워드프레스 URL을 클립보드에 저장했습니다.",
+            )
+        except Exception as exc:
+            append_naver_kin_debug_log(f"clipboard_write_error error={exc}")
+            return False
+
+        link_button_selectors = (
+            "button.se-oglink-toolbar-button",
+            ".se-document-toolbar button:has-text('링크')",
+            "button:has-text('링크 링크 추가')",
+        )
+        popup_input_selectors = (
+            "input.se-popup-oglink-input",
+            "input[type='url'][placeholder*='URL']",
+            "input[placeholder='URL을 입력하세요.']",
+        )
+        confirm_selectors = (
+            "button.se-popup-button-confirm",
+            ".se-popup-button-confirm:has-text('확인')",
+            "button:has-text('확인')",
+        )
+        editor_frames = [target_page, *target_page.frames]
+        for frame in editor_frames:
+            clicked = False
+            for selector in link_button_selectors:
+                try:
+                    button = frame.locator(selector).first
+                    if button.count() <= 0 or not button.is_visible(timeout=500):
+                        continue
+                    button.click(timeout=1800)
+                    target_page.wait_for_timeout(800)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+            if not clicked:
+                continue
+
+            popup_input = None
+            popup_frame = frame
+            for candidate_frame in [frame, target_page, *target_page.frames]:
+                for selector in popup_input_selectors:
+                    try:
+                        candidate = candidate_frame.locator(selector).first
+                        if candidate.count() <= 0 or not candidate.is_visible(timeout=500):
+                            continue
+                        popup_input = candidate
+                        popup_frame = candidate_frame
+                        break
+                    except Exception:
+                        continue
+                if popup_input is not None:
+                    break
+            if popup_input is None:
+                continue
+
+            try:
+                target_page.wait_for_timeout(500)
+                if str(popup_input.input_value(timeout=1000) or "").strip() != normalized_url:
+                    popup_input.fill(normalized_url)
+                    popup_input.press("Tab")
+            except Exception:
+                try:
+                    popup_input.fill(normalized_url)
+                    popup_input.press("Tab")
+                except Exception:
+                    continue
+
+            for selector in confirm_selectors:
+                try:
+                    confirm = popup_frame.locator(selector).first
+                    if confirm.count() <= 0 or not confirm.is_visible(timeout=500):
+                        continue
+                    # 네이버가 URL의 OG 미리보기를 읽는 동안 확인 버튼이 잠시 비활성화됩니다.
+                    confirm.click(timeout=20_000)
+                    target_page.wait_for_timeout(1400)
+                    put_naver_kin_action_log(
+                        result_queue,
+                        "에디터의 링크 버튼과 확인 버튼을 눌러 워드프레스 링크를 삽입했습니다.",
+                    )
+                    return True
+                except Exception:
+                    continue
+        return False
+
     def click_naver_kin_register(target_page) -> bool:
         selectors = (
             "button:has-text('답변등록')",
@@ -12938,6 +13055,13 @@ def run_naver_kin_answer_playwright(
             if not fill_editor(page, answer_text):
                 raise RuntimeError("지식인 답변 입력칸을 찾지 못했습니다. 화면 구조가 바뀌었거나 로그인이 필요할 수 있습니다.")
             put_naver_kin_action_log(result_queue, "답변 에디터에 답변 본문을 입력했습니다.")
+
+            result_queue.put(("naver_kin_auto_progress", "워드프레스 URL을 클립보드에 저장하고 링크를 삽입하는 중입니다..."))
+            if not insert_wordpress_link_from_clipboard(page, wordpress_url):
+                raise RuntimeError(
+                    "워드프레스 URL을 지식인 에디터의 링크 도구로 삽입하지 못했습니다. "
+                    "URL은 클립보드에 저장되어 있을 수 있으니 열린 화면을 확인해 주세요."
+                )
 
             if automation_mode == NAVER_BLOG_AUTOMATION_MODE_SEMI:
                 result_queue.put((
@@ -18030,6 +18154,7 @@ class NaverKinAutomationWorker(threading.Thread):
                 self.result_queue,
                 question_title=question_title,
                 automation_mode=self.settings.naver_kin_automation_mode,
+                wordpress_url=wordpress_url,
             )
             if not success:
                 raise RuntimeError(answer_message)

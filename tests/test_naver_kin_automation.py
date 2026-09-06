@@ -243,6 +243,9 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("/^input_buffer/i", source)
         self.assertIn("target_page.keyboard.insert_text(line)", source)
         self.assertIn("editor_contains_inserted_text(frame)", source)
+        self.assertIn("navigator.clipboard.writeText(url)", source)
+        self.assertIn("button.se-oglink-toolbar-button", source)
+        self.assertIn("button.se-popup-button-confirm", source)
         self.assertIn("success_hold_completed = True", source)
         self.assertNotIn("paste_with_system_clipboard", source)
         self.assertNotIn('keyboard.press("Meta+V")', source)
@@ -271,8 +274,8 @@ class NaverKinAutomationTests(unittest.TestCase):
 
         self.assertIn("차갑게 마시면 쓴맛이 덜 느껴질 수 있습니다.", captured_prompt)
         self.assertIn("더 자세한 내용은 여기에서 확인해 보세요.", captured_prompt)
-        self.assertTrue(answer.endswith("더 자세한 내용은 여기에서 확인해 보세요.\nhttps://example.com/answer"))
-        self.assertEqual(answer.count("https://example.com/answer"), 1)
+        self.assertTrue(answer.endswith("더 자세한 내용은 여기에서 확인해 보세요."))
+        self.assertNotIn("https://example.com/answer", answer)
 
     def test_collect_schedule_runs_fresh_playwright_collection(self) -> None:
         source = self._method_source("_run_naver_kin_automation_once")
