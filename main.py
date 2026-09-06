@@ -19119,6 +19119,8 @@ class KeywordApp(ctk.CTk):
         self.pending_update_payload: dict | None = None
         self.writing_complete_dialog: ctk.CTkToplevel | None = None
         self.reference_collection_dialog: ctk.CTkToplevel | None = None
+        self.naver_kin_complete_dialog: ctk.CTkToplevel | None = None
+        self.naver_kin_complete_url = ""
 
         self.result_queue: queue.Queue = queue.Queue()
         self.remote_agent_store = RemoteAgentConfigStore(DATA_DIR)
@@ -26018,6 +26020,151 @@ class KeywordApp(ctk.CTk):
         else:
             messagebox.showwarning("N지식인 자동화 준비 실패", str(payload))
 
+    def _show_naver_kin_complete_dialog(self, question_url: str) -> None:
+        self.naver_kin_complete_url = str(question_url or "").strip()
+        if self.naver_kin_complete_dialog and self.naver_kin_complete_dialog.winfo_exists():
+            try:
+                self.naver_kin_complete_dialog.lift()
+                self.naver_kin_complete_dialog.focus_force()
+            except tk.TclError:
+                pass
+            return
+
+        palette = self._theme_palette()
+        dialog = ctk.CTkToplevel(self)
+        self.naver_kin_complete_dialog = dialog
+        dialog.title("N지식인 자동화 완료")
+        dialog.geometry("600x390")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.configure(fg_color=palette["shell"])
+        dialog.attributes("-topmost", True)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_naver_kin_complete_dialog)
+
+        card = ctk.CTkFrame(
+            dialog,
+            corner_radius=24,
+            fg_color=palette["card"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        card.pack(fill="both", expand=True, padx=22, pady=22)
+
+        ctk.CTkLabel(
+            card,
+            text="✓",
+            text_color="#48d980",
+            font=ctk.CTkFont(size=40, weight="bold"),
+        ).pack(padx=24, pady=(24, 4))
+        ctk.CTkLabel(
+            card,
+            text="지식인 답변 등록이 완료되었습니다.",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=23, weight="bold"),
+        ).pack(padx=24, pady=(0, 10))
+
+        usage_frame = ctk.CTkFrame(
+            card,
+            corner_radius=14,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        usage_frame.pack(fill="x", padx=28, pady=(2, 14))
+        usage_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            usage_frame,
+            text="오늘 공개 발행 현황",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, padx=16, pady=(11, 5), sticky="w")
+        wordpress_count = DailyPublishLimitStore.count(
+            "wordpress",
+            self._daily_publish_account("wordpress"),
+        )
+        wordpress_limit = normalize_daily_publish_limit(
+            self.wordpress_settings.wordpress_daily_publish_limit
+        )
+        wordpress_remaining = (
+            max(0, wordpress_limit - wordpress_count)
+            if wordpress_limit
+            else None
+        )
+        ctk.CTkLabel(
+            usage_frame,
+            text="워드프레스",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=1, column=0, padx=(16, 14), pady=(0, 11), sticky="w")
+        ctk.CTkLabel(
+            usage_frame,
+            text=format_daily_publish_usage(wordpress_count, wordpress_limit),
+            text_color="#ffb86b" if wordpress_remaining == 0 else palette["accent"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=1, column=1, padx=(0, 16), pady=(0, 11), sticky="e")
+
+        ctk.CTkLabel(
+            card,
+            text="보러가기를 누르면 등록한 지식인 답변을 확인할 수 있습니다.",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14),
+        ).pack(padx=24, pady=(0, 18))
+
+        action_row = ctk.CTkFrame(card, fg_color="transparent")
+        action_row.pack(padx=24, pady=(0, 18))
+        ctk.CTkButton(
+            action_row,
+            text="보러가기",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#1faa4a",
+            hover_color="#16913e",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            state="normal" if self.naver_kin_complete_url.startswith(("http://", "https://")) else "disabled",
+            command=self._open_naver_kin_completed_answer,
+        ).grid(row=0, column=0, padx=(0, 10))
+        confirm_button = ctk.CTkButton(
+            action_row,
+            text="확인",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#2f6df6",
+            hover_color="#255dcc",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._close_naver_kin_complete_dialog,
+        )
+        confirm_button.grid(row=0, column=1)
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.bind("<Return>", lambda _event: self._close_naver_kin_complete_dialog())
+        try:
+            dialog.grab_set()
+            dialog.lift()
+            confirm_button.focus_set()
+        except tk.TclError:
+            pass
+
+    def _close_naver_kin_complete_dialog(self) -> None:
+        dialog = self.naver_kin_complete_dialog
+        self.naver_kin_complete_dialog = None
+        if dialog and dialog.winfo_exists():
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+    def _open_naver_kin_completed_answer(self) -> None:
+        question_url = str(self.naver_kin_complete_url or "").strip()
+        self._close_naver_kin_complete_dialog()
+        if question_url.startswith(("http://", "https://")):
+            self._open_source_url(question_url)
+
     def _handle_naver_kin_automation_done(self, payload: dict) -> None:
         self._refresh_daily_publish_limit_statuses()
         question_url = str(payload.get("question_url") or "").strip()
@@ -26049,10 +26196,7 @@ class KeywordApp(ctk.CTk):
         self._append_naver_kin_run_log(message)
         self._set_naver_kin_progress(message, state="complete")
         self._update_quick_status("N지식인 자동화 완료", message, "#48d980")
-        messagebox.showinfo(
-            "N지식인 자동화 진행 로그",
-            "자동화가 완료되었습니다.\n\n[진행 로그]\n" + self._recent_naver_kin_run_log_text(),
-        )
+        self._show_naver_kin_complete_dialog(question_url)
         if self.naver_kin_automation_running:
             if self._next_naver_kin_question_for_automation() is not None:
                 self._schedule_next_naver_kin_automation(

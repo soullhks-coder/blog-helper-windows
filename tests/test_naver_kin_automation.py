@@ -337,6 +337,19 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("naver_kin_fixed_progress_bar", source)
         self.assertIn("_start_naver_kin_question_worker", direct_handler)
 
+    def test_completion_uses_styled_dialog_and_opens_answer_url(self) -> None:
+        handler_source = self._method_source("_handle_naver_kin_automation_done")
+        dialog_source = self._method_source("_show_naver_kin_complete_dialog")
+        open_source = self._method_source("_open_naver_kin_completed_answer")
+
+        self.assertIn("_show_naver_kin_complete_dialog(question_url)", handler_source)
+        self.assertNotIn("messagebox.showinfo", handler_source)
+        self.assertIn('text="지식인 답변 등록이 완료되었습니다."', dialog_source)
+        self.assertIn('text="보러가기"', dialog_source)
+        self.assertIn('text="확인"', dialog_source)
+        self.assertIn("format_daily_publish_usage", dialog_source)
+        self.assertIn("self._open_source_url(question_url)", open_source)
+
 
 if __name__ == "__main__":
     unittest.main()
