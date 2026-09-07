@@ -33,13 +33,55 @@ class TextEditingShortcutTests(unittest.TestCase):
         self.assertEqual(main._text_editing_shortcut_action("A", 0, os_name="posix"), "select_all")
 
     def test_windows_physical_keycode_works_when_korean_ime_changes_keysym(self) -> None:
-        self.assertEqual(main._text_editing_shortcut_action("Hangul", 67, os_name="nt"), "copy")
-        self.assertEqual(main._text_editing_shortcut_action("Hangul", 86, os_name="nt"), "paste")
-        self.assertEqual(main._text_editing_shortcut_action("Hangul", 88, os_name="nt"), "cut")
-        self.assertEqual(main._text_editing_shortcut_action("Hangul", 65, os_name="nt"), "select_all")
+        self.assertEqual(
+            main._text_editing_shortcut_action("Hangul", 67, os_name="nt", platform_name="win32"),
+            "copy",
+        )
+        self.assertEqual(
+            main._text_editing_shortcut_action("Hangul", 86, os_name="nt", platform_name="win32"),
+            "paste",
+        )
+        self.assertEqual(
+            main._text_editing_shortcut_action("Hangul", 88, os_name="nt", platform_name="win32"),
+            "cut",
+        )
+        self.assertEqual(
+            main._text_editing_shortcut_action("Hangul", 65, os_name="nt", platform_name="win32"),
+            "select_all",
+        )
 
-    def test_non_windows_keycode_fallback_does_not_capture_unrelated_keys(self) -> None:
-        self.assertEqual(main._text_editing_shortcut_action("Hangul", 65, os_name="posix"), "")
+    def test_macos_packed_keycode_works_when_korean_ime_changes_keysym(self) -> None:
+        # Tk Aqua stores the native virtual key in the high byte and the
+        # IME-produced Unicode character in the lower 22 bits.
+        cases = (
+            (0x08, "ㅊ", "copy"),
+            (0x09, "ㅍ", "paste"),
+            (0x07, "ㅌ", "cut"),
+            (0x00, "ㅁ", "select_all"),
+        )
+        for virtual_key, korean_character, expected_action in cases:
+            packed_keycode = (virtual_key << 24) | ord(korean_character)
+            with self.subTest(action=expected_action):
+                self.assertEqual(
+                    main._text_editing_shortcut_action(
+                        korean_character,
+                        packed_keycode,
+                        os_name="posix",
+                        platform_name="darwin",
+                    ),
+                    expected_action,
+                )
+
+    def test_other_platform_keycode_fallback_does_not_capture_unrelated_keys(self) -> None:
+        self.assertEqual(
+            main._text_editing_shortcut_action(
+                "Hangul",
+                65,
+                os_name="posix",
+                platform_name="linux",
+            ),
+            "",
+        )
 
     def test_handler_generates_one_paste_virtual_event(self) -> None:
         widget = _FakeTextWidget()
@@ -56,6 +98,21 @@ class TextEditingShortcutTests(unittest.TestCase):
         self.assertEqual(result, "break")
         self.assertEqual(widget.generated_events, ["<<Paste>>"])
         self.assertEqual(activity, [event])
+
+    def test_handler_generates_paste_for_macos_korean_ime_keycode(self) -> None:
+        widget = _FakeTextWidget()
+        app = SimpleNamespace(
+            _is_text_input_widget=lambda candidate: candidate is widget,
+            _mark_text_input_activity=lambda _event: None,
+        )
+        packed_keycode = (0x09 << 24) | ord("ㅍ")
+        event = SimpleNamespace(widget=widget, keysym="ㅍ", keycode=packed_keycode)
+
+        with patch.object(main.sys, "platform", "darwin"):
+            result = main.KeywordApp._handle_text_editing_shortcut(app, event)
+
+        self.assertEqual(result, "break")
+        self.assertEqual(widget.generated_events, ["<<Paste>>"])
 
     def test_handler_selects_all_entry_text(self) -> None:
         widget = _FakeTextWidget()

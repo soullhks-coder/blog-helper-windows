@@ -98,6 +98,23 @@ _WINDOWS_TEXT_EDITING_KEYCODES = {
     86: "paste",
     88: "cut",
 }
+_DARWIN_TEXT_EDITING_VIRTUAL_KEYCODES = {
+    0x00: "select_all",
+    0x08: "copy",
+    0x09: "paste",
+    0x07: "cut",
+}
+
+
+def _darwin_virtual_keycode(keycode) -> int:
+    """Extract the native virtual key from Tk Aqua's packed 32-bit keycode."""
+    try:
+        packed_keycode = int(keycode)
+    except (TypeError, ValueError):
+        return -1
+    if 0 <= packed_keycode <= 0x7F:
+        return packed_keycode
+    return (packed_keycode >> 24) & 0xFF
 
 
 def _text_editing_shortcut_action(
@@ -105,8 +122,9 @@ def _text_editing_shortcut_action(
     keycode=None,
     *,
     os_name: str | None = None,
+    platform_name: str | None = None,
 ) -> str:
-    """Resolve common editing shortcuts even when a Windows IME hides the Latin keysym."""
+    """Resolve editing shortcuts even when an IME hides the Latin keysym."""
     action_by_keysym = {
         "a": "select_all",
         "c": "copy",
@@ -122,6 +140,11 @@ def _text_editing_shortcut_action(
             return _WINDOWS_TEXT_EDITING_KEYCODES.get(int(keycode), "")
         except (TypeError, ValueError):
             pass
+    if (platform_name or sys.platform) == "darwin":
+        return _DARWIN_TEXT_EDITING_VIRTUAL_KEYCODES.get(
+            _darwin_virtual_keycode(keycode),
+            "",
+        )
     return ""
 
 
