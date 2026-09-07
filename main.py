@@ -26472,7 +26472,12 @@ class KeywordApp(ctk.CTk):
         self._append_naver_kin_run_log(message)
         self._set_naver_kin_progress(message, state="complete")
         self._update_quick_status("N지식인 자동화 완료", message, "#48d980")
-        self._show_naver_kin_complete_dialog(question_url)
+        # Repeating interval automation must continue unattended. Keep its
+        # result in the fixed progress/status UI without opening a modal that
+        # waits for confirmation. Direct URL runs still show the completion
+        # dialog because the user explicitly started and is watching them.
+        if was_direct:
+            self._show_naver_kin_complete_dialog(question_url)
         if self.naver_kin_automation_running:
             if self._next_naver_kin_question_for_automation() is not None:
                 self._schedule_next_naver_kin_automation(

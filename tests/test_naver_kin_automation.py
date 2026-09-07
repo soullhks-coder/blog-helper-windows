@@ -3,6 +3,7 @@ import queue
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -422,13 +423,72 @@ class NaverKinAutomationTests(unittest.TestCase):
         dialog_source = self._method_source("_show_naver_kin_complete_dialog")
         open_source = self._method_source("_open_naver_kin_completed_answer")
 
-        self.assertIn("_show_naver_kin_complete_dialog(question_url)", handler_source)
+        self.assertIn(
+            "if was_direct:\n            self._show_naver_kin_complete_dialog(question_url)",
+            handler_source,
+        )
         self.assertNotIn("messagebox.showinfo", handler_source)
         self.assertIn('text="지식인 답변 등록이 완료되었습니다."', dialog_source)
         self.assertIn('text="보러가기"', dialog_source)
         self.assertIn('text="확인"', dialog_source)
         self.assertIn("format_daily_publish_usage", dialog_source)
         self.assertIn("self._open_source_url(question_url)", open_source)
+
+    def test_interval_automation_completion_does_not_open_modal_dialog(self) -> None:
+        events = []
+        app = SimpleNamespace(
+            naver_kin_questions=[],
+            naver_kin_automation_worker=object(),
+            naver_kin_direct_mode=False,
+            naver_kin_automation_running=True,
+            naver_kin_next_run_at=0,
+            _refresh_daily_publish_limit_statuses=lambda: None,
+            _persist_naver_kin_schedule_state=lambda: None,
+            _render_naver_kin_questions=lambda _questions: None,
+            _append_naver_kin_run_log=lambda _message: None,
+            _set_naver_kin_progress=lambda *_args, **_kwargs: None,
+            _update_quick_status=lambda *_args: None,
+            _show_naver_kin_complete_dialog=lambda url: events.append(("dialog", url)),
+            _next_naver_kin_question_for_automation=lambda: None,
+            _naver_kin_collect_interval_minutes=lambda: 30,
+            _schedule_next_naver_kin_automation=lambda **kwargs: events.append(("schedule", kwargs)),
+            _update_naver_kin_next_run_label=lambda: None,
+        )
+
+        main.KeywordApp._handle_naver_kin_automation_done(
+            app,
+            {"question_url": "https://kin.naver.com/qna/detail.naver?docId=123"},
+        )
+
+        self.assertFalse(any(event[0] == "dialog" for event in events))
+        self.assertTrue(any(event[0] == "schedule" for event in events))
+
+    def test_direct_url_completion_still_opens_modal_dialog(self) -> None:
+        dialogs = []
+        app = SimpleNamespace(
+            naver_kin_questions=[],
+            naver_kin_automation_worker=object(),
+            naver_kin_direct_mode=True,
+            naver_kin_automation_running=False,
+            naver_kin_next_run_at=0,
+            _refresh_daily_publish_limit_statuses=lambda: None,
+            _set_naver_kin_direct_button_state=lambda _running: None,
+            _persist_naver_kin_schedule_state=lambda: None,
+            _render_naver_kin_questions=lambda _questions: None,
+            _append_naver_kin_run_log=lambda _message: None,
+            _set_naver_kin_progress=lambda *_args, **_kwargs: None,
+            _update_quick_status=lambda *_args: None,
+            _show_naver_kin_complete_dialog=lambda url: dialogs.append(url),
+            _update_naver_kin_next_run_label=lambda: None,
+        )
+        question_url = "https://kin.naver.com/qna/detail.naver?docId=456"
+
+        main.KeywordApp._handle_naver_kin_automation_done(
+            app,
+            {"question_url": question_url},
+        )
+
+        self.assertEqual(dialogs, [question_url])
 
 
 if __name__ == "__main__":
