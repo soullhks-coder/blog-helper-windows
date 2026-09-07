@@ -12,6 +12,28 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = ROOT / "main.py"
 
 
+class _EntryStub:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
+
+    def delete(self, _start, _end) -> None:
+        self.value = ""
+
+    def insert(self, _index, value: str) -> None:
+        self.value = value
+
+
+class _LabelStub:
+    def __init__(self) -> None:
+        self.options = {}
+
+    def configure(self, **kwargs) -> None:
+        self.options.update(kwargs)
+
+
 class NaverKinAutomationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -80,6 +102,62 @@ class NaverKinAutomationTests(unittest.TestCase):
             main.normalize_naver_kin_question_url(
                 "https://example.com/qna/detail.naver?docId=123"
             )
+
+    def test_clipboard_text_extracts_only_naver_kin_detail_url(self) -> None:
+        self.assertEqual(
+            main.extract_naver_kin_question_url(
+                "확인할 링크: [https://kin.naver.com/qna/detail.naver?d1id=8&docId=123](https://kin.naver.com)"
+            ),
+            "https://kin.naver.com/qna/detail.naver?d1id=8&docId=123",
+        )
+        self.assertEqual(
+            main.extract_naver_kin_question_url(
+                "https://kin.naver.com/qna/questionList.naver"
+            ),
+            "",
+        )
+        self.assertEqual(
+            main.extract_naver_kin_question_url("https://example.com/qna/detail.naver?docId=123"),
+            "",
+        )
+
+    def test_clipboard_monitor_fills_and_saves_detected_question_url(self) -> None:
+        question_url = "https://kin.naver.com/qna/detail.naver?d1id=8&docId=456"
+        scheduled = []
+        app = type("ClipboardAppStub", (), {})()
+        app._naver_kin_clipboard_job = None
+        app._last_naver_kin_clipboard_url = ""
+        app._app_closing = False
+        app.current_page = "naver_kin"
+        app.naver_kin_automation_running = False
+        app.naver_kin_worker = None
+        app.naver_kin_direct_worker = None
+        app.naver_kin_automation_worker = None
+        app.naver_kin_direct_url_entry = _EntryStub("old value")
+        app.naver_kin_clipboard_status_label = _LabelStub()
+        app.naver_kin_status_label = _LabelStub()
+        app.wordpress_settings = main.WordPressSettings()
+        app.clipboard_get = lambda: f"복사한 질문 {question_url}"
+        app._start_naver_kin_clipboard_monitor = (
+            lambda delay_ms=120: scheduled.append(delay_ms)
+        )
+
+        with patch.object(main.AppStateStore, "update_fields") as update_fields:
+            main.KeywordApp._monitor_naver_kin_clipboard(app)
+
+        self.assertEqual(app.naver_kin_direct_url_entry.get(), question_url)
+        self.assertEqual(
+            app.wordpress_settings.naver_kin_direct_question_url,
+            question_url,
+        )
+        update_fields.assert_called_once_with(
+            naver_kin_direct_question_url=question_url,
+        )
+        self.assertIn(
+            "자동으로 가져왔습니다",
+            app.naver_kin_clipboard_status_label.options["text"],
+        )
+        self.assertEqual(scheduled, [800])
 
     def test_single_question_page_extracts_title_and_body(self) -> None:
         class FakeLocator:
@@ -334,6 +412,8 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn('text="참고 자료"', source)
         self.assertIn("naver_kin_reference_textbox", source)
         self.assertIn("naver_kin_direct_collect_button", source)
+        self.assertIn("naver_kin_clipboard_status_label", source)
+        self.assertIn("지식인 상세 URL을 복사하면", source)
         self.assertIn("naver_kin_fixed_progress_bar", source)
         self.assertIn("_start_naver_kin_question_worker", direct_handler)
 

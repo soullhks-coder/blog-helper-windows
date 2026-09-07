@@ -1699,6 +1699,23 @@ def normalize_naver_kin_question_url(value: str | None) -> str:
     return candidate
 
 
+def extract_naver_kin_question_url(value: object) -> str:
+    """Extract the first Naver Knowledge iN detail URL from clipboard text."""
+    clipboard_text = unescape(str(value or "")).replace("\\&", "&")
+    matches = re.finditer(
+        r"(?:https?://)?(?:m\.)?kin\.naver\.com/qna/detail\.naver\?[^\s<>\"'\[\](){}]*",
+        clipboard_text,
+        flags=re.I,
+    )
+    for match in matches:
+        candidate = match.group(0).rstrip(".,;:!?)]}〉》」』…")
+        try:
+            return normalize_naver_kin_question_url(candidate)
+        except ValueError:
+            continue
+    return ""
+
+
 def build_keyword_focused_article_html(topic: str, keyword: str) -> str:
     safe_topic = escape(topic)
     safe_keyword = escape(keyword)
@@ -19106,6 +19123,8 @@ class KeywordApp(ctk.CTk):
         self._automation_publish_schedule_job = None
         self._naver_kin_automation_job = None
         self._naver_kin_clock_job = None
+        self._naver_kin_clipboard_job = None
+        self._last_naver_kin_clipboard_url = ""
         self.automation_schedule_running = False
         self.naver_kin_automation_running = False
         self.active_automation_upload_item_id = ""
@@ -20020,6 +20039,7 @@ class KeywordApp(ctk.CTk):
             "_cardnews_slider_preview_job",
             "_theme_paint_refresh_job",
             "_automation_queue_refresh_job",
+            "_naver_kin_clipboard_job",
         ):
             job_id = getattr(self, job_attr, None)
             if job_id is not None:
@@ -23406,12 +23426,28 @@ class KeywordApp(ctk.CTk):
             sticky="e",
         )
 
+        self.naver_kin_clipboard_status_label = ctk.CTkLabel(
+            setup_card,
+            text="지식인 상세 URL을 복사하면 이 입력란에 자동으로 가져옵니다.",
+            text_color="#7f91aa",
+            anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.naver_kin_clipboard_status_label.grid(
+            row=5,
+            column=1,
+            columnspan=3,
+            padx=(0, 18),
+            pady=(0, 4),
+            sticky="ew",
+        )
+
         ctk.CTkLabel(
             setup_card,
             text="참고 자료",
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=5, column=0, padx=18, pady=(8, 12), sticky="nw")
+        ).grid(row=6, column=0, padx=18, pady=(8, 12), sticky="nw")
         self.naver_kin_reference_textbox = ctk.CTkTextbox(
             setup_card,
             height=100,
@@ -23423,7 +23459,7 @@ class KeywordApp(ctk.CTk):
             wrap="word",
         )
         self.naver_kin_reference_textbox.grid(
-            row=5,
+            row=6,
             column=1,
             columnspan=3,
             padx=(0, 18),
@@ -23448,7 +23484,7 @@ class KeywordApp(ctk.CTk):
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self.naver_kin_status_label.grid(row=6, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
+        self.naver_kin_status_label.grid(row=7, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
 
         schedule_card = ctk.CTkFrame(
             self.naver_kin_scroll,
@@ -25849,6 +25885,65 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
         if not silent and hasattr(self, "naver_kin_status_label"):
             self.naver_kin_status_label.configure(text="현재 상태: N지식인 설정 저장 완료", text_color="#48d980")
+
+    def _stop_naver_kin_clipboard_monitor(self) -> None:
+        job = getattr(self, "_naver_kin_clipboard_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+        self._naver_kin_clipboard_job = None
+
+    def _start_naver_kin_clipboard_monitor(self, delay_ms: int = 120) -> None:
+        self._stop_naver_kin_clipboard_monitor()
+        if getattr(self, "_app_closing", False):
+            return
+        self._naver_kin_clipboard_job = self.after(
+            max(50, int(delay_ms)),
+            self._monitor_naver_kin_clipboard,
+        )
+
+    def _monitor_naver_kin_clipboard(self) -> None:
+        self._naver_kin_clipboard_job = None
+        if getattr(self, "_app_closing", False) or getattr(self, "current_page", "") != "naver_kin":
+            return
+
+        running_workers = (
+            getattr(self, "naver_kin_worker", None),
+            getattr(self, "naver_kin_direct_worker", None),
+            getattr(self, "naver_kin_automation_worker", None),
+        )
+        is_busy = bool(getattr(self, "naver_kin_automation_running", False)) or any(
+            worker is not None and worker.is_alive() for worker in running_workers
+        )
+        if not is_busy and hasattr(self, "naver_kin_direct_url_entry"):
+            try:
+                clipboard_text = self.clipboard_get()
+            except (tk.TclError, TypeError):
+                clipboard_text = ""
+            question_url = extract_naver_kin_question_url(clipboard_text)
+            if question_url and question_url != getattr(self, "_last_naver_kin_clipboard_url", ""):
+                self._last_naver_kin_clipboard_url = question_url
+                current_url = self.naver_kin_direct_url_entry.get().strip()
+                if current_url != question_url:
+                    self.naver_kin_direct_url_entry.delete(0, "end")
+                    self.naver_kin_direct_url_entry.insert(0, question_url)
+                    self.wordpress_settings.naver_kin_direct_question_url = question_url
+                    AppStateStore.update_fields(
+                        naver_kin_direct_question_url=question_url,
+                    )
+                    if hasattr(self, "naver_kin_clipboard_status_label"):
+                        self.naver_kin_clipboard_status_label.configure(
+                            text="클립보드에서 지식인 URL을 자동으로 가져왔습니다. 오른쪽의 [수집]을 눌러주세요.",
+                            text_color="#48d980",
+                        )
+                    if hasattr(self, "naver_kin_status_label"):
+                        self.naver_kin_status_label.configure(
+                            text="현재 상태: 클립보드의 지식인 URL을 자동 입력했습니다.",
+                            text_color="#48d980",
+                        )
+        self._start_naver_kin_clipboard_monitor(delay_ms=800)
 
     def _start_naver_kin_direct_automation(self) -> None:
         running_workers = (
@@ -34710,6 +34805,11 @@ class KeywordApp(ctk.CTk):
                 self._schedule_automation_queue_refresh()
             else:
                 self._refresh_automation_queue()
+        if hasattr(self, "_start_naver_kin_clipboard_monitor"):
+            if page_name == "naver_kin":
+                self._start_naver_kin_clipboard_monitor()
+            elif hasattr(self, "_stop_naver_kin_clipboard_monitor"):
+                self._stop_naver_kin_clipboard_monitor()
         if hasattr(self, "shell_frame"):
             self._finish_theme_paint()
 
