@@ -91,6 +91,40 @@ ctk.set_widget_scaling(0.82)
 ctk.set_window_scaling(0.82)
 
 
+TEXT_EDITING_SHORTCUT_BINDTAG = "BlogHelperTextEditingShortcuts"
+_WINDOWS_TEXT_EDITING_KEYCODES = {
+    65: "select_all",
+    67: "copy",
+    86: "paste",
+    88: "cut",
+}
+
+
+def _text_editing_shortcut_action(
+    keysym: str = "",
+    keycode=None,
+    *,
+    os_name: str | None = None,
+) -> str:
+    """Resolve common editing shortcuts even when a Windows IME hides the Latin keysym."""
+    action_by_keysym = {
+        "a": "select_all",
+        "c": "copy",
+        "v": "paste",
+        "x": "cut",
+    }
+    normalized_keysym = str(keysym or "").strip().lower()
+    if normalized_keysym in action_by_keysym:
+        return action_by_keysym[normalized_keysym]
+
+    if (os_name or os.name) == "nt":
+        try:
+            return _WINDOWS_TEXT_EDITING_KEYCODES.get(int(keycode), "")
+        except (TypeError, ValueError):
+            pass
+    return ""
+
+
 def _ensure_heif_opener_registered() -> bool:
     """Load HEIC support only when a HEIC preview is actually requested."""
     global register_heif_opener, _HEIF_OPENER_IMPORT_ATTEMPTED
@@ -19337,6 +19371,7 @@ class KeywordApp(ctk.CTk):
         self._apply_app_theme(self.wordpress_settings.app_theme, save=False)
         self.bind("<Configure>", self._on_window_configure)
         self.bind_all("<KeyPress>", self._mark_text_input_activity, add="+")
+        self._install_text_editing_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.after(220, self._poll_queue)
         self.after(1200, self._automation_publish_scheduler_tick)
@@ -19965,6 +20000,85 @@ class KeywordApp(ctk.CTk):
         except Exception:
             widget_class = ""
         return isinstance(widget, (tk.Entry, tk.Text)) or widget_class in {"Entry", "Text", "TEntry"}
+
+    def _add_text_editing_shortcut_bindtag(self, widget) -> bool:
+        if not self._is_text_input_widget(widget):
+            return False
+        try:
+            bindtags = list(widget.bindtags())
+            if TEXT_EDITING_SHORTCUT_BINDTAG not in bindtags:
+                # Run before Tk's class binding so a working default shortcut is
+                # not followed by a second copy/paste operation.
+                bindtags.insert(0, TEXT_EDITING_SHORTCUT_BINDTAG)
+                widget.bindtags(tuple(bindtags))
+            return True
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _tag_text_input_descendants(self, parent) -> None:
+        try:
+            pending = list(parent.winfo_children())
+        except (AttributeError, tk.TclError):
+            return
+        while pending:
+            widget = pending.pop()
+            self._add_text_editing_shortcut_bindtag(widget)
+            try:
+                pending.extend(widget.winfo_children())
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _on_text_input_focus(self, event=None) -> None:
+        # Dialogs and prompt editors create fields after the main layout, so tag
+        # each newly focused native Entry/Text widget on demand as well.
+        self._add_text_editing_shortcut_bindtag(getattr(event, "widget", None))
+
+    def _install_text_editing_shortcuts(self) -> None:
+        self.bind_class(
+            TEXT_EDITING_SHORTCUT_BINDTAG,
+            "<Control-KeyPress>",
+            self._handle_text_editing_shortcut,
+        )
+        if sys.platform == "darwin":
+            self.bind_class(
+                TEXT_EDITING_SHORTCUT_BINDTAG,
+                "<Command-KeyPress>",
+                self._handle_text_editing_shortcut,
+            )
+        self.bind_all("<FocusIn>", self._on_text_input_focus, add="+")
+        self._tag_text_input_descendants(self)
+
+    def _handle_text_editing_shortcut(self, event=None):
+        widget = getattr(event, "widget", None)
+        if not self._is_text_input_widget(widget):
+            return None
+        action = _text_editing_shortcut_action(
+            getattr(event, "keysym", ""),
+            getattr(event, "keycode", None),
+        )
+        if not action:
+            return None
+
+        self._mark_text_input_activity(event)
+        try:
+            if action == "select_all":
+                if isinstance(widget, tk.Text) or str(widget.winfo_class()) == "Text":
+                    widget.tag_add("sel", "1.0", "end-1c")
+                    widget.mark_set("insert", "end-1c")
+                    widget.see("insert")
+                else:
+                    widget.selection_range(0, "end")
+                    widget.icursor("end")
+            else:
+                virtual_event = {
+                    "copy": "<<Copy>>",
+                    "paste": "<<Paste>>",
+                    "cut": "<<Cut>>",
+                }[action]
+                widget.event_generate(virtual_event)
+        except (KeyError, AttributeError, tk.TclError):
+            return None
+        return "break"
 
     def _mark_text_input_activity(self, event=None) -> None:
         widget = getattr(event, "widget", None)
