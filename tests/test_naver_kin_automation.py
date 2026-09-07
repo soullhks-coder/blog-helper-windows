@@ -1,6 +1,7 @@
 import ast
 import queue
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -381,6 +382,9 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("DailyPublishLimitStore.reserve_publish", worker_source)
         self.assertIn("DailyPublishLimitStore.record_reserved_success", worker_source)
         self.assertIn("DailyPublishLimitStore.cancel_reservation", worker_source)
+        self.assertIn('"naver_kin"', worker_source)
+        self.assertIn("NAVER_KIN_DAILY_ANSWER_LIMIT", worker_source)
+        self.assertIn('"naver_kin_answer_count"', worker_source)
         self.assertIn("build_naver_kin_answer_text", worker_source)
         self.assertTrue(source)
 
@@ -432,6 +436,7 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn('text="보러가기"', dialog_source)
         self.assertIn('text="확인"', dialog_source)
         self.assertIn("format_daily_publish_usage", dialog_source)
+        self.assertIn("format_naver_kin_answer_usage", dialog_source)
         self.assertIn("self._open_source_url(question_url)", open_source)
 
     def test_interval_automation_completion_does_not_open_modal_dialog(self) -> None:
@@ -448,6 +453,8 @@ class NaverKinAutomationTests(unittest.TestCase):
             _append_naver_kin_run_log=lambda _message: None,
             _set_naver_kin_progress=lambda *_args, **_kwargs: None,
             _update_quick_status=lambda *_args: None,
+            _naver_kin_daily_answer_count=lambda: 1,
+            _stop_naver_kin_automation_for_daily_limit=lambda count: events.append(("stop", count)),
             _show_naver_kin_complete_dialog=lambda url: events.append(("dialog", url)),
             _next_naver_kin_question_for_automation=lambda: None,
             _naver_kin_collect_interval_minutes=lambda: 30,
@@ -478,6 +485,8 @@ class NaverKinAutomationTests(unittest.TestCase):
             _append_naver_kin_run_log=lambda _message: None,
             _set_naver_kin_progress=lambda *_args, **_kwargs: None,
             _update_quick_status=lambda *_args: None,
+            _naver_kin_daily_answer_count=lambda: 1,
+            _stop_naver_kin_automation_for_daily_limit=lambda count: None,
             _show_naver_kin_complete_dialog=lambda url: dialogs.append(url),
             _update_naver_kin_next_run_label=lambda: None,
         )
@@ -489,6 +498,124 @@ class NaverKinAutomationTests(unittest.TestCase):
         )
 
         self.assertEqual(dialogs, [question_url])
+
+    def test_interval_automation_stops_without_dialog_at_thirty_answers(self) -> None:
+        events = []
+        app = SimpleNamespace(
+            naver_kin_questions=[],
+            naver_kin_automation_worker=object(),
+            naver_kin_direct_mode=False,
+            naver_kin_automation_running=True,
+            naver_kin_next_run_at=0,
+            _refresh_daily_publish_limit_statuses=lambda: None,
+            _persist_naver_kin_schedule_state=lambda: None,
+            _render_naver_kin_questions=lambda _questions: None,
+            _append_naver_kin_run_log=lambda _message: None,
+            _set_naver_kin_progress=lambda *_args, **_kwargs: None,
+            _update_quick_status=lambda *_args: None,
+            _naver_kin_daily_answer_count=lambda: 30,
+            _stop_naver_kin_automation_for_daily_limit=lambda count: events.append(("stop", count)),
+            _show_naver_kin_complete_dialog=lambda url: events.append(("dialog", url)),
+            _next_naver_kin_question_for_automation=lambda: {},
+            _naver_kin_answer_interval_minutes=lambda: 5,
+            _schedule_next_naver_kin_automation=lambda **kwargs: events.append(("schedule", kwargs)),
+            _update_naver_kin_next_run_label=lambda: None,
+        )
+
+        main.KeywordApp._handle_naver_kin_automation_done(
+            app,
+            {
+                "question_url": "https://kin.naver.com/qna/detail.naver?docId=789",
+                "naver_kin_answer_count": 30,
+            },
+        )
+
+        self.assertIn(("stop", 30), events)
+        self.assertFalse(any(event[0] == "dialog" for event in events))
+        self.assertFalse(any(event[0] == "schedule" for event in events))
+
+    def test_scheduled_run_does_not_start_when_daily_limit_is_already_full(self) -> None:
+        stopped = []
+        app = SimpleNamespace(
+            _naver_kin_automation_job=object(),
+            naver_kin_automation_running=True,
+            _naver_kin_daily_answer_count=lambda: 30,
+            _stop_naver_kin_automation_for_daily_limit=lambda count: stopped.append(count),
+        )
+
+        main.KeywordApp._run_naver_kin_automation_once(app)
+
+        self.assertEqual(stopped, [30])
+
+    def test_direct_thirtieth_answer_still_opens_completion_dialog(self) -> None:
+        events = []
+        app = SimpleNamespace(
+            naver_kin_questions=[],
+            naver_kin_automation_worker=object(),
+            naver_kin_direct_mode=True,
+            naver_kin_automation_running=False,
+            naver_kin_next_run_at=0,
+            _refresh_daily_publish_limit_statuses=lambda: None,
+            _set_naver_kin_direct_button_state=lambda _running: None,
+            _persist_naver_kin_schedule_state=lambda: None,
+            _render_naver_kin_questions=lambda _questions: None,
+            _append_naver_kin_run_log=lambda _message: None,
+            _set_naver_kin_progress=lambda *_args, **_kwargs: None,
+            _update_quick_status=lambda *_args: None,
+            _naver_kin_daily_answer_count=lambda: 30,
+            _stop_naver_kin_automation_for_daily_limit=lambda count: events.append(("stop", count)),
+            _show_naver_kin_complete_dialog=lambda url: events.append(("dialog", url)),
+            _update_naver_kin_next_run_label=lambda: None,
+        )
+        question_url = "https://kin.naver.com/qna/detail.naver?docId=999"
+
+        main.KeywordApp._handle_naver_kin_automation_done(
+            app,
+            {
+                "question_url": question_url,
+                "naver_kin_answer_count": 30,
+            },
+        )
+
+        self.assertIn(("stop", 30), events)
+        self.assertIn(("dialog", question_url), events)
+
+    def test_daily_limit_stop_path_does_not_open_a_messagebox(self) -> None:
+        source = self._method_source("_stop_naver_kin_automation_for_daily_limit")
+
+        self.assertNotIn("messagebox", source)
+        self.assertIn("naver_kin_automation_running = False", source)
+        self.assertIn("naver_kin_next_run_at = 0", source)
+
+    def test_today_answer_history_backfills_daily_counter(self) -> None:
+        app = SimpleNamespace(
+            naver_kin_questions=[
+                {
+                    "url": "https://kin.naver.com/qna/detail.naver?docId=1",
+                    "answered_at": "2026-09-07 09:00:00",
+                },
+                {
+                    "url": "https://kin.naver.com/qna/detail.naver?docId=2",
+                    "answered_at": "2026-09-07 10:00:00",
+                },
+                {
+                    "url": "https://kin.naver.com/qna/detail.naver?docId=3",
+                    "answered_at": "2026-09-06 10:00:00",
+                },
+            ]
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                main,
+                "DAILY_PUBLISH_COUNTS_FILE",
+                Path(directory) / "daily-publish-counts.json",
+            ),
+            patch.object(time, "strftime", return_value="2026-09-07"),
+        ):
+            count = main.KeywordApp._naver_kin_daily_answer_count(app)
+
+        self.assertEqual(count, 2)
 
 
 if __name__ == "__main__":

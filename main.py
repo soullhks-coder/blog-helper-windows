@@ -442,6 +442,7 @@ NAVER_PLAYWRIGHT_PROFILE_BLOG_4 = "naver_blog_4"
 NAVER_PLAYWRIGHT_PROFILE_BLOG_5 = "naver_blog_5"
 NAVER_PLAYWRIGHT_PROFILE_BLOG_6 = "naver_blog_6"
 NAVER_PLAYWRIGHT_PROFILE_KIN = "naver_kin"
+NAVER_KIN_DAILY_ANSWER_LIMIT = 30
 NAVER_BLOG_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_BLOG,
     NAVER_PLAYWRIGHT_PROFILE_BLOG_2,
@@ -2445,6 +2446,33 @@ def format_daily_publish_usage(count: object, limit: object) -> str:
     return f"오늘 {normalized_count}개 발행 · 제한 없음"
 
 
+def format_naver_kin_answer_usage(
+    count: object,
+    limit: object = NAVER_KIN_DAILY_ANSWER_LIMIT,
+) -> str:
+    try:
+        normalized_count = max(0, int(count))
+    except (TypeError, ValueError):
+        normalized_count = 0
+    normalized_limit = max(1, normalize_daily_publish_limit(limit))
+    remaining = max(0, normalized_limit - normalized_count)
+    return (
+        f"오늘 답변 {normalized_count}/{normalized_limit}회"
+        f" · 남은 수량 {remaining}회"
+    )
+
+
+def naver_kin_daily_answer_account(
+    profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
+) -> str:
+    """Use the dedicated Knowledge iN browser profile as the account boundary."""
+    profile_dir, _state_file = NAVER_PLAYWRIGHT_PROFILE_PATHS.get(
+        str(profile_scope or NAVER_PLAYWRIGHT_PROFILE_KIN),
+        NAVER_PLAYWRIGHT_PROFILE_PATHS[NAVER_PLAYWRIGHT_PROFILE_KIN],
+    )
+    return f"{profile_scope}|{profile_dir}"
+
+
 class DailyPublishLimitStore:
     """Track successful public posts per local day and per blog account."""
 
@@ -2452,6 +2480,7 @@ class DailyPublishLimitStore:
         "wordpress": "워드프레스",
         "tistory": "티스토리",
         "blogspot": "블로그스팟",
+        "naver_kin": "N지식인",
     }
     _lock = threading.RLock()
     _reservations: dict[str, int] = {}
@@ -2535,6 +2564,17 @@ class DailyPublishLimitStore:
                 pending_text = (
                     f" · 발행 중 {pending_count}개 포함" if pending_count else ""
                 )
+                if platform == "naver_kin":
+                    pending_text = (
+                        f" · 답변 진행 중 {pending_count}회 포함"
+                        if pending_count
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"{platform_label} 계정의 오늘 답변 가능 횟수 "
+                        f"{normalized_limit}회를 모두 사용했습니다. "
+                        f"(오늘 {current_count}회{pending_text})"
+                    )
                 raise RuntimeError(
                     f"{platform_label} 오늘 하루 발행 글 수를 초과했습니다. "
                     f"(오늘 {current_count}개{pending_text} / 설정 한도 {normalized_limit}개)"
@@ -2586,6 +2626,27 @@ class DailyPublishLimitStore:
             counts[account_key] = counts.get(account_key, 0) + 1
             cls._save_today_counts(counts)
             return counts[account_key]
+
+    @classmethod
+    def ensure_minimum_count(
+        cls,
+        platform: str,
+        account: str,
+        minimum_count: object,
+    ) -> int:
+        try:
+            normalized_minimum = max(0, int(minimum_count))
+        except (TypeError, ValueError):
+            normalized_minimum = 0
+        with cls._lock:
+            counts = cls._load_today_counts()
+            account_key = cls._account_key(platform, account)
+            current_count = counts.get(account_key, 0)
+            if normalized_minimum > current_count:
+                counts[account_key] = normalized_minimum
+                cls._save_today_counts(counts)
+                return normalized_minimum
+            return current_count
 
 
 @dataclass
@@ -18088,6 +18149,8 @@ class NaverKinAutomationWorker(threading.Thread):
         cleanup_paths: list[str] = []
         wordpress_reservation_key = ""
         wordpress_account = ""
+        naver_kin_reservation_key = ""
+        naver_kin_account = naver_kin_daily_answer_account()
         try:
             question_title = clean_naver_kin_question_title(self.question.get("title"))
             question_text = clean_naver_kin_question_body(
@@ -18111,6 +18174,11 @@ class NaverKinAutomationWorker(threading.Thread):
                 )
             if not self.settings.blog_url or not self.settings.username or not self.settings.app_password:
                 raise RuntimeError("워드프레스 연결 정보가 없습니다. 환경설정에서 워드프레스 연결을 먼저 확인해 주세요.")
+            naver_kin_reservation_key = DailyPublishLimitStore.reserve_publish(
+                "naver_kin",
+                naver_kin_account,
+                NAVER_KIN_DAILY_ANSWER_LIMIT,
+            )
             wordpress_account = f"{self.settings.blog_url}|{self.settings.username}"
             wordpress_reservation_key = DailyPublishLimitStore.reserve_publish(
                 "wordpress",
@@ -18274,6 +18342,12 @@ class NaverKinAutomationWorker(threading.Thread):
             )
             if not success:
                 raise RuntimeError(answer_message)
+            naver_kin_answer_count = DailyPublishLimitStore.record_reserved_success(
+                "naver_kin",
+                naver_kin_account,
+                naver_kin_reservation_key,
+            )
+            naver_kin_reservation_key = ""
             self.result_queue.put(
                 (
                     "naver_kin_auto_done",
@@ -18287,6 +18361,7 @@ class NaverKinAutomationWorker(threading.Thread):
                         "thumbnail_path": str(thumbnail_path),
                         "cardnews_count": len(cardnews_urls),
                         "daily_publish_count": daily_publish_count,
+                        "naver_kin_answer_count": naver_kin_answer_count,
                         "cleanup_count": cleanup_generated_upload_images(cleanup_paths),
                         "message": answer_message,
                     },
@@ -18295,6 +18370,7 @@ class NaverKinAutomationWorker(threading.Thread):
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("naver_kin_auto_error", str(exc)))
         finally:
+            DailyPublishLimitStore.cancel_reservation(naver_kin_reservation_key)
             DailyPublishLimitStore.cancel_reservation(wordpress_reservation_key)
             cleanup_generated_upload_images(cleanup_paths)
 
@@ -25791,6 +25867,73 @@ class KeywordApp(ctk.CTk):
             text=text or ("진행 중..." if running else "수집"),
         )
 
+    def _naver_kin_daily_answer_count(self) -> int:
+        account = naver_kin_daily_answer_account()
+        stored_count = DailyPublishLimitStore.count("naver_kin", account)
+        today = time.strftime("%Y-%m-%d")
+        answered_urls: set[str] = set()
+        for index, question in enumerate(getattr(self, "naver_kin_questions", [])):
+            if not isinstance(question, dict):
+                continue
+            answered_at = str(question.get("answered_at") or "").strip()
+            if not answered_at.startswith(today):
+                continue
+            answer_key = str(question.get("url") or "").strip() or f"history:{index}:{answered_at}"
+            answered_urls.add(answer_key)
+        history_count = len(answered_urls)
+        if history_count > stored_count:
+            return DailyPublishLimitStore.ensure_minimum_count(
+                "naver_kin",
+                account,
+                history_count,
+            )
+        return stored_count
+
+    def _naver_kin_daily_limit_message(self, count: int | None = None) -> str:
+        answer_count = (
+            self._naver_kin_daily_answer_count()
+            if count is None
+            else max(0, int(count))
+        )
+        return (
+            f"{format_naver_kin_answer_usage(answer_count)} · "
+            f"오늘 가능한 N지식인 답변 {NAVER_KIN_DAILY_ANSWER_LIMIT}회를 "
+            "모두 사용해 자동화를 중지했습니다. "
+            "내일 다시 실행해 주세요."
+        )
+
+    def _stop_naver_kin_automation_for_daily_limit(
+        self,
+        count: int | None = None,
+    ) -> None:
+        self.naver_kin_automation_running = False
+        if self._naver_kin_automation_job is not None:
+            try:
+                self.after_cancel(self._naver_kin_automation_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._naver_kin_automation_job = None
+        if self._naver_kin_clock_job is not None:
+            try:
+                self.after_cancel(self._naver_kin_clock_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._naver_kin_clock_job = None
+        self.naver_kin_next_run_at = 0
+        self.naver_kin_next_action = "answer"
+        self._persist_naver_kin_schedule_state()
+        self._set_naver_kin_automation_button_state()
+        self._update_naver_kin_next_run_label()
+        message = self._naver_kin_daily_limit_message(count)
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(
+                text=f"현재 상태: {message}",
+                text_color="#ffb86b",
+            )
+        self._append_naver_kin_run_log(message)
+        self._set_naver_kin_progress(message, state="complete")
+        self._update_quick_status("N지식인 일일 답변 한도", message, "#ffb86b")
+
     def _toggle_naver_kin_automation(self) -> None:
         if self.naver_kin_automation_running:
             self.naver_kin_automation_running = False
@@ -25807,6 +25950,11 @@ class KeywordApp(ctk.CTk):
             self._update_naver_kin_next_run_label()
             if hasattr(self, "naver_kin_status_label"):
                 self.naver_kin_status_label.configure(text="현재 상태: N지식인 자동화를 중지했습니다.", text_color="#ffcc66")
+            return
+
+        answer_count = self._naver_kin_daily_answer_count()
+        if answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT:
+            self._stop_naver_kin_automation_for_daily_limit(answer_count)
             return
 
         if self.naver_kin_direct_mode or (
@@ -25879,6 +26027,17 @@ class KeywordApp(ctk.CTk):
         direct_mode: bool = False,
         preserve_log: bool = False,
     ) -> bool:
+        answer_count = self._naver_kin_daily_answer_count()
+        if answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT:
+            self._stop_naver_kin_automation_for_daily_limit(answer_count)
+            if direct_mode:
+                self.naver_kin_direct_mode = False
+                self._set_naver_kin_direct_button_state(False)
+                messagebox.showinfo(
+                    "N지식인 일일 답변 한도",
+                    self._naver_kin_daily_limit_message(answer_count),
+                )
+            return False
         try:
             settings = self._read_wordpress_settings()
             self._validate_wordpress_inputs(settings, allow_empty_password=False)
@@ -25933,6 +26092,10 @@ class KeywordApp(ctk.CTk):
     def _run_naver_kin_automation_once(self) -> None:
         self._naver_kin_automation_job = None
         if not self.naver_kin_automation_running:
+            return
+        answer_count = self._naver_kin_daily_answer_count()
+        if answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT:
+            self._stop_naver_kin_automation_for_daily_limit(answer_count)
             return
         scheduled_action = (
             self.naver_kin_next_action
@@ -26097,6 +26260,14 @@ class KeywordApp(ctk.CTk):
             worker is not None and worker.is_alive() for worker in running_workers
         ):
             messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 다시 실행해 주세요.")
+            return
+        answer_count = self._naver_kin_daily_answer_count()
+        if answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT:
+            self._stop_naver_kin_automation_for_daily_limit(answer_count)
+            messagebox.showinfo(
+                "N지식인 일일 답변 한도",
+                self._naver_kin_daily_limit_message(answer_count),
+            )
             return
         try:
             question_url = normalize_naver_kin_question_url(
@@ -26310,7 +26481,7 @@ class KeywordApp(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         self.naver_kin_complete_dialog = dialog
         dialog.title("N지식인 자동화 완료")
-        dialog.geometry("600x390")
+        dialog.geometry("600x430")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.configure(fg_color=palette["shell"])
@@ -26350,7 +26521,7 @@ class KeywordApp(ctk.CTk):
         usage_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             usage_frame,
-            text="오늘 공개 발행 현황",
+            text="오늘 작업 현황",
             text_color=palette["muted"],
             font=ctk.CTkFont(size=12, weight="bold"),
         ).grid(row=0, column=0, columnspan=2, padx=16, pady=(11, 5), sticky="w")
@@ -26371,13 +26542,30 @@ class KeywordApp(ctk.CTk):
             text="워드프레스",
             text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=1, column=0, padx=(16, 14), pady=(0, 11), sticky="w")
+        ).grid(row=1, column=0, padx=(16, 14), pady=(0, 6), sticky="w")
         ctk.CTkLabel(
             usage_frame,
             text=format_daily_publish_usage(wordpress_count, wordpress_limit),
             text_color="#ffb86b" if wordpress_remaining == 0 else palette["accent"],
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=1, column=1, padx=(0, 16), pady=(0, 11), sticky="e")
+        ).grid(row=1, column=1, padx=(0, 16), pady=(0, 6), sticky="e")
+        naver_kin_answer_count = self._naver_kin_daily_answer_count()
+        naver_kin_remaining = max(
+            0,
+            NAVER_KIN_DAILY_ANSWER_LIMIT - naver_kin_answer_count,
+        )
+        ctk.CTkLabel(
+            usage_frame,
+            text="지식인 답변",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=2, column=0, padx=(16, 14), pady=(0, 11), sticky="w")
+        ctk.CTkLabel(
+            usage_frame,
+            text=format_naver_kin_answer_usage(naver_kin_answer_count),
+            text_color="#ffb86b" if naver_kin_remaining == 0 else palette["accent"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=2, column=1, padx=(0, 16), pady=(0, 11), sticky="e")
 
         ctk.CTkLabel(
             card,
@@ -26467,6 +26655,14 @@ class KeywordApp(ctk.CTk):
             message += f" 본문 카드뉴스 {cardnews_count}장 포함."
         if cleanup_count:
             message += f" 임시 이미지 {cleanup_count}개 삭제."
+        naver_kin_answer_count = max(
+            int(payload.get("naver_kin_answer_count") or 0),
+            self._naver_kin_daily_answer_count(),
+        )
+        daily_limit_reached = (
+            naver_kin_answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT
+        )
+        message += f" {format_naver_kin_answer_usage(naver_kin_answer_count)}."
         if hasattr(self, "naver_kin_status_label"):
             self.naver_kin_status_label.configure(text=f"현재 상태: {message}", text_color="#48d980")
         self._append_naver_kin_run_log(message)
@@ -26476,8 +26672,14 @@ class KeywordApp(ctk.CTk):
         # result in the fixed progress/status UI without opening a modal that
         # waits for confirmation. Direct URL runs still show the completion
         # dialog because the user explicitly started and is watching them.
+        if daily_limit_reached:
+            self._stop_naver_kin_automation_for_daily_limit(
+                naver_kin_answer_count
+            )
         if was_direct:
             self._show_naver_kin_complete_dialog(question_url)
+        if daily_limit_reached:
+            return
         if self.naver_kin_automation_running:
             if self._next_naver_kin_question_for_automation() is not None:
                 self._schedule_next_naver_kin_automation(

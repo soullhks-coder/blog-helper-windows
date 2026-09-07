@@ -42,6 +42,10 @@ class DailyPublishLimitTests(unittest.TestCase):
             main.format_daily_publish_usage(4, 0),
             "오늘 4개 발행 · 제한 없음",
         )
+        self.assertEqual(
+            main.format_naver_kin_answer_usage(30),
+            "오늘 답변 30/30회 · 남은 수량 0회",
+        )
 
     def test_completion_usage_rows_are_split_by_wordpress_and_tistory(self) -> None:
         app = SimpleNamespace(
@@ -139,6 +143,39 @@ class DailyPublishLimitTests(unittest.TestCase):
                         ),
                         0,
                     )
+
+    def test_naver_kin_daily_answer_limit_is_per_profile_account(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            count_file = Path(directory) / "daily-publish-counts.json"
+            with (
+                patch.object(main, "DAILY_PUBLISH_COUNTS_FILE", count_file),
+                patch.object(main.DailyPublishLimitStore, "_today", return_value="2026-09-07"),
+            ):
+                account_one = "naver_kin|profile-one"
+                account_two = "naver_kin|profile-two"
+                main.DailyPublishLimitStore.ensure_minimum_count(
+                    "naver_kin",
+                    account_one,
+                    main.NAVER_KIN_DAILY_ANSWER_LIMIT,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "오늘 답변 가능 횟수 30회를 모두 사용했습니다",
+                ):
+                    main.DailyPublishLimitStore.ensure_can_publish(
+                        "naver_kin",
+                        account_one,
+                        main.NAVER_KIN_DAILY_ANSWER_LIMIT,
+                    )
+                self.assertEqual(
+                    main.DailyPublishLimitStore.ensure_can_publish(
+                        "naver_kin",
+                        account_two,
+                        main.NAVER_KIN_DAILY_ANSWER_LIMIT,
+                    ),
+                    0,
+                )
 
     def test_in_progress_publish_reserves_the_last_available_slot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
