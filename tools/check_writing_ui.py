@@ -214,6 +214,35 @@ def main() -> None:
             assert app.naver_kin_start_button.cget("text") == "질문 목록 수집"
             assert app.naver_kin_direct_collect_button.cget("text") == "수집"
             assert app.naver_kin_fixed_progress_panel.winfo_ismapped()
+            reference_native_textbox = app.naver_kin_reference_textbox._textbox
+            assert reference_native_textbox.bindtags()[0] == app_module.TEXT_EDITING_SHORTCUT_BINDTAG
+            reference_shortcut_text = "한글 모드 전체 선택 확인"
+            reference_native_textbox.delete("1.0", "end")
+            reference_native_textbox.insert("1.0", reference_shortcut_text)
+            reference_native_textbox.focus_force()
+            settle(40)
+            if sys.platform == "darwin":
+                app._handle_text_editing_shortcut(
+                    type(
+                        "MacKoreanCommandAEvent",
+                        (),
+                        {
+                            "widget": reference_native_textbox,
+                            "keysym": "??",
+                            "keycode": 97,
+                        },
+                    )()
+                )
+            else:
+                reference_native_textbox.event_generate(
+                    "<Control-KeyPress>",
+                    keycode=65,
+                    when="now",
+                )
+            settle(40)
+            assert reference_native_textbox.get("sel.first", "sel.last").rstrip("\n") == reference_shortcut_text
+            reference_native_textbox.tag_remove("sel", "1.0", "end")
+            reference_native_textbox.delete("1.0", "end")
             assert all(
                 not frame.winfo_ismapped()
                 for name, frame in app._page_frame_map().items()

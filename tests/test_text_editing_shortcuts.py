@@ -72,6 +72,27 @@ class TextEditingShortcutTests(unittest.TestCase):
                     expected_action,
                 )
 
+    def test_macos_real_korean_command_a_event_resolves_low_byte_97(self) -> None:
+        self.assertEqual(
+            main._text_editing_shortcut_action(
+                "??",
+                97,
+                os_name="posix",
+                platform_name="darwin",
+            ),
+            "select_all",
+        )
+
+    def test_korean_two_set_keysyms_are_supported_without_a_keycode(self) -> None:
+        self.assertEqual(
+            main._text_editing_shortcut_action("ㅁ", None, platform_name="darwin"),
+            "select_all",
+        )
+        self.assertEqual(
+            main._text_editing_shortcut_action("U3141", None, platform_name="darwin"),
+            "select_all",
+        )
+
     def test_other_platform_keycode_fallback_does_not_capture_unrelated_keys(self) -> None:
         self.assertEqual(
             main._text_editing_shortcut_action(
@@ -114,7 +135,7 @@ class TextEditingShortcutTests(unittest.TestCase):
         self.assertEqual(result, "break")
         self.assertEqual(widget.generated_events, ["<<Paste>>"])
 
-    def test_handler_selects_all_entry_text(self) -> None:
+    def test_handler_generates_standard_select_all_event(self) -> None:
         widget = _FakeTextWidget()
         app = SimpleNamespace(
             _is_text_input_widget=lambda candidate: candidate is widget,
@@ -125,8 +146,21 @@ class TextEditingShortcutTests(unittest.TestCase):
         result = main.KeywordApp._handle_text_editing_shortcut(app, event)
 
         self.assertEqual(result, "break")
-        self.assertEqual(widget.selection, (0, "end"))
-        self.assertEqual(widget.insert_cursor, "end")
+        self.assertEqual(widget.generated_events, ["<<SelectAll>>"])
+
+    def test_handler_selects_all_for_real_macos_korean_command_a_event(self) -> None:
+        widget = _FakeTextWidget()
+        app = SimpleNamespace(
+            _is_text_input_widget=lambda candidate: candidate is widget,
+            _mark_text_input_activity=lambda _event: None,
+        )
+        event = SimpleNamespace(widget=widget, keysym="??", keycode=97)
+
+        with patch.object(main.sys, "platform", "darwin"):
+            result = main.KeywordApp._handle_text_editing_shortcut(app, event)
+
+        self.assertEqual(result, "break")
+        self.assertEqual(widget.generated_events, ["<<SelectAll>>"])
 
     def test_handler_ignores_non_text_widgets(self) -> None:
         widget = object()

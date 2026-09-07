@@ -112,7 +112,12 @@ def _darwin_virtual_keycode(keycode) -> int:
         packed_keycode = int(keycode)
     except (TypeError, ValueError):
         return -1
-    if 0 <= packed_keycode <= 0x7F:
+    # Real Tk Aqua keycodes pack the native key in the high byte. The A
+    # key's native code is zero, so Command+A can arrive as the low-byte
+    # character value 97 while a Korean IME reports its keysym as "??".
+    # Keep raw 0/7/8/9 support for generated test events and unpack every
+    # other value, including 97, from the high byte.
+    if packed_keycode in _DARWIN_TEXT_EDITING_VIRTUAL_KEYCODES:
         return packed_keycode
     return (packed_keycode >> 24) & 0xFF
 
@@ -130,6 +135,14 @@ def _text_editing_shortcut_action(
         "c": "copy",
         "v": "paste",
         "x": "cut",
+        "ㅁ": "select_all",
+        "ㅊ": "copy",
+        "ㅍ": "paste",
+        "ㅌ": "cut",
+        "u3141": "select_all",
+        "u314a": "copy",
+        "u314d": "paste",
+        "u314c": "cut",
     }
     normalized_keysym = str(keysym or "").strip().lower()
     if normalized_keysym in action_by_keysym:
@@ -20084,21 +20097,13 @@ class KeywordApp(ctk.CTk):
 
         self._mark_text_input_activity(event)
         try:
-            if action == "select_all":
-                if isinstance(widget, tk.Text) or str(widget.winfo_class()) == "Text":
-                    widget.tag_add("sel", "1.0", "end-1c")
-                    widget.mark_set("insert", "end-1c")
-                    widget.see("insert")
-                else:
-                    widget.selection_range(0, "end")
-                    widget.icursor("end")
-            else:
-                virtual_event = {
-                    "copy": "<<Copy>>",
-                    "paste": "<<Paste>>",
-                    "cut": "<<Cut>>",
-                }[action]
-                widget.event_generate(virtual_event)
+            virtual_event = {
+                "select_all": "<<SelectAll>>",
+                "copy": "<<Copy>>",
+                "paste": "<<Paste>>",
+                "cut": "<<Cut>>",
+            }[action]
+            widget.event_generate(virtual_event)
         except (KeyError, AttributeError, tk.TclError):
             return None
         return "break"
