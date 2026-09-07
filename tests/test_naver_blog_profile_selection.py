@@ -187,7 +187,7 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
             "N블로그 · 내 프롬프트",
         )
 
-    def test_existing_profiles_are_migrated_to_three_distinct_browser_scopes(self) -> None:
+    def test_existing_profiles_are_migrated_to_six_distinct_browser_scopes(self) -> None:
         profiles = main.normalize_naver_blog_profiles(
             [
                 {"name": "블로그 1", "blog_id": "mine"},
@@ -200,7 +200,14 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
             [profile["profile_scope"] for profile in profiles],
             list(main.NAVER_BLOG_PROFILE_SCOPES),
         )
-        self.assertEqual(len({profile["profile_path"] for profile in profiles}), 3)
+        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len({profile["profile_path"] for profile in profiles}), 6)
+        self.assertEqual(profiles[3]["name"], "블로그 4")
+        self.assertEqual(profiles[4]["name"], "블로그 5")
+        self.assertEqual(profiles[5]["name"], "블로그 6")
+        self.assertEqual(profiles[0]["blog_id"], "mine")
+        self.assertEqual(profiles[1]["blog_id"], "mom")
+        self.assertEqual(profiles[2]["blog_id"], "third")
 
     def test_writing_choices_show_only_registered_blogs(self) -> None:
         choices = main.selectable_naver_blog_profiles(
@@ -219,7 +226,24 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
     def test_writing_choices_keep_all_slots_when_none_are_registered(self) -> None:
         choices = main.selectable_naver_blog_profiles([])
 
-        self.assertEqual(len(choices), 3)
+        self.assertEqual(len(choices), 6)
+
+    def test_six_profile_controls_use_three_columns_and_two_rows(self) -> None:
+        self.assertEqual(
+            [main.naver_blog_profile_grid_position(index) for index in range(6)],
+            [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)],
+        )
+
+    def test_sixth_profile_uses_its_own_browser_scope(self) -> None:
+        profiles = main.normalize_naver_blog_profiles(
+            [{"name": f"블로그 {index + 1}"} for index in range(6)]
+        )
+
+        self.assertEqual(
+            main.naver_blog_profile_scope(profiles[5], 5),
+            main.NAVER_PLAYWRIGHT_PROFILE_BLOG_6,
+        )
+        self.assertNotEqual(profiles[5]["profile_path"], profiles[0]["profile_path"])
 
     def test_profile_check_starts_browser_with_clicked_blog_scope(self) -> None:
         profiles = main.normalize_naver_blog_profiles(
@@ -322,6 +346,8 @@ class NaverBlogProfileSelectionTests(unittest.TestCase):
         self.assertIn("작성할 블로그", writing_choices_source)
         self.assertIn("CTkRadioButton", writing_choices_source)
         self.assertIn("_set_naver_active_profile", writing_choices_source)
+        self.assertIn("naver_blog_profile_grid_position", build_source)
+        self.assertIn("naver_blog_profile_grid_position", writing_choices_source)
 
 
 if __name__ == "__main__":

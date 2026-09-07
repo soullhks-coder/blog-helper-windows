@@ -232,6 +232,32 @@ def main() -> None:
             assert app.naver_kin_fixed_progress_bar.get() == 1.0
             assert app.naver_kin_fixed_progress_badge.cget("text") == "완료"
             print(f"{sys.platform} {args.theme}: Naver Knowledge iN direct URL and fixed progress UI passed")
+
+            # NBlog exposes six independent slots in matching 3 x 2 grids on
+            # both the writing and settings tabs.
+            app._switch_page("naver_blog")
+            app._switch_naver_blog_tab("writing")
+            settle(700)
+            writing_radios = [
+                widget
+                for widget in app.naver_blog_writing_profile_frame.winfo_children()
+                if isinstance(widget, app_module.ctk.CTkRadioButton)
+            ]
+            assert len(writing_radios) == 6
+            assert {
+                (int(widget.grid_info()["row"]), int(widget.grid_info()["column"]))
+                for widget in writing_radios
+            } == {(1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2)}
+
+            app._switch_naver_blog_tab("settings")
+            settle(700)
+            profile_cards = app.naver_profile_cards_frame.winfo_children()
+            assert len(profile_cards) == 6
+            assert {
+                (int(card.grid_info()["row"]), int(card.grid_info()["column"]))
+                for card in profile_cards
+            } == {(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)}
+            print(f"{sys.platform} {args.theme}: NBlog six-profile 3 x 2 layouts passed")
             assert not errors, errors
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:

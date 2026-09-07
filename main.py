@@ -368,11 +368,17 @@ NAVER_PLAYWRIGHT_PROFILE_AUTOMATION = "blog_automation"
 NAVER_PLAYWRIGHT_PROFILE_BLOG = "naver_blog"
 NAVER_PLAYWRIGHT_PROFILE_BLOG_2 = "naver_blog_2"
 NAVER_PLAYWRIGHT_PROFILE_BLOG_3 = "naver_blog_3"
+NAVER_PLAYWRIGHT_PROFILE_BLOG_4 = "naver_blog_4"
+NAVER_PLAYWRIGHT_PROFILE_BLOG_5 = "naver_blog_5"
+NAVER_PLAYWRIGHT_PROFILE_BLOG_6 = "naver_blog_6"
 NAVER_PLAYWRIGHT_PROFILE_KIN = "naver_kin"
 NAVER_BLOG_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_BLOG,
     NAVER_PLAYWRIGHT_PROFILE_BLOG_2,
     NAVER_PLAYWRIGHT_PROFILE_BLOG_3,
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_4,
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_5,
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_6,
 )
 NAVER_BLOG_DEFAULT_PROMPT_ID = "naver-blog-default"
 NAVER_BLOG_DEFAULT_PROFILE_PROMPT_IDS = {
@@ -390,12 +396,18 @@ NAVER_AUTOMATION_CHROME_PROFILE_DIR = DATA_DIR / "Naver Automation Chrome Profil
 NAVER_BLOG_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog Chrome Profile"
 NAVER_BLOG_2_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 2 Chrome Profile"
 NAVER_BLOG_3_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 3 Chrome Profile"
+NAVER_BLOG_4_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 4 Chrome Profile"
+NAVER_BLOG_5_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 5 Chrome Profile"
+NAVER_BLOG_6_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 6 Chrome Profile"
 NAVER_KIN_CHROME_PROFILE_DIR = DATA_DIR / "Naver Kin Chrome Profile"
 NAVER_WRITING_STORAGE_STATE_FILE = DATA_DIR / "naver-writing-storage-state.json"
 NAVER_AUTOMATION_STORAGE_STATE_FILE = DATA_DIR / "naver-automation-storage-state.json"
 NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
 NAVER_BLOG_2_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-2-storage-state.json"
 NAVER_BLOG_3_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-3-storage-state.json"
+NAVER_BLOG_4_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-4-storage-state.json"
+NAVER_BLOG_5_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-5-storage-state.json"
+NAVER_BLOG_6_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-6-storage-state.json"
 NAVER_KIN_STORAGE_STATE_FILE = DATA_DIR / "naver-kin-storage-state.json"
 NAVER_PLAYWRIGHT_PROFILE_PATHS = {
     NAVER_PLAYWRIGHT_PROFILE_WRITING: (
@@ -417,6 +429,18 @@ NAVER_PLAYWRIGHT_PROFILE_PATHS = {
     NAVER_PLAYWRIGHT_PROFILE_BLOG_3: (
         NAVER_BLOG_3_CHROME_PROFILE_DIR,
         NAVER_BLOG_3_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_4: (
+        NAVER_BLOG_4_CHROME_PROFILE_DIR,
+        NAVER_BLOG_4_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_5: (
+        NAVER_BLOG_5_CHROME_PROFILE_DIR,
+        NAVER_BLOG_5_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_BLOG_6: (
+        NAVER_BLOG_6_CHROME_PROFILE_DIR,
+        NAVER_BLOG_6_STORAGE_STATE_FILE,
     ),
     NAVER_PLAYWRIGHT_PROFILE_KIN: (
         NAVER_KIN_CHROME_PROFILE_DIR,
@@ -7429,10 +7453,9 @@ def naver_blog_profile_scope(
 def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
     raw_profiles = profiles if isinstance(profiles, list) else []
     normalized_profiles: list[dict] = []
-    for index in range(3):
+    for index, scope in enumerate(NAVER_BLOG_PROFILE_SCOPES):
         raw_profile = raw_profiles[index] if index < len(raw_profiles) else {}
         profile = dict(raw_profile) if isinstance(raw_profile, dict) else {}
-        scope = NAVER_BLOG_PROFILE_SCOPES[index]
         profile_dir, _state_file = naver_playwright_profile_paths(scope)
         profile.update(
             {
@@ -7446,6 +7469,12 @@ def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
         )
         normalized_profiles.append(profile)
     return normalized_profiles
+
+
+def naver_blog_profile_grid_position(index: int) -> tuple[int, int]:
+    """Place six NBlog profile controls in two rows of three."""
+    safe_index = max(0, int(index))
+    return divmod(safe_index, 3)
 
 
 def naver_blog_profile_scope_for_name(
@@ -24407,11 +24436,13 @@ class KeywordApp(ctk.CTk):
             text="작성할 블로그",
             text_color=self._theme_palette()["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, padx=(0, 16), sticky="w")
-        for column, profile in enumerate(choices, start=1):
-            name = str(profile.get("name") or f"블로그 {column}")
-            detail = str(profile.get("nickname") or profile.get("blog_id") or "미등록")
+        ).grid(row=0, column=0, columnspan=3, pady=(0, 8), sticky="w")
+        for column in range(3):
             frame.grid_columnconfigure(column, weight=1, uniform="writing_profiles")
+        for index, profile in enumerate(choices):
+            name = str(profile.get("name") or f"블로그 {index + 1}")
+            detail = str(profile.get("nickname") or profile.get("blog_id") or "미등록")
+            row, column = naver_blog_profile_grid_position(index)
             ctk.CTkRadioButton(
                 frame,
                 text=f"{name} · {detail}",
@@ -24420,9 +24451,10 @@ class KeywordApp(ctk.CTk):
                 command=lambda value=name: self._set_naver_active_profile(value),
                 font=ctk.CTkFont(size=13, weight="bold"),
             ).grid(
-                row=0,
+                row=row + 1,
                 column=column,
                 padx=(0, 12),
+                pady=(0, 8),
                 sticky="w",
             )
 
@@ -24440,8 +24472,15 @@ class KeywordApp(ctk.CTk):
         profiles = self._naver_blog_profiles_from_state()
         for index, profile in enumerate(profiles):
             name = str(profile.get("name") or f"블로그 {index + 1}")
+            row, column = naver_blog_profile_grid_position(index)
             card = ctk.CTkFrame(self.naver_profile_cards_frame, fg_color="#222c3b", corner_radius=16, border_width=1, border_color="#334760")
-            card.grid(row=0, column=index, padx=(0 if index == 0 else 10, 0), sticky="nsew")
+            card.grid(
+                row=row,
+                column=column,
+                padx=(0 if column == 0 else 10, 0),
+                pady=(0 if row == 0 else 10, 0),
+                sticky="nsew",
+            )
             card.grid_columnconfigure(1, weight=1)
             ctk.CTkRadioButton(
                 card,

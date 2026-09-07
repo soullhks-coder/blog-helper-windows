@@ -136,7 +136,10 @@ class NaverBlogPromptManagementTests(unittest.TestCase):
                 main.AppStateStore.save(settings, save_secrets=False)
                 loaded = main.AppStateStore.load()
 
-        self.assertEqual(loaded.naver_blog_profile_prompt_ids, prompt_ids)
+        self.assertEqual(
+            loaded.naver_blog_profile_prompt_ids,
+            main.normalize_naver_blog_profile_prompt_ids(prompt_ids),
+        )
 
     def test_new_prompt_does_not_overwrite_selected_prompt(self) -> None:
         existing = [

@@ -114,22 +114,22 @@ class NaverPlaywrightProfileTests(unittest.TestCase):
             for scope in main.NAVER_PLAYWRIGHT_PROFILE_SCOPES
         ]
 
-        self.assertEqual(len(main.NAVER_PLAYWRIGHT_PROFILE_SCOPES), 6)
-        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 6)
-        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 6)
+        self.assertEqual(len(main.NAVER_PLAYWRIGHT_PROFILE_SCOPES), 9)
+        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 9)
+        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 9)
         self.assertEqual(
             main.naver_playwright_profile_paths(main.NAVER_PLAYWRIGHT_PROFILE_BLOG)[0],
             main.NAVER_BLOG_CHROME_PROFILE_DIR,
         )
 
-    def test_three_nblog_slots_have_separate_browser_and_cookie_paths(self) -> None:
+    def test_six_nblog_slots_have_separate_browser_and_cookie_paths(self) -> None:
         paths = [
             main.naver_playwright_profile_paths(scope)
             for scope in main.NAVER_BLOG_PROFILE_SCOPES
         ]
 
-        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 3)
-        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 3)
+        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 6)
+        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 6)
         self.assertEqual(
             paths[0][0],
             main.NAVER_BLOG_CHROME_PROFILE_DIR,
