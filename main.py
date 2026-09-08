@@ -284,8 +284,6 @@ KEYCHAIN_PUBLIC_DATA_ACCOUNT = "public_data_api_key"
 KEYCHAIN_BLOGSPOT_ACCOUNT = "blogspot_access_token"
 KEYCHAIN_BLOGSPOT_CLIENT_SECRET = "blogspot_client_secret"
 KEYCHAIN_BLOGSPOT_REFRESH_TOKEN = "blogspot_refresh_token"
-KEYCHAIN_THREADS_APP_SECRET = "threads_app_secret"
-KEYCHAIN_THREADS_ACCESS_TOKEN = "threads_access_token"
 PREVIEW_FILE = DATA_DIR / "article-preview.html"
 THUMBNAIL_EXPORT_FILE = DATA_DIR / "thumbnail-preview.png"
 TISTORY_DRAFT_FILE = DATA_DIR / "tistory-draft.html"
@@ -293,6 +291,10 @@ TISTORY_AUTOMATION_SCRIPT_FILE = DATA_DIR / "tistory-automation.js"
 TISTORY_AUTOMATION_RUNNER_FILE = DATA_DIR / "tistory-automation-runner.js"
 TISTORY_CHROME_PROFILE_DIR = DATA_DIR / "Tistory Chrome Profile"
 TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
+THREADS_CHROME_PROFILE_DIR = DATA_DIR / "Threads Chrome Profile"
+THREADS_STORAGE_STATE_FILE = DATA_DIR / "threads-storage-state.json"
+THREADS_HOME_URL = "https://www.threads.com/"
+THREADS_LOGIN_URL = "https://www.threads.com/login"
 TEXT_INPUT_MODE_FAST = "빠른 입력"
 TEXT_INPUT_MODE_TYPING = "직접 타이핑"
 TEXT_INPUT_MODE_OPTIONS = (TEXT_INPUT_MODE_FAST, TEXT_INPUT_MODE_TYPING)
@@ -433,6 +435,7 @@ CODEX_DEFAULT_WRITING_MODEL_MIGRATION = "1.1.46:default-writing-model-codex"
 UPDATE_PROBE_INTERVAL_MS = 5 * 60_000
 UPDATE_PROBE_RETRY_MS = 60_000
 TISTORY_COOKIE_KEEP_DAYS = 180
+THREADS_COOKIE_KEEP_DAYS = 180
 NAVER_PLAYWRIGHT_PROFILE_WRITING = "blog_writing"
 NAVER_PLAYWRIGHT_PROFILE_AUTOMATION = "blog_automation"
 NAVER_PLAYWRIGHT_PROFILE_BLOG = "naver_blog"
@@ -2762,11 +2765,6 @@ class WordPressSettings:
     naver_kin_next_run_at: float = 0.0
     naver_kin_next_action: str = "answer"
     naver_kin_last_questions: list[dict] = field(default_factory=list)
-    threads_app_id: str = ""
-    threads_app_secret: str = ""
-    threads_redirect_uri: str = "https://localhost/"
-    threads_access_token: str = ""
-    threads_user_id: str = ""
     threads_username: str = ""
     threads_auto_publish: bool = False
     threads_post_prompt: str = DEFAULT_THREADS_POST_PROMPT
@@ -3119,9 +3117,6 @@ class AppStateStore:
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
-        "threads_app_id",
-        "threads_redirect_uri",
-        "threads_user_id",
         "threads_username",
     )
 
@@ -3180,8 +3175,6 @@ class AppStateStore:
         blogspot_fallback = payload.get("blogspot_access_token_fallback", "")
         blogspot_client_secret_fallback = payload.get("blogspot_client_secret_fallback", "")
         blogspot_refresh_token_fallback = payload.get("blogspot_refresh_token_fallback", "")
-        threads_app_secret_fallback = payload.get("threads_app_secret_fallback", "")
-        threads_access_token_fallback = payload.get("threads_access_token_fallback", "")
         writing_links = payload.get("writing_links", [])
         if not writing_links and payload.get("writing_link_url"):
             writing_links = [
@@ -3368,11 +3361,6 @@ class AppStateStore:
                 else "answer"
             ),
             naver_kin_last_questions=payload.get("naver_kin_last_questions", []),
-            threads_app_id=payload.get("threads_app_id", ""),
-            threads_app_secret=KeychainStore.load_secret(KEYCHAIN_THREADS_APP_SECRET) or threads_app_secret_fallback,
-            threads_redirect_uri=payload.get("threads_redirect_uri", "https://localhost/"),
-            threads_access_token=KeychainStore.load_secret(KEYCHAIN_THREADS_ACCESS_TOKEN) or threads_access_token_fallback,
-            threads_user_id=payload.get("threads_user_id", ""),
             threads_username=payload.get("threads_username", ""),
             threads_auto_publish=payload.get("threads_auto_publish", False),
             threads_post_prompt=nonempty_text(payload.get("threads_post_prompt"), DEFAULT_THREADS_POST_PROMPT),
@@ -3489,10 +3477,6 @@ class AppStateStore:
         payload["blogspot_client_secret_fallback"] = settings.blogspot_client_secret if save_secrets else (previous_payload.get("blogspot_client_secret_fallback", "") or settings.blogspot_client_secret)
         payload["blogspot_refresh_token"] = ""
         payload["blogspot_refresh_token_fallback"] = settings.blogspot_refresh_token if save_secrets else (previous_payload.get("blogspot_refresh_token_fallback", "") or settings.blogspot_refresh_token)
-        payload["threads_app_secret"] = ""
-        payload["threads_app_secret_fallback"] = settings.threads_app_secret if save_secrets else (previous_payload.get("threads_app_secret_fallback", "") or settings.threads_app_secret)
-        payload["threads_access_token"] = ""
-        payload["threads_access_token_fallback"] = settings.threads_access_token if save_secrets else (previous_payload.get("threads_access_token_fallback", "") or settings.threads_access_token)
         if save_secrets and settings.app_password:
             KeychainStore.save_secret(
                 f"{KEYCHAIN_WP_PREFIX}{settings.username}",
@@ -3512,10 +3496,6 @@ class AppStateStore:
             KeychainStore.save_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET, settings.blogspot_client_secret)
         if save_secrets and settings.blogspot_refresh_token:
             KeychainStore.save_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN, settings.blogspot_refresh_token)
-        if save_secrets and settings.threads_app_secret:
-            KeychainStore.save_secret(KEYCHAIN_THREADS_APP_SECRET, settings.threads_app_secret)
-        if save_secrets and settings.threads_access_token:
-            KeychainStore.save_secret(KEYCHAIN_THREADS_ACCESS_TOKEN, settings.threads_access_token)
         if payload == previous_payload:
             return
         AppStateStore._write_payload(payload)
@@ -4051,144 +4031,229 @@ class BlogspotClient:
             DailyPublishLimitStore.cancel_reservation(reservation_key)
 
 
-class ThreadsClient:
-    AUTH_URL = "https://threads.net/oauth/authorize"
-    TOKEN_URL = "https://graph.threads.net/oauth/access_token"
-    LONG_LIVED_TOKEN_URL = "https://graph.threads.net/access_token"
-    API_ROOT = "https://graph.threads.net/v1.0"
-
-    def __init__(self, app_id: str, app_secret: str, redirect_uri: str, access_token: str = "") -> None:
-        self.app_id = app_id.strip()
-        self.app_secret = app_secret.strip()
-        self.redirect_uri = redirect_uri.strip()
-        self.access_token = access_token.strip()
-        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
-
-    def authorization_url(self) -> str:
-        if not self.app_id:
-            raise RuntimeError("Threads App ID를 입력해 주세요.")
-        if not self.redirect_uri:
-            raise RuntimeError("Threads Redirect URI를 입력해 주세요.")
-        return self.AUTH_URL + "?" + urlencode(
-            {
-                "client_id": self.app_id,
-                "redirect_uri": self.redirect_uri,
-                "scope": "threads_basic,threads_content_publish",
-                "response_type": "code",
-            }
-        )
-
-    def exchange_code(self, code: str) -> dict:
-        if not self.app_id or not self.app_secret or not self.redirect_uri:
-            raise RuntimeError("Threads App ID, App Secret, Redirect URI를 모두 입력해 주세요.")
-        code = self._extract_code(code)
-        if not code:
-            raise RuntimeError("Meta 인증 후 발급된 code를 입력해 주세요.")
-        short_token = self._request_json(
-            self.TOKEN_URL,
-            method="POST",
-            form={
-                "client_id": self.app_id,
-                "client_secret": self.app_secret,
-                "grant_type": "authorization_code",
-                "redirect_uri": self.redirect_uri,
-                "code": code,
-            },
-        )
-        token = str(short_token.get("access_token") or "").strip()
-        if not token:
-            raise RuntimeError("Threads Access Token 응답이 비어 있습니다.")
-        long_lived = self._request_json(
-            self.LONG_LIVED_TOKEN_URL + "?" + urlencode(
-                {
-                    "grant_type": "th_exchange_token",
-                    "client_secret": self.app_secret,
-                    "access_token": token,
-                }
-            )
-        )
-        return long_lived if long_lived.get("access_token") else short_token
-
-    def profile(self, access_token: str = "") -> dict:
-        token = (access_token or self.access_token).strip()
-        if not token:
-            raise RuntimeError("Threads Access Token이 없습니다. Meta 인증을 먼저 완료해 주세요.")
-        url = self.API_ROOT + "/me?" + urlencode(
-            {
-                "fields": "id,username,name,threads_profile_picture_url,threads_biography",
-                "access_token": token,
-            }
-        )
-        return self._request_json(url)
-
-    def publish_text(self, user_id: str, text: str) -> dict:
-        user_id = user_id.strip()
-        text = text.strip()
-        if not user_id:
-            raise RuntimeError("Threads User ID를 입력해 주세요.")
-        if not self.access_token:
-            raise RuntimeError("Threads Access Token을 입력해 주세요.")
-        if not text:
-            raise RuntimeError("Threads에 게시할 내용이 비어 있습니다.")
-
-        creation = self._request_json(
-            f"{self.API_ROOT}/{quote(user_id, safe='')}/threads",
-            method="POST",
-            form={
-                "media_type": "TEXT",
-                "text": text,
-                "access_token": self.access_token,
-            },
-        )
-        creation_id = str(creation.get("id") or "").strip()
-        if not creation_id:
-            raise RuntimeError("Threads 게시물 생성 ID를 받지 못했습니다.")
-
-        published = self._request_json(
-            f"{self.API_ROOT}/{quote(user_id, safe='')}/threads_publish",
-            method="POST",
-            form={
-                "creation_id": creation_id,
-                "access_token": self.access_token,
-            },
-        )
-        post_id = str(published.get("id") or "").strip()
-        if not post_id:
-            raise RuntimeError("Threads 게시 완료 ID를 받지 못했습니다.")
-        return {
-            "id": post_id,
-            "creation_id": creation_id,
-            "text": text,
-        }
-
-    def _request_json(self, url: str, method: str = "GET", form: dict[str, str] | None = None) -> dict:
-        data = urlencode(form).encode("utf-8") if form is not None else None
-        request = Request(
-            url,
-            data=data,
-            method=method,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-                "User-Agent": "BlogHelper/1.0",
-            },
-        )
+def _threads_profile_from_page(page) -> dict[str, str]:
+    profile_href = ""
+    selectors = (
+        'nav a[href^="/@"]',
+        'a[aria-label*="프로필"][href^="/@"]',
+        'a[href^="/@"][href]:has(img[alt*="프로필"])',
+    )
+    for selector in selectors:
         try:
-            with urlopen(request, timeout=20, context=self.ssl_context) as response:
-                text = response.read().decode("utf-8", errors="ignore")
-                return json.loads(text) if text else {}
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Threads API 요청 실패 ({exc.code}): {detail[:300]}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Threads API에 연결할 수 없습니다: {exc.reason}") from exc
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                profile_href = str(locator.last.get_attribute("href") or "").strip()
+                if re.fullmatch(r"/@[^/?#]+/?", profile_href):
+                    break
+        except Exception:
+            continue
+    match = re.fullmatch(r"/@([^/?#]+)/?", profile_href)
+    username = match.group(1) if match else ""
+    return {
+        "username": username,
+        "profile_url": urljoin(THREADS_HOME_URL, profile_href) if username else "",
+    }
 
-    @staticmethod
-    def _extract_code(code_or_url: str) -> str:
-        text = code_or_url.strip()
-        if "code=" not in text:
-            return text
-        parsed = urlparse(text)
-        return (parse_qs(parsed.query).get("code") or [""])[0]
+
+def _threads_composer_button(page):
+    for name in ("새로운 스레드", "만들기", "New thread", "Create"):
+        locator = page.get_by_role("button", name=name, exact=True)
+        if locator.count() > 0 and locator.last.is_visible():
+            return locator.last
+    return None
+
+
+def _threads_login_ready(page) -> bool:
+    try:
+        profile = _threads_profile_from_page(page)
+        if profile.get("username"):
+            return True
+        return _threads_composer_button(page) is not None
+    except Exception:
+        return False
+
+
+def _wait_for_threads_login(
+    context,
+    page,
+    result_queue: queue.Queue,
+    login_timeout_seconds: int,
+    progress_event: str = "threads_progress",
+):
+    deadline = time.time() + max(30, int(login_timeout_seconds or 300))
+    login_notice_sent = False
+    while time.time() < deadline:
+        active_pages = list(context.pages) or [page]
+        page = active_pages[-1]
+        if _threads_login_ready(page):
+            return page
+        if not login_notice_sent:
+            result_queue.put(
+                (
+                    progress_event,
+                    "Threads 전용 Chrome에서 Instagram 계정 로그인을 완료해 주세요...",
+                )
+            )
+            login_notice_sent = True
+        time.sleep(1)
+    raise RuntimeError(
+        "5분 안에 Threads 로그인이 확인되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 시도해 주세요."
+    )
+
+
+def _launch_threads_context(playwright):
+    chrome_path = require_google_chrome_executable()
+    THREADS_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        return playwright.chromium.launch_persistent_context(
+            user_data_dir=str(THREADS_CHROME_PROFILE_DIR),
+            executable_path=str(chrome_path),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+    except Exception as exc:
+        raise RuntimeError(friendly_threads_automation_error(exc)) from exc
+
+
+def run_threads_playwright_bootstrap(
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+) -> tuple[bool, dict[str, str]]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+
+    with sync_playwright() as playwright:
+        context = _launch_threads_context(playwright)
+        try:
+            saved_state = load_threads_storage_state()
+            saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
+            if saved_cookies:
+                context.add_cookies(saved_cookies)
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            result_queue.put(("threads_profile_progress", "Threads 로그인 상태를 확인하고 있습니다..."))
+            page.goto(THREADS_HOME_URL, wait_until="domcontentloaded")
+            if not _threads_login_ready(page):
+                page.goto(THREADS_LOGIN_URL, wait_until="domcontentloaded")
+            page = _wait_for_threads_login(
+                context,
+                page,
+                result_queue,
+                login_timeout_seconds,
+                progress_event="threads_profile_progress",
+            )
+            save_threads_storage_state(context)
+            profile = _threads_profile_from_page(page)
+            if not profile.get("username"):
+                raise RuntimeError("로그인은 확인했지만 Threads 프로필 계정을 찾지 못했습니다.")
+            result_queue.put(
+                (
+                    "threads_profile_progress",
+                    f"Threads 로그인 확인 완료: @{profile['username']}",
+                )
+            )
+            return True, profile
+        finally:
+            save_threads_storage_state(context)
+            context.close()
+
+
+def run_threads_playwright_publish(
+    text: str,
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+) -> dict[str, str]:
+    text = str(text or "").strip()
+    if not text:
+        raise RuntimeError("Threads에 게시할 내용이 비어 있습니다.")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+
+    with sync_playwright() as playwright:
+        context = _launch_threads_context(playwright)
+        try:
+            saved_state = load_threads_storage_state()
+            saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
+            if saved_cookies:
+                context.add_cookies(saved_cookies)
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            result_queue.put(("threads_progress", "Threads 전용 Chrome 로그인 상태를 확인하고 있습니다..."))
+            page.goto(THREADS_HOME_URL, wait_until="domcontentloaded")
+            if not _threads_login_ready(page):
+                page.goto(THREADS_LOGIN_URL, wait_until="domcontentloaded")
+            page = _wait_for_threads_login(context, page, result_queue, login_timeout_seconds)
+            profile = _threads_profile_from_page(page)
+            username = str(profile.get("username") or "").strip()
+            profile_url = str(profile.get("profile_url") or "").strip()
+
+            result_queue.put(("threads_progress", "Threads 새 글 작성창을 열고 있습니다..."))
+            composer_button = _threads_composer_button(page)
+            if composer_button is None:
+                raise RuntimeError("Threads 새 글 작성 버튼을 찾지 못했습니다.")
+            composer_button.click()
+            dialog = page.get_by_role("dialog").last
+            dialog.wait_for(state="visible", timeout=20_000)
+
+            editor = dialog.locator('[contenteditable="true"][role="textbox"]')
+            if editor.count() == 0:
+                editor = dialog.locator('[contenteditable="true"]')
+            if editor.count() == 0:
+                editor = dialog.get_by_role("textbox").last
+            result_queue.put(("threads_progress", "Threads 글을 입력하고 있습니다..."))
+            editor.last.fill(text)
+
+            publish_button = dialog.get_by_role(
+                "button",
+                name=re.compile(r"^(게시|Post)$"),
+            ).last
+            publish_button.wait_for(state="visible", timeout=20_000)
+            if not publish_button.is_enabled():
+                raise RuntimeError("Threads 게시 버튼이 활성화되지 않았습니다. 작성 내용을 확인해 주세요.")
+            result_queue.put(("threads_progress", "Threads 게시 버튼을 누르고 완료를 확인하고 있습니다..."))
+            publish_button.click()
+            dialog.wait_for(state="hidden", timeout=60_000)
+            save_threads_storage_state(context)
+
+            post_url = ""
+            if profile_url and username:
+                page.goto(profile_url, wait_until="domcontentloaded")
+                for _attempt in range(3):
+                    post_locator = page.locator(f'a[href^="/@{username}/post/"]')
+                    if post_locator.count() > 0:
+                        href = str(post_locator.first.get_attribute("href") or "").strip()
+                        if href:
+                            post_url = urljoin(THREADS_HOME_URL, href)
+                            break
+                    page.wait_for_timeout(1500)
+                    page.reload(wait_until="domcontentloaded")
+            post_id = post_url.rstrip("/").rsplit("/", 1)[-1] if "/post/" in post_url else ""
+            result_queue.put(("threads_progress", "Threads 자동 게시가 완료되었습니다."))
+            return {
+                "id": post_id,
+                "url": post_url,
+                "username": username,
+                "text": text,
+            }
+        finally:
+            save_threads_storage_state(context)
+            context.close()
 
 
 def append_runtime_log(scope: str, message: str) -> None:
@@ -4218,6 +4283,26 @@ def friendly_naver_blog_automation_error(exc: BaseException) -> str:
             "N블로그 전용 Chrome 창이 이미 열려 있어 새 자동화를 시작하지 못했습니다.\n\n"
             "현재 열려 있는 N블로그 글쓰기 전용 Chrome 창을 먼저 닫은 뒤 다시 실행해 주세요. "
             "Blog Helper가 두 개 실행 중이면 하나만 남겨 주세요.\n\n"
+            f"상세 로그: {RUNTIME_LOG_FILE}"
+        )
+    if not message:
+        message = "알 수 없는 오류가 발생했습니다."
+    return f"{message}\n\n상세 로그: {RUNTIME_LOG_FILE}"
+
+
+def friendly_threads_automation_error(exc: BaseException) -> str:
+    message = str(exc or "").strip()
+    lowered = message.lower()
+    profile_collision_markers = (
+        "target page, context or browser has been closed",
+        "existing browser session",
+        "processsingleton",
+        "profile appears to be in use",
+        "user data directory is already in use",
+    )
+    if any(marker in lowered for marker in profile_collision_markers):
+        return (
+            "Threads 전용 Chrome 창이 이미 열려 있습니다. 현재 창을 닫은 뒤 다시 실행해 주세요.\n\n"
             f"상세 로그: {RUNTIME_LOG_FILE}"
         )
     if not message:
@@ -7516,6 +7601,74 @@ def save_tistory_storage_state(context) -> None:
         state = context.storage_state()
         normalized_state = normalize_tistory_storage_state(state)
         TISTORY_STORAGE_STATE_FILE.write_text(
+            json.dumps(normalized_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        cookies = normalized_state.get("cookies", [])
+        if cookies:
+            context.add_cookies(cookies)
+    except Exception:
+        pass
+
+
+def is_threads_auth_cookie(cookie: dict) -> bool:
+    domain = str(cookie.get("domain") or "").lower()
+    name = str(cookie.get("name") or "")
+    return (
+        any(host in domain for host in ("threads.com", "threads.net", "instagram.com"))
+        and name
+        and not name.startswith("_ga")
+    )
+
+
+def normalize_threads_storage_state(state: dict) -> dict:
+    if not isinstance(state, dict):
+        return {"cookies": [], "origins": []}
+    normalized_state = dict(state)
+    cookies = normalized_state.get("cookies", [])
+    if not isinstance(cookies, list):
+        normalized_state["cookies"] = []
+        return normalized_state
+
+    persistent_expires = int(time.time()) + (THREADS_COOKIE_KEEP_DAYS * 24 * 60 * 60)
+    normalized_cookies: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        normalized = dict(cookie)
+        if is_threads_auth_cookie(normalized) and float(normalized.get("expires", -1) or -1) < 0:
+            normalized["expires"] = persistent_expires
+        key = (
+            str(normalized.get("domain") or ""),
+            str(normalized.get("path") or "/"),
+            str(normalized.get("name") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_cookies.append(normalized)
+    normalized_state["cookies"] = normalized_cookies
+    if not isinstance(normalized_state.get("origins", []), list):
+        normalized_state["origins"] = []
+    return normalized_state
+
+
+def load_threads_storage_state() -> dict:
+    if not THREADS_STORAGE_STATE_FILE.exists():
+        return {"cookies": [], "origins": []}
+    try:
+        state = json.loads(THREADS_STORAGE_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {"cookies": [], "origins": []}
+    return normalize_threads_storage_state(state)
+
+
+def save_threads_storage_state(context) -> None:
+    try:
+        state = context.storage_state()
+        normalized_state = normalize_threads_storage_state(state)
+        THREADS_STORAGE_STATE_FILE.write_text(
             json.dumps(normalized_state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -17410,53 +17563,23 @@ class WordPressPublishWorker(threading.Thread):
             self.result_queue.put(("wp_error", str(exc)))
 
 
-class ThreadsAuthWorker(threading.Thread):
+class ThreadsProfileWorker(threading.Thread):
     def __init__(
         self,
-        settings: WordPressSettings,
         result_queue: queue.Queue,
-        mode: str,
-        code: str = "",
     ) -> None:
         super().__init__(daemon=True)
-        self.settings = settings
         self.result_queue = result_queue
-        self.mode = mode
-        self.code = code
 
     def run(self) -> None:
         try:
-            client = ThreadsClient(
-                self.settings.threads_app_id,
-                self.settings.threads_app_secret,
-                self.settings.threads_redirect_uri,
-                self.settings.threads_access_token,
-            )
-            if self.mode == "exchange":
-                token_payload = client.exchange_code(self.code)
-                access_token = str(token_payload.get("access_token") or "").strip()
-                profile = client.profile(access_token)
-                self.result_queue.put(
-                    (
-                        "threads_auth_done",
-                        {
-                            "access_token": access_token,
-                            "expires_in": token_payload.get("expires_in"),
-                            "profile": profile,
-                        },
-                    )
-                )
-            else:
-                profile = client.profile()
-                expected_user_id = self.settings.threads_user_id.strip()
-                actual_user_id = str(profile.get("id") or "").strip()
-                if expected_user_id and actual_user_id and expected_user_id != actual_user_id:
-                    raise RuntimeError(
-                        f"입력한 Threads User ID({expected_user_id})와 토큰 계정 ID({actual_user_id})가 다릅니다."
-                    )
-                self.result_queue.put(("threads_test_done", profile))
+            _success, profile = run_threads_playwright_bootstrap(self.result_queue)
+            self.result_queue.put(("threads_profile_done", profile))
         except Exception as exc:  # pragma: no cover - runtime handling
-            self.result_queue.put(("threads_error", str(exc)))
+            message = str(exc)
+            if "상세 로그:" not in message:
+                message = friendly_threads_automation_error(exc)
+            self.result_queue.put(("threads_error", message))
 
 
 class OpenAITestWorker(threading.Thread):
@@ -19140,11 +19263,6 @@ class PublishPipelineWorker(threading.Thread):
 
             threads_result = None
             if self.settings.threads_auto_publish:
-                if not self.settings.threads_user_id or not self.settings.threads_access_token:
-                    threads_result = {
-                        "error": "Threads User ID 또는 Access Token이 없습니다.",
-                        "message": "Threads 자동 게시 실패",
-                    }
                 published_url = wordpress_url
                 if not published_url and blogspot_result:
                     published_url = str(blogspot_result.get("link") or "").strip()
@@ -19163,12 +19281,10 @@ class PublishPipelineWorker(threading.Thread):
                             self.meta_description,
                             self.focus_keyword,
                         )
-                        threads_result = ThreadsClient(
-                            "",
-                            "",
-                            "",
-                            self.settings.threads_access_token,
-                        ).publish_text(self.settings.threads_user_id, threads_text)
+                        threads_result = run_threads_playwright_publish(
+                            threads_text,
+                            self.result_queue,
+                        )
                         threads_result["blog_url"] = published_url
                         threads_result["message"] = "Threads 자동 게시 완료"
                     except Exception as threads_exc:
@@ -19334,7 +19450,7 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_worker: NaverKinBootstrapWorker | None = None
         self.naver_kin_direct_worker: NaverKinQuestionCollectorWorker | None = None
         self.naver_kin_automation_worker: NaverKinAutomationWorker | None = None
-        self.threads_auth_worker: ThreadsAuthWorker | None = None
+        self.threads_profile_worker: ThreadsProfileWorker | None = None
         self.thumbnail_ai_worker: ThumbnailAIWorker | None = None
         self.daum_worker: DaumRealtimeKeywordWorker | None = None
         self.signal_worker: SignalKeywordWorker | None = None
@@ -21416,7 +21532,7 @@ class KeywordApp(ctk.CTk):
 
         save_info = ctk.CTkLabel(
             status_panel,
-            text="• 워드프레스 연결\n• 티스토리 글쓰기 URL\n• 블로그스팟 정보\n• Threads OAuth\n• 포스팅 방식\n• GPT/Gemini/Imagen API",
+            text="• 워드프레스 연결\n• 티스토리 글쓰기 URL\n• 블로그스팟 정보\n• Threads Playwright\n• 포스팅 방식\n• GPT/Gemini/Imagen API",
             justify="left",
             anchor="nw",
             wraplength=180,
@@ -31407,49 +31523,31 @@ class KeywordApp(ctk.CTk):
     def _build_threads_card(self) -> None:
         ctk.CTkLabel(
             self.threads_card,
-            text="◉ Threads API",
+            text="◉ Threads Playwright",
             text_color="#6dadff",
             font=ctk.CTkFont(size=28, weight="bold"),
         ).grid(row=0, column=0, padx=24, pady=(22, 18), sticky="w")
 
-        self.threads_user_id_entry = self._labeled_entry(
+        connection_card = ctk.CTkFrame(
             self.threads_card,
-            row=1,
-            label="Threads User ID",
-            placeholder="예: 26944859408505116",
+            corner_radius=18,
+            fg_color=("#edf3fc", "#111826"),
         )
-
-        token_label = ctk.CTkLabel(
-            self.threads_card,
-            text="Access Token",
+        connection_card.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="ew")
+        connection_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            connection_card,
+            text="전용 Chrome 로그인",
             font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        token_label.grid(row=3, column=0, padx=24, pady=(18, 8), sticky="w")
-        token_row = ctk.CTkFrame(self.threads_card, fg_color="transparent")
-        token_row.grid(row=4, column=0, padx=24, sticky="ew")
-        token_row.grid_columnconfigure(0, weight=1)
-        self.threads_access_token_entry = ctk.CTkEntry(
-            token_row,
-            height=56,
-            corner_radius=16,
-            placeholder_text="Threads 장기 Access Token",
-            show="*",
-            fg_color="#3b4658",
-            border_width=0,
-            font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        self.threads_access_token_entry.grid(row=0, column=0, sticky="ew")
-        ctk.CTkButton(
-            token_row,
-            text="보기",
-            width=80,
-            height=56,
-            corner_radius=16,
-            fg_color="#596579",
-            hover_color="#6a768b",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            command=self._toggle_threads_token_visibility,
-        ).grid(row=0, column=1, padx=(10, 0))
+        ).grid(row=0, column=0, padx=18, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(
+            connection_card,
+            text="API 키 없이 Threads 전용 Chrome에 한 번 로그인하면 이후 로그인 상태를 저장해 자동 게시합니다.",
+            text_color=("#5f6f86", "#9aa7bb"),
+            font=ctk.CTkFont(size=13),
+            wraplength=760,
+            justify="left",
+        ).grid(row=1, column=0, padx=18, pady=(0, 16), sticky="w")
 
         self.threads_auto_publish_var = tk.BooleanVar(value=False)
         self.threads_auto_publish_checkbox = ctk.CTkCheckBox(
@@ -31464,38 +31562,38 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._save_ui_state,
         )
-        self.threads_auto_publish_checkbox.grid(row=5, column=0, padx=24, pady=(18, 14), sticky="w")
+        self.threads_auto_publish_checkbox.grid(row=2, column=0, padx=24, pady=(2, 16), sticky="w")
 
         ctk.CTkLabel(
             self.threads_card,
             text="Threads 글작성 지침",
             font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=6, column=0, padx=24, pady=(0, 8), sticky="w")
+        ).grid(row=3, column=0, padx=24, pady=(0, 8), sticky="w")
         ctk.CTkLabel(
             self.threads_card,
             text="{title}, {url}, {excerpt}, {keyword} 변수를 사용할 수 있습니다.",
-            text_color="#9aa7bb",
+            text_color=("#5f6f86", "#9aa7bb"),
             font=ctk.CTkFont(size=13),
-        ).grid(row=7, column=0, padx=24, pady=(0, 8), sticky="w")
+        ).grid(row=4, column=0, padx=24, pady=(0, 8), sticky="w")
         self.threads_post_prompt_box = ctk.CTkTextbox(
             self.threads_card,
             height=170,
             corner_radius=16,
-            fg_color="#111826",
+            fg_color=("#edf3fc", "#111826"),
             border_width=0,
             font=ctk.CTkFont(size=14),
         )
-        self.threads_post_prompt_box.grid(row=8, column=0, padx=24, pady=(0, 18), sticky="ew")
+        self.threads_post_prompt_box.grid(row=5, column=0, padx=24, pady=(0, 18), sticky="ew")
         self.threads_post_prompt_box.bind("<KeyRelease>", lambda _event: self._save_ui_state())
         self._bind_private_mousewheel_scroll(self.threads_post_prompt_box)
 
         button_row = ctk.CTkFrame(self.threads_card, fg_color="transparent")
-        button_row.grid(row=9, column=0, padx=24, sticky="ew")
+        button_row.grid(row=6, column=0, padx=24, sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(
             button_row,
-            text="수정",
+            text="저장",
             height=52,
             corner_radius=16,
             fg_color="#1faa4a",
@@ -31505,8 +31603,8 @@ class KeywordApp(ctk.CTk):
         ).grid(row=0, column=0, sticky="ew")
         ctk.CTkButton(
             button_row,
-            text="연결확인",
-            width=150,
+            text="로그인 · 프로필 확인",
+            width=210,
             height=52,
             corner_radius=16,
             fg_color="#3468e8",
@@ -31528,11 +31626,11 @@ class KeywordApp(ctk.CTk):
 
         self.threads_status_label = ctk.CTkLabel(
             self.threads_card,
-            text="● 저장 대기 중",
-            text_color="#48d980",
+            text="● 로그인 확인 대기 중",
+            text_color=("#64748b", "#9aa7bb"),
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.threads_status_label.grid(row=10, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.threads_status_label.grid(row=7, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_writing_workflow(self, parent: ctk.CTkFrame) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -34956,16 +35054,14 @@ class KeywordApp(ctk.CTk):
             str(self.wordpress_settings.blogspot_daily_publish_limit),
         )
         self._refresh_daily_publish_limit_statuses()
-        self.threads_user_id_entry.insert(0, self.wordpress_settings.threads_user_id)
-        self.threads_access_token_entry.insert(0, self.wordpress_settings.threads_access_token)
         self.threads_auto_publish_var.set(self.wordpress_settings.threads_auto_publish)
         self.threads_post_prompt_box.insert(
             "1.0",
             self.wordpress_settings.threads_post_prompt or DEFAULT_THREADS_POST_PROMPT,
         )
-        if self.wordpress_settings.threads_user_id:
+        if self.wordpress_settings.threads_username:
             self.threads_status_label.configure(
-                text=f"● 연결됨: @{self.wordpress_settings.threads_username or self.wordpress_settings.threads_user_id}",
+                text=f"● 저장된 프로필: @{self.wordpress_settings.threads_username}",
                 text_color="#48d980",
             )
         selected_writing_model = writing_model_label(
@@ -35273,7 +35369,11 @@ class KeywordApp(ctk.CTk):
         elif tab_name == "blogspot":
             self._update_quick_status("블로그스팟 설정", "Blog ID와 Google OAuth Client 정보를 저장해 Blogger API를 연결합니다.", palette["accent"])
         elif tab_name == "threads":
-            self._update_quick_status("Threads 설정", "Meta OAuth 인증과 Threads 사용자 연결 상태를 관리합니다.", palette["accent"])
+            self._update_quick_status(
+                "Threads 설정",
+                "전용 Chrome 로그인과 Playwright 자동 게시 상태를 관리합니다.",
+                palette["accent"],
+            )
         self._finish_theme_paint()
 
     def _on_gpt_model_changed(self, model_name: str) -> None:
@@ -35475,10 +35575,6 @@ class KeywordApp(ctk.CTk):
     def _toggle_imagen_visibility(self) -> None:
         self.imagen_password_visible = not self.imagen_password_visible
         self.imagen_secret_entry.configure(show="" if self.imagen_password_visible else "*")
-
-    def _toggle_threads_token_visibility(self) -> None:
-        self.threads_token_visible = not getattr(self, "threads_token_visible", False)
-        self.threads_access_token_entry.configure(show="" if self.threads_token_visible else "*")
 
     def _save_ui_state(self) -> None:
         if self._ui_state_save_job is not None:
@@ -36054,11 +36150,6 @@ class KeywordApp(ctk.CTk):
                 else "answer"
             ),
             naver_kin_last_questions=list(getattr(self, "naver_kin_questions", self.wordpress_settings.naver_kin_last_questions or [])),
-            threads_app_id=self.wordpress_settings.threads_app_id,
-            threads_app_secret=self.wordpress_settings.threads_app_secret,
-            threads_redirect_uri=self.wordpress_settings.threads_redirect_uri,
-            threads_access_token=self.threads_access_token_entry.get().strip(),
-            threads_user_id=self.threads_user_id_entry.get().strip(),
             threads_username=self.wordpress_settings.threads_username,
             threads_auto_publish=self.threads_auto_publish_var.get(),
             threads_post_prompt=self.threads_post_prompt_box.get("1.0", "end").strip() or DEFAULT_THREADS_POST_PROMPT,
@@ -36583,80 +36674,45 @@ class KeywordApp(ctk.CTk):
 
     def _save_threads_settings(self) -> None:
         settings = self._read_wordpress_settings(include_prompts=False)
-        if not settings.threads_user_id or not settings.threads_access_token:
-            messagebox.showerror("입력 오류", "Threads User ID와 Access Token을 입력해 주세요.")
-            return
         self.wordpress_settings = settings
-        AppStateStore.save(settings)
+        AppStateStore.save(settings, save_secrets=False)
         self.threads_status_label.configure(text="● Threads 설정 저장 완료", text_color="#48d980")
-        self._update_quick_status("Threads 저장됨", "User ID, Access Token, 자동 게시 설정을 저장했습니다.", "#48d980")
-
-    def _open_threads_auth(self) -> None:
-        settings = self._read_wordpress_settings(include_prompts=False)
-        try:
-            auth_url = ThreadsClient(
-                settings.threads_app_id,
-                settings.threads_app_secret,
-                settings.threads_redirect_uri,
-                settings.threads_access_token,
-            ).authorization_url()
-        except RuntimeError as exc:
-            messagebox.showerror("Threads 인증 준비 실패", str(exc))
-            return
-        self.wordpress_settings = settings
-        AppStateStore.save(settings)
-        self._open_source_url(auth_url)
-        self.threads_status_label.configure(text="● Meta 인증 화면 열림", text_color="#6dadff")
         self._update_quick_status(
-            "Threads 인증 진행 중",
-            "승인 후 Redirect URL 전체 또는 code 값을 인증 코드 칸에 붙여넣으세요.",
-            "#6dadff",
+            "Threads 저장됨",
+            "Playwright 자동 게시와 글작성 지침을 저장했습니다.",
+            "#48d980",
         )
 
-    def _complete_threads_auth(self) -> None:
-        if self.threads_auth_worker and self.threads_auth_worker.is_alive():
-            messagebox.showinfo("진행 중", "Threads 인증 작업이 이미 진행 중입니다.")
-            return
-        code = self.threads_auth_code_entry.get().strip()
-        if not code:
-            messagebox.showerror("입력 오류", "Meta 인증 후 code 또는 Redirect URL을 입력해 주세요.")
-            return
-        settings = self._read_wordpress_settings(include_prompts=False)
-        self.wordpress_settings = settings
-        AppStateStore.save(settings)
-        self.threads_status_label.configure(text="● 인증 코드 교환 중...", text_color="#6dadff")
-        self.threads_auth_worker = ThreadsAuthWorker(settings, self.result_queue, "exchange", code)
-        self.threads_auth_worker.start()
-
     def _test_threads_connection(self) -> None:
-        if self.threads_auth_worker and self.threads_auth_worker.is_alive():
+        if self.threads_profile_worker and self.threads_profile_worker.is_alive():
             messagebox.showinfo("진행 중", "Threads 연결 확인이 이미 진행 중입니다.")
             return
         settings = self._read_wordpress_settings(include_prompts=False)
-        if not settings.threads_user_id or not settings.threads_access_token:
-            messagebox.showerror("입력 오류", "Threads User ID와 Access Token을 입력해 주세요.")
-            return
         self.wordpress_settings = settings
-        AppStateStore.save(settings)
-        self.threads_status_label.configure(text="● Threads 연결 확인 중...", text_color="#6dadff")
-        self.threads_auth_worker = ThreadsAuthWorker(settings, self.result_queue, "test")
-        self.threads_auth_worker.start()
+        AppStateStore.save(settings, save_secrets=False)
+        self.threads_status_label.configure(text="● Threads 전용 Chrome 시작 중...", text_color="#6dadff")
+        self._update_quick_status(
+            "Threads 로그인 확인 중",
+            "전용 Chrome에서 로그인이 필요하면 직접 완료해 주세요.",
+            "#6dadff",
+        )
+        self.threads_profile_worker = ThreadsProfileWorker(self.result_queue)
+        self.threads_profile_worker.start()
 
     def _reset_threads_settings(self) -> None:
-        for entry in (self.threads_user_id_entry, self.threads_access_token_entry):
-            entry.delete(0, "end")
         self.threads_auto_publish_var.set(False)
         self.threads_post_prompt_box.delete("1.0", "end")
         self.threads_post_prompt_box.insert("1.0", DEFAULT_THREADS_POST_PROMPT)
-        self.wordpress_settings.threads_access_token = ""
-        self.wordpress_settings.threads_user_id = ""
         self.wordpress_settings.threads_username = ""
         self.wordpress_settings.threads_auto_publish = False
         self.wordpress_settings.threads_post_prompt = DEFAULT_THREADS_POST_PROMPT
-        AppStateStore.save(self.wordpress_settings)
-        KeychainStore.delete_secret(KEYCHAIN_THREADS_ACCESS_TOKEN)
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
         self.threads_status_label.configure(text="● Threads 초기화 완료", text_color="#9aa7bb")
-        self._update_quick_status("Threads 초기화", "저장된 User ID와 Access Token을 삭제했습니다.", "#9aa7bb")
+        self._update_quick_status(
+            "Threads 설정 초기화",
+            "자동 게시와 글작성 지침을 초기화했습니다. 전용 Chrome 로그인은 유지됩니다.",
+            "#9aa7bb",
+        )
 
     def _reset_tistory_settings(self) -> None:
         self.tistory_blog_url_entry.delete(0, "end")
@@ -38106,20 +38162,6 @@ class KeywordApp(ctk.CTk):
         ):
             self.automation_status_label.configure(text="블로그스팟 Blog ID와 OAuth 인증 정보가 필요합니다.", text_color="#ff6b6b")
             return False
-        if settings.threads_auto_publish and (
-            not settings.threads_user_id or not settings.threads_access_token
-        ):
-            self.automation_status_label.configure(
-                text="Threads 자동 게시용 User ID와 Access Token이 필요합니다.",
-                text_color="#ff6b6b",
-            )
-            if not scheduled and not remote_request:
-                messagebox.showerror(
-                    "Threads 설정 필요",
-                    "환경설정 > Threads에서 User ID와 Access Token을 입력하고 연결확인을 해주세요.",
-                )
-            return False
-
         title = str(item.get("title") or item.get("keyword") or "자동화 글").strip()
         article_html = str(item.get("article_html") or "").strip()
         keyword = str(item.get("keyword") or title).strip()
@@ -38304,14 +38346,6 @@ class KeywordApp(ctk.CTk):
                 return
         if "tistory" in settings.target_platforms and not self._build_tistory_write_url(settings):
             messagebox.showerror("입력 오류", "티스토리 발행을 선택했다면 환경설정에서 티스토리 블로그 주소 또는 글쓰기 URL을 입력해 주세요.")
-            return
-        if settings.threads_auto_publish and (
-            not settings.threads_user_id or not settings.threads_access_token
-        ):
-            messagebox.showerror(
-                "Threads 설정 필요",
-                "환경설정 > Threads에서 User ID와 Access Token을 입력하고 연결확인을 해주세요.",
-            )
             return
         self.wordpress_settings = settings
         AppStateStore.save(settings)
@@ -39397,39 +39431,39 @@ class KeywordApp(ctk.CTk):
                     self.codex_status_label.configure(text="● Codex CLI 연결 실패", text_color="#ff6b6b")
                     self._update_quick_status("Codex CLI 오류", payload, "#ff6b6b")
                     messagebox.showerror("Codex CLI 오류", payload)
-                elif event_type == "threads_auth_done":
-                    profile = payload.get("profile", {})
-                    access_token = str(payload.get("access_token") or "").strip()
-                    self.threads_access_token_entry.delete(0, "end")
-                    self.threads_access_token_entry.insert(0, access_token)
-                    self.threads_auth_code_entry.delete(0, "end")
-                    self.wordpress_settings = self._read_wordpress_settings(include_prompts=False)
-                    self.wordpress_settings.threads_access_token = access_token
-                    self.wordpress_settings.threads_user_id = str(profile.get("id") or "")
-                    self.wordpress_settings.threads_username = str(profile.get("username") or "")
-                    AppStateStore.save(self.wordpress_settings)
-                    account_name = self.wordpress_settings.threads_username or self.wordpress_settings.threads_user_id
-                    self.threads_status_label.configure(text=f"● 연결됨: @{account_name}", text_color="#48d980")
-                    self._update_quick_status(
-                        "Threads 인증 완료",
-                        f"사용자: @{account_name}\n사용자 ID: {self.wordpress_settings.threads_user_id}",
-                        "#48d980",
-                    )
-                    self.threads_auth_worker = None
-                    messagebox.showinfo("Threads 연결 성공", f"@{account_name} 계정 연결을 확인했습니다.")
-                elif event_type == "threads_test_done":
+                elif event_type == "threads_profile_progress":
+                    message = str(payload or "Threads 로그인 확인 중...")
+                    self.threads_status_label.configure(text=f"● {message}", text_color="#6dadff")
+                    self._update_quick_status("Threads 로그인 확인 중", message, "#6dadff")
+                elif event_type == "threads_progress":
+                    message = str(payload or "Threads 작업 진행 중...")
+                    if self.active_automation_upload_item_id and hasattr(self, "automation_status_label"):
+                        self.automation_status_label.configure(text=message, text_color="#6dadff")
+                    else:
+                        self.publish_status_label.configure(text=message, text_color="#6dadff")
+                        self._set_writing_progress(4, message)
+                elif event_type == "threads_profile_done":
                     profile = payload
                     self.wordpress_settings = self._read_wordpress_settings(include_prompts=False)
-                    self.wordpress_settings.threads_user_id = str(profile.get("id") or "")
                     self.wordpress_settings.threads_username = str(profile.get("username") or "")
-                    AppStateStore.save(self.wordpress_settings)
-                    account_name = self.wordpress_settings.threads_username or self.wordpress_settings.threads_user_id
-                    self.threads_status_label.configure(text=f"● 연결 정상: @{account_name}", text_color="#48d980")
-                    self._update_quick_status("Threads 연결 정상", f"사용자: @{account_name}", "#48d980")
-                    self.threads_auth_worker = None
-                    messagebox.showinfo("Threads 연결확인", f"@{account_name} 계정 API 호출에 성공했습니다.")
+                    AppStateStore.save(self.wordpress_settings, save_secrets=False)
+                    account_name = self.wordpress_settings.threads_username
+                    self.threads_status_label.configure(
+                        text=f"● 로그인 확인 완료: @{account_name}",
+                        text_color="#48d980",
+                    )
+                    self._update_quick_status(
+                        "Threads 로그인 정상",
+                        f"Playwright 전용 프로필: @{account_name}",
+                        "#48d980",
+                    )
+                    self.threads_profile_worker = None
+                    messagebox.showinfo(
+                        "Threads 로그인 확인",
+                        f"@{account_name} 계정의 전용 Chrome 로그인을 저장했습니다.",
+                    )
                 elif event_type == "threads_error":
-                    self.threads_auth_worker = None
+                    self.threads_profile_worker = None
                     self.threads_status_label.configure(text="● Threads 연결 실패", text_color="#ff6b6b")
                     self._update_quick_status("Threads 오류", payload, "#ff6b6b")
                     messagebox.showerror("Threads 연결 오류", payload)
@@ -39737,6 +39771,8 @@ class KeywordApp(ctk.CTk):
             message.append(blogspot.get("message", "블로그스팟 준비 중"))
         if threads:
             message.append(threads.get("message", "Threads 자동 게시 완료"))
+            if threads.get("url"):
+                message.append(f"Threads 게시물: {threads['url']}")
             if threads.get("id"):
                 message.append(f"Threads 게시물 ID: {threads['id']}")
             if threads.get("error"):
