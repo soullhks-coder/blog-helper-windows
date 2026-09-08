@@ -21198,7 +21198,7 @@ class KeywordApp(ctk.CTk):
 
         self.settings_ai_section_button = ctk.CTkButton(
             section_header,
-            text="AI",
+            text="서비스 연동",
             height=42,
             corner_radius=13,
             fg_color=palette["selected"],
@@ -21223,7 +21223,7 @@ class KeywordApp(ctk.CTk):
 
         ctk.CTkLabel(
             header,
-            text="AI 서비스 연결",
+            text="연동 목록",
             text_color=palette["text"],
             font=ctk.CTkFont(size=17, weight="bold"),
         ).grid(row=0, column=0, columnspan=2, padx=(16, 8), pady=(13, 7), sticky="w")

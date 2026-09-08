@@ -144,7 +144,8 @@ class AiSettingsUiRegressionTests(unittest.TestCase):
         style_source = self._method_source("_style_ai_settings_cards")
 
         self.assertIn('palette = self._theme_palette()', build_source)
-        self.assertIn('text="AI 서비스 연결"', build_source)
+        self.assertIn('text="연동 목록"', build_source)
+        self.assertIn('text="서비스 연동"', build_source)
         self.assertIn('fg_color=palette["panel"]', build_source)
         self.assertIn('border_color=palette["border"]', build_source)
         self.assertIn("self._style_ai_settings_cards()", build_source)
