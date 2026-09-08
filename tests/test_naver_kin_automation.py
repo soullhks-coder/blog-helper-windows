@@ -87,6 +87,13 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertTrue(main.naver_kin_question_ready(ready))
         self.assertFalse(main.naver_kin_question_ready(title_only))
 
+    def test_collect_count_is_normalized_to_one_through_ten(self) -> None:
+        self.assertEqual(main.normalize_naver_kin_collect_count("1개"), 1)
+        self.assertEqual(main.normalize_naver_kin_collect_count("6개"), 6)
+        self.assertEqual(main.normalize_naver_kin_collect_count(20), 10)
+        self.assertEqual(main.normalize_naver_kin_collect_count(0), 1)
+        self.assertEqual(main.normalize_naver_kin_collect_count("잘못된 값"), 10)
+
     def test_single_question_url_validation_accepts_detail_only(self) -> None:
         normalized = main.normalize_naver_kin_question_url(
             "kin.naver.com/qna/detail.naver?d1id=1&docId=123"
@@ -274,6 +281,7 @@ class NaverKinAutomationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "app_state.json"
             settings = main.WordPressSettings(
+                naver_kin_collect_count=4,
                 naver_kin_collect_interval_minutes=120,
                 naver_kin_answer_interval_minutes=10,
                 naver_kin_wordpress_prompt_id="wordpress-kin",
@@ -290,6 +298,7 @@ class NaverKinAutomationTests(unittest.TestCase):
                 main.AppStateStore.save(settings, save_secrets=False)
                 loaded = main.AppStateStore.load()
 
+            self.assertEqual(loaded.naver_kin_collect_count, 4)
             self.assertEqual(loaded.naver_kin_collect_interval_minutes, 120)
             self.assertEqual(loaded.naver_kin_answer_interval_minutes, 10)
             self.assertEqual(loaded.naver_kin_wordpress_prompt_id, "wordpress-kin")
@@ -311,10 +320,36 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("extract_question_body(detail_page)", source)
         self.assertIn("naver_kin_question_ready(question)", source)
         self.assertIn('sort_mode == "최신순"', source)
+        self.assertIn("collection_limit = normalize_naver_kin_collect_count(collect_count)", source)
+        self.assertIn("len(questions) >= collection_limit", source)
         self.assertLess(
             source.index('".questionTitle"'),
             source.index('for selector in ("main h1", "#content h1", "h1")'),
         )
+
+    def test_bootstrap_worker_forwards_selected_collect_count(self) -> None:
+        result_queue = queue.Queue()
+        payload = {"questions": []}
+        with patch.object(
+            main,
+            "run_naver_kin_playwright_bootstrap",
+            return_value=(True, payload),
+        ) as bootstrap:
+            worker = main.NaverKinBootstrapWorker(
+                main.NAVER_KIN_QUESTION_LIST_URL,
+                "최신순",
+                result_queue,
+                6,
+            )
+            worker.run()
+
+        bootstrap.assert_called_once_with(
+            main.NAVER_KIN_QUESTION_LIST_URL,
+            "최신순",
+            result_queue,
+            6,
+        )
+        self.assertEqual(result_queue.get_nowait(), ("naver_kin_done", payload))
 
     def test_answer_editor_supports_naver_input_buffer_without_clipboard_paste(self) -> None:
         source = self._method_source("run_naver_kin_answer_playwright")
@@ -413,6 +448,9 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertNotIn('text="자동화 흐름"', source)
         self.assertNotIn("1. 지식인 질문 목록", source)
         self.assertIn('text="질문 목록 수집"', source)
+        self.assertIn('text="수집건수"', source)
+        self.assertIn("naver_kin_collect_count_menu", source)
+        self.assertIn('values=[f"{count}개" for count in range(1, 11)]', source)
         self.assertIn('text="지식인 URL"', source)
         self.assertIn('text="참고 자료"', source)
         self.assertIn("naver_kin_reference_textbox", source)

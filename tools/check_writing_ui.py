@@ -213,6 +213,13 @@ def main() -> None:
             assert "자동화 흐름" not in visible_copy
             assert app.naver_kin_start_button.cget("text") == "질문 목록 수집"
             assert app.naver_kin_direct_collect_button.cget("text") == "수집"
+            assert list(app.naver_kin_collect_count_menu.cget("values")) == [
+                f"{count}개" for count in range(1, 11)
+            ]
+            assert (
+                app.naver_kin_collect_count_menu.winfo_rootx()
+                < app.naver_kin_collect_interval_menu.winfo_rootx()
+            )
             assert app.naver_kin_fixed_progress_panel.winfo_ismapped()
             reference_native_textbox = app.naver_kin_reference_textbox._textbox
             assert reference_native_textbox.bindtags()[0] == app_module.TEXT_EDITING_SHORTCUT_BINDTAG

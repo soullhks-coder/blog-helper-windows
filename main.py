@@ -1672,6 +1672,14 @@ def nonempty_text(value: str | None, fallback: str) -> str:
     return value if value else fallback
 
 
+def normalize_naver_kin_collect_count(value: object) -> int:
+    try:
+        count = int(str(value if value is not None else "").replace("개", "").strip())
+    except (TypeError, ValueError):
+        count = 10
+    return max(1, min(count, 10))
+
+
 def is_invalid_naver_kin_question_title(value: str | None) -> bool:
     normalized = re.sub(r"\s+", " ", str(value or "")).strip().lower()
     if not normalized:
@@ -2757,6 +2765,7 @@ class WordPressSettings:
     naver_kin_reference_text: str = ""
     naver_kin_automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI
     naver_kin_sort_mode: str = "최신순"
+    naver_kin_collect_count: int = 10
     naver_kin_collect_interval_minutes: int = 60
     naver_kin_answer_interval_minutes: int = 30
     naver_kin_answer_template: str = "자세한 답변은 아래 블로그 글에 정리했습니다.\n{url}"
@@ -3343,6 +3352,9 @@ class AppStateStore:
                 )
             ),
             naver_kin_sort_mode=payload.get("naver_kin_sort_mode", "최신순"),
+            naver_kin_collect_count=normalize_naver_kin_collect_count(
+                payload.get("naver_kin_collect_count", 10)
+            ),
             naver_kin_collect_interval_minutes=payload.get("naver_kin_collect_interval_minutes", 60),
             naver_kin_answer_interval_minutes=payload.get("naver_kin_answer_interval_minutes", 30),
             naver_kin_answer_template=payload.get(
@@ -12134,6 +12146,7 @@ def run_naver_kin_playwright_bootstrap(
     question_list_url: str,
     sort_mode: str,
     result_queue: queue.Queue,
+    collect_count: int = 10,
 ) -> tuple[bool, dict | str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -12147,6 +12160,7 @@ def run_naver_kin_playwright_bootstrap(
     profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
 
     target_url = (question_list_url or NAVER_KIN_QUESTION_LIST_URL).strip() or NAVER_KIN_QUESTION_LIST_URL
+    collection_limit = normalize_naver_kin_collect_count(collect_count)
     profile_dir.mkdir(parents=True, exist_ok=True)
     append_runtime_log("NKin", f"전용 Chrome 프로필: {profile_dir}")
 
@@ -12396,7 +12410,7 @@ def run_naver_kin_playwright_bootstrap(
                                 "collected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                             }
                         )
-                        if len(questions) >= 10:
+                        if len(questions) >= collection_limit:
                             break
                     if questions:
                         break
@@ -12466,6 +12480,7 @@ def run_naver_kin_playwright_bootstrap(
                 "message": "N지식인 질문 목록 접근 뼈대가 준비되었습니다.",
                 "current_url": page.url,
                 "sort_mode": sort_mode,
+                "collect_count": collection_limit,
                 "questions": questions,
                 "ready_count": ready_count,
             }
@@ -18220,11 +18235,18 @@ class NaverSearchAdvisorWorker(threading.Thread):
 
 
 class NaverKinBootstrapWorker(threading.Thread):
-    def __init__(self, question_list_url: str, sort_mode: str, result_queue: queue.Queue) -> None:
+    def __init__(
+        self,
+        question_list_url: str,
+        sort_mode: str,
+        result_queue: queue.Queue,
+        collect_count: int = 10,
+    ) -> None:
         super().__init__(daemon=True)
         self.question_list_url = question_list_url.strip() or NAVER_KIN_QUESTION_LIST_URL
         self.sort_mode = sort_mode.strip() or "최신순"
         self.result_queue = result_queue
+        self.collect_count = normalize_naver_kin_collect_count(collect_count)
 
     def run(self) -> None:
         try:
@@ -18232,6 +18254,7 @@ class NaverKinBootstrapWorker(threading.Thread):
                 self.question_list_url,
                 self.sort_mode,
                 self.result_queue,
+                self.collect_count,
             )
             if success:
                 self.result_queue.put(("naver_kin_done", payload))
@@ -23837,10 +23860,34 @@ class KeywordApp(ctk.CTk):
         ).grid(row=0, column=0, columnspan=6, padx=18, pady=(16, 10), sticky="w")
         ctk.CTkLabel(
             schedule_card,
-            text="자동수집 간격",
+            text="수집건수",
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=0, padx=(18, 8), pady=(0, 12), sticky="w")
+        self.naver_kin_collect_count_menu = ctk.CTkOptionMenu(
+            schedule_card,
+            values=[f"{count}개" for count in range(1, 11)],
+            width=90,
+            height=40,
+            corner_radius=12,
+            fg_color="#111826",
+            button_color="#31445f",
+            button_hover_color="#3b5170",
+            dropdown_fg_color="#273142",
+            dropdown_hover_color="#3468e8",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda _value: self._on_naver_kin_interval_changed(),
+        )
+        self.naver_kin_collect_count_menu.grid(row=1, column=1, padx=(0, 14), pady=(0, 12), sticky="w")
+        self.naver_kin_collect_count_menu.set(
+            f"{normalize_naver_kin_collect_count(self.wordpress_settings.naver_kin_collect_count)}개"
+        )
+        ctk.CTkLabel(
+            schedule_card,
+            text="자동수집 간격",
+            text_color="#dce6f3",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=1, column=2, padx=(0, 8), pady=(0, 12), sticky="w")
         self.naver_kin_collect_interval_menu = ctk.CTkOptionMenu(
             schedule_card,
             values=["30분", "1시간", "2시간", "4시간", "6시간", "12시간", "24시간"],
@@ -23855,7 +23902,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda _value: self._on_naver_kin_interval_changed(),
         )
-        self.naver_kin_collect_interval_menu.grid(row=1, column=1, padx=(0, 18), pady=(0, 12), sticky="w")
+        self.naver_kin_collect_interval_menu.grid(row=1, column=3, padx=(0, 14), pady=(0, 12), sticky="w")
         self.naver_kin_collect_interval_menu.set(
             self._format_naver_kin_interval_label(self.wordpress_settings.naver_kin_collect_interval_minutes)
         )
@@ -23864,7 +23911,7 @@ class KeywordApp(ctk.CTk):
             text="답변 등록 간격",
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=1, column=2, padx=(0, 8), pady=(0, 12), sticky="w")
+        ).grid(row=1, column=4, padx=(0, 8), pady=(0, 12), sticky="w")
         self.naver_kin_answer_interval_menu = ctk.CTkOptionMenu(
             schedule_card,
             values=["5분", "10분", "30분", "40분", "50분", "1시간", "2시간", "3시간", "4시간"],
@@ -23879,7 +23926,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda _value: self._on_naver_kin_interval_changed(),
         )
-        self.naver_kin_answer_interval_menu.grid(row=1, column=3, padx=(0, 18), pady=(0, 12), sticky="w")
+        self.naver_kin_answer_interval_menu.grid(row=1, column=5, padx=(0, 18), pady=(0, 12), sticky="w")
         self.naver_kin_answer_interval_menu.set(
             self._format_naver_kin_interval_label(self.wordpress_settings.naver_kin_answer_interval_minutes)
         )
@@ -25739,6 +25786,15 @@ class KeywordApp(ctk.CTk):
             return self.wordpress_settings.naver_kin_collect_interval_minutes
         return self._naver_kin_interval_minutes_from_label(self.naver_kin_collect_interval_menu.get(), 60)
 
+    def _naver_kin_collect_count(self) -> int:
+        if not hasattr(self, "naver_kin_collect_count_menu"):
+            return normalize_naver_kin_collect_count(
+                self.wordpress_settings.naver_kin_collect_count
+            )
+        return normalize_naver_kin_collect_count(
+            self.naver_kin_collect_count_menu.get()
+        )
+
     def _naver_kin_answer_interval_minutes(self) -> int:
         if not hasattr(self, "naver_kin_answer_interval_menu"):
             return self.wordpress_settings.naver_kin_answer_interval_minutes
@@ -25789,9 +25845,10 @@ class KeywordApp(ctk.CTk):
             return
         collect_label = self._format_naver_kin_interval_label(self._naver_kin_collect_interval_minutes())
         answer_label = self._format_naver_kin_interval_label(self._naver_kin_answer_interval_minutes())
+        collect_count = self._naver_kin_collect_count()
         self.naver_kin_schedule_summary_label.configure(
             text=(
-                f"질문 자동수집은 {collect_label}마다, 답변 등록은 {answer_label}마다 1건씩 처리하도록 예약 기준을 잡습니다. "
+                f"질문 자동수집은 {collect_label}마다 {collect_count}건, 답변 등록은 {answer_label}마다 1건씩 처리하도록 예약 기준을 잡습니다. "
                 "짧은 시간에 반복 답변하지 않도록 기본값을 넉넉하게 두었습니다."
             )
         )
@@ -26280,6 +26337,7 @@ class KeywordApp(ctk.CTk):
             )
         if hasattr(self, "naver_kin_sort_menu"):
             self.wordpress_settings.naver_kin_sort_mode = self.naver_kin_sort_menu.get()
+        self.wordpress_settings.naver_kin_collect_count = self._naver_kin_collect_count()
         self.wordpress_settings.naver_kin_collect_interval_minutes = self._naver_kin_collect_interval_minutes()
         self.wordpress_settings.naver_kin_answer_interval_minutes = self._naver_kin_answer_interval_minutes()
         self.wordpress_settings.naver_kin_next_run_at = float(getattr(self, "naver_kin_next_run_at", 0) or 0)
@@ -26497,6 +26555,7 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.naver_kin_question_list_url,
             self.wordpress_settings.naver_kin_sort_mode,
             self.result_queue,
+            self.wordpress_settings.naver_kin_collect_count,
         )
         self.naver_kin_worker.start()
 
@@ -36118,6 +36177,11 @@ class KeywordApp(ctk.CTk):
                 self.naver_kin_sort_menu.get()
                 if hasattr(self, "naver_kin_sort_menu")
                 else self.wordpress_settings.naver_kin_sort_mode
+            ),
+            naver_kin_collect_count=(
+                self._naver_kin_collect_count()
+                if hasattr(self, "naver_kin_collect_count_menu")
+                else self.wordpress_settings.naver_kin_collect_count
             ),
             naver_kin_collect_interval_minutes=(
                 self._naver_kin_collect_interval_minutes()
