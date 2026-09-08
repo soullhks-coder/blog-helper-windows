@@ -216,6 +216,10 @@ def main() -> None:
             assert list(app.naver_kin_collect_count_menu.cget("values")) == [
                 f"{count}개" for count in range(1, 11)
             ]
+            assert list(app.naver_kin_collect_interval_menu.cget("values")) == [
+                "5분", "10분", "15분", "20분", "30분",
+                "1시간", "2시간", "4시간", "6시간", "12시간", "24시간",
+            ]
             assert (
                 app.naver_kin_collect_count_menu.winfo_rootx()
                 < app.naver_kin_collect_interval_menu.winfo_rootx()

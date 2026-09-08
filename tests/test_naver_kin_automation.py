@@ -451,6 +451,10 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn('text="수집건수"', source)
         self.assertIn("naver_kin_collect_count_menu", source)
         self.assertIn('values=[f"{count}개" for count in range(1, 11)]', source)
+        self.assertIn(
+            'values=["5분", "10분", "15분", "20분", "30분", "1시간", "2시간", "4시간", "6시간", "12시간", "24시간"]',
+            source,
+        )
         self.assertIn('text="지식인 URL"', source)
         self.assertIn('text="참고 자료"', source)
         self.assertIn("naver_kin_reference_textbox", source)

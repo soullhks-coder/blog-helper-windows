@@ -23890,7 +23890,7 @@ class KeywordApp(ctk.CTk):
         ).grid(row=1, column=2, padx=(0, 8), pady=(0, 12), sticky="w")
         self.naver_kin_collect_interval_menu = ctk.CTkOptionMenu(
             schedule_card,
-            values=["30분", "1시간", "2시간", "4시간", "6시간", "12시간", "24시간"],
+            values=["5분", "10분", "15분", "20분", "30분", "1시간", "2시간", "4시간", "6시간", "12시간", "24시간"],
             width=120,
             height=40,
             corner_radius=12,
