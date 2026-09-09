@@ -35,7 +35,21 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("_collect_reference_text_for_keyword", source)
         self.assertIn("generate_naver_blog_article", source)
         self.assertIn("collect_naver_blog_image_files", source)
+        self.assertIn("build_focus_keyword_and_tags", source)
+        self.assertIn('"tag_names": tag_names', source)
         self.assertIn('"manifest.json"', source)
+
+    def test_full_automation_opens_publish_settings_and_enters_tags(self) -> None:
+        bootstrap_source = self._method_source("run_naver_blog_playwright_bootstrap")
+        tag_source = self._method_source("fill_naver_blog_publish_tags")
+        panel_source = self._method_source("_open_naver_blog_publish_panel")
+
+        self.assertIn("NAVER_BLOG_AUTOMATION_MODE_FULL", bootstrap_source)
+        self.assertIn("fill_naver_blog_publish_tags", bootstrap_source)
+        self.assertIn("tag_input.fill(tag)", tag_source)
+        self.assertIn('tag_input.press("Enter")', tag_source)
+        self.assertIn("len(normalized_tags) >= 10", tag_source)
+        self.assertIn('get_by_role("button", name=publish_pattern)', panel_source)
 
     def test_editor_fills_title_body_and_attaches_files_without_publish(self) -> None:
         source = self._method_source("fill_naver_blog_editor")

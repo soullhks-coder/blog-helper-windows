@@ -9916,6 +9916,155 @@ NAVER_BLOG_TEXT_PARAGRAPH_SELECTORS = (
     ".se-component.se-text [contenteditable='true']",
 )
 
+NAVER_BLOG_TAG_INPUT_SELECTORS = (
+    "textarea[placeholder*='태그 입력']",
+    "input[placeholder*='태그 입력']",
+    "textarea[placeholder*='최대 30개']",
+    "input[placeholder*='최대 30개']",
+    "[role='textbox'][data-placeholder*='태그 입력']",
+    "[contenteditable='true'][data-placeholder*='태그 입력']",
+    "[role='textbox'][aria-label*='태그']",
+)
+
+
+def _wait_for_naver_blog_tag_input(editor_page, timeout_seconds: int = 20):
+    """Find the tag editor shown in Naver's publish side panel."""
+    deadline = time.time() + max(2, int(timeout_seconds or 20))
+    while time.time() < deadline:
+        pages = list(editor_page.context.pages) or [editor_page]
+        for page in reversed(pages):
+            for target in [page, *list(page.frames)]:
+                locator = _visible_naver_editor_locator(
+                    target,
+                    NAVER_BLOG_TAG_INPUT_SELECTORS,
+                    require_editable=True,
+                )
+                if locator is not None:
+                    return locator
+        time.sleep(0.2)
+    return None
+
+
+def _open_naver_blog_publish_panel(editor_page, timeout_seconds: int = 20):
+    """Open Naver's publish settings without clicking the final publish action."""
+    tag_input = _wait_for_naver_blog_tag_input(editor_page, timeout_seconds=2)
+    if tag_input is not None:
+        return tag_input
+
+    publish_pattern = re.compile(r"^\s*발행\s*$")
+    publish_selectors = (
+        "button[class*='publish']",
+        "[role='button'][class*='publish']",
+        "button[data-click-area*='publish']",
+        "a[data-click-area*='publish']",
+    )
+    deadline = time.time() + max(3, int(timeout_seconds or 20))
+    while time.time() < deadline:
+        pages = list(editor_page.context.pages) or [editor_page]
+        for page in reversed(pages):
+            for target in [page, *list(page.frames)]:
+                candidate_groups = []
+                try:
+                    candidate_groups.append(
+                        target.get_by_role("button", name=publish_pattern)
+                    )
+                except Exception:
+                    pass
+                for selector in publish_selectors:
+                    try:
+                        candidate_groups.append(target.locator(selector))
+                    except Exception:
+                        continue
+                for candidates in candidate_groups:
+                    try:
+                        for index in range(min(candidates.count(), 20)):
+                            candidate = candidates.nth(index)
+                            if not candidate.is_visible() or not candidate.is_enabled():
+                                continue
+                            label = str(
+                                candidate.evaluate(
+                                    "node => (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim()"
+                                )
+                                or ""
+                            ).strip()
+                            if not publish_pattern.fullmatch(label):
+                                continue
+                            candidate.scroll_into_view_if_needed(timeout=3_000)
+                            candidate.click(timeout=5_000)
+                            append_runtime_log(
+                                "NBlog",
+                                "완전자동 모드에서 상단 발행 버튼을 눌러 태그 편집 화면을 열었습니다.",
+                            )
+                            tag_input = _wait_for_naver_blog_tag_input(
+                                editor_page,
+                                timeout_seconds=max(2, int(deadline - time.time())),
+                            )
+                            # Once the side panel is opened, never scan and click
+                            # another exact "발행" control: the newly visible one is
+                            # the final public-publish action.
+                            return tag_input
+                    except Exception:
+                        continue
+        time.sleep(0.25)
+    return None
+
+
+def fill_naver_blog_publish_tags(
+    editor_page,
+    tag_names: list[str] | tuple[str, ...],
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> int:
+    """Enter each Naver tag with a real Enter key, leaving final publish to the user."""
+    normalized_tags: list[str] = []
+    seen: set[str] = set()
+    for tag_name in tag_names or []:
+        tag = re.sub(r"^[#＃]+", "", str(tag_name or "")).strip()
+        tag = re.sub(r"[\r\n,]+", " ", tag)
+        tag = re.sub(r"\s+", " ", tag).strip()
+        if not tag or tag in seen or len(tag) > 30:
+            continue
+        seen.add(tag)
+        normalized_tags.append(tag)
+        if len(normalized_tags) >= 10:
+            break
+    if not normalized_tags:
+        return 0
+
+    _raise_if_naver_blog_cancelled(cancel_event)
+    result_queue.put(("naver_blog_progress", "발행 설정을 열어 주요 키워드 태그를 입력하는 중..."))
+    tag_input = _open_naver_blog_publish_panel(editor_page, timeout_seconds=25)
+    if tag_input is None:
+        raise RuntimeError(
+            "네이버 블로그 발행 설정의 '#태그 입력 (최대 30개)' 입력란을 찾지 못했습니다."
+        )
+
+    for index, tag in enumerate(normalized_tags, start=1):
+        _raise_if_naver_blog_cancelled(cancel_event)
+        _focus_naver_editor_locator(tag_input)
+        try:
+            tag_input.fill("")
+            tag_input.fill(tag)
+        except Exception:
+            modifier = "Meta" if sys.platform == "darwin" else "Control"
+            editor_page.keyboard.press(f"{modifier}+A")
+            editor_page.keyboard.press("Backspace")
+            editor_page.keyboard.insert_text(tag)
+        tag_input.press("Enter")
+        editor_page.wait_for_timeout(250)
+        result_queue.put(
+            (
+                "naver_blog_progress",
+                f"주요 키워드 태그 입력 중... {index}/{len(normalized_tags)} ({tag})",
+            )
+        )
+
+    append_runtime_log(
+        "NBlog",
+        f"완전자동 태그 {len(normalized_tags)}개 입력 완료: {', '.join(normalized_tags)}",
+    )
+    return len(normalized_tags)
+
 
 def _focus_naver_blog_editor_end(editor_page, timeout_seconds: int = 20):
     # SmartEditor lives on the current writing page.  Searching every open tab
@@ -10840,6 +10989,20 @@ def run_naver_blog_playwright_bootstrap(
                     "네이버 블로그 제목과 본문을 입력하고 "
                     f"이미지 {int(editor_result.get('image_count') or 0)}개를 첨부했습니다."
                 )
+                if (
+                    normalize_naver_blog_automation_mode(automation_mode)
+                    == NAVER_BLOG_AUTOMATION_MODE_FULL
+                ):
+                    tag_count = fill_naver_blog_publish_tags(
+                        editor_page,
+                        list(article_payload.get("tag_names") or []),
+                        result_queue,
+                        cancel_event=cancel_event,
+                    )
+                    editor_result["tag_count"] = tag_count
+                    report(
+                        f"완전자동 발행 설정에 주요 키워드 태그 {tag_count}개를 입력했습니다."
+                    )
 
             payload = {
                 "message": (
@@ -10853,6 +11016,8 @@ def run_naver_blog_playwright_bootstrap(
                 "article_ready": bool(editor_result),
                 "title": str((article_payload or {}).get("title") or ""),
                 "image_count": int(editor_result.get("image_count") or 0),
+                "tag_count": int(editor_result.get("tag_count") or 0),
+                "tag_names": list((article_payload or {}).get("tag_names") or []),
                 "work_dir": str((article_payload or {}).get("work_dir") or ""),
                 "provider": str((article_payload or {}).get("provider") or ""),
                 "profile_scope": profile_scope,
@@ -10860,7 +11025,11 @@ def run_naver_blog_playwright_bootstrap(
             save_naver_blog_storage_state(context, profile_scope)
             result_queue.put(("naver_blog_editor_ready", payload))
             report(
-                "작성과 사진 첨부 완료. 내용을 확인할 수 있도록 브라우저를 열어 두었습니다."
+                (
+                    "작성과 사진 첨부 및 태그 입력 완료. 최종 발행 설정을 확인할 수 있도록 브라우저를 열어 두었습니다."
+                    if int(editor_result.get("tag_count") or 0)
+                    else "작성과 사진 첨부 완료. 내용을 확인할 수 있도록 브라우저를 열어 두었습니다."
+                )
                 if editor_result
                 else "에디터 준비 완료. 브라우저를 열어 둔 채 작성 대기 중입니다."
             )
@@ -17977,6 +18146,12 @@ def build_naver_blog_workflow_payload(
         result_queue,
         cancel_event=cancel_event,
     )
+    _focus_keyword, tag_names = build_focus_keyword_and_tags(
+        topic,
+        topic,
+        f"{title}\n{body_text[:6000]}",
+    )
+    tag_names = tag_names[:10]
     work_dir = _naver_blog_work_directory(work_folder, topic)
     image_mode = normalize_naver_blog_image_mode(image_mode)
     try:
@@ -18017,6 +18192,7 @@ def build_naver_blog_workflow_payload(
         "provider": provider_name,
         "work_dir": str(work_dir),
         "prompt_id": str(settings.naver_blog_prompt_id or ""),
+        "tag_names": tag_names,
     }
     (work_dir / "manifest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
