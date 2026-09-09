@@ -1,6 +1,9 @@
 import ast
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,9 +38,55 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("_collect_reference_text_for_keyword", source)
         self.assertIn("generate_naver_blog_article", source)
         self.assertIn("collect_naver_blog_image_files", source)
-        self.assertIn("build_focus_keyword_and_tags", source)
+        self.assertIn("generate_naver_blog_tags_with_ai", source)
         self.assertIn('"tag_names": tag_names', source)
         self.assertIn('"manifest.json"', source)
+
+    def test_ai_tags_are_extracted_from_the_finished_article(self) -> None:
+        settings = main.WordPressSettings(naver_blog_topic_category="정치·시사")
+        events = __import__("queue").Queue()
+        response = '["이재명", "더불어민주당", "민생지원 정책", "정치 후기", "정치 가격"]'
+        body = "이재명 대통령과 더불어민주당은 민생지원 정책의 추진 방향을 논의했습니다."
+
+        with patch.object(
+            main,
+            "generate_text_with_writing_model",
+            return_value=(response, "테스트 AI"),
+        ) as generate:
+            tags = main.generate_naver_blog_tags_with_ai(
+                settings,
+                "민생지원 정책 발표",
+                "이재명 대통령 민생지원 정책 논의",
+                body,
+                events,
+            )
+
+        prompt = generate.call_args.args[1]
+        self.assertIn("최종 본문", prompt)
+        self.assertIn(body, prompt)
+        self.assertEqual(tags, ["이재명", "더불어민주당", "민생지원 정책"])
+        self.assertNotIn("후기", " ".join(tags))
+        self.assertNotIn("가격", " ".join(tags))
+
+    def test_ai_tag_parser_accepts_json_object_and_rejects_ungrounded_terms(self) -> None:
+        tags = main.parse_naver_blog_ai_tags(
+            '{"tags": ["국회 본회의", "여야 협상", "구매 추천", "뉴스"]}',
+            "국회 본회의 일정",
+            "국회 본회의를 앞둔 여야 협상",
+            "국회 본회의를 앞두고 여야 협상이 이어졌습니다.",
+        )
+
+        self.assertEqual(tags, ["국회 본회의", "여야 협상"])
+
+    def test_fallback_tags_only_use_finished_article_words(self) -> None:
+        tags = main.build_naver_blog_grounded_fallback_tags(
+            "국회 예산안 협상",
+            "여야, 국회 예산안 협상 재개",
+            "여야 지도부가 국회에서 예산안 협상을 다시 시작했습니다.",
+        )
+
+        self.assertTrue(tags)
+        self.assertFalse(any(word in " ".join(tags) for word in ("가격", "후기", "추천")))
 
     def test_full_automation_opens_publish_settings_and_enters_tags(self) -> None:
         bootstrap_source = self._method_source("run_naver_blog_playwright_bootstrap")

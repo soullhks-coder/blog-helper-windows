@@ -2286,6 +2286,236 @@ def build_focus_keyword_and_tags(topic: str, keyword: str, context: str = "") ->
     return primary_keyword, unique_tags[:8]
 
 
+NAVER_BLOG_AI_TAG_GENERIC_WORDS = {
+    "글",
+    "내용",
+    "네이버",
+    "블로그",
+    "뉴스",
+    "시사",
+    "정치",
+    "정보",
+    "최신",
+    "정리",
+    "관련",
+    "이야기",
+}
+NAVER_BLOG_AI_TAG_CONTEXT_ONLY_WORDS = {
+    "가격",
+    "비용",
+    "구매",
+    "할인",
+    "후기",
+    "리뷰",
+    "추천",
+    "효능",
+    "효과",
+    "부작용",
+    "먹는법",
+    "사용법",
+    "가입조건",
+    "신청방법",
+}
+
+
+def _normalize_naver_blog_ai_tag(value: str) -> str:
+    tag = unescape(str(value or ""))
+    tag = re.sub(r"^\s*(?:[-–—*•·]+|\d+[.)]\s*)", "", tag)
+    tag = re.sub(r"^[#＃]+", "", tag)
+    tag = re.sub(r"[^0-9A-Za-z가-힣&+._·\-\s]", " ", tag)
+    return re.sub(r"\s+", " ", tag).strip(" ._-·")
+
+
+def _naver_blog_ai_tag_is_grounded(tag: str, source_text: str) -> bool:
+    source_lower = source_text.lower()
+    source_compact = re.sub(r"[^0-9a-z가-힣]+", "", source_lower)
+    tag_lower = tag.lower()
+    tag_compact = re.sub(r"[^0-9a-z가-힣]+", "", tag_lower)
+    if not tag_compact:
+        return False
+
+    # Commercial or review-style intent must actually occur in the finished
+    # article. This prevents unrelated tags such as "가격" and "후기" from
+    # being attached to political/news articles.
+    if any(
+        word in tag_lower and word not in source_lower
+        for word in NAVER_BLOG_AI_TAG_CONTEXT_ONLY_WORDS
+    ):
+        return False
+    if tag_compact in source_compact:
+        return True
+
+    meaningful_tokens = [
+        token.lower()
+        for token in re.findall(r"[0-9A-Za-z가-힣]{2,}", tag)
+        if token.lower() not in NAVER_BLOG_AI_TAG_GENERIC_WORDS
+    ]
+    if not meaningful_tokens:
+        return False
+    matched = sum(
+        1
+        for token in meaningful_tokens
+        if re.sub(r"[^0-9a-z가-힣]+", "", token) in source_compact
+    )
+    return matched >= max(1, (len(meaningful_tokens) + 1) // 2)
+
+
+def parse_naver_blog_ai_tags(
+    raw_response: str,
+    topic: str,
+    title: str,
+    body_text: str,
+    *,
+    limit: int = 10,
+) -> list[str]:
+    """Parse an AI tag response and retain only tags grounded in the final article."""
+    response = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw_response or "").strip(), flags=re.I)
+    candidates: list[object] = []
+    parsed = None
+    try:
+        parsed = json.loads(response)
+    except (json.JSONDecodeError, TypeError):
+        array_match = re.search(r"\[[\s\S]*\]", response)
+        if array_match:
+            try:
+                parsed = json.loads(array_match.group(0))
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+
+    if isinstance(parsed, dict):
+        parsed = parsed.get("tags") or parsed.get("keywords") or []
+    if isinstance(parsed, list):
+        candidates = parsed
+    else:
+        candidates = re.split(r"[,\n|]+", response)
+
+    source_text = unescape(
+        re.sub(r"\s+", " ", f"{topic}\n{title}\n{body_text}")
+    ).strip()
+    normalized_tags: list[str] = []
+    seen: set[str] = set()
+    max_tags = max(1, min(int(limit or 10), 10))
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            candidate = candidate.get("tag") or candidate.get("keyword") or candidate.get("name") or ""
+        tag = _normalize_naver_blog_ai_tag(str(candidate or ""))
+        tag_key = re.sub(r"\s+", "", tag).lower()
+        if not 2 <= len(tag) <= 30 or not tag_key or tag_key in seen:
+            continue
+        if tag.lower() in NAVER_BLOG_AI_TAG_GENERIC_WORDS:
+            continue
+        if not _naver_blog_ai_tag_is_grounded(tag, source_text):
+            continue
+        seen.add(tag_key)
+        normalized_tags.append(tag)
+        if len(normalized_tags) >= max_tags:
+            break
+    return normalized_tags
+
+
+def build_naver_blog_grounded_fallback_tags(topic: str, title: str, body_text: str) -> list[str]:
+    """Build conservative tags from words that really occur when AI extraction fails."""
+    source_text = unescape(re.sub(r"<[^>]+>", " ", f"{topic}\n{title}\n{body_text}"))
+    source_text = re.sub(r"\s+", " ", source_text).strip()
+    title_text = re.sub(r"\s+", " ", f"{topic} {title}").strip()
+    stopwords = NAVER_BLOG_AI_TAG_GENERIC_WORDS | {
+        "그리고", "하지만", "때문에", "대해서", "통해서", "이번", "오늘", "현재",
+        "있습니다", "했습니다", "됩니다", "하는", "있는", "없는", "대한", "위한",
+    }
+    frequencies: Counter[str] = Counter(
+        token
+        for token in re.findall(r"[가-힣]{2,12}|[A-Za-z][A-Za-z0-9]{1,20}|[0-9]{2,}", source_text)
+        if token.lower() not in stopwords
+    )
+    for token in re.findall(r"[가-힣]{2,12}|[A-Za-z][A-Za-z0-9]{1,20}|[0-9]{2,}", title_text):
+        if token.lower() not in stopwords:
+            frequencies[token] += 4
+
+    candidates: list[str] = []
+    for phrase in re.split(r"[|,:;!?/\\\[\]{}()<>…]+", f"{topic}\n{title}"):
+        normalized = _normalize_naver_blog_ai_tag(phrase)
+        if 2 <= len(normalized) <= 30:
+            candidates.append(normalized)
+    candidates.extend(token for token, _count in frequencies.most_common(20))
+
+    fallback_tags: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        tag = _normalize_naver_blog_ai_tag(candidate)
+        key = re.sub(r"\s+", "", tag).lower()
+        if not key or key in seen or tag.lower() in NAVER_BLOG_AI_TAG_GENERIC_WORDS:
+            continue
+        if not _naver_blog_ai_tag_is_grounded(tag, source_text):
+            continue
+        seen.add(key)
+        fallback_tags.append(tag)
+        if len(fallback_tags) >= 10:
+            break
+    return fallback_tags
+
+
+def generate_naver_blog_tags_with_ai(
+    settings: WordPressSettings,
+    topic: str,
+    title: str,
+    body_text: str,
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+) -> list[str]:
+    """Ask the selected writing AI to extract final, article-grounded Naver tags."""
+    _raise_if_naver_blog_cancelled(cancel_event)
+    result_queue.put(("naver_blog_progress", "완성된 제목과 본문을 AI로 분석해 주요 태그를 추출하는 중..."))
+    category = str(settings.naver_blog_topic_category or "선택안함").strip()
+    prompt = (
+        "당신은 네이버 블로그 검색 태그 편집자입니다.\n"
+        "아래 글은 제목과 본문 작성이 모두 끝난 최종 원고입니다. 전체 내용을 먼저 판단한 뒤 "
+        "실제 글의 핵심 주제와 검색 의도를 나타내는 태그를 1~10개 추출하세요.\n\n"
+        "규칙:\n"
+        "1. 제목, 주제, 본문에 실제로 근거가 있는 인물명·기관명·정당명·정책명·사건명·지역명·핵심 쟁점을 우선합니다.\n"
+        "2. 글에 없는 사실이나 연관 검색어를 추측해서 만들지 않습니다.\n"
+        "3. 가격, 후기, 추천, 효능, 구매, 신청방법 같은 단어는 그 내용이 원고의 핵심으로 실제 등장할 때만 사용합니다.\n"
+        "4. 뉴스·정치·정보·최신·정리처럼 너무 넓은 단어만 단독 태그로 쓰지 않습니다.\n"
+        "5. 각 태그는 2~30자, 중복 없이 작성하고 # 기호를 붙이지 않습니다.\n"
+        "6. 설명이나 마크다운 없이 JSON 문자열 배열 하나만 반환합니다.\n"
+        "반환 예시: [\"인물명\", \"정당명\", \"정책명\", \"핵심 사건\"]\n\n"
+        f"카테고리: {category}\n"
+        f"입력 주제: {topic}\n"
+        f"최종 제목: {title}\n\n"
+        f"최종 본문:\n{body_text}"
+    )
+    try:
+        raw_tags, provider_name = generate_text_with_writing_model(
+            settings,
+            prompt,
+            on_retry=lambda message: result_queue.put(("naver_blog_progress", message)),
+        )
+        _raise_if_naver_blog_cancelled(cancel_event)
+        tags = parse_naver_blog_ai_tags(raw_tags, topic, title, body_text, limit=10)
+        if tags:
+            append_runtime_log(
+                "NBlog",
+                f"{provider_name} 본문 분석 태그 {len(tags)}개 추출: {', '.join(tags)}",
+            )
+            result_queue.put(
+                ("naver_blog_progress", f"AI 본문 분석으로 주요 태그 {len(tags)}개를 준비했습니다.")
+            )
+            return tags
+        append_runtime_log("NBlog", "AI 태그 응답에서 본문 근거가 있는 태그를 찾지 못해 안전 추출을 사용합니다.")
+    except NaverBlogAutomationCancelled:
+        raise
+    except Exception as exc:
+        append_runtime_log("NBlog", f"AI 태그 추출 실패, 본문 기반 안전 추출 사용: {exc}")
+
+    fallback_tags = build_naver_blog_grounded_fallback_tags(topic, title, body_text)
+    result_queue.put(
+        (
+            "naver_blog_progress",
+            f"AI 태그 응답을 사용할 수 없어 본문에 실제 등장한 태그 {len(fallback_tags)}개를 준비했습니다.",
+        )
+    )
+    return fallback_tags
+
+
 def build_naver_kin_focus_keyword_and_tags(question_title: str, question_text: str, wordpress_title: str) -> tuple[str, list[str]]:
     """N지식인 질문형 제목을 그대로 태그로 쓰지 않고, 실제 검색 단어 위주로 정리합니다."""
     source = " ".join((wordpress_title or question_title or "").split())
@@ -18391,10 +18621,13 @@ def build_naver_blog_workflow_payload(
         result_queue,
         cancel_event=cancel_event,
     )
-    _focus_keyword, tag_names = build_focus_keyword_and_tags(
+    tag_names = generate_naver_blog_tags_with_ai(
+        settings,
         topic,
-        topic,
-        f"{title}\n{body_text[:6000]}",
+        title,
+        body_text,
+        result_queue,
+        cancel_event=cancel_event,
     )
     tag_names = tag_names[:10]
     work_dir = _naver_blog_work_directory(work_folder, topic)

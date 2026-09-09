@@ -188,6 +188,7 @@ class NaverBlogManualImageTests(unittest.TestCase):
                     "generate_naver_blog_article",
                     return_value=("제목", "<p>본문</p>", "본문", "테스트 모델"),
                 ),
+                patch.object(main, "generate_naver_blog_tags_with_ai", return_value=["테스트 주제"]),
                 patch.object(main, "collect_naver_blog_image_files") as auto_collect,
             ):
                 payload = main.build_naver_blog_workflow_payload(
