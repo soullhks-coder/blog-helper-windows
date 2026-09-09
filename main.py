@@ -10470,16 +10470,24 @@ def _focus_naver_blog_paragraph_after_latest_quote(
             '.se-quotation', '.se-quote'
         ].join(',');
         const quoteNodes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
-        const quotes = [];
+        const quoteCandidates = [];
         for (const quoteNode of quoteNodes) {
             const component = quoteNode.closest('.se-component') || quoteNode;
-            if (!quotes.includes(component) && visible(component)) quotes.push(component);
+            if (!quoteCandidates.includes(component) && visible(component)) {
+                quoteCandidates.push(component);
+            }
         }
+        // SmartEditor can expose both the complete quote card and nested text
+        // components through the quote selectors. Keep only the outer cards so
+        // the click offset is never calculated from an inner heading/content row.
+        const quotes = quoteCandidates.filter(candidate =>
+            !quoteCandidates.some(other => other !== candidate && other.contains(candidate))
+        );
         const quote = quotes[quotes.length - 1];
         if (!quote) return false;
         // Always click well below the complete quote component. The old 18px
-        // offset could still land inside the quote's outer padding; 54px is the
-        // requested three-times-lower position and activates a normal paragraph.
+        // offset could still land inside the quote's outer padding; 90px is the
+        // requested five-times-lower position and activates a normal paragraph.
         const canvas = quote.closest('.se-main-container, .se-content') ||
             document.querySelector('.se-main-container, .se-content');
         if (!canvas || !visible(canvas)) return {found: false};
@@ -10487,10 +10495,14 @@ def _focus_naver_blog_paragraph_after_latest_quote(
         const canvasRect = canvas.getBoundingClientRect();
         const insideX = Math.min(Math.max(80, quoteRect.width * 0.2), Math.max(20, quoteRect.width - 20));
         const x = Math.max(8, Math.min(canvasRect.width - 8, quoteRect.left - canvasRect.left + insideX));
-        const y = quoteRect.bottom - canvasRect.top + 54;
+        const y = quoteRect.bottom - canvasRect.top + 90;
         if (y >= canvasRect.height - 4) return {found: false};
+        const hit = document.elementFromPoint(canvasRect.left + x, canvasRect.top + y);
+        if (hit && (quote.contains(hit) || hit.closest(quoteSelector))) {
+            return {found: false};
+        }
         canvas.setAttribute('data-blog-helper-after-quote', marker);
-        return {found: true, canvas: true, x, y, offset: 54};
+        return {found: true, canvas: true, x, y, offset: 90};
     }"""
     targets = [editor_page]
     try:
@@ -10525,7 +10537,7 @@ def _focus_naver_blog_paragraph_after_latest_quote(
                     if _naver_blog_active_normal_paragraph(editor_page):
                         append_runtime_log(
                             "NBlog",
-                            "인용구 전체 카드 하단에서 54px 아래 본문 영역 클릭을 확인했습니다.",
+                            "인용구 전체 카드 하단에서 90px 아래 본문 영역 클릭을 확인했습니다.",
                         )
                         return True
                     continue
@@ -10572,7 +10584,7 @@ def _naver_blog_active_normal_paragraph(editor_page) -> bool:
         if (node.closest('.se-documentTitle, .se-title-text')) return false;
         if (node.closest('.se-component.se-quotation, .se-component.se-quote, ' +
             '.se-component[class*="quotation"], .se-component[class*="quote"], ' +
-            '.se-quotation, .se-quote, [class*="quotation-content"], [class*="quote-content"]')) {
+            '.se-quotation, .se-quote, [class*="quotation"], [class*="quote"]')) {
             return false;
         }
         if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) {

@@ -169,8 +169,10 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
 
         self.assertIn("locator.click", focus_source)
         self.assertIn("quoteNode.closest('.se-component')", focus_source)
-        self.assertIn("quoteRect.bottom - canvasRect.top + 54", focus_source)
-        self.assertIn("offset: 54", focus_source)
+        self.assertIn("other.contains(candidate)", focus_source)
+        self.assertIn("quoteRect.bottom - canvasRect.top + 90", focus_source)
+        self.assertIn("offset: 90", focus_source)
+        self.assertIn("quote.contains(hit)", focus_source)
         self.assertIn("position=", focus_source)
         self.assertNotIn('keyboard.press("Enter")', leave_source)
 
