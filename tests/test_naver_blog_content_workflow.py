@@ -55,12 +55,15 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         enter_source = self._method_source("_enter_naver_blog_tag")
         verify_source = self._method_source("_naver_blog_tag_committed")
         self.assertIn("press_sequentially", enter_source)
-        self.assertIn("range(2)", enter_source)
+        self.assertNotIn("range(2)", enter_source)
         self.assertIn('tag_input.press("Enter", delay=140)', enter_source)
-        self.assertIn('tag_input.page.keyboard.press("Enter", delay=160)', enter_source)
+        self.assertEqual(enter_source.count('press("Enter"'), 1)
+        self.assertNotIn('press(f"{modifier}+A")', enter_source)
+        self.assertIn("if not remaining_value", enter_source)
         self.assertIn("_naver_blog_tag_committed", enter_source)
         self.assertIn("chipFound", verify_source)
         self.assertIn("태그 확정 확인 실패(작업은 계속 유지)", tag_source)
+        self.assertNotIn("retry=True", tag_source)
 
     def test_editor_fills_title_body_and_attaches_files_without_publish(self) -> None:
         source = self._method_source("fill_naver_blog_editor")

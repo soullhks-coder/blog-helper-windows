@@ -10085,69 +10085,91 @@ def _naver_blog_tag_committed(tag_input, tag_name: str) -> bool:
         return False
 
 
-def _enter_naver_blog_tag(tag_input, tag_name: str, *, retry: bool = False) -> bool:
-    """Type one tag and confirm it even when Korean composition needs two Enters."""
-    modifier = "Meta" if sys.platform == "darwin" else "Control"
+def _enter_naver_blog_tag(tag_input, tag_name: str) -> bool:
+    """Type one tag and commit it with exactly one Enter key."""
     _focus_naver_editor_locator(tag_input)
+    # Never use Ctrl/Cmd+A + Backspace here. In Naver's tag editor that shortcut
+    # can select and remove tag chips committed by the previous iteration.
     try:
-        tag_input.press(f"{modifier}+A")
-        tag_input.press("Backspace")
-    except Exception:
-        try:
-            tag_input.fill("")
-        except Exception:
-            pass
-
-    try:
-        if retry:
-            # The native value setter plus input/change events covers controlled
-            # React textareas whose key handling differs between Naver builds.
+        current_value = str(
             tag_input.evaluate(
-                """(node, value) => {
+                "node => node.isContentEditable ? "
+                "String(node.innerText || node.textContent || '') : "
+                "String(node.value || '')"
+            )
+            or ""
+        )
+    except Exception:
+        current_value = ""
+
+    if current_value.strip():
+        try:
+            # Clear only the draft input value without sending a selection
+            # shortcut that can reach already committed sibling chips.
+            tag_input.evaluate(
+                """node => {
                     node.focus();
                     if (node.isContentEditable) {
-                        node.textContent = value;
+                        node.textContent = '';
                     } else {
                         const prototype = node.tagName === 'TEXTAREA'
                             ? HTMLTextAreaElement.prototype
                             : HTMLInputElement.prototype;
                         const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-                        if (setter) setter.call(node, value);
-                        else node.value = value;
+                        if (setter) setter.call(node, '');
+                        else node.value = '';
                     }
                     node.dispatchEvent(new InputEvent('input', {
                         bubbles: true,
-                        inputType: 'insertText',
-                        data: value
+                        inputType: 'deleteContentBackward',
+                        data: null
                     }));
                     node.dispatchEvent(new Event('change', {bubbles: true}));
-                }""",
-                tag_name,
+                }"""
             )
-        else:
-            # press_sequentially produces the key/input events that Naver's tag
-            # editor expects; fill() alone can display text without committing it.
-            tag_input.press_sequentially(tag_name, delay=35)
-    except Exception:
-        tag_input.fill(tag_name)
+        except Exception:
+            try:
+                tag_input.fill("")
+            except Exception:
+                return False
 
-    time.sleep(0.35)
-    # With Korean text and Naver's autocomplete, the first Enter can merely
-    # finish composition/select a suggestion. The second Enter commits the chip.
-    for enter_index in range(2):
+    try:
+        # press_sequentially produces the key/input events that Naver's tag
+        # editor expects; fill() alone can display text without committing it.
+        tag_input.press_sequentially(tag_name, delay=35)
+    except Exception:
         try:
-            if enter_index == 0:
-                tag_input.press("Enter", delay=140)
-            else:
-                _focus_naver_editor_locator(tag_input)
-                tag_input.page.keyboard.press("Enter", delay=160)
+            tag_input.fill(tag_name)
         except Exception:
             return False
-        deadline = time.time() + 1.5
-        while time.time() < deadline:
-            if _naver_blog_tag_committed(tag_input, tag_name):
+
+    time.sleep(0.3)
+    try:
+        tag_input.press("Enter", delay=140)
+    except Exception:
+        return False
+
+    deadline = time.time() + 1.8
+    while time.time() < deadline:
+        if _naver_blog_tag_committed(tag_input, tag_name):
+            return True
+        try:
+            remaining_value = str(
+                tag_input.evaluate(
+                    "node => node.isContentEditable ? "
+                    "String(node.innerText || node.textContent || '') : "
+                    "String(node.value || '')"
+                )
+                or ""
+            ).strip()
+            # Naver clears the textarea as soon as the tag chip is committed.
+            # The chip itself may be rendered outside the input's local wrapper,
+            # so an empty value is also a successful commit signal.
+            if not remaining_value:
                 return True
-            time.sleep(0.12)
+        except Exception:
+            pass
+        time.sleep(0.12)
     return False
 
 
@@ -10194,10 +10216,7 @@ def fill_naver_blog_publish_tags(
             current_input = _wait_for_naver_blog_tag_input(editor_page, timeout_seconds=4)
             committed = bool(
                 current_input is not None
-                and (
-                    _naver_blog_tag_committed(current_input, tag)
-                    or _enter_naver_blog_tag(current_input, tag, retry=True)
-                )
+                and _naver_blog_tag_committed(current_input, tag)
             )
         if not committed:
             try:
@@ -10220,6 +10239,7 @@ def fill_naver_blog_publish_tags(
             result_queue.put(("naver_blog_progress", warning))
             break
         committed_count += 1
+        time.sleep(0.25)
         result_queue.put(
             (
                 "naver_blog_progress",
