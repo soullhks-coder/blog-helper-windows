@@ -531,6 +531,9 @@ NAVER_BLOG_AUTOMATION_MODE_LABELS = {
 NAVER_BLOG_AUTOMATION_MODE_BY_LABEL = {
     label: value for value, label in NAVER_BLOG_AUTOMATION_MODE_LABELS.items()
 }
+NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT = 90
+NAVER_BLOG_QUOTE_CLICK_DISTANCE_MIN = 0
+NAVER_BLOG_QUOTE_CLICK_DISTANCE_MAX = 2000
 NAVER_BLOG_IMAGE_MODE_AUTO = "auto"
 NAVER_BLOG_IMAGE_MODE_MANUAL = "manual"
 NAVER_BLOG_IMAGE_MODE_LABELS = {
@@ -2747,6 +2750,7 @@ class WordPressSettings:
     naver_blog_image_mode: str = NAVER_BLOG_IMAGE_MODE_AUTO
     naver_blog_manual_image_paths: list[str] = field(default_factory=list)
     naver_blog_automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI
+    naver_blog_quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT
     naver_blog_work_folder: str = ""
     naver_blog_prompt_type: str = "공통"
     naver_blog_prompt_id: str = NAVER_BLOG_DEFAULT_PROMPT_ID
@@ -3310,6 +3314,12 @@ class AppStateStore:
                 payload.get(
                     "naver_blog_automation_mode",
                     NAVER_BLOG_AUTOMATION_MODE_SEMI,
+                )
+            ),
+            naver_blog_quote_click_distance_px=normalize_naver_blog_quote_click_distance(
+                payload.get(
+                    "naver_blog_quote_click_distance_px",
+                    NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
                 )
             ),
             naver_blog_work_folder=payload.get("naver_blog_work_folder", ""),
@@ -9157,6 +9167,17 @@ def normalize_naver_blog_automation_mode(value: object) -> str:
     )
 
 
+def normalize_naver_blog_quote_click_distance(value: object) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT
+    return max(
+        NAVER_BLOG_QUOTE_CLICK_DISTANCE_MIN,
+        min(parsed, NAVER_BLOG_QUOTE_CLICK_DISTANCE_MAX),
+    )
+
+
 def normalize_naver_blog_image_mode(value: object) -> str:
     text = str(value or "").strip()
     lowered = text.lower()
@@ -10452,11 +10473,17 @@ def _fill_latest_naver_quote_component(
 def _focus_naver_blog_paragraph_after_latest_quote(
     editor_page,
     timeout_seconds: float = 2.0,
+    quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
 ) -> bool:
     """Click the first normal body area immediately below the newest quote."""
+    click_distance = normalize_naver_blog_quote_click_distance(
+        quote_click_distance_px
+    )
     deadline = time.time() + max(0.12, min(float(timeout_seconds or 0.5), 0.8))
     marker = f"blog-helper-after-quote-{time.time_ns()}"
-    find_after_quote = """marker => {
+    find_after_quote = """options => {
+        const marker = options.marker;
+        const clickDistance = Math.max(0, Number(options.clickDistance) || 0);
         const visible = node => {
             if (!node || !node.isConnected) return false;
             const style = window.getComputedStyle(node);
@@ -10485,9 +10512,9 @@ def _focus_naver_blog_paragraph_after_latest_quote(
         );
         const quote = quotes[quotes.length - 1];
         if (!quote) return false;
-        // Always click well below the complete quote component. The old 18px
-        // offset could still land inside the quote's outer padding; 90px is the
-        // requested five-times-lower position and activates a normal paragraph.
+        // Always click below the complete quote component. The user-configurable
+        // offset makes it possible to tune the click point
+        // against SmartEditor layout differences on each computer.
         const canvas = quote.closest('.se-main-container, .se-content') ||
             document.querySelector('.se-main-container, .se-content');
         if (!canvas || !visible(canvas)) return {found: false};
@@ -10495,14 +10522,14 @@ def _focus_naver_blog_paragraph_after_latest_quote(
         const canvasRect = canvas.getBoundingClientRect();
         const insideX = Math.min(Math.max(80, quoteRect.width * 0.2), Math.max(20, quoteRect.width - 20));
         const x = Math.max(8, Math.min(canvasRect.width - 8, quoteRect.left - canvasRect.left + insideX));
-        const y = quoteRect.bottom - canvasRect.top + 90;
+        const y = quoteRect.bottom - canvasRect.top + clickDistance;
         if (y >= canvasRect.height - 4) return {found: false};
         const hit = document.elementFromPoint(canvasRect.left + x, canvasRect.top + y);
         if (hit && (quote.contains(hit) || hit.closest(quoteSelector))) {
             return {found: false};
         }
         canvas.setAttribute('data-blog-helper-after-quote', marker);
-        return {found: true, canvas: true, x, y, offset: 90};
+        return {found: true, canvas: true, x, y, offset: clickDistance};
     }"""
     targets = [editor_page]
     try:
@@ -10515,7 +10542,10 @@ def _focus_naver_blog_paragraph_after_latest_quote(
     while time.time() < deadline:
         for target in targets:
             try:
-                target_info = target.evaluate(find_after_quote, marker)
+                target_info = target.evaluate(
+                    find_after_quote,
+                    {"marker": marker, "clickDistance": click_distance},
+                )
                 if not target_info or not target_info.get("found"):
                     continue
                 locator = target.locator(
@@ -10537,7 +10567,8 @@ def _focus_naver_blog_paragraph_after_latest_quote(
                     if _naver_blog_active_normal_paragraph(editor_page):
                         append_runtime_log(
                             "NBlog",
-                            "인용구 전체 카드 하단에서 90px 아래 본문 영역 클릭을 확인했습니다.",
+                            f"인용구 전체 카드 하단에서 {click_distance}px 아래 "
+                            "본문 영역 클릭을 확인했습니다.",
                         )
                         return True
                     continue
@@ -10611,26 +10642,39 @@ def _naver_blog_active_normal_paragraph(editor_page) -> bool:
     return False
 
 
-def _leave_naver_blog_quote(editor_page, timeout_seconds: float = 0.6) -> bool:
+def _leave_naver_blog_quote(
+    editor_page,
+    timeout_seconds: float = 0.6,
+    quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
+) -> bool:
     """Leave a quote only by clicking the normal body area below it."""
     # Enter inside SmartEditor's quote creates another quoted line. Always use
     # a direct pointer click below the quote before any following body text.
     return _focus_naver_blog_paragraph_after_latest_quote(
         editor_page,
         timeout_seconds=max(0.3, float(timeout_seconds or 0.6)),
+        quote_click_distance_px=quote_click_distance_px,
     )
 
 
-def _ensure_naver_blog_normal_paragraph_after_quote(editor_page) -> bool:
+def _ensure_naver_blog_normal_paragraph_after_quote(
+    editor_page,
+    quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
+) -> bool:
     """Confirm the caret is outside a quote before any body text is entered."""
     if _naver_blog_active_normal_paragraph(editor_page):
         return True
     if _focus_naver_blog_paragraph_after_latest_quote(
         editor_page,
         timeout_seconds=0.22,
+        quote_click_distance_px=quote_click_distance_px,
     ):
         return True
-    return _leave_naver_blog_quote(editor_page, timeout_seconds=0.45)
+    return _leave_naver_blog_quote(
+        editor_page,
+        timeout_seconds=0.45,
+        quote_click_distance_px=quote_click_distance_px,
+    )
 
 
 def apply_naver_blog_quote_style(
@@ -10836,9 +10880,13 @@ def fill_naver_blog_editor(
     cancel_event: threading.Event | None = None,
     article_html: str = "",
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
+    quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
 ) -> dict:
     """Fill the current Naver SmartEditor and attach local images without publishing."""
     automation_mode = normalize_naver_blog_automation_mode(automation_mode)
+    quote_click_distance_px = normalize_naver_blog_quote_click_distance(
+        quote_click_distance_px
+    )
     use_rich_formatting = automation_mode == NAVER_BLOG_AUTOMATION_MODE_FULL
     title_selectors = (
         ".se-documentTitle [contenteditable='true']",
@@ -10959,7 +11007,11 @@ def fill_naver_blog_editor(
                 heading_text=block_text,
                 timeout_seconds=1.2,
             ):
-                if not _leave_naver_blog_quote(editor_page, timeout_seconds=0.6):
+                if not _leave_naver_blog_quote(
+                    editor_page,
+                    timeout_seconds=0.6,
+                    quote_click_distance_px=quote_click_distance_px,
+                ):
                     raise RuntimeError(
                         "인용구 소제목 다음의 일반 본문 입력란을 만들지 못했습니다."
                     )
@@ -11006,6 +11058,7 @@ def fill_naver_blog_editor(
         "image_count": attached_count,
         "collage_selected": collage_selected,
         "automation_mode": automation_mode,
+        "quote_click_distance_px": quote_click_distance_px,
     }
 
 
@@ -11019,12 +11072,16 @@ def run_naver_blog_playwright_bootstrap(
     cancel_event: threading.Event | None = None,
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
     profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
+    quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
 ) -> tuple[bool, dict]:
     def report(message: str) -> None:
         result_queue.put(("naver_blog_progress", message))
         append_runtime_log("NBlog", message)
 
     _raise_if_naver_blog_cancelled(cancel_event)
+    quote_click_distance_px = normalize_naver_blog_quote_click_distance(
+        quote_click_distance_px
+    )
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -11137,6 +11194,10 @@ def run_naver_blog_playwright_bootstrap(
             editor_result = {}
             if isinstance(article_payload, dict) and article_payload.get("title") and article_payload.get("body_text"):
                 _raise_if_naver_blog_cancelled(cancel_event)
+                report(
+                    "인용구 하단 클릭거리 설정 "
+                    f"{quote_click_distance_px}px를 적용합니다."
+                )
                 editor_result = fill_naver_blog_editor(
                     editor_page,
                     str(article_payload.get("title") or "").strip(),
@@ -11147,6 +11208,7 @@ def run_naver_blog_playwright_bootstrap(
                     cancel_event=cancel_event,
                     article_html=str(article_payload.get("article_html") or ""),
                     automation_mode=automation_mode,
+                    quote_click_distance_px=quote_click_distance_px,
                 )
                 report(
                     "네이버 블로그 제목과 본문을 입력하고 "
@@ -18380,6 +18442,7 @@ class NaverBlogBootstrapWorker(threading.Thread):
         work_folder: str = "",
         body_delay_ms: int = 20,
         automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_SEMI,
+        quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
         profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
         image_mode: str = NAVER_BLOG_IMAGE_MODE_AUTO,
         manual_image_paths: list[str] | tuple[str, ...] | None = None,
@@ -18395,6 +18458,9 @@ class NaverBlogBootstrapWorker(threading.Thread):
         self.work_folder = str(work_folder or "").strip()
         self.body_delay_ms = max(0, min(int(body_delay_ms or 20), 100))
         self.automation_mode = normalize_naver_blog_automation_mode(automation_mode)
+        self.quote_click_distance_px = normalize_naver_blog_quote_click_distance(
+            quote_click_distance_px
+        )
         self.profile_scope = naver_blog_profile_scope(
             {"profile_scope": profile_scope}
         )
@@ -18440,6 +18506,7 @@ class NaverBlogBootstrapWorker(threading.Thread):
                 article_payload=article_payload,
                 body_delay_ms=self.body_delay_ms,
                 automation_mode=self.automation_mode,
+                quote_click_distance_px=self.quote_click_distance_px,
                 cancel_event=self.cancel_event,
                 profile_scope=self.profile_scope,
             )
@@ -24812,6 +24879,54 @@ class KeywordApp(ctk.CTk):
             pady=(0, 10),
             sticky="ew",
         )
+        ctk.CTkLabel(
+            control_panel,
+            text="인용구 하단 클릭거리 (px)",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=2, column=0, padx=(18, 10), pady=(0, 10), sticky="w")
+        self.naver_blog_quote_click_distance_entry = ctk.CTkEntry(
+            control_panel,
+            width=130,
+            height=34,
+            fg_color=palette["input"],
+            border_color=palette["border"],
+            text_color=palette["text"],
+            placeholder_text=str(NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT),
+        )
+        self.naver_blog_quote_click_distance_entry.grid(
+            row=2,
+            column=1,
+            padx=(0, 10),
+            pady=(0, 10),
+            sticky="w",
+        )
+        self.naver_blog_quote_click_distance_entry.insert(
+            0,
+            str(
+                normalize_naver_blog_quote_click_distance(
+                    self.wordpress_settings.naver_blog_quote_click_distance_px
+                )
+            ),
+        )
+        self.naver_blog_quote_click_distance_entry.bind(
+            "<KeyRelease>",
+            lambda _event: self._save_ui_state(),
+        )
+        ctk.CTkLabel(
+            control_panel,
+            text="0~2000px · 다음 자동화 시작부터 적용",
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        ).grid(
+            row=2,
+            column=2,
+            columnspan=2,
+            padx=(0, 18),
+            pady=(0, 10),
+            sticky="w",
+        )
         self.naver_blog_status_label = ctk.CTkLabel(
             control_panel,
             text="현재 상태: 대기 중",
@@ -24819,7 +24934,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         )
-        self.naver_blog_status_label.grid(row=2, column=0, columnspan=4, padx=18, pady=(0, 10), sticky="ew")
+        self.naver_blog_status_label.grid(row=3, column=0, columnspan=4, padx=18, pady=(0, 10), sticky="ew")
         self.naver_blog_start_button = ctk.CTkButton(
             control_panel,
             text="🚀 자동화 시작 (Playwright)",
@@ -24831,7 +24946,7 @@ class KeywordApp(ctk.CTk):
             command=self._start_naver_blog_bootstrap,
         )
         self.naver_blog_start_button.grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=3,
             padx=(18, 8),
@@ -24851,7 +24966,7 @@ class KeywordApp(ctk.CTk):
             command=self._stop_naver_blog_bootstrap,
         )
         self.naver_blog_stop_button.grid(
-            row=3,
+            row=4,
             column=3,
             padx=(0, 18),
             pady=(0, 18),
@@ -25829,6 +25944,21 @@ class KeywordApp(ctk.CTk):
                     self.naver_blog_automation_mode_var.get()
                 )
             )
+        if hasattr(self, "naver_blog_quote_click_distance_entry"):
+            normalized_distance = normalize_naver_blog_quote_click_distance(
+                self.naver_blog_quote_click_distance_entry.get()
+            )
+            self.wordpress_settings.naver_blog_quote_click_distance_px = (
+                normalized_distance
+            )
+            if self.naver_blog_quote_click_distance_entry.get().strip() != str(
+                normalized_distance
+            ):
+                self.naver_blog_quote_click_distance_entry.delete(0, "end")
+                self.naver_blog_quote_click_distance_entry.insert(
+                    0,
+                    str(normalized_distance),
+                )
         if hasattr(self, "naver_blog_run_count_entry"):
             self.wordpress_settings.naver_blog_run_count = self._safe_int(self.naver_blog_run_count_entry.get(), 1)
         if hasattr(self, "naver_blog_image_count_menu"):
@@ -26020,6 +26150,9 @@ class KeywordApp(ctk.CTk):
             work_folder=self.wordpress_settings.naver_blog_work_folder,
             body_delay_ms=self.wordpress_settings.naver_blog_body_delay_ms,
             automation_mode=self.wordpress_settings.naver_blog_automation_mode,
+            quote_click_distance_px=(
+                self.wordpress_settings.naver_blog_quote_click_distance_px
+            ),
             profile_scope=profile_scope,
             image_mode=image_mode,
             manual_image_paths=manual_image_paths,
@@ -36436,6 +36569,13 @@ class KeywordApp(ctk.CTk):
                 )
                 if hasattr(self, "naver_blog_automation_mode_var")
                 else self.wordpress_settings.naver_blog_automation_mode
+            ),
+            naver_blog_quote_click_distance_px=(
+                normalize_naver_blog_quote_click_distance(
+                    self.naver_blog_quote_click_distance_entry.get()
+                )
+                if hasattr(self, "naver_blog_quote_click_distance_entry")
+                else self.wordpress_settings.naver_blog_quote_click_distance_px
             ),
             naver_blog_run_count=self._safe_int(self.naver_blog_run_count_entry.get(), 1) if hasattr(self, "naver_blog_run_count_entry") else self.wordpress_settings.naver_blog_run_count,
             naver_blog_image_count=(

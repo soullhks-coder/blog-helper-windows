@@ -170,11 +170,29 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("locator.click", focus_source)
         self.assertIn("quoteNode.closest('.se-component')", focus_source)
         self.assertIn("other.contains(candidate)", focus_source)
-        self.assertIn("quoteRect.bottom - canvasRect.top + 90", focus_source)
-        self.assertIn("offset: 90", focus_source)
+        self.assertIn("quoteRect.bottom - canvasRect.top + clickDistance", focus_source)
+        self.assertIn("offset: clickDistance", focus_source)
+        self.assertIn('"clickDistance": click_distance', focus_source)
         self.assertIn("quote.contains(hit)", focus_source)
         self.assertIn("position=", focus_source)
         self.assertNotIn('keyboard.press("Enter")', leave_source)
+
+    def test_quote_click_distance_setting_reaches_the_editor(self) -> None:
+        ui_source = self._method_source("_build_naver_blog_writing_tab")
+        save_source = self._method_source("_save_naver_blog_settings")
+        read_source = self._method_source("_read_wordpress_settings")
+        start_source = self._method_source("_start_naver_blog_bootstrap")
+        editor_source = self._method_source("fill_naver_blog_editor")
+        bootstrap_source = self._method_source("run_naver_blog_playwright_bootstrap")
+
+        self.assertIn('text="인용구 하단 클릭거리 (px)"', ui_source)
+        self.assertIn("naver_blog_quote_click_distance_entry", ui_source)
+        self.assertIn("naver_blog_quote_click_distance_px", save_source)
+        self.assertIn("naver_blog_quote_click_distance_px", read_source)
+        self.assertIn("quote_click_distance_px=", start_source)
+        self.assertIn("quote_click_distance_px=quote_click_distance_px", editor_source)
+        self.assertIn("quote_click_distance_px=quote_click_distance_px", bootstrap_source)
+        self.assertIn("인용구 하단 클릭거리 설정", bootstrap_source)
 
     def test_editor_starts_and_continues_only_in_normal_text_components(self) -> None:
         source = self._method_source("fill_naver_blog_editor")
