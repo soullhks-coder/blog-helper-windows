@@ -10009,6 +10009,117 @@ def _open_naver_blog_publish_panel(editor_page, timeout_seconds: int = 20):
     return None
 
 
+def _naver_blog_tag_committed(tag_input, tag_name: str) -> bool:
+    """Return True only after Naver has converted the input text to a tag chip."""
+    try:
+        return bool(
+            tag_input.evaluate(
+                """(node, expectedTag) => {
+                    const clean = value => String(value || '')
+                        .replace(/^[#＃]+/, '')
+                        .replace(/[×✕✖]|(?:삭제)|(?:remove)/gi, '')
+                        .replace(/\\s+/g, ' ')
+                        .trim();
+                    const expected = clean(expectedTag);
+                    const currentValue = node.isContentEditable
+                        ? clean(node.innerText || node.textContent || '')
+                        : clean(node.value || '');
+
+                    let root = node.parentElement;
+                    let localRoot = root;
+                    for (let depth = 0; root && depth < 9; depth += 1) {
+                        localRoot = root;
+                        const text = String(root.innerText || root.textContent || '');
+                        if (/태그\\s*편집/.test(text)) break;
+                        root = root.parentElement;
+                    }
+                    root = root || localRoot || node.parentElement;
+                    const candidates = Array.from(root.querySelectorAll(
+                        'li, button, [role="button"], [class*="tag" i], [class*="chip" i], span'
+                    ));
+                    const chipFound = candidates.some(candidate => {
+                        if (candidate === node || candidate.contains(node)) return false;
+                        const rect = candidate.getBoundingClientRect();
+                        if (rect.width < 2 || rect.height < 2) return false;
+                        const values = [
+                            candidate.innerText,
+                            candidate.textContent,
+                            candidate.getAttribute('aria-label'),
+                            candidate.getAttribute('title')
+                        ].map(clean).filter(Boolean);
+                        return values.some(value => value === expected);
+                    });
+                    if (chipFound) return true;
+
+                    // Naver sometimes renders the chip as plain text in a wrapper
+                    // without a stable class. A cleared input plus the tag text in
+                    // the tag-editing section is still a reliable committed state.
+                    const rootText = clean(root.innerText || root.textContent || '');
+                    return !currentValue && Boolean(expected) && rootText.includes(expected);
+                }""",
+                tag_name,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _enter_naver_blog_tag(tag_input, tag_name: str, *, retry: bool = False) -> bool:
+    """Type one tag through real key events and wait until a tag chip exists."""
+    modifier = "Meta" if sys.platform == "darwin" else "Control"
+    _focus_naver_editor_locator(tag_input)
+    try:
+        tag_input.press(f"{modifier}+A")
+        tag_input.press("Backspace")
+    except Exception:
+        try:
+            tag_input.fill("")
+        except Exception:
+            pass
+
+    try:
+        if retry:
+            # The native value setter plus input/change events covers controlled
+            # React textareas whose key handling differs between Naver builds.
+            tag_input.evaluate(
+                """(node, value) => {
+                    node.focus();
+                    if (node.isContentEditable) {
+                        node.textContent = value;
+                    } else {
+                        const prototype = node.tagName === 'TEXTAREA'
+                            ? HTMLTextAreaElement.prototype
+                            : HTMLInputElement.prototype;
+                        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                        if (setter) setter.call(node, value);
+                        else node.value = value;
+                    }
+                    node.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: value
+                    }));
+                    node.dispatchEvent(new Event('change', {bubbles: true}));
+                }""",
+                tag_name,
+            )
+        else:
+            # press_sequentially produces the key/input events that Naver's tag
+            # editor expects; fill() alone can display text without committing it.
+            tag_input.press_sequentially(tag_name, delay=35)
+    except Exception:
+        tag_input.fill(tag_name)
+
+    time.sleep(0.3)
+    tag_input.press("Enter")
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        if _naver_blog_tag_committed(tag_input, tag_name):
+            return True
+        time.sleep(0.12)
+    return False
+
+
 def fill_naver_blog_publish_tags(
     editor_page,
     tag_names: list[str] | tuple[str, ...],
@@ -10039,19 +10150,30 @@ def fill_naver_blog_publish_tags(
             "네이버 블로그 발행 설정의 '#태그 입력 (최대 30개)' 입력란을 찾지 못했습니다."
         )
 
+    committed_count = 0
     for index, tag in enumerate(normalized_tags, start=1):
         _raise_if_naver_blog_cancelled(cancel_event)
-        _focus_naver_editor_locator(tag_input)
-        try:
-            tag_input.fill("")
-            tag_input.fill(tag)
-        except Exception:
-            modifier = "Meta" if sys.platform == "darwin" else "Control"
-            editor_page.keyboard.press(f"{modifier}+A")
-            editor_page.keyboard.press("Backspace")
-            editor_page.keyboard.insert_text(tag)
-        tag_input.press("Enter")
-        editor_page.wait_for_timeout(250)
+        # Adding a chip can rerender the textarea, so resolve it again before
+        # every tag instead of continuing with a potentially stale locator.
+        current_input = _wait_for_naver_blog_tag_input(editor_page, timeout_seconds=4)
+        if current_input is None:
+            raise RuntimeError(f"태그 입력란이 사라져 '{tag}' 태그를 입력하지 못했습니다.")
+        committed = _enter_naver_blog_tag(current_input, tag)
+        if not committed:
+            current_input = _wait_for_naver_blog_tag_input(editor_page, timeout_seconds=4)
+            committed = bool(
+                current_input is not None
+                and (
+                    _naver_blog_tag_committed(current_input, tag)
+                    or _enter_naver_blog_tag(current_input, tag, retry=True)
+                )
+            )
+        if not committed:
+            raise RuntimeError(
+                f"'{tag}' 태그가 입력란에 표시됐지만 태그로 확정되지 않았습니다. "
+                "네이버 태그 입력 화면을 확인해 주세요."
+            )
+        committed_count += 1
         result_queue.put(
             (
                 "naver_blog_progress",
@@ -10061,9 +10183,9 @@ def fill_naver_blog_publish_tags(
 
     append_runtime_log(
         "NBlog",
-        f"완전자동 태그 {len(normalized_tags)}개 입력 완료: {', '.join(normalized_tags)}",
+        f"완전자동 태그 {committed_count}개 입력·검증 완료: {', '.join(normalized_tags[:committed_count])}",
     )
-    return len(normalized_tags)
+    return committed_count
 
 
 def _focus_naver_blog_editor_end(editor_page, timeout_seconds: int = 20):
@@ -10306,7 +10428,7 @@ def _focus_naver_blog_paragraph_after_latest_quote(
     editor_page,
     timeout_seconds: float = 2.0,
 ) -> bool:
-    """Focus the first normal text paragraph after the newest quote component."""
+    """Click the first normal body area immediately below the newest quote."""
     deadline = time.time() + max(0.12, min(float(timeout_seconds or 0.5), 0.8))
     marker = f"blog-helper-after-quote-{time.time_ns()}"
     find_after_quote = """marker => {
@@ -10325,7 +10447,7 @@ def _focus_naver_blog_paragraph_after_latest_quote(
         const quotes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
         const quote = quotes[quotes.length - 1];
         if (!quote) return false;
-        const selectors = [
+        const editableSelectors = [
             '.se-main-container .se-component.se-text .se-text-paragraph[contenteditable="true"]',
             '.se-main-container .se-component.se-text [role="textbox"][contenteditable="true"]',
             '.se-main-container .se-component.se-text [contenteditable="true"]',
@@ -10334,10 +10456,20 @@ def _focus_naver_blog_paragraph_after_latest_quote(
             '.se-component.se-text [contenteditable="true"]'
         ];
         const nodes = [];
-        for (const selector of selectors) {
+        for (const selector of editableSelectors) {
             for (const node of document.querySelectorAll(selector)) {
                 if (!nodes.includes(node)) nodes.push(node);
             }
+        }
+        // Blank SmartEditor paragraphs can be non-editable activation shells
+        // until they receive a real pointer click. Include those body surfaces.
+        for (const component of document.querySelectorAll('.se-component.se-text')) {
+            const node = component.querySelector(
+                '.se-text-paragraph[contenteditable="true"], ' +
+                '[role="textbox"][contenteditable="true"], [contenteditable="true"], ' +
+                '.se-module-text, .se-text-paragraph'
+            ) || component;
+            if (!nodes.includes(node)) nodes.push(node);
         }
         const safe = nodes.filter(node => {
             if (!visible(node)) return false;
@@ -10350,9 +10482,23 @@ def _focus_naver_blog_paragraph_after_latest_quote(
             return !/(출처|source|cite|caption)/i.test(hint);
         });
         const node = safe[0];
-        if (!node) return false;
-        node.setAttribute('data-blog-helper-after-quote', marker);
-        return true;
+        if (node) {
+            node.setAttribute('data-blog-helper-after-quote', marker);
+            return {found: true, canvas: false};
+        }
+
+        // If the quote is currently the final component, click the editor canvas
+        // immediately below it. SmartEditor creates/activates the next paragraph
+        // from this click without inserting another line inside the quote.
+        const canvas = quote.closest('.se-main-container, .se-content') ||
+            document.querySelector('.se-main-container, .se-content');
+        if (!canvas || !visible(canvas)) return {found: false};
+        const quoteRect = quote.getBoundingClientRect();
+        const canvasRect = canvas.getBoundingClientRect();
+        const x = Math.max(8, Math.min(canvasRect.width - 8, quoteRect.left - canvasRect.left + 24));
+        const y = Math.max(8, Math.min(canvasRect.height - 8, quoteRect.bottom - canvasRect.top + 18));
+        canvas.setAttribute('data-blog-helper-after-quote', marker);
+        return {found: true, canvas: true, x, y};
     }"""
     targets = [editor_page]
     try:
@@ -10365,25 +10511,53 @@ def _focus_naver_blog_paragraph_after_latest_quote(
     while time.time() < deadline:
         for target in targets:
             try:
-                if not target.evaluate(find_after_quote, marker):
+                target_info = target.evaluate(find_after_quote, marker)
+                if not target_info or not target_info.get("found"):
                     continue
                 locator = target.locator(
                     f'[data-blog-helper-after-quote="{marker}"]'
                 )
-                locator.evaluate(
+                locator.scroll_into_view_if_needed(timeout=3_000)
+                if target_info.get("canvas"):
+                    locator.click(
+                        timeout=5_000,
+                        position={
+                            "x": float(target_info.get("x") or 8),
+                            "y": float(target_info.get("y") or 8),
+                        },
+                    )
+                    locator.evaluate(
+                        "node => node.removeAttribute('data-blog-helper-after-quote')"
+                    )
+                    time.sleep(0.08)
+                    if _naver_blog_active_normal_paragraph(editor_page):
+                        return True
+                    continue
+                else:
+                    locator.click(timeout=5_000)
+                time.sleep(0.08)
+                focused = locator.evaluate(
                     """node => {
                         node.removeAttribute('data-blog-helper-after-quote');
-                        node.scrollIntoView({block: 'center', inline: 'nearest'});
-                        node.focus();
+                        const editable = node.matches('[contenteditable="true"], [role="textbox"]')
+                            ? node
+                            : node.querySelector(
+                                '.se-text-paragraph[contenteditable="true"], ' +
+                                '[role="textbox"][contenteditable="true"], [contenteditable="true"]'
+                            );
+                        if (!editable) return false;
+                        editable.focus();
                         const selection = window.getSelection();
                         const range = document.createRange();
-                        range.selectNodeContents(node);
+                        range.selectNodeContents(editable);
                         range.collapse(false);
                         selection.removeAllRanges();
                         selection.addRange(range);
+                        return true;
                     }"""
                 )
-                return True
+                if focused and _naver_blog_active_normal_paragraph(editor_page):
+                    return True
             except Exception:
                 continue
         time.sleep(0.04)
@@ -10427,34 +10601,12 @@ def _naver_blog_active_normal_paragraph(editor_page) -> bool:
 
 
 def _leave_naver_blog_quote(editor_page, timeout_seconds: float = 0.6) -> bool:
-    """Leave the active quote and keep the caret in a new normal paragraph."""
-    # SmartEditor often creates a normal paragraph together with the quote.
-    # Prefer that paragraph instead of adding extra blank quote lines.
-    if _focus_naver_blog_paragraph_after_latest_quote(
-        editor_page,
-        timeout_seconds=min(float(timeout_seconds or 0.6), 0.22),
-    ):
-        return True
-
-    editor_page.keyboard.press("End")
-    editor_page.keyboard.press("Enter")
-    if _naver_blog_active_normal_paragraph(editor_page):
-        return True
-    if _focus_naver_blog_paragraph_after_latest_quote(
-        editor_page,
-        timeout_seconds=min(float(timeout_seconds or 0.6), 0.22),
-    ):
-        return True
-
-    # A few SmartEditor builds need a boundary move, but never type body text
-    # until a normal text component is positively identified.
-    editor_page.keyboard.press("ArrowDown")
-    editor_page.keyboard.press("Enter")
-    if _naver_blog_active_normal_paragraph(editor_page):
-        return True
+    """Leave a quote only by clicking the normal body area below it."""
+    # Enter inside SmartEditor's quote creates another quoted line. Always use
+    # a direct pointer click below the quote before any following body text.
     return _focus_naver_blog_paragraph_after_latest_quote(
         editor_page,
-        timeout_seconds=0.25,
+        timeout_seconds=max(0.3, float(timeout_seconds or 0.6)),
     )
 
 
