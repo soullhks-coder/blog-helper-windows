@@ -55,9 +55,12 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         enter_source = self._method_source("_enter_naver_blog_tag")
         verify_source = self._method_source("_naver_blog_tag_committed")
         self.assertIn("press_sequentially", enter_source)
-        self.assertIn('tag_input.press("Enter")', enter_source)
+        self.assertIn("range(2)", enter_source)
+        self.assertIn('tag_input.press("Enter", delay=140)', enter_source)
+        self.assertIn('tag_input.page.keyboard.press("Enter", delay=160)', enter_source)
         self.assertIn("_naver_blog_tag_committed", enter_source)
         self.assertIn("chipFound", verify_source)
+        self.assertIn("태그 확정 확인 실패(작업은 계속 유지)", tag_source)
 
     def test_editor_fills_title_body_and_attaches_files_without_publish(self) -> None:
         source = self._method_source("fill_naver_blog_editor")
@@ -165,7 +168,9 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         leave_source = self._method_source("_leave_naver_blog_quote")
 
         self.assertIn("locator.click", focus_source)
-        self.assertIn(".se-module-text, .se-text-paragraph", focus_source)
+        self.assertIn("quoteNode.closest('.se-component')", focus_source)
+        self.assertIn("quoteRect.bottom - canvasRect.top + 54", focus_source)
+        self.assertIn("offset: 54", focus_source)
         self.assertIn("position=", focus_source)
         self.assertNotIn('keyboard.press("Enter")', leave_source)
 

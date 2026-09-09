@@ -10065,7 +10065,7 @@ def _naver_blog_tag_committed(tag_input, tag_name: str) -> bool:
 
 
 def _enter_naver_blog_tag(tag_input, tag_name: str, *, retry: bool = False) -> bool:
-    """Type one tag through real key events and wait until a tag chip exists."""
+    """Type one tag and confirm it even when Korean composition needs two Enters."""
     modifier = "Meta" if sys.platform == "darwin" else "Control"
     _focus_naver_editor_locator(tag_input)
     try:
@@ -10110,13 +10110,23 @@ def _enter_naver_blog_tag(tag_input, tag_name: str, *, retry: bool = False) -> b
     except Exception:
         tag_input.fill(tag_name)
 
-    time.sleep(0.3)
-    tag_input.press("Enter")
-    deadline = time.time() + 2.5
-    while time.time() < deadline:
-        if _naver_blog_tag_committed(tag_input, tag_name):
-            return True
-        time.sleep(0.12)
+    time.sleep(0.35)
+    # With Korean text and Naver's autocomplete, the first Enter can merely
+    # finish composition/select a suggestion. The second Enter commits the chip.
+    for enter_index in range(2):
+        try:
+            if enter_index == 0:
+                tag_input.press("Enter", delay=140)
+            else:
+                _focus_naver_editor_locator(tag_input)
+                tag_input.page.keyboard.press("Enter", delay=160)
+        except Exception:
+            return False
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            if _naver_blog_tag_committed(tag_input, tag_name):
+                return True
+            time.sleep(0.12)
     return False
 
 
@@ -10169,10 +10179,25 @@ def fill_naver_blog_publish_tags(
                 )
             )
         if not committed:
-            raise RuntimeError(
-                f"'{tag}' 태그가 입력란에 표시됐지만 태그로 확정되지 않았습니다. "
-                "네이버 태그 입력 화면을 확인해 주세요."
+            try:
+                remaining_value = str(
+                    current_input.evaluate(
+                        "node => node.isContentEditable ? (node.innerText || '') : (node.value || '')"
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                remaining_value = ""
+            warning = (
+                f"'{tag}' 태그 자동 확정을 확인하지 못했습니다. "
+                "발행 설정 화면을 유지하므로 입력된 태그를 확인해 주세요."
             )
+            append_runtime_log(
+                "NBlog",
+                f"태그 확정 확인 실패(작업은 계속 유지): tag={tag!r}, input={remaining_value!r}",
+            )
+            result_queue.put(("naver_blog_progress", warning))
+            break
         committed_count += 1
         result_queue.put(
             (
@@ -10444,61 +10469,28 @@ def _focus_naver_blog_paragraph_after_latest_quote(
             '.se-component[class*="quotation"]', '.se-component[class*="quote"]',
             '.se-quotation', '.se-quote'
         ].join(',');
-        const quotes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
+        const quoteNodes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
+        const quotes = [];
+        for (const quoteNode of quoteNodes) {
+            const component = quoteNode.closest('.se-component') || quoteNode;
+            if (!quotes.includes(component) && visible(component)) quotes.push(component);
+        }
         const quote = quotes[quotes.length - 1];
         if (!quote) return false;
-        const editableSelectors = [
-            '.se-main-container .se-component.se-text .se-text-paragraph[contenteditable="true"]',
-            '.se-main-container .se-component.se-text [role="textbox"][contenteditable="true"]',
-            '.se-main-container .se-component.se-text [contenteditable="true"]',
-            '.se-content .se-component.se-text .se-text-paragraph[contenteditable="true"]',
-            '.se-component.se-text .se-text-paragraph[contenteditable="true"]',
-            '.se-component.se-text [contenteditable="true"]'
-        ];
-        const nodes = [];
-        for (const selector of editableSelectors) {
-            for (const node of document.querySelectorAll(selector)) {
-                if (!nodes.includes(node)) nodes.push(node);
-            }
-        }
-        // Blank SmartEditor paragraphs can be non-editable activation shells
-        // until they receive a real pointer click. Include those body surfaces.
-        for (const component of document.querySelectorAll('.se-component.se-text')) {
-            const node = component.querySelector(
-                '.se-text-paragraph[contenteditable="true"], ' +
-                '[role="textbox"][contenteditable="true"], [contenteditable="true"], ' +
-                '.se-module-text, .se-text-paragraph'
-            ) || component;
-            if (!nodes.includes(node)) nodes.push(node);
-        }
-        const safe = nodes.filter(node => {
-            if (!visible(node)) return false;
-            if (!(quote.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
-            if (node.closest(quoteSelector)) return false;
-            if (node.closest('.se-documentTitle, .se-title-text')) return false;
-            if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) return false;
-            const hint = [node.className || '', node.getAttribute('data-placeholder') || '',
-                node.getAttribute('placeholder') || '', node.getAttribute('aria-label') || ''].join(' ');
-            return !/(출처|source|cite|caption)/i.test(hint);
-        });
-        const node = safe[0];
-        if (node) {
-            node.setAttribute('data-blog-helper-after-quote', marker);
-            return {found: true, canvas: false};
-        }
-
-        // If the quote is currently the final component, click the editor canvas
-        // immediately below it. SmartEditor creates/activates the next paragraph
-        // from this click without inserting another line inside the quote.
+        // Always click well below the complete quote component. The old 18px
+        // offset could still land inside the quote's outer padding; 54px is the
+        // requested three-times-lower position and activates a normal paragraph.
         const canvas = quote.closest('.se-main-container, .se-content') ||
             document.querySelector('.se-main-container, .se-content');
         if (!canvas || !visible(canvas)) return {found: false};
         const quoteRect = quote.getBoundingClientRect();
         const canvasRect = canvas.getBoundingClientRect();
-        const x = Math.max(8, Math.min(canvasRect.width - 8, quoteRect.left - canvasRect.left + 24));
-        const y = Math.max(8, Math.min(canvasRect.height - 8, quoteRect.bottom - canvasRect.top + 18));
+        const insideX = Math.min(Math.max(80, quoteRect.width * 0.2), Math.max(20, quoteRect.width - 20));
+        const x = Math.max(8, Math.min(canvasRect.width - 8, quoteRect.left - canvasRect.left + insideX));
+        const y = quoteRect.bottom - canvasRect.top + 54;
+        if (y >= canvasRect.height - 4) return {found: false};
         canvas.setAttribute('data-blog-helper-after-quote', marker);
-        return {found: true, canvas: true, x, y};
+        return {found: true, canvas: true, x, y, offset: 54};
     }"""
     targets = [editor_page]
     try:
@@ -10531,6 +10523,10 @@ def _focus_naver_blog_paragraph_after_latest_quote(
                     )
                     time.sleep(0.08)
                     if _naver_blog_active_normal_paragraph(editor_page):
+                        append_runtime_log(
+                            "NBlog",
+                            "인용구 전체 카드 하단에서 54px 아래 본문 영역 클릭을 확인했습니다.",
+                        )
                         return True
                     continue
                 else:
@@ -10575,7 +10571,10 @@ def _naver_blog_active_normal_paragraph(editor_page) -> bool:
         if (!node || !node.closest('.se-component.se-text')) return false;
         if (node.closest('.se-documentTitle, .se-title-text')) return false;
         if (node.closest('.se-component.se-quotation, .se-component.se-quote, ' +
-            '.se-component[class*="quotation"], .se-component[class*="quote"]')) return false;
+            '.se-component[class*="quotation"], .se-component[class*="quote"], ' +
+            '.se-quotation, .se-quote, [class*="quotation-content"], [class*="quote-content"]')) {
+            return false;
+        }
         if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) {
             return false;
         }
