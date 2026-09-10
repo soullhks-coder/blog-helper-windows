@@ -227,16 +227,32 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
     def test_quote_exit_clicks_body_below_without_pressing_enter(self) -> None:
         focus_source = self._method_source("_focus_naver_blog_paragraph_after_latest_quote")
         leave_source = self._method_source("_leave_naver_blog_quote")
+        caret_source = self._method_source("_naver_blog_active_normal_paragraph")
 
         self.assertIn("locator.click", focus_source)
-        self.assertIn("quoteNode.closest('.se-component')", focus_source)
+        self.assertIn("sourceSelector", focus_source)
+        self.assertIn("ancestor.querySelectorAll", focus_source)
+        self.assertIn("hasSourceField", focus_source)
         self.assertIn("other.contains(candidate)", focus_source)
-        self.assertIn("quoteRect.bottom - canvasRect.top + clickDistance", focus_source)
+        self.assertIn("quoteRect.bottom + clickDistance", focus_source)
         self.assertIn("offset: clickDistance", focus_source)
         self.assertIn('"clickDistance": click_distance', focus_source)
         self.assertIn("quote.contains(hit)", focus_source)
         self.assertIn("position=", focus_source)
+        self.assertIn("preferred_target=target", focus_source)
+        self.assertIn("selection.anchorNode", caret_source)
+        self.assertIn("preferred_target", caret_source)
         self.assertNotIn('keyboard.press("Enter")', leave_source)
+
+    def test_quote_fields_are_never_reused_as_normal_body_paragraphs(self) -> None:
+        last_locator_source = self._method_source("_visible_last_naver_editor_locator")
+        focus_end_source = self._method_source("_focus_naver_blog_editor_end")
+
+        for source in (last_locator_source, focus_end_source):
+            self.assertIn('[class*="quotation"]', source)
+            self.assertIn('[class*="quote"]', source)
+            self.assertIn('.se-quotation', source)
+            self.assertIn('.se-quote', source)
 
     def test_quote_heading_uses_only_one_line_then_immediately_clicks_below(self) -> None:
         calls = []

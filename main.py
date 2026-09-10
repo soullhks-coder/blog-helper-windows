@@ -9852,7 +9852,9 @@ def _visible_last_naver_editor_locator(
                             '.se-documentTitle, .se-title-text, [data-placeholder*="제목"]'
                         )),
                         inQuote: Boolean(node.closest(
-                            '.se-component.se-quotation, .se-component[class*="quotation"], .se-component[class*="quote"], .se-quotation'
+                            '.se-component.se-quotation, .se-component.se-quote, ' +
+                            '.se-component[class*="quotation"], .se-component[class*="quote"], ' +
+                            '.se-quotation, .se-quote, [class*="quotation"], [class*="quote"]'
                         )),
                         inTextComponent: Boolean(node.closest('.se-component.se-text')),
                         inMediaComponent: Boolean(node.closest(
@@ -10516,7 +10518,8 @@ def _focus_naver_blog_editor_end(editor_page, timeout_seconds: int = 20):
             if (node.closest('.se-documentTitle, .se-title-text')) return false;
             if (node.closest(
                 '.se-component.se-quotation, .se-component.se-quote, ' +
-                '.se-component[class*="quotation"], .se-component[class*="quote"]'
+                '.se-component[class*="quotation"], .se-component[class*="quote"], ' +
+                '.se-quotation, .se-quote, [class*="quotation"], [class*="quote"]'
             )) return false;
             if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) return false;
             const hint = [
@@ -10744,42 +10747,69 @@ def _focus_naver_blog_paragraph_after_latest_quote(
         const quoteSelector = [
             '.se-component.se-quotation', '.se-component.se-quote',
             '.se-component[class*="quotation"]', '.se-component[class*="quote"]',
-            '.se-quotation', '.se-quote'
+            '.se-quotation', '.se-quote', '[class*="quotation"]', '[class*="quote"]'
         ].join(',');
-        const quoteNodes = Array.from(document.querySelectorAll(quoteSelector)).filter(visible);
+        const sourceSelector = [
+            '[data-placeholder*="출처"]', '[placeholder*="출처"]',
+            '[aria-label*="출처"]', '[title*="출처"]',
+            '[class*="source" i]', '[class*="cite" i]'
+        ].join(',');
+        const canvas = document.querySelector('.se-main-container, .se-content');
+        if (!canvas || !visible(canvas)) return {found: false};
+        const quoteNodes = Array.from(canvas.querySelectorAll(quoteSelector)).filter(visible);
         const quoteCandidates = [];
         for (const quoteNode of quoteNodes) {
-            const component = quoteNode.closest('.se-component') || quoteNode;
-            if (!quoteCandidates.includes(component) && visible(component)) {
-                quoteCandidates.push(component);
+            // The visible quotation card is commonly an ancestor of the nested
+            // .se-component text field.  closest('.se-component') therefore
+            // measures only the heading row and makes the configured offset
+            // land in the quote's next line/source field.  Walk upward to the
+            // first container that also owns the quote source field instead.
+            let card = quoteNode;
+            let ancestor = quoteNode;
+            for (let depth = 0; ancestor && ancestor !== canvas && depth < 12; depth += 1) {
+                const hasSourceField = Array.from(
+                    ancestor.querySelectorAll(sourceSelector)
+                ).some(visible) || /출처\\s*입력|source|cite/i.test(
+                    String(ancestor.innerText || ancestor.textContent || '')
+                );
+                if (hasSourceField) {
+                    card = ancestor;
+                    break;
+                }
+                ancestor = ancestor.parentElement;
+            }
+            if (!quoteCandidates.includes(card) && visible(card)) {
+                quoteCandidates.push(card);
             }
         }
-        // SmartEditor can expose both the complete quote card and nested text
-        // components through the quote selectors. Keep only the outer cards so
-        // the click offset is never calculated from an inner heading/content row.
+        // Keep only outer cards when multiple quote-related descendants resolve
+        // to the same visible quotation.
         const quotes = quoteCandidates.filter(candidate =>
             !quoteCandidates.some(other => other !== candidate && other.contains(candidate))
         );
         const quote = quotes[quotes.length - 1];
-        if (!quote) return false;
-        // Always click below the complete quote component. The user-configurable
+        if (!quote) return {found: false};
+        // Always click below the complete quote card. The user-configurable
         // offset makes it possible to tune the click point
         // against SmartEditor layout differences on each computer.
-        const canvas = quote.closest('.se-main-container, .se-content') ||
-            document.querySelector('.se-main-container, .se-content');
-        if (!canvas || !visible(canvas)) return {found: false};
         const quoteRect = quote.getBoundingClientRect();
-        const canvasRect = canvas.getBoundingClientRect();
         const insideX = Math.min(Math.max(80, quoteRect.width * 0.2), Math.max(20, quoteRect.width - 20));
-        const x = Math.max(8, Math.min(canvasRect.width - 8, quoteRect.left - canvasRect.left + insideX));
-        const y = quoteRect.bottom - canvasRect.top + clickDistance;
-        if (y >= canvasRect.height - 4) return {found: false};
-        const hit = document.elementFromPoint(canvasRect.left + x, canvasRect.top + y);
-        if (hit && (quote.contains(hit) || hit.closest(quoteSelector))) {
+        const viewportX = quoteRect.left + insideX;
+        const viewportY = quoteRect.bottom + clickDistance;
+        const hit = document.elementFromPoint(viewportX, viewportY);
+        if (!hit || !canvas.contains(hit) || quote.contains(hit) || hit.closest(quoteSelector)) {
             return {found: false};
         }
-        canvas.setAttribute('data-blog-helper-after-quote', marker);
-        return {found: true, canvas: true, x, y, offset: clickDistance};
+        const hitRect = hit.getBoundingClientRect();
+        hit.setAttribute('data-blog-helper-after-quote', marker);
+        return {
+            found: true,
+            x: Math.max(1, Math.min(hitRect.width - 1, viewportX - hitRect.left)),
+            y: Math.max(1, Math.min(hitRect.height - 1, viewportY - hitRect.top)),
+            offset: clickDistance,
+            quoteBottom: quoteRect.bottom,
+            targetY: viewportY
+        };
     }"""
     targets = [editor_page]
     try:
@@ -10801,88 +10831,85 @@ def _focus_naver_blog_paragraph_after_latest_quote(
                 locator = target.locator(
                     f'[data-blog-helper-after-quote="{marker}"]'
                 )
-                locator.scroll_into_view_if_needed(timeout=3_000)
-                if target_info.get("canvas"):
+                try:
                     locator.click(
                         timeout=5_000,
                         position={
-                            "x": float(target_info.get("x") or 8),
-                            "y": float(target_info.get("y") or 8),
+                            "x": float(target_info.get("x") or 1),
+                            "y": float(target_info.get("y") or 1),
                         },
                     )
-                    locator.evaluate(
-                        "node => node.removeAttribute('data-blog-helper-after-quote')"
-                    )
-                    time.sleep(0.08)
-                    if _naver_blog_active_normal_paragraph(editor_page):
-                        append_runtime_log(
-                            "NBlog",
-                            f"인용구 전체 카드 하단에서 {click_distance}px 아래 "
-                            "본문 영역 클릭을 확인했습니다.",
+                finally:
+                    try:
+                        locator.evaluate(
+                            "node => node.removeAttribute('data-blog-helper-after-quote')"
                         )
-                        return True
-                    continue
-                else:
-                    locator.click(timeout=5_000)
-                time.sleep(0.08)
-                focused = locator.evaluate(
-                    """node => {
-                        node.removeAttribute('data-blog-helper-after-quote');
-                        const editable = node.matches('[contenteditable="true"], [role="textbox"]')
-                            ? node
-                            : node.querySelector(
-                                '.se-text-paragraph[contenteditable="true"], ' +
-                                '[role="textbox"][contenteditable="true"], [contenteditable="true"]'
-                            );
-                        if (!editable) return false;
-                        editable.focus();
-                        const selection = window.getSelection();
-                        const range = document.createRange();
-                        range.selectNodeContents(editable);
-                        range.collapse(false);
-                        selection.removeAllRanges();
-                        selection.addRange(range);
-                        return true;
-                    }"""
-                )
-                if focused and _naver_blog_active_normal_paragraph(editor_page):
+                    except Exception:
+                        pass
+                time.sleep(0.12)
+                if _naver_blog_active_normal_paragraph(
+                    editor_page,
+                    preferred_target=target,
+                ):
+                    append_runtime_log(
+                        "NBlog",
+                        f"인용구 전체 카드 하단에서 {click_distance}px 아래 "
+                        "본문 영역 클릭을 확인했습니다.",
+                    )
                     return True
+                append_runtime_log(
+                    "NBlog",
+                    f"인용구 하단 {click_distance}px 클릭 후 커서가 아직 "
+                    "일반 본문에 있지 않아 입력을 중단하고 다시 확인합니다.",
+                )
             except Exception:
                 continue
         time.sleep(0.04)
     return False
 
 
-def _naver_blog_active_normal_paragraph(editor_page) -> bool:
+def _naver_blog_active_normal_paragraph(editor_page, preferred_target=None) -> bool:
     """Return True when the caret is already inside a normal body paragraph."""
     script = """() => {
-        let node = document.activeElement;
-        if (!node) return false;
-        if (!node.matches('[contenteditable="true"], [role="textbox"]')) {
-            node = node.closest('[contenteditable="true"], [role="textbox"]');
+        const selection = window.getSelection();
+        let node = selection && selection.rangeCount ? selection.anchorNode : null;
+        if (node && node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+        let editable = node && node.isConnected
+            ? (node.matches?.('[contenteditable="true"], [role="textbox"]')
+                ? node
+                : node.closest?.('[contenteditable="true"], [role="textbox"]'))
+            : null;
+        if (!editable) {
+            node = document.activeElement;
+            editable = node && node.matches?.('[contenteditable="true"], [role="textbox"]')
+                ? node
+                : node?.closest?.('[contenteditable="true"], [role="textbox"]');
         }
-        if (!node || !node.closest('.se-component.se-text')) return false;
-        if (node.closest('.se-documentTitle, .se-title-text')) return false;
-        if (node.closest('.se-component.se-quotation, .se-component.se-quote, ' +
+        if (!editable || !editable.closest('.se-component.se-text')) return false;
+        if (editable.closest('.se-documentTitle, .se-title-text')) return false;
+        if (editable.closest('.se-component.se-quotation, .se-component.se-quote, ' +
             '.se-component[class*="quotation"], .se-component[class*="quote"], ' +
             '.se-quotation, .se-quote, [class*="quotation"], [class*="quote"]')) {
             return false;
         }
-        if (node.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) {
+        if (editable.closest('.se-component.se-image, .se-component.se-video, .se-component.se-file')) {
             return false;
         }
-        const hint = [node.className || '', node.getAttribute('data-placeholder') || '',
-            node.getAttribute('placeholder') || '', node.getAttribute('aria-label') || ''].join(' ');
+        const hint = [editable.className || '', editable.getAttribute('data-placeholder') || '',
+            editable.getAttribute('placeholder') || '', editable.getAttribute('aria-label') || ''].join(' ');
         return !/(출처|source|cite|caption)/i.test(hint);
     }"""
-    targets = [editor_page]
-    try:
-        targets.extend(
-            frame for frame in editor_page.frames
-            if frame is not editor_page.main_frame
-        )
-    except Exception:
-        pass
+    if preferred_target is not None:
+        targets = [preferred_target]
+    else:
+        targets = [editor_page]
+        try:
+            targets.extend(
+                frame for frame in editor_page.frames
+                if frame is not editor_page.main_frame
+            )
+        except Exception:
+            pass
     for target in targets:
         try:
             if target.evaluate(script):
