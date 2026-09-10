@@ -10246,7 +10246,7 @@ def _open_naver_blog_publish_panel(editor_page, timeout_seconds: int = 20):
                             candidate.click(timeout=5_000)
                             append_runtime_log(
                                 "NBlog",
-                                "완전자동 모드에서 상단 발행 버튼을 눌러 태그 편집 화면을 열었습니다.",
+                                "상단 발행 버튼을 눌러 태그 편집 화면을 열었습니다.",
                             )
                             tag_input = _wait_for_naver_blog_tag_input(
                                 editor_page,
@@ -10481,7 +10481,7 @@ def fill_naver_blog_publish_tags(
 
     append_runtime_log(
         "NBlog",
-        f"완전자동 태그 {committed_count}개 입력·검증 완료: {', '.join(normalized_tags[:committed_count])}",
+        f"N블로그 태그 {committed_count}개 입력·검증 완료: {', '.join(normalized_tags[:committed_count])}",
     )
     return committed_count
 
@@ -11477,6 +11477,7 @@ def run_naver_blog_playwright_bootstrap(
         append_runtime_log("NBlog", message)
 
     _raise_if_naver_blog_cancelled(cancel_event)
+    automation_mode = normalize_naver_blog_automation_mode(automation_mode)
     quote_click_distance_px = normalize_naver_blog_quote_click_distance(
         quote_click_distance_px
     )
@@ -11612,20 +11613,17 @@ def run_naver_blog_playwright_bootstrap(
                     "네이버 블로그 제목과 본문을 입력하고 "
                     f"이미지 {int(editor_result.get('image_count') or 0)}개를 첨부했습니다."
                 )
-                if (
-                    normalize_naver_blog_automation_mode(automation_mode)
-                    == NAVER_BLOG_AUTOMATION_MODE_FULL
-                ):
-                    tag_count = fill_naver_blog_publish_tags(
-                        editor_page,
-                        list(article_payload.get("tag_names") or []),
-                        result_queue,
-                        cancel_event=cancel_event,
-                    )
-                    editor_result["tag_count"] = tag_count
-                    report(
-                        f"완전자동 발행 설정에 주요 키워드 태그 {tag_count}개를 입력했습니다."
-                    )
+                tag_count = fill_naver_blog_publish_tags(
+                    editor_page,
+                    list(article_payload.get("tag_names") or []),
+                    result_queue,
+                    cancel_event=cancel_event,
+                )
+                editor_result["tag_count"] = tag_count
+                automation_mode_label = NAVER_BLOG_AUTOMATION_MODE_LABELS[automation_mode]
+                report(
+                    f"{automation_mode_label} 발행 설정에 주요 키워드 태그 {tag_count}개를 입력했습니다."
+                )
 
             payload = {
                 "message": (

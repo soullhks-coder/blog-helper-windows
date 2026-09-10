@@ -88,13 +88,15 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertTrue(tags)
         self.assertFalse(any(word in " ".join(tags) for word in ("가격", "후기", "추천")))
 
-    def test_full_automation_opens_publish_settings_and_enters_tags(self) -> None:
+    def test_semi_and_full_automation_open_publish_settings_and_enter_tags(self) -> None:
         bootstrap_source = self._method_source("run_naver_blog_playwright_bootstrap")
         tag_source = self._method_source("fill_naver_blog_publish_tags")
         panel_source = self._method_source("_open_naver_blog_publish_panel")
 
         self.assertIn("NAVER_BLOG_AUTOMATION_MODE_FULL", bootstrap_source)
         self.assertIn("fill_naver_blog_publish_tags", bootstrap_source)
+        self.assertNotIn("== NAVER_BLOG_AUTOMATION_MODE_FULL", bootstrap_source)
+        self.assertIn("NAVER_BLOG_AUTOMATION_MODE_LABELS[automation_mode]", bootstrap_source)
         self.assertIn("_enter_naver_blog_tag", tag_source)
         self.assertIn("committed_count", tag_source)
         self.assertIn("입력·검증 완료", tag_source)
