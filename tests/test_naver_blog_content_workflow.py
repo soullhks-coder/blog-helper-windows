@@ -216,8 +216,13 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("_clean_naver_blog_heading_text", insert_source)
         self.assertLess(
             insert_source.index("apply_naver_blog_quote_style"),
+            insert_source.index("_scroll_naver_blog_editor_after_latest_quote"),
+        )
+        self.assertLess(
+            insert_source.index("_scroll_naver_blog_editor_after_latest_quote"),
             insert_source.index("_leave_naver_blog_quote"),
         )
+        self.assertIn("scroll_px=100", insert_source)
         self.assertIn("quote_click_distance_px=click_distance", insert_source)
         self.assertNotIn('keyboard.press("Enter")', insert_source)
         self.assertIn("insert_naver_blog_quote_heading_and_click_below", editor_source)
@@ -228,6 +233,7 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         focus_source = self._method_source("_focus_naver_blog_paragraph_after_latest_quote")
         leave_source = self._method_source("_leave_naver_blog_quote")
         caret_source = self._method_source("_naver_blog_active_normal_paragraph")
+        scroll_source = self._method_source("_scroll_naver_blog_editor_after_latest_quote")
 
         self.assertIn("locator.click", focus_source)
         self.assertIn("sourceSelector", focus_source)
@@ -242,6 +248,8 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("preferred_target=target", focus_source)
         self.assertIn("selection.anchorNode", caret_source)
         self.assertIn("preferred_target", caret_source)
+        self.assertIn("scrollRoot.scrollTop = before + Number(amount", scroll_source)
+        self.assertIn("scroll_px: int = 100", scroll_source)
         self.assertNotIn('keyboard.press("Enter")', leave_source)
 
     def test_quote_fields_are_never_reused_as_normal_body_paragraphs(self) -> None:
@@ -265,8 +273,17 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
             calls.append(("click", kwargs["quote_click_distance_px"]))
             return True
 
+        def scroll_after_quote(_page, **kwargs):
+            calls.append(("scroll", kwargs["scroll_px"]))
+            return True
+
         with (
             patch.object(main, "apply_naver_blog_quote_style", side_effect=apply_quote),
+            patch.object(
+                main,
+                "_scroll_naver_blog_editor_after_latest_quote",
+                side_effect=scroll_after_quote,
+            ),
             patch.object(main, "_leave_naver_blog_quote", side_effect=click_below),
         ):
             completed = main.insert_naver_blog_quote_heading_and_click_below(
@@ -276,7 +293,10 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
             )
 
         self.assertTrue(completed)
-        self.assertEqual(calls, [("input", "첫 번째 소제목"), ("click", 275)])
+        self.assertEqual(
+            calls,
+            [("input", "첫 번째 소제목"), ("scroll", 100), ("click", 275)],
+        )
 
     def test_quote_click_distance_setting_reaches_the_editor(self) -> None:
         ui_source = self._method_source("_build_naver_blog_writing_tab")

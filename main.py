@@ -10723,6 +10723,87 @@ def _fill_latest_naver_quote_component(
     return False
 
 
+def _scroll_naver_blog_editor_after_latest_quote(
+    editor_page,
+    scroll_px: int = 100,
+    timeout_seconds: float = 0.8,
+) -> bool:
+    """Scroll the editor down after a one-line quote before clicking below it."""
+    requested_scroll = max(1, min(int(scroll_px or 100), 500))
+    deadline = time.time() + max(0.2, min(float(timeout_seconds or 0.8), 1.2))
+    scroll_after_quote = """amount => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2;
+        };
+        const canvas = document.querySelector('.se-main-container, .se-content');
+        if (!canvas || !visible(canvas)) return {found: false, scrolled: 0};
+        const quoteSelector = [
+            '.se-component.se-quotation', '.se-component.se-quote',
+            '.se-component[class*="quotation"]', '.se-component[class*="quote"]',
+            '.se-quotation', '.se-quote', '[class*="quotation"]', '[class*="quote"]'
+        ].join(',');
+        const quotes = Array.from(canvas.querySelectorAll(quoteSelector)).filter(visible);
+        const quote = quotes[quotes.length - 1];
+        if (!quote) return {found: false, scrolled: 0};
+
+        let scrollRoot = quote.parentElement;
+        while (scrollRoot && scrollRoot !== document.body && scrollRoot !== document.documentElement) {
+            const style = window.getComputedStyle(scrollRoot);
+            if (/(auto|scroll|overlay)/i.test(style.overflowY || '') &&
+                    scrollRoot.scrollHeight > scrollRoot.clientHeight + 2) {
+                break;
+            }
+            scrollRoot = scrollRoot.parentElement;
+        }
+        if (!scrollRoot || scrollRoot === document.body || scrollRoot === document.documentElement) {
+            scrollRoot = document.scrollingElement || document.documentElement;
+        }
+        const before = Number(scrollRoot.scrollTop || 0);
+        scrollRoot.scrollTop = before + Number(amount || 0);
+        const after = Number(scrollRoot.scrollTop || 0);
+        return {
+            found: true,
+            scrolled: after - before,
+            requested: Number(amount || 0)
+        };
+    }"""
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    while time.time() < deadline:
+        for target in targets:
+            try:
+                result = target.evaluate(scroll_after_quote, requested_scroll)
+                if not result or not result.get("found"):
+                    continue
+                actual_scroll = int(round(float(result.get("scrolled") or 0)))
+                if actual_scroll <= 0:
+                    append_runtime_log(
+                        "NBlog",
+                        "인용구 입력 후 에디터를 100px 아래로 스크롤하지 못했습니다.",
+                    )
+                    return False
+                editor_page.wait_for_timeout(160)
+                append_runtime_log(
+                    "NBlog",
+                    f"인용구 소제목 한 줄 입력 직후 에디터를 {actual_scroll}px 아래로 스크롤했습니다.",
+                )
+                return True
+            except Exception:
+                continue
+        time.sleep(0.04)
+    return False
+
+
 def _focus_naver_blog_paragraph_after_latest_quote(
     editor_page,
     timeout_seconds: float = 2.0,
@@ -10793,7 +10874,7 @@ def _focus_naver_blog_paragraph_after_latest_quote(
         // offset makes it possible to tune the click point
         // against SmartEditor layout differences on each computer.
         const quoteRect = quote.getBoundingClientRect();
-        const insideX = Math.min(Math.max(80, quoteRect.width * 0.2), Math.max(20, quoteRect.width - 20));
+        const insideX = Math.min(Math.max(80, quoteRect.width * 0.5), Math.max(20, quoteRect.width - 20));
         const viewportX = quoteRect.left + insideX;
         const viewportY = quoteRect.bottom + clickDistance;
         const hit = document.elementFromPoint(viewportX, viewportY);
@@ -11096,14 +11177,22 @@ def insert_naver_blog_quote_heading_and_click_below(
         return False
 
     # Do not press Enter after a quote heading: SmartEditor keeps Enter inside
-    # the quotation card. Move the caret with the configured pointer offset as
-    # the immediate next action after the verified single-line insertion.
+    # the quotation card. Scroll the editor down first, then move the caret with
+    # the configured pointer offset after the verified single-line insertion.
     click_distance = normalize_naver_blog_quote_click_distance(
         quote_click_distance_px
     )
+    if not _scroll_naver_blog_editor_after_latest_quote(
+        editor_page,
+        scroll_px=100,
+        timeout_seconds=0.8,
+    ):
+        raise RuntimeError(
+            "인용구 소제목 한 줄 입력 후 에디터를 100px 아래로 스크롤하지 못했습니다."
+        )
     append_runtime_log(
         "NBlog",
-        f"인용구 소제목 한 줄 입력 확인 후 즉시 하단 {click_distance}px 클릭: {heading_line}",
+        f"인용구 소제목 한 줄 입력·100px 스크롤 후 하단 {click_distance}px 클릭: {heading_line}",
     )
     if not _leave_naver_blog_quote(
         editor_page,
