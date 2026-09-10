@@ -11051,6 +11051,45 @@ def apply_naver_blog_quote_style(
     return False
 
 
+def insert_naver_blog_quote_heading_and_click_below(
+    editor_page,
+    heading_text: str,
+    quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
+    timeout_seconds: float = 1.2,
+) -> bool:
+    """Insert exactly one quote-heading line, then immediately click below it."""
+    heading_line = _clean_naver_blog_heading_text(heading_text)
+    if not heading_line:
+        return False
+    if not apply_naver_blog_quote_style(
+        editor_page,
+        heading_text=heading_line,
+        timeout_seconds=max(1, int(timeout_seconds or 1.2)),
+    ):
+        return False
+
+    # Do not press Enter after a quote heading: SmartEditor keeps Enter inside
+    # the quotation card. Move the caret with the configured pointer offset as
+    # the immediate next action after the verified single-line insertion.
+    click_distance = normalize_naver_blog_quote_click_distance(
+        quote_click_distance_px
+    )
+    append_runtime_log(
+        "NBlog",
+        f"인용구 소제목 한 줄 입력 확인 후 즉시 하단 {click_distance}px 클릭: {heading_line}",
+    )
+    if not _leave_naver_blog_quote(
+        editor_page,
+        timeout_seconds=0.8,
+        quote_click_distance_px=click_distance,
+    ):
+        raise RuntimeError(
+            "인용구 소제목 한 줄 입력 후 설정된 하단 클릭거리로 "
+            "일반 본문 영역을 선택하지 못했습니다."
+        )
+    return True
+
+
 def _attach_naver_blog_image_group(
     editor_page,
     image_paths: list[str],
@@ -11252,19 +11291,12 @@ def fill_naver_blog_editor(
             result_queue.put(("naver_blog_progress", f"소제목을 인용구로 입력하는 중: {block_text[:28]}"))
             _focus_naver_blog_editor_end(editor_page)
             normal_paragraph_ready = False
-            if apply_naver_blog_quote_style(
+            if insert_naver_blog_quote_heading_and_click_below(
                 editor_page,
                 heading_text=block_text,
+                quote_click_distance_px=quote_click_distance_px,
                 timeout_seconds=1.2,
             ):
-                if not _leave_naver_blog_quote(
-                    editor_page,
-                    timeout_seconds=0.6,
-                    quote_click_distance_px=quote_click_distance_px,
-                ):
-                    raise RuntimeError(
-                        "인용구 소제목 다음의 일반 본문 입력란을 만들지 못했습니다."
-                    )
                 normal_paragraph_ready = True
                 continue
             _focus_naver_blog_editor_end(editor_page)

@@ -122,7 +122,7 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("naver_blog_editor_blocks_from_html", source)
         self.assertIn("distribute_naver_blog_image_groups", source)
         self.assertIn("_attach_naver_blog_image_group", source)
-        self.assertIn("apply_naver_blog_quote_style", source)
+        self.assertIn("insert_naver_blog_quote_heading_and_click_below", source)
         self.assertIn('keyboard.press(f"{modifier}+B")', source)
         self.assertNotIn(":has-text('발행')", source)
 
@@ -206,12 +206,21 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
     def test_heading_is_filled_inside_quote_and_never_in_source_field(self) -> None:
         quote_source = self._method_source("apply_naver_blog_quote_style")
         filler_source = self._method_source("_fill_latest_naver_quote_component")
+        insert_source = self._method_source("insert_naver_blog_quote_heading_and_click_below")
         editor_source = self._method_source("fill_naver_blog_editor")
 
         self.assertIn("_fill_latest_naver_quote_component", quote_source)
         self.assertIn("출처|source|cite", filler_source)
         self.assertIn("_clean_naver_blog_heading_text", filler_source)
         self.assertIn("data-blog-helper-quote-target", filler_source)
+        self.assertIn("_clean_naver_blog_heading_text", insert_source)
+        self.assertLess(
+            insert_source.index("apply_naver_blog_quote_style"),
+            insert_source.index("_leave_naver_blog_quote"),
+        )
+        self.assertIn("quote_click_distance_px=click_distance", insert_source)
+        self.assertNotIn('keyboard.press("Enter")', insert_source)
+        self.assertIn("insert_naver_blog_quote_heading_and_click_below", editor_source)
         self.assertIn("heading_text=block_text", editor_source)
         self.assertIn("_clean_naver_blog_heading_text(block_text)", editor_source)
 
@@ -228,6 +237,30 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         self.assertIn("quote.contains(hit)", focus_source)
         self.assertIn("position=", focus_source)
         self.assertNotIn('keyboard.press("Enter")', leave_source)
+
+    def test_quote_heading_uses_only_one_line_then_immediately_clicks_below(self) -> None:
+        calls = []
+
+        def apply_quote(_page, **kwargs):
+            calls.append(("input", kwargs["heading_text"]))
+            return True
+
+        def click_below(_page, **kwargs):
+            calls.append(("click", kwargs["quote_click_distance_px"]))
+            return True
+
+        with (
+            patch.object(main, "apply_naver_blog_quote_style", side_effect=apply_quote),
+            patch.object(main, "_leave_naver_blog_quote", side_effect=click_below),
+        ):
+            completed = main.insert_naver_blog_quote_heading_and_click_below(
+                object(),
+                "첫 번째 소제목\n두 번째 줄은 입력하면 안 됨",
+                quote_click_distance_px=275,
+            )
+
+        self.assertTrue(completed)
+        self.assertEqual(calls, [("input", "첫 번째 소제목"), ("click", 275)])
 
     def test_quote_click_distance_setting_reaches_the_editor(self) -> None:
         ui_source = self._method_source("_build_naver_blog_writing_tab")
