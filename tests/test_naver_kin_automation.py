@@ -522,6 +522,18 @@ class NaverKinAutomationTests(unittest.TestCase):
         )
         self.assertEqual(worker.profile_scope, main.NAVER_PLAYWRIGHT_PROFILE_KIN_2)
 
+    def test_profile_login_window_stays_open_until_user_closes_it(self) -> None:
+        source = self._method_source("run_naver_kin_profile_playwright")
+
+        self.assertIn("로그인 확인 완료 · 프로필을 저장했습니다.", source)
+        self.assertIn("Chrome 창을 직접 닫아주세요.", source)
+        self.assertIn("while True:", source)
+        self.assertIn("if not open_pages:\n                    break", source)
+        self.assertLess(
+            source.index("save_naver_blog_storage_state(context, scope)"),
+            source.index("# Do not close a successfully authenticated profile immediately."),
+        )
+
     def test_completion_uses_styled_dialog_and_opens_answer_url(self) -> None:
         handler_source = self._method_source("_handle_naver_kin_automation_done")
         dialog_source = self._method_source("_show_naver_kin_complete_dialog")

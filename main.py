@@ -13439,10 +13439,18 @@ def run_naver_kin_profile_playwright(
 
             deadline = time.time() + max(30, int(login_timeout_seconds or 300))
             login_notice_sent = False
+            logged_in = False
             while time.time() < deadline:
+                try:
+                    open_pages = [item for item in context.pages if not item.is_closed()]
+                except Exception:
+                    open_pages = []
+                if not open_pages:
+                    return False, "네이버 로그인을 완료하기 전에 Chrome 창을 닫았습니다."
+                page = open_pages[-1]
                 if is_naver_logged_in_context(context):
-                    save_naver_blog_storage_state(context, scope)
-                    return True, "네이버 로그인 프로필을 확인하고 저장했습니다."
+                    logged_in = True
+                    break
                 if "nid.naver.com" not in str(page.url or ""):
                     login_url = (
                         "https://nid.naver.com/nidlogin.login?mode=form&url="
@@ -13452,8 +13460,37 @@ def run_naver_kin_profile_playwright(
                 if not login_notice_sent:
                     result_queue.put(("naver_kin_profile_progress", "열린 Chrome에서 네이버 로그인을 완료해 주세요..."))
                     login_notice_sent = True
-                page.wait_for_timeout(1000)
-            return False, "5분 안에 네이버 로그인이 확인되지 않았습니다."
+                time.sleep(1)
+            if not logged_in:
+                return False, "5분 안에 네이버 로그인이 확인되지 않았습니다."
+
+            save_naver_blog_storage_state(context, scope)
+            result_queue.put(
+                (
+                    "naver_kin_profile_progress",
+                    "로그인 확인 완료 · 프로필을 저장했습니다. 확인을 마쳤으면 Chrome 창을 직접 닫아주세요.",
+                )
+            )
+            # Do not close a successfully authenticated profile immediately.
+            # The user may need to verify the account or switch accounts first;
+            # closing the Playwright window is the explicit completion action.
+            last_profile_snapshot_at = 0.0
+            while True:
+                try:
+                    open_pages = [item for item in context.pages if not item.is_closed()]
+                except Exception:
+                    open_pages = []
+                if not open_pages:
+                    break
+                now = time.monotonic()
+                if now - last_profile_snapshot_at >= 2.0:
+                    try:
+                        save_naver_blog_storage_state(context, scope)
+                    except Exception:
+                        pass
+                    last_profile_snapshot_at = now
+                time.sleep(0.5)
+            return True, "네이버 로그인 프로필을 확인하고 저장했습니다."
         except Exception as exc:
             append_runtime_log("NKin", f"프로필 확인 실패: {scope} · {exc}")
             return False, str(exc)
@@ -13462,7 +13499,10 @@ def run_naver_kin_profile_playwright(
                 save_naver_blog_storage_state(context, scope)
             except Exception:
                 pass
-            context.close()
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 def run_naver_kin_answer_playwright(
