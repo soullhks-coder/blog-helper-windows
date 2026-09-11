@@ -114,9 +114,9 @@ class NaverPlaywrightProfileTests(unittest.TestCase):
             for scope in main.NAVER_PLAYWRIGHT_PROFILE_SCOPES
         ]
 
-        self.assertEqual(len(main.NAVER_PLAYWRIGHT_PROFILE_SCOPES), 9)
-        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 9)
-        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 9)
+        self.assertEqual(len(main.NAVER_PLAYWRIGHT_PROFILE_SCOPES), 11)
+        self.assertEqual(len({profile_dir for profile_dir, _state_file in paths}), 11)
+        self.assertEqual(len({state_file for _profile_dir, state_file in paths}), 11)
         self.assertEqual(
             main.naver_playwright_profile_paths(main.NAVER_PLAYWRIGHT_PROFILE_BLOG)[0],
             main.NAVER_BLOG_CHROME_PROFILE_DIR,

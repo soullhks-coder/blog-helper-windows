@@ -445,6 +445,8 @@ NAVER_PLAYWRIGHT_PROFILE_BLOG_4 = "naver_blog_4"
 NAVER_PLAYWRIGHT_PROFILE_BLOG_5 = "naver_blog_5"
 NAVER_PLAYWRIGHT_PROFILE_BLOG_6 = "naver_blog_6"
 NAVER_PLAYWRIGHT_PROFILE_KIN = "naver_kin"
+NAVER_PLAYWRIGHT_PROFILE_KIN_2 = "naver_kin_2"
+NAVER_PLAYWRIGHT_PROFILE_KIN_3 = "naver_kin_3"
 NAVER_KIN_DAILY_ANSWER_LIMIT = 30
 NAVER_BLOG_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_BLOG,
@@ -454,6 +456,11 @@ NAVER_BLOG_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_BLOG_5,
     NAVER_PLAYWRIGHT_PROFILE_BLOG_6,
 )
+NAVER_KIN_PROFILE_SCOPES = (
+    NAVER_PLAYWRIGHT_PROFILE_KIN,
+    NAVER_PLAYWRIGHT_PROFILE_KIN_2,
+    NAVER_PLAYWRIGHT_PROFILE_KIN_3,
+)
 NAVER_BLOG_DEFAULT_PROMPT_ID = "naver-blog-default"
 NAVER_BLOG_DEFAULT_PROFILE_PROMPT_IDS = {
     scope: NAVER_BLOG_DEFAULT_PROMPT_ID for scope in NAVER_BLOG_PROFILE_SCOPES
@@ -462,7 +469,7 @@ NAVER_PLAYWRIGHT_PROFILE_SCOPES = (
     NAVER_PLAYWRIGHT_PROFILE_WRITING,
     NAVER_PLAYWRIGHT_PROFILE_AUTOMATION,
     *NAVER_BLOG_PROFILE_SCOPES,
-    NAVER_PLAYWRIGHT_PROFILE_KIN,
+    *NAVER_KIN_PROFILE_SCOPES,
 )
 NAVER_WRITING_CHROME_PROFILE_DIR = DATA_DIR / "Naver Writing Chrome Profile"
 NAVER_AUTOMATION_CHROME_PROFILE_DIR = DATA_DIR / "Naver Automation Chrome Profile"
@@ -474,6 +481,8 @@ NAVER_BLOG_4_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 4 Chrome Profile"
 NAVER_BLOG_5_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 5 Chrome Profile"
 NAVER_BLOG_6_CHROME_PROFILE_DIR = DATA_DIR / "Naver Blog 6 Chrome Profile"
 NAVER_KIN_CHROME_PROFILE_DIR = DATA_DIR / "Naver Kin Chrome Profile"
+NAVER_KIN_2_CHROME_PROFILE_DIR = DATA_DIR / "Naver Kin 2 Chrome Profile"
+NAVER_KIN_3_CHROME_PROFILE_DIR = DATA_DIR / "Naver Kin 3 Chrome Profile"
 NAVER_WRITING_STORAGE_STATE_FILE = DATA_DIR / "naver-writing-storage-state.json"
 NAVER_AUTOMATION_STORAGE_STATE_FILE = DATA_DIR / "naver-automation-storage-state.json"
 NAVER_BLOG_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-storage-state.json"
@@ -483,6 +492,8 @@ NAVER_BLOG_4_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-4-storage-state.json"
 NAVER_BLOG_5_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-5-storage-state.json"
 NAVER_BLOG_6_STORAGE_STATE_FILE = DATA_DIR / "naver-blog-6-storage-state.json"
 NAVER_KIN_STORAGE_STATE_FILE = DATA_DIR / "naver-kin-storage-state.json"
+NAVER_KIN_2_STORAGE_STATE_FILE = DATA_DIR / "naver-kin-2-storage-state.json"
+NAVER_KIN_3_STORAGE_STATE_FILE = DATA_DIR / "naver-kin-3-storage-state.json"
 NAVER_PLAYWRIGHT_PROFILE_PATHS = {
     NAVER_PLAYWRIGHT_PROFILE_WRITING: (
         NAVER_WRITING_CHROME_PROFILE_DIR,
@@ -519,6 +530,14 @@ NAVER_PLAYWRIGHT_PROFILE_PATHS = {
     NAVER_PLAYWRIGHT_PROFILE_KIN: (
         NAVER_KIN_CHROME_PROFILE_DIR,
         NAVER_KIN_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_KIN_2: (
+        NAVER_KIN_2_CHROME_PROFILE_DIR,
+        NAVER_KIN_2_STORAGE_STATE_FILE,
+    ),
+    NAVER_PLAYWRIGHT_PROFILE_KIN_3: (
+        NAVER_KIN_3_CHROME_PROFILE_DIR,
+        NAVER_KIN_3_STORAGE_STATE_FILE,
     ),
 }
 NAVER_BLOG_COOKIE_KEEP_DAYS = 180
@@ -2710,6 +2729,7 @@ def naver_kin_daily_answer_account(
     profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
 ) -> str:
     """Use the dedicated Knowledge iN browser profile as the account boundary."""
+    profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
     profile_dir, _state_file = NAVER_PLAYWRIGHT_PROFILE_PATHS.get(
         str(profile_scope or NAVER_PLAYWRIGHT_PROFILE_KIN),
         NAVER_PLAYWRIGHT_PROFILE_PATHS[NAVER_PLAYWRIGHT_PROFILE_KIN],
@@ -2994,6 +3014,8 @@ class WordPressSettings:
     naver_blog_conversion_rules: str = DEFAULT_NAVER_BLOG_CONVERSION_RULES
     naver_blog_generation_model: str = "[CLI] Codex"
     naver_blog_image_model: str = "[CLI IMG] Codex"
+    naver_kin_profiles: list[dict] = field(default_factory=list)
+    naver_kin_active_profile: str = "지식인 1"
     naver_kin_question_list_url: str = NAVER_KIN_QUESTION_LIST_URL
     naver_kin_direct_question_url: str = ""
     naver_kin_reference_text: str = ""
@@ -3356,6 +3378,8 @@ class AppStateStore:
         "naver_blog_write_url",
         "naver_blog_publish_name",
         "naver_blog_work_folder",
+        "naver_kin_profiles",
+        "naver_kin_active_profile",
         "blogspot_blog_id",
         "blogspot_client_id",
         "blogspot_redirect_uri",
@@ -3429,6 +3453,9 @@ class AppStateStore:
             ]
         naver_profiles = payload.get("naver_blog_profiles", [])
         naver_profiles = normalize_naver_blog_profiles(naver_profiles)
+        naver_kin_profiles = normalize_naver_kin_profiles(
+            payload.get("naver_kin_profiles", [])
+        )
         naver_manual_image_paths = payload.get("naver_blog_manual_image_paths", [])
         if not isinstance(naver_manual_image_paths, list):
             naver_manual_image_paths = []
@@ -3582,6 +3609,11 @@ class AppStateStore:
             naver_blog_conversion_rules=payload.get("naver_blog_conversion_rules", DEFAULT_NAVER_BLOG_CONVERSION_RULES),
             naver_blog_generation_model=payload.get("naver_blog_generation_model", "[CLI] Codex"),
             naver_blog_image_model=payload.get("naver_blog_image_model", "[CLI IMG] Codex"),
+            naver_kin_profiles=naver_kin_profiles,
+            naver_kin_active_profile=normalize_naver_kin_active_profile(
+                payload.get("naver_kin_active_profile", "지식인 1"),
+                naver_kin_profiles,
+            ),
             naver_kin_question_list_url=payload.get("naver_kin_question_list_url", NAVER_KIN_QUESTION_LIST_URL),
             naver_kin_direct_question_url=payload.get("naver_kin_direct_question_url", ""),
             naver_kin_reference_text=str(payload.get("naver_kin_reference_text", "") or ""),
@@ -8022,6 +8054,74 @@ def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
         )
         normalized_profiles.append(profile)
     return normalized_profiles
+
+
+def naver_kin_profile_scope(
+    profile: dict | None = None,
+    index: int | None = None,
+) -> str:
+    profile = profile or {}
+    requested_scope = str(profile.get("profile_scope") or "").strip().lower()
+    if requested_scope in NAVER_KIN_PROFILE_SCOPES:
+        return requested_scope
+    if index is None:
+        name_match = re.search(r"(\d+)", str(profile.get("name") or ""))
+        if name_match:
+            index = int(name_match.group(1)) - 1
+    if isinstance(index, int) and 0 <= index < len(NAVER_KIN_PROFILE_SCOPES):
+        return NAVER_KIN_PROFILE_SCOPES[index]
+    return NAVER_PLAYWRIGHT_PROFILE_KIN
+
+
+def normalize_naver_kin_profiles(profiles: object) -> list[dict]:
+    """Return the three independent Knowledge iN browser profiles."""
+    raw_profiles = profiles if isinstance(profiles, list) else []
+    normalized_profiles: list[dict] = []
+    for index, scope in enumerate(NAVER_KIN_PROFILE_SCOPES):
+        raw_profile = raw_profiles[index] if index < len(raw_profiles) else {}
+        profile = dict(raw_profile) if isinstance(raw_profile, dict) else {}
+        profile_dir, _state_file = naver_playwright_profile_paths(scope)
+        profile.update(
+            {
+                "name": f"지식인 {index + 1}",
+                "nickname": str(profile.get("nickname") or ""),
+                "profile_scope": scope,
+                "profile_path": str(profile_dir),
+            }
+        )
+        normalized_profiles.append(profile)
+    return normalized_profiles
+
+
+def normalize_naver_kin_active_profile(
+    profile_name: object,
+    profiles: object = None,
+) -> str:
+    normalized_profiles = normalize_naver_kin_profiles(profiles)
+    names = [str(profile.get("name") or "") for profile in normalized_profiles]
+    requested_name = str(profile_name or "").strip()
+    return requested_name if requested_name in names else names[0]
+
+
+def naver_kin_profile_scope_for_name(
+    profiles: object,
+    profile_name: object,
+) -> str:
+    normalized_profiles = normalize_naver_kin_profiles(profiles)
+    active_name = normalize_naver_kin_active_profile(profile_name, normalized_profiles)
+    for index, profile in enumerate(normalized_profiles):
+        if str(profile.get("name") or "") == active_name:
+            return naver_kin_profile_scope(profile, index)
+    return NAVER_PLAYWRIGHT_PROFILE_KIN
+
+
+def naver_kin_question_profile_scope(question: object) -> str:
+    """Treat legacy unscoped history as profile 1."""
+    if not isinstance(question, dict):
+        return NAVER_PLAYWRIGHT_PROFILE_KIN
+    return naver_kin_profile_scope(
+        {"profile_scope": question.get("profile_scope")}
+    )
 
 
 def naver_blog_profile_grid_position(index: int) -> tuple[int, int]:
@@ -12868,6 +12968,7 @@ def extract_naver_kin_question_from_page(page, question_url: str) -> dict:
 def run_naver_kin_single_question_playwright(
     question_url: str,
     result_queue: queue.Queue,
+    profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
 ) -> tuple[bool, dict | str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -12881,7 +12982,9 @@ def run_naver_kin_single_question_playwright(
     except ValueError as exc:
         return False, str(exc)
     chrome_path = require_google_chrome_executable()
-    profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
+    if profile_scope not in NAVER_KIN_PROFILE_SCOPES:
+        profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
     profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
     profile_dir.mkdir(parents=True, exist_ok=True)
     append_runtime_log("NKin", f"단건 질문 수집 전용 Chrome 프로필: {profile_dir}")
@@ -12937,6 +13040,7 @@ def run_naver_kin_playwright_bootstrap(
     sort_mode: str,
     result_queue: queue.Queue,
     collect_count: int = 10,
+    profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
 ) -> tuple[bool, dict | str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -12946,7 +13050,9 @@ def run_naver_kin_playwright_bootstrap(
         ) from exc
 
     chrome_path = require_google_chrome_executable()
-    profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
+    if profile_scope not in NAVER_KIN_PROFILE_SCOPES:
+        profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
     profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
 
     target_url = (question_list_url or NAVER_KIN_QUESTION_LIST_URL).strip() or NAVER_KIN_QUESTION_LIST_URL
@@ -13271,12 +13377,89 @@ def run_naver_kin_playwright_bootstrap(
                 "current_url": page.url,
                 "sort_mode": sort_mode,
                 "collect_count": collection_limit,
+                "profile_scope": profile_scope,
                 "questions": questions,
                 "ready_count": ready_count,
             }
         finally:
             try:
                 save_naver_blog_storage_state(context, profile_scope)
+            except Exception:
+                pass
+            context.close()
+
+
+def run_naver_kin_profile_playwright(
+    profile_scope: str,
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+) -> tuple[bool, str]:
+    """Open one isolated Knowledge iN profile and retain its login session."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+
+    scope = normalize_naver_playwright_profile_scope(profile_scope)
+    if scope not in NAVER_KIN_PROFILE_SCOPES:
+        scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    chrome_path = require_google_chrome_executable()
+    profile_dir, _state_file = naver_playwright_profile_paths(scope)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    append_runtime_log("NKin", f"프로필 로그인 확인: {scope} · {profile_dir}")
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            executable_path=str(chrome_path),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        try:
+            saved_state = load_naver_blog_storage_state(scope)
+            saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
+            if saved_cookies:
+                try:
+                    context.add_cookies(saved_cookies)
+                except Exception:
+                    pass
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(12_000)
+            page.set_default_navigation_timeout(60_000)
+            result_queue.put(("naver_kin_profile_progress", "선택한 프로필의 네이버 로그인 상태를 확인합니다..."))
+            page.goto("https://kin.naver.com/", wait_until="domcontentloaded")
+
+            deadline = time.time() + max(30, int(login_timeout_seconds or 300))
+            login_notice_sent = False
+            while time.time() < deadline:
+                if is_naver_logged_in_context(context):
+                    save_naver_blog_storage_state(context, scope)
+                    return True, "네이버 로그인 프로필을 확인하고 저장했습니다."
+                if "nid.naver.com" not in str(page.url or ""):
+                    login_url = (
+                        "https://nid.naver.com/nidlogin.login?mode=form&url="
+                        + quote("https://kin.naver.com/", safe="")
+                    )
+                    page.goto(login_url, wait_until="domcontentloaded")
+                if not login_notice_sent:
+                    result_queue.put(("naver_kin_profile_progress", "열린 Chrome에서 네이버 로그인을 완료해 주세요..."))
+                    login_notice_sent = True
+                page.wait_for_timeout(1000)
+            return False, "5분 안에 네이버 로그인이 확인되지 않았습니다."
+        except Exception as exc:
+            append_runtime_log("NKin", f"프로필 확인 실패: {scope} · {exc}")
+            return False, str(exc)
+        finally:
+            try:
+                save_naver_blog_storage_state(context, scope)
             except Exception:
                 pass
             context.close()
@@ -13292,6 +13475,7 @@ def run_naver_kin_answer_playwright(
     preflight_only: bool = False,
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
     wordpress_url: str = "",
+    profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
 ) -> tuple[bool, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -14104,7 +14288,9 @@ def run_naver_kin_answer_playwright(
                 time.sleep(0.7)
         return False, "등록 버튼을 눌렀지만 완료 여부를 확인하지 못했습니다. 열린 Chrome의 답변 화면을 확인해 주세요."
 
-    profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
+    profile_scope = normalize_naver_playwright_profile_scope(profile_scope)
+    if profile_scope not in NAVER_KIN_PROFILE_SCOPES:
+        profile_scope = NAVER_PLAYWRIGHT_PROFILE_KIN
     automation_mode = normalize_naver_blog_automation_mode(automation_mode)
     profile_dir, _state_file = naver_playwright_profile_paths(profile_scope)
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -19046,12 +19232,14 @@ class NaverKinBootstrapWorker(threading.Thread):
         sort_mode: str,
         result_queue: queue.Queue,
         collect_count: int = 10,
+        profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
     ) -> None:
         super().__init__(daemon=True)
         self.question_list_url = question_list_url.strip() or NAVER_KIN_QUESTION_LIST_URL
         self.sort_mode = sort_mode.strip() or "최신순"
         self.result_queue = result_queue
         self.collect_count = normalize_naver_kin_collect_count(collect_count)
+        self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
 
     def run(self) -> None:
         try:
@@ -19060,6 +19248,7 @@ class NaverKinBootstrapWorker(threading.Thread):
                 self.sort_mode,
                 self.result_queue,
                 self.collect_count,
+                self.profile_scope,
             )
             if success:
                 self.result_queue.put(("naver_kin_done", payload))
@@ -19070,16 +19259,23 @@ class NaverKinBootstrapWorker(threading.Thread):
 
 
 class NaverKinQuestionCollectorWorker(threading.Thread):
-    def __init__(self, question_url: str, result_queue: queue.Queue) -> None:
+    def __init__(
+        self,
+        question_url: str,
+        result_queue: queue.Queue,
+        profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
+    ) -> None:
         super().__init__(daemon=True)
         self.question_url = question_url
         self.result_queue = result_queue
+        self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
 
     def run(self) -> None:
         try:
             success, payload = run_naver_kin_single_question_playwright(
                 self.question_url,
                 self.result_queue,
+                self.profile_scope,
             )
             if success:
                 self.result_queue.put(("naver_kin_direct_collected", payload))
@@ -19089,19 +19285,51 @@ class NaverKinQuestionCollectorWorker(threading.Thread):
             self.result_queue.put(("naver_kin_direct_error", str(exc)))
 
 
+class NaverKinProfileWorker(threading.Thread):
+    def __init__(self, profile_scope: str, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            success, message = run_naver_kin_profile_playwright(
+                self.profile_scope,
+                self.result_queue,
+            )
+            event = "naver_kin_profile_done" if success else "naver_kin_profile_error"
+            self.result_queue.put(
+                (event, {"profile_scope": self.profile_scope, "message": message})
+            )
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(
+                (
+                    "naver_kin_profile_error",
+                    {"profile_scope": self.profile_scope, "message": str(exc)},
+                )
+            )
+
+
 class NaverKinAutomationWorker(threading.Thread):
-    def __init__(self, settings: WordPressSettings, question: dict, result_queue: queue.Queue) -> None:
+    def __init__(
+        self,
+        settings: WordPressSettings,
+        question: dict,
+        result_queue: queue.Queue,
+        profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
+    ) -> None:
         super().__init__(daemon=True)
         self.settings = WordPressSettings(**asdict(settings))
         self.question = dict(question or {})
         self.result_queue = result_queue
+        self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
 
     def run(self) -> None:
         cleanup_paths: list[str] = []
         wordpress_reservation_key = ""
         wordpress_account = ""
         naver_kin_reservation_key = ""
-        naver_kin_account = naver_kin_daily_answer_account()
+        naver_kin_account = naver_kin_daily_answer_account(self.profile_scope)
         try:
             question_title = clean_naver_kin_question_title(self.question.get("title"))
             question_text = clean_naver_kin_question_body(
@@ -19147,6 +19375,7 @@ class NaverKinAutomationWorker(threading.Thread):
                 post_submit_hold_seconds=0,
                 question_title=question_title,
                 preflight_only=True,
+                profile_scope=self.profile_scope,
             )
             self.result_queue.put(("naver_kin_auto_progress", "지식인 질문을 바탕으로 워드프레스 글 작성 프롬프트를 준비합니다..."))
             self.settings.target_platforms = ["wordpress"]
@@ -19290,6 +19519,7 @@ class NaverKinAutomationWorker(threading.Thread):
                 question_title=question_title,
                 automation_mode=self.settings.naver_kin_automation_mode,
                 wordpress_url=wordpress_url,
+                profile_scope=self.profile_scope,
             )
             if not success:
                 raise RuntimeError(answer_message)
@@ -19313,6 +19543,7 @@ class NaverKinAutomationWorker(threading.Thread):
                         "cardnews_count": len(cardnews_urls),
                         "daily_publish_count": daily_publish_count,
                         "naver_kin_answer_count": naver_kin_answer_count,
+                        "profile_scope": self.profile_scope,
                         "cleanup_count": cleanup_generated_upload_images(cleanup_paths),
                         "message": answer_message,
                     },
@@ -20278,6 +20509,7 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_worker: NaverKinBootstrapWorker | None = None
         self.naver_kin_direct_worker: NaverKinQuestionCollectorWorker | None = None
         self.naver_kin_automation_worker: NaverKinAutomationWorker | None = None
+        self.naver_kin_profile_worker: NaverKinProfileWorker | None = None
         self.threads_profile_worker: ThreadsProfileWorker | None = None
         self.thumbnail_ai_worker: ThumbnailAIWorker | None = None
         self.daum_worker: DaumRealtimeKeywordWorker | None = None
@@ -20324,6 +20556,13 @@ class KeywordApp(ctk.CTk):
             "region": {},
             "category": {},
         }
+        self.wordpress_settings.naver_kin_profiles = normalize_naver_kin_profiles(
+            self.wordpress_settings.naver_kin_profiles
+        )
+        self.wordpress_settings.naver_kin_active_profile = normalize_naver_kin_active_profile(
+            self.wordpress_settings.naver_kin_active_profile,
+            self.wordpress_settings.naver_kin_profiles,
+        )
         self.naver_kin_questions: list[dict] = list(self.wordpress_settings.naver_kin_last_questions or [])
         self.naver_kin_next_run_at = float(self.wordpress_settings.naver_kin_next_run_at or 0)
         self.naver_kin_next_action = (
@@ -24395,14 +24634,81 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_scroll.grid(row=1, column=0, padx=28, pady=(0, 12), sticky="nsew")
         self.naver_kin_scroll.grid_columnconfigure(0, weight=1)
 
-        setup_card = ctk.CTkFrame(
+        palette = self._theme_palette()
+        tab_row = ctk.CTkFrame(self.naver_kin_scroll, fg_color="transparent")
+        tab_row.grid(row=0, column=0, sticky="ew")
+        self.naver_kin_tab_buttons: dict[str, ctk.CTkButton] = {}
+        for index, (tab_key, label) in enumerate(
+            (("writing", "글작성"), ("settings", "설정"))
+        ):
+            button = ctk.CTkButton(
+                tab_row,
+                text=label,
+                width=112,
+                height=36,
+                corner_radius=9,
+                fg_color=palette["card"],
+                hover_color=palette["hover"],
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=lambda key=tab_key: self._switch_naver_kin_tab(key),
+            )
+            button.grid(row=0, column=index, padx=(0, 8), pady=(0, 10), sticky="w")
+            self.naver_kin_tab_buttons[tab_key] = button
+
+        self.naver_kin_tab_holder = ctk.CTkFrame(
             self.naver_kin_scroll,
+            fg_color="transparent",
+        )
+        self.naver_kin_tab_holder.grid(row=1, column=0, sticky="ew")
+        self.naver_kin_tab_holder.grid_columnconfigure(0, weight=1)
+        self.naver_kin_tab_frames: dict[str, ctk.CTkFrame] = {}
+        for tab_key in ("writing", "settings"):
+            frame = ctk.CTkFrame(self.naver_kin_tab_holder, fg_color=palette["shell"])
+            frame.grid(row=0, column=0, sticky="ew")
+            frame.grid_columnconfigure(0, weight=1)
+            self.naver_kin_tab_frames[tab_key] = frame
+        writing_parent = self.naver_kin_tab_frames["writing"]
+
+        account_card = ctk.CTkFrame(
+            writing_parent,
+            fg_color=palette["card"],
+            corner_radius=18,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        account_card.grid(row=0, column=0, sticky="ew")
+        account_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            account_card,
+            text="사용할 지식인 계정",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, padx=18, pady=(16, 8), sticky="w")
+        self.naver_kin_writing_profile_frame = ctk.CTkFrame(
+            account_card,
+            fg_color="transparent",
+        )
+        self.naver_kin_writing_profile_frame.grid(
+            row=1,
+            column=0,
+            padx=18,
+            pady=(0, 12),
+            sticky="ew",
+        )
+        self.naver_kin_active_profile_var = tk.StringVar(
+            value=self.wordpress_settings.naver_kin_active_profile
+        )
+        self._refresh_naver_kin_writing_profile_choices()
+
+        setup_card = ctk.CTkFrame(
+            writing_parent,
             fg_color="#1d2635",
             corner_radius=20,
             border_width=1,
             border_color="#314761",
         )
-        setup_card.grid(row=0, column=0, sticky="ew")
+        setup_card.grid(row=1, column=0, pady=(14, 0), sticky="ew")
         setup_card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
@@ -24649,13 +24955,13 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_status_label.grid(row=7, column=0, columnspan=4, padx=18, pady=(4, 16), sticky="ew")
 
         schedule_card = ctk.CTkFrame(
-            self.naver_kin_scroll,
+            writing_parent,
             fg_color="#1d2635",
             corner_radius=20,
             border_width=1,
             border_color="#314761",
         )
-        schedule_card.grid(row=1, column=0, pady=(14, 0), sticky="ew")
+        schedule_card.grid(row=2, column=0, pady=(14, 0), sticky="ew")
         schedule_card.grid_columnconfigure(5, weight=1)
         ctk.CTkLabel(
             schedule_card,
@@ -24769,13 +25075,13 @@ class KeywordApp(ctk.CTk):
         self._update_naver_kin_next_run_label()
 
         template_card = ctk.CTkFrame(
-            self.naver_kin_scroll,
+            writing_parent,
             fg_color="#1d2635",
             corner_radius=20,
             border_width=1,
             border_color="#314761",
         )
-        template_card.grid(row=2, column=0, pady=(14, 0), sticky="ew")
+        template_card.grid(row=3, column=0, pady=(14, 0), sticky="ew")
         template_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             template_card,
@@ -24809,13 +25115,13 @@ class KeywordApp(ctk.CTk):
         self._bind_private_mousewheel_scroll(self.naver_kin_answer_template_box)
 
         log_card = ctk.CTkFrame(
-            self.naver_kin_scroll,
+            writing_parent,
             fg_color="#1d2635",
             corner_radius=20,
             border_width=1,
             border_color="#314761",
         )
-        log_card.grid(row=3, column=0, pady=(14, 0), sticky="ew")
+        log_card.grid(row=4, column=0, pady=(14, 0), sticky="ew")
         log_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             log_card,
@@ -24847,13 +25153,13 @@ class KeywordApp(ctk.CTk):
         self._bind_private_mousewheel_scroll(self.naver_kin_log_box)
 
         questions_card = ctk.CTkFrame(
-            self.naver_kin_scroll,
+            writing_parent,
             fg_color="#1d2635",
             corner_radius=20,
             border_width=1,
             border_color="#314761",
         )
-        questions_card.grid(row=4, column=0, pady=(14, 0), sticky="ew")
+        questions_card.grid(row=5, column=0, pady=(14, 0), sticky="ew")
         questions_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             questions_card,
@@ -24866,7 +25172,8 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_question_frame.grid_columnconfigure(0, weight=1)
         self._render_naver_kin_questions(self.naver_kin_questions)
 
-        palette = self._theme_palette()
+        self._build_naver_kin_settings_tab(self.naver_kin_tab_frames["settings"])
+
         self.naver_kin_fixed_progress_panel = ctk.CTkFrame(
             self.naver_kin_page,
             fg_color=palette["panel"],
@@ -24947,6 +25254,8 @@ class KeywordApp(ctk.CTk):
             self.naver_kin_progress_fraction,
             state=self.naver_kin_progress_state,
         )
+        self.active_naver_kin_tab = ""
+        self._switch_naver_kin_tab("writing")
 
     def _naver_panel(self, parent, title: str, row: int) -> ctk.CTkFrame:
         palette = self._theme_palette()
@@ -25666,6 +25975,311 @@ class KeywordApp(ctk.CTk):
         except Exception:
             pass
         self._finish_theme_paint(force=True)
+
+    def _switch_naver_kin_tab(self, tab_key: str) -> None:
+        if tab_key not in getattr(self, "naver_kin_tab_frames", {}):
+            return
+        palette = self._theme_palette()
+        self.active_naver_kin_tab = tab_key
+        for key, button in self.naver_kin_tab_buttons.items():
+            button.configure(
+                fg_color=palette["selected"] if key == tab_key else palette["card"],
+                hover_color=palette["hover"],
+                text_color=palette["accent"] if key == tab_key else palette["text"],
+            )
+        for key, frame in self.naver_kin_tab_frames.items():
+            if key == tab_key:
+                frame.grid(row=0, column=0, sticky="ew")
+                frame.tkraise()
+            else:
+                frame.grid_remove()
+        try:
+            canvas = getattr(self.naver_kin_scroll, "_parent_canvas", None)
+            if canvas is not None:
+                canvas.yview_moveto(0)
+        except Exception:
+            pass
+        self._finish_theme_paint(force=True)
+
+    def _naver_kin_profiles_from_state(self) -> list[dict]:
+        return normalize_naver_kin_profiles(self.wordpress_settings.naver_kin_profiles)
+
+    def _current_naver_kin_profiles(self) -> list[dict]:
+        profiles = self._naver_kin_profiles_from_state()
+        for index, profile in enumerate(profiles):
+            var = getattr(self, "naver_kin_profile_vars", {}).get(f"{index}:nickname")
+            if var is not None:
+                profile["nickname"] = var.get().strip()
+        return profiles
+
+    def _selected_naver_kin_profile_scope(self) -> str:
+        profiles = self._current_naver_kin_profiles()
+        active_name = (
+            self.naver_kin_active_profile_var.get()
+            if hasattr(self, "naver_kin_active_profile_var")
+            else self.wordpress_settings.naver_kin_active_profile
+        )
+        return naver_kin_profile_scope_for_name(profiles, active_name)
+
+    def _refresh_naver_kin_writing_profile_choices(self) -> None:
+        if not hasattr(self, "naver_kin_writing_profile_frame"):
+            return
+        frame = self.naver_kin_writing_profile_frame
+        for child in frame.winfo_children():
+            child.destroy()
+        profiles = self._current_naver_kin_profiles()
+        active_name = normalize_naver_kin_active_profile(
+            self.naver_kin_active_profile_var.get(),
+            profiles,
+        )
+        self.naver_kin_active_profile_var.set(active_name)
+        for column in range(3):
+            frame.grid_columnconfigure(column, weight=1, uniform="naver_kin_writing_profiles")
+        for index, profile in enumerate(profiles):
+            name = str(profile.get("name") or f"지식인 {index + 1}")
+            nickname = str(profile.get("nickname") or "미등록")
+            ctk.CTkRadioButton(
+                frame,
+                text=f"{name} · {nickname}",
+                variable=self.naver_kin_active_profile_var,
+                value=name,
+                command=lambda value=name: self._set_naver_kin_active_profile(value),
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).grid(row=0, column=index, padx=(0, 12), pady=(0, 6), sticky="w")
+
+    def _build_naver_kin_settings_tab(self, parent) -> None:
+        palette = self._theme_palette()
+        panel = self._naver_panel(parent, "다중 프로필 설정", 0)
+        ctk.CTkLabel(
+            panel,
+            text="지식인 계정 3개의 네이버 로그인 상태를 각각 분리해 저장합니다. 글작성 탭에서 사용할 계정을 선택하세요.",
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            justify="left",
+            wraplength=860,
+        ).grid(row=1, column=0, columnspan=4, padx=18, pady=(0, 10), sticky="w")
+        self.naver_kin_profile_cards_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self.naver_kin_profile_cards_frame.grid(
+            row=2,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 12),
+            sticky="ew",
+        )
+        for column in range(3):
+            self.naver_kin_profile_cards_frame.grid_columnconfigure(
+                column,
+                weight=1,
+                uniform="naver_kin_profiles",
+            )
+        self.naver_kin_profile_vars: dict[str, tk.StringVar] = {}
+        self._refresh_naver_kin_profile_cards()
+        self.naver_kin_profile_status_label = ctk.CTkLabel(
+            panel,
+            text="현재 상태: 프로필을 선택한 뒤 로그인 상태를 확인해 주세요.",
+            text_color=palette["subtext"],
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.naver_kin_profile_status_label.grid(
+            row=3,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 16),
+            sticky="ew",
+        )
+
+    def _refresh_naver_kin_profile_cards(self) -> None:
+        if not hasattr(self, "naver_kin_profile_cards_frame"):
+            return
+        palette = self._theme_palette()
+        for child in self.naver_kin_profile_cards_frame.winfo_children():
+            child.destroy()
+        self.naver_kin_profile_vars = {}
+        profiles = self._naver_kin_profiles_from_state()
+        active_name = normalize_naver_kin_active_profile(
+            self.wordpress_settings.naver_kin_active_profile,
+            profiles,
+        )
+        self.naver_kin_active_profile_var.set(active_name)
+        for index, profile in enumerate(profiles):
+            name = str(profile.get("name") or f"지식인 {index + 1}")
+            card = ctk.CTkFrame(
+                self.naver_kin_profile_cards_frame,
+                fg_color=palette["panel"],
+                corner_radius=16,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            card.grid(
+                row=0,
+                column=index,
+                padx=(0 if index == 0 else 10, 0),
+                sticky="nsew",
+            )
+            card.grid_columnconfigure(1, weight=1)
+            ctk.CTkRadioButton(
+                card,
+                text=name,
+                variable=self.naver_kin_active_profile_var,
+                value=name,
+                command=lambda value=name: self._set_naver_kin_active_profile(value),
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).grid(row=0, column=0, columnspan=2, padx=14, pady=(14, 10), sticky="w")
+            ctk.CTkLabel(
+                card,
+                text="계정 이름",
+                text_color=palette["subtext"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(row=1, column=0, padx=(14, 8), pady=4, sticky="w")
+            nickname_var = tk.StringVar(value=str(profile.get("nickname") or ""))
+            nickname_entry = ctk.CTkEntry(
+                card,
+                textvariable=nickname_var,
+                height=32,
+                fg_color=palette["input"],
+                border_color=palette["border"],
+                text_color=palette["text"],
+                placeholder_text="예: 내 계정",
+            )
+            nickname_entry.grid(row=1, column=1, padx=(0, 14), pady=4, sticky="ew")
+            nickname_entry.bind(
+                "<FocusOut>",
+                lambda _event, value=name: self._on_naver_kin_profile_field_changed(value),
+            )
+            self.naver_kin_profile_vars[f"{index}:nickname"] = nickname_var
+            ctk.CTkLabel(
+                card,
+                text=f"독립 로그인 저장공간 {index + 1}",
+                text_color=palette["subtext"],
+                font=ctk.CTkFont(size=11),
+            ).grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 0), sticky="w")
+            button_row = ctk.CTkFrame(card, fg_color="transparent")
+            button_row.grid(row=3, column=0, columnspan=2, padx=14, pady=(10, 14), sticky="ew")
+            button_row.grid_columnconfigure((0, 1, 2), weight=1)
+            ctk.CTkButton(
+                button_row,
+                text="만들기/로그인",
+                height=32,
+                fg_color=palette["button"],
+                hover_color=palette["button_hover"],
+                command=lambda value=name: self._start_naver_kin_profile_check(value),
+            ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+            ctk.CTkButton(
+                button_row,
+                text="프로필 확인",
+                height=32,
+                fg_color=palette["button"],
+                hover_color=palette["button_hover"],
+                command=lambda value=name: self._start_naver_kin_profile_check(value),
+            ).grid(row=0, column=1, padx=(0, 6), sticky="ew")
+            ctk.CTkButton(
+                button_row,
+                text="초기화",
+                height=32,
+                fg_color="#596579",
+                command=lambda idx=index: self._reset_naver_kin_profile(idx),
+            ).grid(row=0, column=2, sticky="ew")
+        self._refresh_naver_kin_writing_profile_choices()
+
+    def _on_naver_kin_profile_field_changed(self, _profile_name: str) -> None:
+        self.wordpress_settings.naver_kin_profiles = self._current_naver_kin_profiles()
+        self._refresh_naver_kin_writing_profile_choices()
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+
+    def _set_naver_kin_active_profile(self, profile_name: str) -> None:
+        workers = (
+            getattr(self, "naver_kin_worker", None),
+            getattr(self, "naver_kin_direct_worker", None),
+            getattr(self, "naver_kin_automation_worker", None),
+            getattr(self, "naver_kin_profile_worker", None),
+        )
+        if getattr(self, "naver_kin_automation_running", False) or any(
+            worker is not None and worker.is_alive() for worker in workers
+        ):
+            current_name = self.wordpress_settings.naver_kin_active_profile
+            self.naver_kin_active_profile_var.set(current_name)
+            messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 계정을 변경해 주세요.")
+            return
+        profiles = self._current_naver_kin_profiles()
+        active_name = normalize_naver_kin_active_profile(profile_name, profiles)
+        self.wordpress_settings.naver_kin_profiles = profiles
+        self.wordpress_settings.naver_kin_active_profile = active_name
+        self.naver_kin_active_profile_var.set(active_name)
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self._refresh_naver_kin_writing_profile_choices()
+        self._render_naver_kin_questions(self.naver_kin_questions)
+        count = self._naver_kin_daily_answer_count()
+        message = f"{active_name} 선택 · {format_naver_kin_answer_usage(count)}"
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(text=f"현재 상태: {message}", text_color="#48d980")
+        if hasattr(self, "naver_kin_profile_status_label"):
+            self.naver_kin_profile_status_label.configure(text=f"현재 상태: {message}", text_color="#48d980")
+
+    def _reset_naver_kin_profile(self, index: int) -> None:
+        profiles = self._current_naver_kin_profiles()
+        if not 0 <= index < len(profiles):
+            return
+        profiles[index]["nickname"] = ""
+        self.wordpress_settings.naver_kin_profiles = profiles
+        var = getattr(self, "naver_kin_profile_vars", {}).get(f"{index}:nickname")
+        if var is not None:
+            var.set("")
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self._refresh_naver_kin_profile_cards()
+        if hasattr(self, "naver_kin_profile_status_label"):
+            self.naver_kin_profile_status_label.configure(
+                text=f"현재 상태: 지식인 {index + 1}의 표시 이름을 초기화했습니다.",
+                text_color="#ffcc66",
+            )
+
+    def _start_naver_kin_profile_check(self, profile_name: str) -> None:
+        workers = (
+            getattr(self, "naver_kin_worker", None),
+            getattr(self, "naver_kin_direct_worker", None),
+            getattr(self, "naver_kin_automation_worker", None),
+            getattr(self, "naver_kin_profile_worker", None),
+        )
+        if getattr(self, "naver_kin_automation_running", False) or any(
+            worker is not None and worker.is_alive() for worker in workers
+        ):
+            messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 프로필을 확인해 주세요.")
+            return
+        self._on_naver_kin_profile_field_changed(profile_name)
+        self._set_naver_kin_active_profile(profile_name)
+        profile_scope = self._selected_naver_kin_profile_scope()
+        if hasattr(self, "naver_kin_profile_status_label"):
+            self.naver_kin_profile_status_label.configure(
+                text=f"현재 상태: {profile_name} 전용 Chrome을 여는 중...",
+                text_color="#6dadff",
+            )
+        self.naver_kin_profile_worker = NaverKinProfileWorker(
+            profile_scope,
+            self.result_queue,
+        )
+        self.naver_kin_profile_worker.start()
+
+    def _handle_naver_kin_profile_done(self, payload) -> None:
+        self.naver_kin_profile_worker = None
+        message = str((payload or {}).get("message") or "프로필 저장을 완료했습니다.")
+        active_name = self.wordpress_settings.naver_kin_active_profile
+        if hasattr(self, "naver_kin_profile_status_label"):
+            self.naver_kin_profile_status_label.configure(
+                text=f"현재 상태: {active_name} · {message}",
+                text_color="#48d980",
+            )
+
+    def _handle_naver_kin_profile_error(self, payload) -> None:
+        self.naver_kin_profile_worker = None
+        message = str((payload or {}).get("message") or "프로필 확인에 실패했습니다.")
+        if hasattr(self, "naver_kin_profile_status_label"):
+            self.naver_kin_profile_status_label.configure(
+                text=f"현재 상태: {message}",
+                text_color="#ff6b6b",
+            )
+        messagebox.showwarning("N지식인 프로필 확인 실패", message)
 
     def _naver_blog_profiles_from_state(self) -> list[dict]:
         return normalize_naver_blog_profiles(
@@ -26767,6 +27381,13 @@ class KeywordApp(ctk.CTk):
         self._start_naver_kin_clock()
 
     def _persist_naver_kin_schedule_state(self) -> None:
+        self.wordpress_settings.naver_kin_profiles = self._current_naver_kin_profiles()
+        self.wordpress_settings.naver_kin_active_profile = normalize_naver_kin_active_profile(
+            self.naver_kin_active_profile_var.get()
+            if hasattr(self, "naver_kin_active_profile_var")
+            else self.wordpress_settings.naver_kin_active_profile,
+            self.wordpress_settings.naver_kin_profiles,
+        )
         self.wordpress_settings.naver_kin_next_run_at = float(getattr(self, "naver_kin_next_run_at", 0) or 0)
         self.wordpress_settings.naver_kin_next_action = (
             self.naver_kin_next_action
@@ -26912,12 +27533,20 @@ class KeywordApp(ctk.CTk):
         )
 
     def _naver_kin_daily_answer_count(self) -> int:
-        account = naver_kin_daily_answer_account()
+        profile_scope_getter = getattr(self, "_selected_naver_kin_profile_scope", None)
+        profile_scope = (
+            profile_scope_getter()
+            if callable(profile_scope_getter)
+            else NAVER_PLAYWRIGHT_PROFILE_KIN
+        )
+        account = naver_kin_daily_answer_account(profile_scope)
         stored_count = DailyPublishLimitStore.count("naver_kin", account)
         today = time.strftime("%Y-%m-%d")
         answered_urls: set[str] = set()
         for index, question in enumerate(getattr(self, "naver_kin_questions", [])):
             if not isinstance(question, dict):
+                continue
+            if naver_kin_question_profile_scope(question) != profile_scope:
                 continue
             answered_at = str(question.get("answered_at") or "").strip()
             if not answered_at.startswith(today):
@@ -27005,6 +27634,8 @@ class KeywordApp(ctk.CTk):
             self.naver_kin_direct_worker is not None and self.naver_kin_direct_worker.is_alive()
         ) or (
             self.naver_kin_automation_worker is not None and self.naver_kin_automation_worker.is_alive()
+        ) or (
+            self.naver_kin_profile_worker is not None and self.naver_kin_profile_worker.is_alive()
         ):
             messagebox.showinfo("진행 중", "입력한 지식인 URL 작업을 마친 뒤 예약 자동화를 시작해 주세요.")
             return
@@ -27058,7 +27689,10 @@ class KeywordApp(ctk.CTk):
 
     def _next_naver_kin_question_for_automation(self) -> dict | None:
         skip_statuses = {"진행 중", "답변 완료", "오류"}
+        profile_scope = self._selected_naver_kin_profile_scope()
         for question in self.naver_kin_questions:
+            if naver_kin_question_profile_scope(question) != profile_scope:
+                continue
             status = str(question.get("automation_status") or "").strip()
             if status not in skip_statuses and naver_kin_question_ready(question):
                 return question
@@ -27129,7 +27763,14 @@ class KeywordApp(ctk.CTk):
             self._set_naver_kin_direct_button_state(True, "작성 중...")
         self.naver_kin_progress_fraction = 0.2
         self._set_naver_kin_progress("워드프레스 글 발행을 준비하고 있습니다...", 0.22)
-        self.naver_kin_automation_worker = NaverKinAutomationWorker(settings, question, self.result_queue)
+        profile_scope = self._selected_naver_kin_profile_scope()
+        question["profile_scope"] = profile_scope
+        self.naver_kin_automation_worker = NaverKinAutomationWorker(
+            settings,
+            question,
+            self.result_queue,
+            profile_scope,
+        )
         self.naver_kin_automation_worker.start()
         return True
 
@@ -27155,6 +27796,8 @@ class KeywordApp(ctk.CTk):
         if self.naver_kin_worker and self.naver_kin_worker.is_alive():
             if hasattr(self, "naver_kin_status_label"):
                 self.naver_kin_status_label.configure(text="현재 상태: 질문 목록 수집 완료를 기다리는 중...", text_color="#6dadff")
+            return
+        if self.naver_kin_profile_worker and self.naver_kin_profile_worker.is_alive():
             return
         if scheduled_action == "collect":
             self.naver_kin_next_run_at = 0
@@ -27188,6 +27831,13 @@ class KeywordApp(ctk.CTk):
         self._save_naver_kin_settings(silent=True)
 
     def _save_naver_kin_settings(self, silent: bool = False) -> None:
+        self.wordpress_settings.naver_kin_profiles = self._current_naver_kin_profiles()
+        self.wordpress_settings.naver_kin_active_profile = normalize_naver_kin_active_profile(
+            self.naver_kin_active_profile_var.get()
+            if hasattr(self, "naver_kin_active_profile_var")
+            else self.wordpress_settings.naver_kin_active_profile,
+            self.wordpress_settings.naver_kin_profiles,
+        )
         if hasattr(self, "naver_kin_url_entry"):
             self.wordpress_settings.naver_kin_question_list_url = (
                 self.naver_kin_url_entry.get().strip() or NAVER_KIN_QUESTION_LIST_URL
@@ -27263,6 +27913,7 @@ class KeywordApp(ctk.CTk):
             getattr(self, "naver_kin_worker", None),
             getattr(self, "naver_kin_direct_worker", None),
             getattr(self, "naver_kin_automation_worker", None),
+            getattr(self, "naver_kin_profile_worker", None),
         )
         is_busy = bool(getattr(self, "naver_kin_automation_running", False)) or any(
             worker is not None and worker.is_alive() for worker in running_workers
@@ -27300,6 +27951,7 @@ class KeywordApp(ctk.CTk):
             self.naver_kin_worker,
             self.naver_kin_direct_worker,
             self.naver_kin_automation_worker,
+            self.naver_kin_profile_worker,
         )
         if self.naver_kin_automation_running or any(
             worker is not None and worker.is_alive() for worker in running_workers
@@ -27341,6 +27993,7 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_direct_worker = NaverKinQuestionCollectorWorker(
             question_url,
             self.result_queue,
+            self._selected_naver_kin_profile_scope(),
         )
         self.naver_kin_direct_worker.start()
 
@@ -27361,6 +28014,7 @@ class KeywordApp(ctk.CTk):
             "wordpress_url": "",
             "wordpress_title": "",
             "answered_at": "",
+            "profile_scope": self._selected_naver_kin_profile_scope(),
         }
         if not naver_kin_question_ready(question):
             self._handle_naver_kin_direct_error("질문 제목과 본문을 충분히 수집하지 못했습니다.")
@@ -27368,7 +28022,10 @@ class KeywordApp(ctk.CTk):
 
         existing = [
             item for item in self.naver_kin_questions
-            if str(item.get("url") or "").strip() != question_url
+            if not (
+                str(item.get("url") or "").strip() == question_url
+                and naver_kin_question_profile_scope(item) == question["profile_scope"]
+            )
         ]
         self.naver_kin_questions = [question, *existing]
         self.wordpress_settings.naver_kin_last_questions = list(self.naver_kin_questions)
@@ -27408,6 +28065,8 @@ class KeywordApp(ctk.CTk):
             self.naver_kin_direct_worker is not None and self.naver_kin_direct_worker.is_alive()
         ) or (
             self.naver_kin_automation_worker is not None and self.naver_kin_automation_worker.is_alive()
+        ) or (
+            self.naver_kin_profile_worker is not None and self.naver_kin_profile_worker.is_alive()
         ):
             messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 질문 목록을 수집해 주세요.")
             return
@@ -27427,6 +28086,7 @@ class KeywordApp(ctk.CTk):
             self.wordpress_settings.naver_kin_sort_mode,
             self.result_queue,
             self.wordpress_settings.naver_kin_collect_count,
+            self._selected_naver_kin_profile_scope(),
         )
         self.naver_kin_worker.start()
 
@@ -27435,11 +28095,24 @@ class KeywordApp(ctk.CTk):
             self.naver_kin_start_button.configure(state="normal", text="질문 목록 수집")
         self.naver_kin_worker = None
         questions = payload.get("questions", []) if isinstance(payload, dict) else []
+        profile_scope = (
+            naver_kin_profile_scope(
+                {"profile_scope": payload.get("profile_scope")}
+            )
+            if isinstance(payload, dict)
+            else self._selected_naver_kin_profile_scope()
+        )
         previous_by_url = {
             str(item.get("url") or ""): item
             for item in getattr(self, "naver_kin_questions", [])
             if str(item.get("url") or "")
+            and naver_kin_question_profile_scope(item) == profile_scope
         }
+        other_profile_questions = [
+            item
+            for item in getattr(self, "naver_kin_questions", [])
+            if naver_kin_question_profile_scope(item) != profile_scope
+        ]
         normalized_questions: list[dict] = []
         for item in questions:
             if not isinstance(item, dict):
@@ -27465,11 +28138,12 @@ class KeywordApp(ctk.CTk):
                 "wordpress_url": str(previous.get("wordpress_url") or "").strip(),
                 "wordpress_title": str(previous.get("wordpress_title") or "").strip(),
                 "answered_at": str(previous.get("answered_at") or "").strip(),
+                "profile_scope": profile_scope,
             }
             if normalized["automation_status"] == "오류" and naver_kin_question_ready(normalized):
                 normalized["automation_status"] = ""
             normalized_questions.append(normalized)
-        self.naver_kin_questions = normalized_questions
+        self.naver_kin_questions = [*normalized_questions, *other_profile_questions]
         self.wordpress_settings.naver_kin_last_questions = list(self.naver_kin_questions)
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
         self._render_naver_kin_questions(self.naver_kin_questions)
@@ -27477,8 +28151,8 @@ class KeywordApp(ctk.CTk):
         if isinstance(payload, dict) and payload.get("current_url"):
             message += f" 현재 URL: {payload['current_url']}"
         if hasattr(self, "naver_kin_status_label"):
-            count = len(self.naver_kin_questions)
-            body_count = sum(1 for question in self.naver_kin_questions if str(question.get("question_text") or "").strip())
+            count = len(normalized_questions)
+            body_count = sum(1 for question in normalized_questions if str(question.get("question_text") or "").strip())
             self.naver_kin_status_label.configure(
                 text=f"현재 상태: 질문 {count}개 확인 완료 · 본문 {body_count}개 수집",
                 text_color="#48d980",
@@ -27678,8 +28352,14 @@ class KeywordApp(ctk.CTk):
     def _handle_naver_kin_automation_done(self, payload: dict) -> None:
         self._refresh_daily_publish_limit_statuses()
         question_url = str(payload.get("question_url") or "").strip()
+        profile_scope = naver_kin_profile_scope(
+            {"profile_scope": payload.get("profile_scope")}
+        )
         for question in self.naver_kin_questions:
-            if str(question.get("url") or "").strip() == question_url:
+            if (
+                str(question.get("url") or "").strip() == question_url
+                and naver_kin_question_profile_scope(question) == profile_scope
+            ):
                 question["automation_status"] = "답변 완료"
                 question["wordpress_url"] = str(payload.get("wordpress_url") or "").strip()
                 question["wordpress_title"] = str(payload.get("wordpress_title") or "").strip()
@@ -27742,8 +28422,12 @@ class KeywordApp(ctk.CTk):
 
     def _handle_naver_kin_automation_error(self, payload: str) -> None:
         error_message = str(payload)
+        profile_scope = self._selected_naver_kin_profile_scope()
         for question in self.naver_kin_questions:
-            if str(question.get("automation_status") or "") == "진행 중":
+            if (
+                str(question.get("automation_status") or "") == "진행 중"
+                and naver_kin_question_profile_scope(question) == profile_scope
+            ):
                 question["automation_status"] = "오류"
                 question["automation_error"] = error_message
                 question["error_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -27782,6 +28466,15 @@ class KeywordApp(ctk.CTk):
     def _render_naver_kin_questions(self, questions: list[dict]) -> None:
         if not hasattr(self, "naver_kin_question_frame"):
             return
+        try:
+            active_scope = self._selected_naver_kin_profile_scope()
+            questions = [
+                question
+                for question in questions
+                if naver_kin_question_profile_scope(question) == active_scope
+            ]
+        except (AttributeError, tk.TclError):
+            questions = list(questions or [])
         for widget in self.naver_kin_question_frame.winfo_children():
             widget.destroy()
         if not questions:
@@ -36182,6 +36875,30 @@ class KeywordApp(ctk.CTk):
                 self._refresh_automation_queue()
         if hasattr(self, "_start_naver_kin_clipboard_monitor"):
             if page_name == "naver_kin":
+                if hasattr(self, "naver_kin_tab_frames"):
+                    naver_kin_tab = (
+                        getattr(self, "active_naver_kin_tab", "writing") or "writing"
+                    )
+                    self._switch_naver_kin_tab(naver_kin_tab)
+                    alternate_tab = (
+                        "settings" if naver_kin_tab == "writing" else "writing"
+                    )
+                    self.after(
+                        30,
+                        lambda key=alternate_tab: (
+                            self._switch_naver_kin_tab(key)
+                            if getattr(self, "current_page", "") == "naver_kin"
+                            else None
+                        ),
+                    )
+                    self.after(
+                        70,
+                        lambda key=naver_kin_tab: (
+                            self._switch_naver_kin_tab(key)
+                            if getattr(self, "current_page", "") == "naver_kin"
+                            else None
+                        ),
+                    )
                 self._start_naver_kin_clipboard_monitor()
             elif hasattr(self, "_stop_naver_kin_clipboard_monitor"):
                 self._stop_naver_kin_clipboard_monitor()
@@ -37028,6 +37745,19 @@ class KeywordApp(ctk.CTk):
                     if hasattr(self, "naver_blog_image_model_entry")
                     else self.wordpress_settings.naver_blog_image_model
                 )
+            ),
+            naver_kin_profiles=(
+                self._current_naver_kin_profiles()
+                if hasattr(self, "naver_kin_active_profile_var")
+                else self.wordpress_settings.naver_kin_profiles
+            ),
+            naver_kin_active_profile=(
+                normalize_naver_kin_active_profile(
+                    self.naver_kin_active_profile_var.get(),
+                    self._current_naver_kin_profiles(),
+                )
+                if hasattr(self, "naver_kin_active_profile_var")
+                else self.wordpress_settings.naver_kin_active_profile
             ),
             naver_kin_question_list_url=(
                 self.naver_kin_url_entry.get().strip()
@@ -40303,6 +41033,16 @@ class KeywordApp(ctk.CTk):
                     self._handle_naver_kin_done(payload)
                 elif event_type == "naver_kin_error":
                     self._handle_naver_kin_error(payload)
+                elif event_type == "naver_kin_profile_progress":
+                    if hasattr(self, "naver_kin_profile_status_label"):
+                        self.naver_kin_profile_status_label.configure(
+                            text=f"현재 상태: {payload}",
+                            text_color="#6dadff",
+                        )
+                elif event_type == "naver_kin_profile_done":
+                    self._handle_naver_kin_profile_done(payload)
+                elif event_type == "naver_kin_profile_error":
+                    self._handle_naver_kin_profile_error(payload)
                 elif event_type == "naver_kin_direct_progress":
                     if hasattr(self, "naver_kin_status_label"):
                         self.naver_kin_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")

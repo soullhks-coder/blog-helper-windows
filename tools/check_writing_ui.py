@@ -213,6 +213,26 @@ def main() -> None:
             assert "자동화 흐름" not in visible_copy
             assert app.naver_kin_start_button.cget("text") == "질문 목록 수집"
             assert app.naver_kin_direct_collect_button.cget("text") == "수집"
+            assert set(app.naver_kin_tab_buttons) == {"writing", "settings"}
+            writing_profile_radios = [
+                widget
+                for widget in app.naver_kin_writing_profile_frame.winfo_children()
+                if isinstance(widget, app_module.ctk.CTkRadioButton)
+            ]
+            assert len(writing_profile_radios) == 3
+            screenshot("naver-kin-writing")
+            app._switch_naver_kin_tab("settings")
+            settle()
+            settings_profile_cards = app.naver_kin_profile_cards_frame.winfo_children()
+            assert len(settings_profile_cards) == 3
+            assert len({
+                app_module.naver_kin_profile_scope(profile, index)
+                for index, profile in enumerate(app._current_naver_kin_profiles())
+            }) == 3
+            screenshot("naver-kin-settings")
+            app._switch_naver_kin_tab("writing")
+            settle()
+            screenshot("naver-kin-writing-return")
             assert list(app.naver_kin_collect_count_menu.cget("values")) == [
                 f"{count}개" for count in range(1, 11)
             ]
@@ -264,14 +284,17 @@ def main() -> None:
             fixed_y = app.naver_kin_fixed_progress_panel.winfo_rooty()
             app.naver_kin_scroll._parent_canvas.yview_moveto(1)
             settle()
-            assert app.naver_kin_fixed_progress_panel.winfo_rooty() == fixed_y
+            assert app.naver_kin_fixed_progress_panel.winfo_rooty() == fixed_y, (
+                fixed_y,
+                app.naver_kin_fixed_progress_panel.winfo_rooty(),
+            )
             app._set_naver_kin_progress("워드프레스 글 발행을 준비하고 있습니다...", 0.42)
             assert app.naver_kin_fixed_progress_bar.get() == 0.42
             assert app.naver_kin_fixed_progress_percent.cget("text") == "42%"
             app._set_naver_kin_progress("N지식인 답변 등록 완료", state="complete")
             assert app.naver_kin_fixed_progress_bar.get() == 1.0
             assert app.naver_kin_fixed_progress_badge.cget("text") == "완료"
-            print(f"{sys.platform} {args.theme}: Naver Knowledge iN direct URL and fixed progress UI passed")
+            print(f"{sys.platform} {args.theme}: Naver Knowledge iN tabs, three profiles, direct URL and fixed progress UI passed")
 
             # NBlog exposes six independent slots in matching 3 x 2 grids on
             # both the writing and settings tabs.

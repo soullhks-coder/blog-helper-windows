@@ -281,6 +281,12 @@ class NaverKinAutomationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "app_state.json"
             settings = main.WordPressSettings(
+                naver_kin_profiles=[
+                    {"name": "지식인 1", "nickname": "내 계정"},
+                    {"name": "지식인 2", "nickname": "엄마 계정"},
+                    {"name": "지식인 3", "nickname": "업무 계정"},
+                ],
+                naver_kin_active_profile="지식인 2",
                 naver_kin_collect_count=4,
                 naver_kin_collect_interval_minutes=120,
                 naver_kin_answer_interval_minutes=10,
@@ -302,6 +308,11 @@ class NaverKinAutomationTests(unittest.TestCase):
             self.assertEqual(loaded.naver_kin_collect_interval_minutes, 120)
             self.assertEqual(loaded.naver_kin_answer_interval_minutes, 10)
             self.assertEqual(loaded.naver_kin_wordpress_prompt_id, "wordpress-kin")
+            self.assertEqual(loaded.naver_kin_active_profile, "지식인 2")
+            self.assertEqual(
+                [profile["nickname"] for profile in loaded.naver_kin_profiles],
+                ["내 계정", "엄마 계정", "업무 계정"],
+            )
             self.assertEqual(loaded.naver_kin_next_action, "collect")
             self.assertEqual(loaded.naver_kin_next_run_at, 12345.0)
             self.assertEqual(
@@ -348,6 +359,7 @@ class NaverKinAutomationTests(unittest.TestCase):
             "최신순",
             result_queue,
             6,
+            main.NAVER_PLAYWRIGHT_PROFILE_KIN,
         )
         self.assertEqual(result_queue.get_nowait(), ("naver_kin_done", payload))
 
@@ -462,7 +474,53 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("naver_kin_clipboard_status_label", source)
         self.assertIn("지식인 상세 URL을 복사하면", source)
         self.assertIn("naver_kin_fixed_progress_bar", source)
+        self.assertIn('(("writing", "글작성"), ("settings", "설정"))', source)
+        self.assertIn("_build_naver_kin_settings_tab", source)
         self.assertIn("_start_naver_kin_question_worker", direct_handler)
+
+    def test_three_naver_kin_profiles_use_distinct_browser_storage(self) -> None:
+        profiles = main.normalize_naver_kin_profiles(
+            [{"nickname": "나"}, {"nickname": "엄마"}, {"nickname": "업무"}]
+        )
+
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(
+            [profile["profile_scope"] for profile in profiles],
+            list(main.NAVER_KIN_PROFILE_SCOPES),
+        )
+        self.assertEqual(len({profile["profile_path"] for profile in profiles}), 3)
+        self.assertEqual(profiles[0]["profile_path"], str(main.NAVER_KIN_CHROME_PROFILE_DIR))
+        self.assertEqual(
+            main.naver_kin_profile_scope_for_name(profiles, "지식인 2"),
+            main.NAVER_PLAYWRIGHT_PROFILE_KIN_2,
+        )
+
+    def test_profile_scope_is_forwarded_to_collect_and_answer_workers(self) -> None:
+        result_queue = queue.Queue()
+        with patch.object(
+            main,
+            "run_naver_kin_single_question_playwright",
+            return_value=(True, {"title": "질문"}),
+        ) as collector:
+            worker = main.NaverKinQuestionCollectorWorker(
+                "https://kin.naver.com/qna/detail.naver?docId=123",
+                result_queue,
+                main.NAVER_PLAYWRIGHT_PROFILE_KIN_3,
+            )
+            worker.run()
+
+        collector.assert_called_once_with(
+            "https://kin.naver.com/qna/detail.naver?docId=123",
+            result_queue,
+            main.NAVER_PLAYWRIGHT_PROFILE_KIN_3,
+        )
+        worker = main.NaverKinAutomationWorker(
+            main.WordPressSettings(),
+            {},
+            result_queue,
+            main.NAVER_PLAYWRIGHT_PROFILE_KIN_2,
+        )
+        self.assertEqual(worker.profile_scope, main.NAVER_PLAYWRIGHT_PROFILE_KIN_2)
 
     def test_completion_uses_styled_dialog_and_opens_answer_url(self) -> None:
         handler_source = self._method_source("_handle_naver_kin_automation_done")
@@ -658,6 +716,27 @@ class NaverKinAutomationTests(unittest.TestCase):
             count = main.KeywordApp._naver_kin_daily_answer_count(app)
 
         self.assertEqual(count, 2)
+
+    def test_daily_answer_counts_are_isolated_per_kin_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            main,
+            "DAILY_PUBLISH_COUNTS_FILE",
+            Path(directory) / "daily-publish-counts.json",
+        ):
+            profile_one_account = main.naver_kin_daily_answer_account(
+                main.NAVER_PLAYWRIGHT_PROFILE_KIN
+            )
+            main.DailyPublishLimitStore.record_success("naver_kin", profile_one_account)
+            app = SimpleNamespace(
+                naver_kin_questions=[],
+                _selected_naver_kin_profile_scope=lambda: main.NAVER_PLAYWRIGHT_PROFILE_KIN,
+            )
+            self.assertEqual(main.KeywordApp._naver_kin_daily_answer_count(app), 1)
+
+            app._selected_naver_kin_profile_scope = (
+                lambda: main.NAVER_PLAYWRIGHT_PROFILE_KIN_2
+            )
+            self.assertEqual(main.KeywordApp._naver_kin_daily_answer_count(app), 0)
 
 
 if __name__ == "__main__":
