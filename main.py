@@ -9554,6 +9554,40 @@ def is_naver_logged_in_context(context) -> bool:
     return False
 
 
+def extract_naver_kin_nickname(page) -> str:
+    """Read the signed-in Naver nickname shown by the Knowledge iN GNB."""
+    try:
+        nickname = str(
+            page.evaluate(
+                """() => {
+                    const selectors = [
+                        '#gnb_name1',
+                        '#gnb_name2',
+                        '.gnb_name',
+                        '.my_info .name',
+                        '.myinfo .name',
+                        '.profile_info .name'
+                    ];
+                    for (const selector of selectors) {
+                        const nodes = [...document.querySelectorAll(selector)];
+                        for (const node of nodes) {
+                            const value = (node.textContent || '').trim();
+                            if (value) return value;
+                        }
+                    }
+                    return '';
+                }"""
+            )
+            or ""
+        ).strip()
+    except Exception:
+        nickname = ""
+    nickname = re.sub(r"\s*님\s*$", "", nickname).strip()
+    if nickname.lower() in {"로그인", "내정보", "프로필", "naver"}:
+        return ""
+    return nickname[:80]
+
+
 def extract_naver_blog_nickname(page) -> str:
     try:
         nickname = str(
@@ -13416,7 +13450,7 @@ def run_naver_kin_profile_playwright(
     profile_scope: str,
     result_queue: queue.Queue,
     login_timeout_seconds: int = 300,
-) -> tuple[bool, str]:
+) -> tuple[bool, object]:
     """Open one isolated Knowledge iN profile and retain its login session."""
     try:
         from playwright.sync_api import sync_playwright
@@ -13487,11 +13521,24 @@ def run_naver_kin_profile_playwright(
             if not logged_in:
                 return False, "5분 안에 네이버 로그인이 확인되지 않았습니다."
 
+            nickname = ""
+            try:
+                if "kin.naver.com" not in str(page.url or "").lower():
+                    page.goto("https://kin.naver.com/", wait_until="domcontentloaded")
+                page.wait_for_timeout(700)
+                nickname = extract_naver_kin_nickname(page)
+            except Exception:
+                nickname = ""
             save_naver_blog_storage_state(context, scope)
             result_queue.put(
                 (
                     "naver_kin_profile_progress",
-                    "로그인 확인 완료 · 프로필을 저장했습니다. 확인을 마쳤으면 Chrome 창을 직접 닫아주세요.",
+                    (
+                        f"네이버 계정 '{nickname}' 확인 완료 · 프로필을 저장했습니다. "
+                        "확인을 마쳤으면 Chrome 창을 직접 닫아주세요."
+                        if nickname
+                        else "로그인 확인 완료 · 프로필을 저장했습니다. 확인을 마쳤으면 Chrome 창을 직접 닫아주세요."
+                    ),
                 )
             )
             # Do not close a successfully authenticated profile immediately.
@@ -13511,9 +13558,21 @@ def run_naver_kin_profile_playwright(
                         save_naver_blog_storage_state(context, scope)
                     except Exception:
                         pass
+                    for candidate_page in reversed(open_pages):
+                        candidate_nickname = extract_naver_kin_nickname(candidate_page)
+                        if candidate_nickname:
+                            nickname = candidate_nickname
+                            break
                     last_profile_snapshot_at = now
                 time.sleep(0.5)
-            return True, "네이버 로그인 프로필을 확인하고 저장했습니다."
+            return True, {
+                "message": (
+                    f"네이버 계정 '{nickname}' 프로필을 확인하고 저장했습니다."
+                    if nickname
+                    else "네이버 로그인 프로필을 확인하고 저장했습니다."
+                ),
+                "nickname": nickname,
+            }
         except Exception as exc:
             append_runtime_log("NKin", f"프로필 확인 실패: {scope} · {exc}")
             return False, str(exc)
@@ -19356,14 +19415,14 @@ class NaverKinProfileWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            success, message = run_naver_kin_profile_playwright(
+            success, result = run_naver_kin_profile_playwright(
                 self.profile_scope,
                 self.result_queue,
             )
             event = "naver_kin_profile_done" if success else "naver_kin_profile_error"
-            self.result_queue.put(
-                (event, {"profile_scope": self.profile_scope, "message": message})
-            )
+            payload = dict(result) if isinstance(result, dict) else {"message": str(result)}
+            payload["profile_scope"] = self.profile_scope
+            self.result_queue.put((event, payload))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(
                 (
@@ -26337,7 +26396,26 @@ class KeywordApp(ctk.CTk):
     def _handle_naver_kin_profile_done(self, payload) -> None:
         self.naver_kin_profile_worker = None
         message = str((payload or {}).get("message") or "프로필 저장을 완료했습니다.")
+        nickname = str((payload or {}).get("nickname") or "").strip()
+        requested_scope = naver_kin_profile_scope(
+            {"profile_scope": (payload or {}).get("profile_scope")}
+        )
+        profiles = self._current_naver_kin_profiles()
         active_name = self.wordpress_settings.naver_kin_active_profile
+        if nickname:
+            for index, profile in enumerate(profiles):
+                if naver_kin_profile_scope(profile, index) != requested_scope:
+                    continue
+                profile["nickname"] = nickname
+                active_name = str(profile.get("name") or active_name)
+                nickname_var = getattr(self, "naver_kin_profile_vars", {}).get(
+                    f"{index}:nickname"
+                )
+                if nickname_var is not None:
+                    nickname_var.set(nickname)
+                break
+            self.wordpress_settings.naver_kin_profiles = profiles
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
         self._refresh_naver_kin_writing_profile_choices()
         self._refresh_naver_kin_profile_cards()
         if hasattr(self, "naver_kin_profile_status_label"):

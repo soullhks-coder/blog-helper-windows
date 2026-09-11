@@ -522,6 +522,34 @@ class NaverKinAutomationTests(unittest.TestCase):
                 main.has_saved_naver_login(main.NAVER_PLAYWRIGHT_PROFILE_KIN)
             )
 
+    def test_naver_kin_nickname_is_read_from_signed_in_gnb(self) -> None:
+        page = SimpleNamespace(evaluate=lambda _script: "정여사님")
+
+        self.assertEqual(main.extract_naver_kin_nickname(page), "정여사")
+
+    def test_profile_worker_forwards_detected_nickname(self) -> None:
+        result_queue = queue.Queue()
+        with patch.object(
+            main,
+            "run_naver_kin_profile_playwright",
+            return_value=(
+                True,
+                {"message": "프로필 저장 완료", "nickname": "정여사"},
+            ),
+        ):
+            worker = main.NaverKinProfileWorker(
+                main.NAVER_PLAYWRIGHT_PROFILE_KIN_2,
+                result_queue,
+            )
+            worker.run()
+
+        event, payload = result_queue.get_nowait()
+        self.assertEqual(event, "naver_kin_profile_done")
+        self.assertEqual(payload["nickname"], "정여사")
+        self.assertEqual(
+            payload["profile_scope"], main.NAVER_PLAYWRIGHT_PROFILE_KIN_2
+        )
+
     def test_kin_profile_ui_uses_saved_login_for_registered_label(self) -> None:
         writing_source = self._method_source(
             "_refresh_naver_kin_writing_profile_choices"
@@ -534,6 +562,8 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("네이버 로그인 등록됨", cards_source)
         self.assertIn("_refresh_naver_kin_writing_profile_choices()", done_source)
         self.assertIn("_refresh_naver_kin_profile_cards()", done_source)
+        self.assertIn('profile["nickname"] = nickname', done_source)
+        self.assertIn("AppStateStore.save", done_source)
 
     def test_profile_scope_is_forwarded_to_collect_and_answer_workers(self) -> None:
         result_queue = queue.Queue()
@@ -569,6 +599,8 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("Chrome 창을 직접 닫아주세요.", source)
         self.assertIn("while True:", source)
         self.assertIn("if not open_pages:\n                    break", source)
+        self.assertIn("extract_naver_kin_nickname(page)", source)
+        self.assertIn("candidate_nickname", source)
         self.assertLess(
             source.index("save_naver_blog_storage_state(context, scope)"),
             source.index("# Do not close a successfully authenticated profile immediately."),
