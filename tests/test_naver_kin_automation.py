@@ -495,6 +495,46 @@ class NaverKinAutomationTests(unittest.TestCase):
             main.NAVER_PLAYWRIGHT_PROFILE_KIN_2,
         )
 
+    def test_saved_naver_login_marks_profile_as_registered(self) -> None:
+        with patch.object(
+            main,
+            "load_naver_blog_storage_state",
+            return_value={
+                "cookies": [
+                    {
+                        "name": "NID_AUT",
+                        "domain": ".naver.com",
+                        "expires": time.time() + 3600,
+                    }
+                ]
+            },
+        ):
+            self.assertTrue(
+                main.has_saved_naver_login(main.NAVER_PLAYWRIGHT_PROFILE_KIN)
+            )
+
+        with patch.object(
+            main,
+            "load_naver_blog_storage_state",
+            return_value={"cookies": [{"name": "NNB", "domain": ".naver.com"}]},
+        ):
+            self.assertFalse(
+                main.has_saved_naver_login(main.NAVER_PLAYWRIGHT_PROFILE_KIN)
+            )
+
+    def test_kin_profile_ui_uses_saved_login_for_registered_label(self) -> None:
+        writing_source = self._method_source(
+            "_refresh_naver_kin_writing_profile_choices"
+        )
+        cards_source = self._method_source("_refresh_naver_kin_profile_cards")
+        done_source = self._method_source("_handle_naver_kin_profile_done")
+
+        self.assertIn("has_saved_naver_login(profile_scope)", writing_source)
+        self.assertIn('"등록됨"', writing_source)
+        self.assertIn("네이버 로그인 등록됨", cards_source)
+        self.assertIn("_refresh_naver_kin_writing_profile_choices()", done_source)
+        self.assertIn("_refresh_naver_kin_profile_cards()", done_source)
+
     def test_profile_scope_is_forwarded_to_collect_and_answer_workers(self) -> None:
         result_queue = queue.Queue()
         with patch.object(

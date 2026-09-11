@@ -8221,6 +8221,29 @@ def load_naver_blog_storage_state(
     return normalize_naver_blog_storage_state(state)
 
 
+def has_saved_naver_login(
+    profile_scope: object = NAVER_PLAYWRIGHT_PROFILE_BLOG,
+) -> bool:
+    """Return whether one isolated profile contains a usable Naver login."""
+    state = load_naver_blog_storage_state(profile_scope)
+    cookies = state.get("cookies", []) if isinstance(state, dict) else []
+    now = time.time()
+    for cookie in cookies if isinstance(cookies, list) else []:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "")
+        domain = str(cookie.get("domain") or "").lower()
+        if name not in {"NID_AUT", "NID_SES", "NID_JKL"} or "naver.com" not in domain:
+            continue
+        try:
+            expires = float(cookie.get("expires", -1) or -1)
+        except (TypeError, ValueError):
+            expires = -1
+        if expires < 0 or expires > now:
+            return True
+    return False
+
+
 def save_naver_blog_storage_state(
     context,
     profile_scope: object = NAVER_PLAYWRIGHT_PROFILE_BLOG,
@@ -26077,10 +26100,14 @@ class KeywordApp(ctk.CTk):
             frame.grid_columnconfigure(column, weight=1, uniform="naver_kin_writing_profiles")
         for index, profile in enumerate(profiles):
             name = str(profile.get("name") or f"지식인 {index + 1}")
-            nickname = str(profile.get("nickname") or "미등록")
+            nickname = str(profile.get("nickname") or "").strip()
+            profile_scope = naver_kin_profile_scope(profile, index)
+            account_label = nickname or (
+                "등록됨" if has_saved_naver_login(profile_scope) else "미등록"
+            )
             ctk.CTkRadioButton(
                 frame,
-                text=f"{name} · {nickname}",
+                text=f"{name} · {account_label}",
                 variable=self.naver_kin_active_profile_var,
                 value=name,
                 command=lambda value=name: self._set_naver_kin_active_profile(value),
@@ -26146,6 +26173,12 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_active_profile_var.set(active_name)
         for index, profile in enumerate(profiles):
             name = str(profile.get("name") or f"지식인 {index + 1}")
+            profile_scope = naver_kin_profile_scope(profile, index)
+            login_status = (
+                "네이버 로그인 등록됨"
+                if has_saved_naver_login(profile_scope)
+                else "네이버 로그인 미등록"
+            )
             card = ctk.CTkFrame(
                 self.naver_kin_profile_cards_frame,
                 fg_color=palette["panel"],
@@ -26192,7 +26225,7 @@ class KeywordApp(ctk.CTk):
             self.naver_kin_profile_vars[f"{index}:nickname"] = nickname_var
             ctk.CTkLabel(
                 card,
-                text=f"독립 로그인 저장공간 {index + 1}",
+                text=f"{login_status} · 독립 저장공간 {index + 1}",
                 text_color=palette["subtext"],
                 font=ctk.CTkFont(size=11),
             ).grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 0), sticky="w")
@@ -26305,6 +26338,8 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_profile_worker = None
         message = str((payload or {}).get("message") or "프로필 저장을 완료했습니다.")
         active_name = self.wordpress_settings.naver_kin_active_profile
+        self._refresh_naver_kin_writing_profile_choices()
+        self._refresh_naver_kin_profile_cards()
         if hasattr(self, "naver_kin_profile_status_label"):
             self.naver_kin_profile_status_label.configure(
                 text=f"현재 상태: {active_name} · {message}",
