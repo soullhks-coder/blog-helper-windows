@@ -354,13 +354,18 @@ class NaverKinAutomationTests(unittest.TestCase):
             )
             worker.run()
 
-        bootstrap.assert_called_once_with(
-            main.NAVER_KIN_QUESTION_LIST_URL,
-            "최신순",
-            result_queue,
-            6,
-            main.NAVER_PLAYWRIGHT_PROFILE_KIN,
+        bootstrap_args = bootstrap.call_args.args
+        self.assertEqual(
+            bootstrap_args[:5],
+            (
+                main.NAVER_KIN_QUESTION_LIST_URL,
+                "최신순",
+                result_queue,
+                6,
+                main.NAVER_PLAYWRIGHT_PROFILE_KIN,
+            ),
         )
+        self.assertIs(bootstrap_args[5], worker.cancel_event)
         self.assertEqual(result_queue.get_nowait(), ("naver_kin_done", payload))
 
     def test_answer_editor_supports_naver_input_buffer_without_clipboard_paste(self) -> None:
@@ -470,6 +475,9 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn('text="지식인 URL"', source)
         self.assertIn('text="참고 자료"', source)
         self.assertIn("naver_kin_reference_textbox", source)
+        self.assertIn('text="수집중단"', source)
+        self.assertIn("naver_kin_collect_stop_button", source)
+        self.assertIn("command=self._stop_naver_kin_collection", source)
         self.assertIn("naver_kin_direct_collect_button", source)
         self.assertIn("naver_kin_clipboard_status_label", source)
         self.assertIn("지식인 상세 URL을 복사하면", source)
@@ -579,11 +587,16 @@ class NaverKinAutomationTests(unittest.TestCase):
             )
             worker.run()
 
-        collector.assert_called_once_with(
-            "https://kin.naver.com/qna/detail.naver?docId=123",
-            result_queue,
-            main.NAVER_PLAYWRIGHT_PROFILE_KIN_3,
+        collector_args = collector.call_args.args
+        self.assertEqual(
+            collector_args[:3],
+            (
+                "https://kin.naver.com/qna/detail.naver?docId=123",
+                result_queue,
+                main.NAVER_PLAYWRIGHT_PROFILE_KIN_3,
+            ),
         )
+        self.assertIs(collector_args[3], worker.cancel_event)
         worker = main.NaverKinAutomationWorker(
             main.WordPressSettings(),
             {},
@@ -591,6 +604,48 @@ class NaverKinAutomationTests(unittest.TestCase):
             main.NAVER_PLAYWRIGHT_PROFILE_KIN_2,
         )
         self.assertEqual(worker.profile_scope, main.NAVER_PLAYWRIGHT_PROFILE_KIN_2)
+
+    def test_naver_kin_workers_emit_cancelled_event(self) -> None:
+        workers = (
+            main.NaverKinBootstrapWorker(
+                main.NAVER_KIN_QUESTION_LIST_URL,
+                "최신순",
+                queue.Queue(),
+            ),
+            main.NaverKinQuestionCollectorWorker(
+                "https://kin.naver.com/qna/detail.naver?docId=123",
+                queue.Queue(),
+            ),
+            main.NaverKinAutomationWorker(
+                main.WordPressSettings(),
+                {},
+                queue.Queue(),
+            ),
+        )
+
+        for worker in workers:
+            worker.cancel()
+            worker.run()
+            event, _payload = worker.result_queue.get_nowait()
+            self.assertEqual(event, "naver_kin_cancelled")
+
+    def test_collection_stop_resets_all_naver_kin_workflow_state(self) -> None:
+        stop_source = self._method_source("_stop_naver_kin_collection")
+        poll_source = self._method_source("_poll_queue")
+        answer_source = self._method_source("run_naver_kin_answer_playwright")
+
+        for worker_attr in (
+            "naver_kin_worker",
+            "naver_kin_direct_worker",
+            "naver_kin_automation_worker",
+        ):
+            self.assertIn(f'"{worker_attr}"', stop_source)
+        self.assertIn("cancel()", stop_source)
+        self.assertIn('question["automation_status"] = ""', stop_source)
+        self.assertIn('state="idle"', stop_source)
+        self.assertIn('event_type == "naver_kin_cancelled"', poll_source)
+        self.assertIn("_raise_if_naver_kin_cancelled(cancel_event)", answer_source)
+        self.assertIn("cancel_event.is_set()", answer_source)
 
     def test_profile_login_window_stays_open_until_user_closes_it(self) -> None:
         source = self._method_source("run_naver_kin_profile_playwright")

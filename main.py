@@ -10141,9 +10141,18 @@ class NaverBlogAutomationCancelled(RuntimeError):
     """Raised when the current NBlog automation run is stopped by the user."""
 
 
+class NaverKinAutomationCancelled(RuntimeError):
+    """Raised when the current Knowledge iN run is stopped by the user."""
+
+
 def _raise_if_naver_blog_cancelled(cancel_event: threading.Event | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise NaverBlogAutomationCancelled("네이버 블로그 자동화를 사용자가 중단했습니다.")
+
+
+def _raise_if_naver_kin_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise NaverKinAutomationCancelled("N지식인 작업을 사용자가 중단했습니다.")
 
 
 def _replace_naver_editor_text(
@@ -13026,6 +13035,7 @@ def run_naver_kin_single_question_playwright(
     question_url: str,
     result_queue: queue.Queue,
     profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bool, dict | str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -13047,6 +13057,7 @@ def run_naver_kin_single_question_playwright(
     append_runtime_log("NKin", f"단건 질문 수집 전용 Chrome 프로필: {profile_dir}")
 
     with sync_playwright() as playwright:
+        _raise_if_naver_kin_cancelled(cancel_event)
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
             executable_path=str(chrome_path),
@@ -13060,6 +13071,7 @@ def run_naver_kin_single_question_playwright(
             ],
         )
         try:
+            _raise_if_naver_kin_cancelled(cancel_event)
             saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
@@ -13071,16 +13083,21 @@ def run_naver_kin_single_question_playwright(
             page.set_default_timeout(12_000)
             page.set_default_navigation_timeout(45_000)
             result_queue.put(("naver_kin_direct_progress", "입력한 지식인 질문 URL로 이동하고 있습니다..."))
+            _raise_if_naver_kin_cancelled(cancel_event)
             page.goto(target_url, wait_until="domcontentloaded")
             page.wait_for_timeout(1400)
+            _raise_if_naver_kin_cancelled(cancel_event)
             try:
                 normalize_naver_kin_question_url(page.url)
             except ValueError as exc:
                 return False, f"질문 상세페이지로 이동하지 못했습니다: {exc}"
             result_queue.put(("naver_kin_direct_progress", "질문 제목과 본문을 수집하고 있습니다..."))
             question = extract_naver_kin_question_from_page(page, target_url)
+            _raise_if_naver_kin_cancelled(cancel_event)
             save_naver_blog_storage_state(context, profile_scope)
             return True, question
+        except NaverKinAutomationCancelled:
+            raise
         except Exception as exc:
             append_naver_kin_debug_log(f"single_question_collect_error url={target_url} error={exc}")
             return False, str(exc)
@@ -13098,6 +13115,7 @@ def run_naver_kin_playwright_bootstrap(
     result_queue: queue.Queue,
     collect_count: int = 10,
     profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bool, dict | str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -13118,6 +13136,7 @@ def run_naver_kin_playwright_bootstrap(
     append_runtime_log("NKin", f"전용 Chrome 프로필: {profile_dir}")
 
     def extract_question_body(detail_page) -> str:
+        _raise_if_naver_kin_cancelled(cancel_event)
         selectors = (
             ".questionDetail",
             "div.questionDetail",
@@ -13133,6 +13152,7 @@ def run_naver_kin_playwright_bootstrap(
             "div#content .question",
         )
         for selector in selectors:
+            _raise_if_naver_kin_cancelled(cancel_event)
             try:
                 locator = detail_page.locator(selector).first
                 if locator.count() <= 0:
@@ -13170,6 +13190,7 @@ def run_naver_kin_playwright_bootstrap(
             return ""
 
     def question_has_attached_image(detail_page) -> bool:
+        _raise_if_naver_kin_cancelled(cancel_event)
         try:
             return bool(detail_page.evaluate(
                 """
@@ -13217,6 +13238,7 @@ def run_naver_kin_playwright_bootstrap(
             return False
 
     def extract_detail_title(detail_page) -> str:
+        _raise_if_naver_kin_cancelled(cancel_event)
         for selector in (
             ".questionDetail .c-heading__title",
             ".end_question .c-heading__title",
@@ -13225,6 +13247,7 @@ def run_naver_kin_playwright_bootstrap(
             "[class*='questionTitle']",
             ".c-heading__title",
         ):
+            _raise_if_naver_kin_cancelled(cancel_event)
             try:
                 candidates = detail_page.locator(selector)
                 for index in range(min(candidates.count(), 6)):
@@ -13269,6 +13292,7 @@ def run_naver_kin_playwright_bootstrap(
         return ""
 
     def extract_anchor_title(anchor) -> str:
+        _raise_if_naver_kin_cancelled(cancel_event)
         for attribute in ("title", "aria-label"):
             try:
                 title = clean_naver_kin_question_title(anchor.get_attribute(attribute))
@@ -13292,6 +13316,7 @@ def run_naver_kin_playwright_bootstrap(
             return ""
 
     with sync_playwright() as playwright:
+        _raise_if_naver_kin_cancelled(cancel_event)
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
             executable_path=str(chrome_path),
@@ -13305,6 +13330,7 @@ def run_naver_kin_playwright_bootstrap(
             ],
         )
         try:
+            _raise_if_naver_kin_cancelled(cancel_event)
             saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
@@ -13316,8 +13342,10 @@ def run_naver_kin_playwright_bootstrap(
             page.set_default_timeout(12_000)
             page.set_default_navigation_timeout(45_000)
             result_queue.put(("naver_kin_progress", "네이버 지식인 질문 목록으로 이동 중입니다..."))
+            _raise_if_naver_kin_cancelled(cancel_event)
             page.goto(target_url, wait_until="domcontentloaded")
             page.wait_for_timeout(1400)
+            _raise_if_naver_kin_cancelled(cancel_event)
 
             if sort_mode == "최신순":
                 result_queue.put(("naver_kin_progress", "최신순 정렬 버튼을 찾는 중입니다..."))
@@ -13326,6 +13354,7 @@ def run_naver_kin_playwright_bootstrap(
                     "button:has-text('최신순')",
                     "text=최신순",
                 ):
+                    _raise_if_naver_kin_cancelled(cancel_event)
                     try:
                         page.locator(selector).first.click(timeout=1600)
                         page.wait_for_timeout(1000)
@@ -13340,10 +13369,12 @@ def run_naver_kin_playwright_bootstrap(
                 "a[href*='/qna/detail.naver']",
                 "a[href*='kin.naver.com/qna/detail']",
             ):
+                _raise_if_naver_kin_cancelled(cancel_event)
                 try:
                     anchors = page.locator(selector)
                     count = min(anchors.count(), 20)
                     for index in range(count):
+                        _raise_if_naver_kin_cancelled(cancel_event)
                         anchor = anchors.nth(index)
                         title = extract_anchor_title(anchor)
                         href = (anchor.get_attribute("href") or "").strip()
@@ -13377,6 +13408,7 @@ def run_naver_kin_playwright_bootstrap(
                 detail_page.set_default_navigation_timeout(30_000)
                 try:
                     for question_index, question in enumerate(questions, start=1):
+                        _raise_if_naver_kin_cancelled(cancel_event)
                         url = str(question.get("url") or "")
                         if not url:
                             continue
@@ -13384,6 +13416,7 @@ def run_naver_kin_playwright_bootstrap(
                             result_queue.put(("naver_kin_progress", f"{question_index}/{len(questions)} 질문 본문 수집 중..."))
                             detail_page.goto(url, wait_until="domcontentloaded")
                             detail_page.wait_for_timeout(900)
+                            _raise_if_naver_kin_cancelled(cancel_event)
                             current_detail_url = str(detail_page.url or "").lower()
                             if "/qna/detail.naver" not in current_detail_url and "docid=" not in current_detail_url and "questionid=" not in current_detail_url:
                                 question["stale"] = True
@@ -13403,6 +13436,8 @@ def run_naver_kin_playwright_bootstrap(
                             )
                             if len(question["question_text"]) < 20:
                                 question["detail_error"] = "질문 상세 본문을 20자 이상 확인하지 못했습니다."
+                        except NaverKinAutomationCancelled:
+                            raise
                         except Exception as exc:
                             question["question_text"] = ""
                             question["detail_error"] = str(exc)[:180]
@@ -13421,6 +13456,7 @@ def run_naver_kin_playwright_bootstrap(
                 result_queue.put(("naver_kin_progress", f"홈/목록으로 이동된 질문 {stale_count}개는 자동화 대상에서 제외했습니다."))
                 questions = [question for question in questions if not question.get("stale")]
             ready_count = sum(1 for question in questions if naver_kin_question_ready(question))
+            _raise_if_naver_kin_cancelled(cancel_event)
             result_queue.put(
                 (
                     "naver_kin_progress",
@@ -13598,6 +13634,7 @@ def run_naver_kin_answer_playwright(
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
     wordpress_url: str = "",
     profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_KIN,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bool, str]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -13674,6 +13711,7 @@ def run_naver_kin_answer_playwright(
     def wait_for_question_detail_content(target_page, timeout_seconds: int = 8) -> bool:
         deadline = time.time() + max(2, int(timeout_seconds or 8))
         while time.time() < deadline:
+            _raise_if_naver_kin_cancelled(cancel_event)
             if has_question_detail_content(target_page):
                 return True
             try:
@@ -13960,6 +13998,7 @@ def run_naver_kin_answer_playwright(
         current_page = fallback_page
         last_notice = 0.0
         while time.time() < deadline:
+            _raise_if_naver_kin_cancelled(cancel_event)
             current_page = select_answer_editor_page(context, current_page)
             if page_has_editable_answer_editor(current_page):
                 return current_page
@@ -14355,6 +14394,7 @@ def run_naver_kin_answer_playwright(
         sample = re.sub(r"\s+", " ", inserted_text).strip()[:36]
         deadline = time.time() + max(8, int(timeout_seconds or 25))
         while time.time() < deadline:
+            _raise_if_naver_kin_cancelled(cancel_event)
             try:
                 state = target_page.evaluate(
                     """
@@ -14423,6 +14463,7 @@ def run_naver_kin_answer_playwright(
     submit_attempted = False
     success_hold_completed = False
     with sync_playwright() as playwright:
+        _raise_if_naver_kin_cancelled(cancel_event)
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
             executable_path=str(chrome_path),
@@ -14436,6 +14477,7 @@ def run_naver_kin_answer_playwright(
             ],
         )
         try:
+            _raise_if_naver_kin_cancelled(cancel_event)
             saved_state = load_naver_blog_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
@@ -14448,11 +14490,13 @@ def run_naver_kin_answer_playwright(
             page.set_default_timeout(15_000)
             page.set_default_navigation_timeout(60_000)
             result_queue.put(("naver_kin_auto_progress", "네이버 로그인 상태를 확인하고 있습니다..."))
+            _raise_if_naver_kin_cancelled(cancel_event)
             page.goto(question_url, wait_until="domcontentloaded")
 
             deadline = time.time() + max(30, login_timeout_seconds)
             login_notice_sent = False
             while time.time() < deadline:
+                _raise_if_naver_kin_cancelled(cancel_event)
                 if is_naver_logged_in_context(context):
                     break
                 current_url = page.url or ""
@@ -14469,11 +14513,13 @@ def run_naver_kin_answer_playwright(
             else:
                 raise RuntimeError("5분 안에 네이버 로그인이 확인되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 실행해 주세요.")
 
+            _raise_if_naver_kin_cancelled(cancel_event)
             save_naver_blog_storage_state(context, profile_scope)
             result_queue.put(("naver_kin_auto_progress", "로그인 확인 완료. 지식인 질문 상세로 이동합니다..."))
             put_naver_kin_action_log(result_queue, f"지식인 질문 상세페이지로 이동합니다: {question_url}")
             page.goto(question_url, wait_until="domcontentloaded")
             page.wait_for_timeout(1600)
+            _raise_if_naver_kin_cancelled(cancel_event)
             ensure_question_detail_page(page, question_title)
             detail_screen_opened = True
             append_naver_kin_debug_log(f"detail_ready url={page.url} title={question_title[:120]}")
@@ -14484,6 +14530,7 @@ def run_naver_kin_answer_playwright(
                 success_hold_completed = True
                 return True, "지식인 질문 상세 사전검사를 통과했습니다."
 
+            _raise_if_naver_kin_cancelled(cancel_event)
             result_queue.put(("naver_kin_auto_progress", "답변 입력 영역을 여는 중입니다..."))
             if not open_answer_editor(page):
                 append_naver_kin_debug_log(f"open_answer_editor_failed url={page.url}")
@@ -14494,11 +14541,13 @@ def run_naver_kin_answer_playwright(
             if not page_has_editable_answer_editor(page):
                 raise RuntimeError("답변 에디터 입력 영역이 아직 준비되지 않았습니다. 에디터 로딩이 끝난 뒤 다시 실행해 주세요.")
 
+            _raise_if_naver_kin_cancelled(cancel_event)
             result_queue.put(("naver_kin_auto_progress", "답변 에디터 준비 완료. 생성한 답변을 입력하는 중입니다..."))
             if not fill_editor(page, answer_text):
                 raise RuntimeError("지식인 답변 입력칸을 찾지 못했습니다. 화면 구조가 바뀌었거나 로그인이 필요할 수 있습니다.")
             put_naver_kin_action_log(result_queue, "답변 에디터에 답변 본문을 입력했습니다.")
 
+            _raise_if_naver_kin_cancelled(cancel_event)
             result_queue.put(("naver_kin_auto_progress", "워드프레스 URL을 클립보드에 저장하고 링크를 삽입하는 중입니다..."))
             if not insert_wordpress_link_from_clipboard(page, wordpress_url):
                 raise RuntimeError(
@@ -14506,6 +14555,7 @@ def run_naver_kin_answer_playwright(
                     "URL은 클립보드에 저장되어 있을 수 있으니 열린 화면을 확인해 주세요."
                 )
 
+            _raise_if_naver_kin_cancelled(cancel_event)
             if automation_mode == NAVER_BLOG_AUTOMATION_MODE_SEMI:
                 result_queue.put((
                     "naver_kin_auto_progress",
@@ -14516,6 +14566,7 @@ def run_naver_kin_answer_playwright(
                     "반자동 모드로 답변 입력을 완료했습니다. 사용자의 수동 등록을 기다립니다.",
                 )
                 while True:
+                    _raise_if_naver_kin_cancelled(cancel_event)
                     if page.is_closed():
                         raise RuntimeError("답변을 등록하기 전에 지식인 브라우저가 닫혔습니다.")
                     submitted, submission_message = wait_for_answer_submission(
@@ -14539,6 +14590,7 @@ def run_naver_kin_answer_playwright(
                 submitted, submission_message = wait_for_answer_submission(page, answer_text)
                 if not submitted:
                     raise RuntimeError(submission_message)
+            _raise_if_naver_kin_cancelled(cancel_event)
             put_naver_kin_action_log(result_queue, submission_message)
             save_naver_blog_storage_state(context, profile_scope)
             hold_seconds = max(0, int(post_submit_hold_seconds or 0))
@@ -14547,9 +14599,19 @@ def run_naver_kin_answer_playwright(
                     "naver_kin_auto_progress",
                     f"답변 등록을 확인했습니다. 브라우저를 {hold_seconds}초 동안 유지합니다...",
                 ))
-                page.wait_for_timeout(hold_seconds * 1000)
+                if cancel_event is not None:
+                    if cancel_event.wait(hold_seconds):
+                        # The answer is already registered at this point. A stop
+                        # request only skips the visual hold; it must not discard
+                        # the successful daily-count/result bookkeeping.
+                        success_hold_completed = True
+                        return True, submission_message
+                else:
+                    page.wait_for_timeout(hold_seconds * 1000)
                 success_hold_completed = True
             return True, submission_message
+        except NaverKinAutomationCancelled:
+            raise
         except PlaywrightTimeoutError as exc:
             append_naver_kin_debug_log(f"playwright_timeout url={getattr(page, 'url', '')} error={exc}")
             raise RuntimeError(f"지식인 화면 응답 시간이 초과되었습니다: {exc}") from exc
@@ -14561,7 +14623,12 @@ def run_naver_kin_answer_playwright(
                 save_naver_blog_storage_state(context, profile_scope)
             except Exception:
                 pass
-            if (submit_attempted or answer_screen_opened or detail_screen_opened) and not success_hold_completed and page is not None:
+            if (
+                (submit_attempted or answer_screen_opened or detail_screen_opened)
+                and not success_hold_completed
+                and page is not None
+                and not (cancel_event is not None and cancel_event.is_set())
+            ):
                 try:
                     result_queue.put((
                         "naver_kin_auto_progress",
@@ -19362,20 +19429,29 @@ class NaverKinBootstrapWorker(threading.Thread):
         self.result_queue = result_queue
         self.collect_count = normalize_naver_kin_collect_count(collect_count)
         self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         try:
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             success, payload = run_naver_kin_playwright_bootstrap(
                 self.question_list_url,
                 self.sort_mode,
                 self.result_queue,
                 self.collect_count,
                 self.profile_scope,
+                self.cancel_event,
             )
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             if success:
                 self.result_queue.put(("naver_kin_done", payload))
             else:
                 self.result_queue.put(("naver_kin_error", payload))
+        except NaverKinAutomationCancelled:
+            self.result_queue.put(("naver_kin_cancelled", {"worker": "bootstrap"}))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("naver_kin_error", str(exc)))
 
@@ -19391,18 +19467,27 @@ class NaverKinQuestionCollectorWorker(threading.Thread):
         self.question_url = question_url
         self.result_queue = result_queue
         self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         try:
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             success, payload = run_naver_kin_single_question_playwright(
                 self.question_url,
                 self.result_queue,
                 self.profile_scope,
+                self.cancel_event,
             )
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             if success:
                 self.result_queue.put(("naver_kin_direct_collected", payload))
             else:
                 self.result_queue.put(("naver_kin_direct_error", payload))
+        except NaverKinAutomationCancelled:
+            self.result_queue.put(("naver_kin_cancelled", {"worker": "direct"}))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("naver_kin_direct_error", str(exc)))
 
@@ -19445,6 +19530,10 @@ class NaverKinAutomationWorker(threading.Thread):
         self.question = dict(question or {})
         self.result_queue = result_queue
         self.profile_scope = naver_kin_profile_scope({"profile_scope": profile_scope})
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         cleanup_paths: list[str] = []
@@ -19453,6 +19542,7 @@ class NaverKinAutomationWorker(threading.Thread):
         naver_kin_reservation_key = ""
         naver_kin_account = naver_kin_daily_answer_account(self.profile_scope)
         try:
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             question_title = clean_naver_kin_question_title(self.question.get("title"))
             question_text = clean_naver_kin_question_body(
                 self.question.get("question_text"),
@@ -19489,6 +19579,7 @@ class NaverKinAutomationWorker(threading.Thread):
 
             put_naver_kin_action_log(self.result_queue, f"선택한 지식인 질문: {question_title}")
             self.result_queue.put(("naver_kin_auto_progress", "지식인 질문 상세페이지 접근 가능 여부를 먼저 확인합니다..."))
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             run_naver_kin_answer_playwright(
                 question_url,
                 "사전 확인",
@@ -19498,7 +19589,9 @@ class NaverKinAutomationWorker(threading.Thread):
                 question_title=question_title,
                 preflight_only=True,
                 profile_scope=self.profile_scope,
+                cancel_event=self.cancel_event,
             )
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             self.result_queue.put(("naver_kin_auto_progress", "지식인 질문을 바탕으로 워드프레스 글 작성 프롬프트를 준비합니다..."))
             self.settings.target_platforms = ["wordpress"]
             self.settings.post_mode = "공개발행"
@@ -19534,6 +19627,7 @@ class NaverKinAutomationWorker(threading.Thread):
                     f"사용자 참고 자료 {len(user_reference)}자를 워드프레스 글에 반영합니다.",
                 )
             title, article_html, provider_name = self._generate_article(topic, keyword, reference_text)
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             put_naver_kin_action_log(self.result_queue, f"워드프레스 글 생성 완료: {title}")
 
             self.result_queue.put(("naver_kin_auto_progress", "워드프레스에 공개 발행할 SEO 정보를 준비합니다..."))
@@ -19542,6 +19636,7 @@ class NaverKinAutomationWorker(threading.Thread):
             meta_description = build_meta_description(topic, focus_keyword or keyword)
             wordpress_client = WordPressClient(self.settings)
             tag_ids = wordpress_client.ensure_tag_ids(tag_names)
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             wordpress_title = ensure_focus_keyword_in_title(title, focus_keyword)
             content = ensure_focus_keyword_in_content(article_html, focus_keyword)
             featured_media_id = None
@@ -19551,7 +19646,9 @@ class NaverKinAutomationWorker(threading.Thread):
             thumbnail_text = self._generate_thumbnail_text(wordpress_title, focus_keyword, question_title, question_text)
             create_default_thumbnail_png(self.settings, thumbnail_text, thumbnail_path)
             cleanup_paths.append(str(thumbnail_path))
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             thumbnail_media = wordpress_client.upload_media(thumbnail_path, wordpress_title)
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             featured_media_id = thumbnail_media.get("id")
             thumbnail_url = str(thumbnail_media.get("source_url") or "").strip()
             if thumbnail_url:
@@ -19566,6 +19663,7 @@ class NaverKinAutomationWorker(threading.Thread):
             summary = plain_text_from_html(content, limit=180) or meta_description or wordpress_title
             self.result_queue.put(("naver_kin_auto_progress", f"본문 카드뉴스 {cardnews_count}장을 만들고 워드프레스에 업로드합니다..."))
             for image_index in range(1, cardnews_count + 1):
+                _raise_if_naver_kin_cancelled(self.cancel_event)
                 cardnews_path = DATA_DIR / f"naver-kin-cardnews-{int(time.time() * 1000)}-{image_index}.png"
                 cardnews_title, cardnews_summary = build_naver_kin_cardnews_copy(
                     wordpress_title,
@@ -19583,13 +19681,16 @@ class NaverKinAutomationWorker(threading.Thread):
                     cardnews_count,
                 )
                 cleanup_paths.append(str(cardnews_path))
+                _raise_if_naver_kin_cancelled(self.cancel_event)
                 cardnews_media = wordpress_client.upload_media(cardnews_path, f"{cardnews_title} 카드뉴스 {image_index}")
+                _raise_if_naver_kin_cancelled(self.cancel_event)
                 cardnews_url = str(cardnews_media.get("source_url") or "").strip()
                 if cardnews_url:
                     cardnews_urls.append(cardnews_url)
             if cardnews_urls:
                 content = insert_cardnews_images(content, cardnews_urls, wordpress_title)
 
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             self.result_queue.put(("naver_kin_auto_progress", "워드프레스에 답변형 글을 공개발행 중입니다..."))
             wordpress_result = wordpress_client.publish_post(
                 title=wordpress_title,
@@ -19623,6 +19724,7 @@ class NaverKinAutomationWorker(threading.Thread):
             wordpress_reservation_key = ""
             put_naver_kin_action_log(self.result_queue, f"워드프레스 공개발행 완료: {wordpress_url}")
 
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             self.result_queue.put(("naver_kin_auto_progress", "프롬프트관리의 N지식인자동화 프롬프트를 참고해 지식인 답변을 작성합니다..."))
             answer_text = build_naver_kin_answer_text(
                 self.settings,
@@ -19642,6 +19744,7 @@ class NaverKinAutomationWorker(threading.Thread):
                 automation_mode=self.settings.naver_kin_automation_mode,
                 wordpress_url=wordpress_url,
                 profile_scope=self.profile_scope,
+                cancel_event=self.cancel_event,
             )
             if not success:
                 raise RuntimeError(answer_message)
@@ -19671,6 +19774,16 @@ class NaverKinAutomationWorker(threading.Thread):
                     },
                 )
             )
+        except NaverKinAutomationCancelled:
+            self.result_queue.put(
+                (
+                    "naver_kin_cancelled",
+                    {
+                        "worker": "automation",
+                        "question_url": str(self.question.get("url") or ""),
+                    },
+                )
+            )
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("naver_kin_auto_error", str(exc)))
         finally:
@@ -19679,6 +19792,7 @@ class NaverKinAutomationWorker(threading.Thread):
             cleanup_generated_upload_images(cleanup_paths)
 
     def _generate_article(self, topic: str, keyword: str, reference_text: str) -> tuple[str, str, str]:
+        _raise_if_naver_kin_cancelled(self.cancel_event)
         reference_block = (
             "\n\n[참고내용]\n"
             "아래 지식인 질문과 사용자가 직접 입력한 참고 자료를 함께 바탕으로 질문자의 의도를 먼저 파악하고, 확인 가능한 사실 중심으로 답변형 글을 작성하세요.\n"
@@ -19705,6 +19819,7 @@ class NaverKinAutomationWorker(threading.Thread):
             + reference_block
         )
         raw_title, provider_name = self._generate_with_provider(title_prompt)
+        _raise_if_naver_kin_cancelled(self.cancel_event)
         generated_title = compact_naver_kin_blog_title(raw_title, keyword, reference_text)
 
         article_managed_prompt = render_prompt_template(
@@ -19727,11 +19842,13 @@ class NaverKinAutomationWorker(threading.Thread):
             + reference_block
         )
         article_html, provider_name = self._generate_with_provider(article_prompt)
+        _raise_if_naver_kin_cancelled(self.cancel_event)
         article_html = normalize_generated_article_html(article_html)
         title = compact_naver_kin_blog_title(generated_title or extract_title_from_article_html(article_html, keyword), keyword, reference_text)
         return title, article_html, provider_name
 
     def _generate_thumbnail_text(self, title: str, focus_keyword: str, question_title: str, question_text: str) -> str:
+        _raise_if_naver_kin_cancelled(self.cancel_event)
         fallback = shorten_thumbnail_text(title, focus_keyword or question_title, max_chars=18)
         prompt = (
             "[N지식인 워드프레스 썸네일 문구 생성]\n"
@@ -19748,11 +19865,14 @@ class NaverKinAutomationWorker(threading.Thread):
         )
         try:
             generated, _provider = self._generate_with_provider(prompt)
+            _raise_if_naver_kin_cancelled(self.cancel_event)
             generated = normalize_generated_article_html(generated)
             generated = re.sub(r"^[\"'`“”‘’\s]+|[\"'`“”‘’\s]+$", "", generated)
             generated = re.split(r"[\n\r]", generated.strip())[0].strip()
             shortened = shorten_thumbnail_text(generated, focus_keyword or question_title, max_chars=18)
             return shortened or fallback
+        except NaverKinAutomationCancelled:
+            raise
         except Exception:
             return fallback
 
@@ -20570,6 +20690,8 @@ class KeywordApp(ctk.CTk):
         self._last_naver_kin_clipboard_url = ""
         self.automation_schedule_running = False
         self.naver_kin_automation_running = False
+        self.naver_kin_cancel_requested = False
+        self.naver_kin_cancel_ignore_until = 0.0
         self.active_automation_upload_item_id = ""
         self.active_automation_tistory_pending = False
         self.pending_upload_cleanup_paths: list[str] = []
@@ -24983,7 +25105,6 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_direct_url_entry.grid(
             row=4,
             column=1,
-            columnspan=2,
             padx=(0, 10),
             pady=8,
             sticky="ew",
@@ -24996,6 +25117,24 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_direct_url_entry.bind(
             "<KeyRelease>",
             lambda _event: self._save_naver_kin_settings(silent=True),
+        )
+        self.naver_kin_collect_stop_button = ctk.CTkButton(
+            setup_card,
+            text="수집중단",
+            width=110,
+            height=40,
+            corner_radius=12,
+            fg_color="#8f3535",
+            hover_color="#aa4141",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._stop_naver_kin_collection,
+        )
+        self.naver_kin_collect_stop_button.grid(
+            row=4,
+            column=2,
+            padx=(0, 10),
+            pady=8,
+            sticky="e",
         )
         self.naver_kin_direct_collect_button = ctk.CTkButton(
             setup_card,
@@ -27685,6 +27824,90 @@ class KeywordApp(ctk.CTk):
             text=text or ("진행 중..." if running else "수집"),
         )
 
+    def _stop_naver_kin_collection(self) -> None:
+        """Cancel every collection-linked Knowledge iN task and reset its UI."""
+        self.naver_kin_cancel_requested = True
+        self.naver_kin_cancel_ignore_until = time.monotonic() + 5.0
+        self.naver_kin_automation_running = False
+        for job_attr in ("_naver_kin_automation_job", "_naver_kin_clock_job"):
+            job = getattr(self, job_attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+                setattr(self, job_attr, None)
+
+        active_workers = []
+        for worker_attr in (
+            "naver_kin_worker",
+            "naver_kin_direct_worker",
+            "naver_kin_automation_worker",
+        ):
+            worker = getattr(self, worker_attr, None)
+            if worker is None or not worker.is_alive():
+                setattr(self, worker_attr, None)
+                continue
+            active_workers.append(worker)
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+
+        self.naver_kin_direct_mode = False
+        self.naver_kin_next_run_at = 0
+        self.naver_kin_next_action = "answer"
+        for question in getattr(self, "naver_kin_questions", []):
+            if str(question.get("automation_status") or "").strip() == "진행 중":
+                question["automation_status"] = ""
+                question.pop("automation_started_at", None)
+        self._persist_naver_kin_schedule_state()
+        self._render_naver_kin_questions(self.naver_kin_questions)
+        self._set_naver_kin_automation_button_state()
+        self._update_naver_kin_next_run_label()
+        self._set_naver_kin_direct_button_state(False)
+        if hasattr(self, "naver_kin_start_button"):
+            self.naver_kin_start_button.configure(
+                state="normal",
+                text="질문 목록 수집",
+            )
+        self._clear_naver_kin_run_log()
+        self._set_naver_kin_progress(
+            "작업을 시작하면 진행 상황이 여기에 표시됩니다.",
+            state="idle",
+        )
+        if hasattr(self, "naver_kin_status_label"):
+            self.naver_kin_status_label.configure(
+                text="현재 상태: 대기 중",
+                text_color="#6dadff",
+            )
+        self._update_quick_status(
+            "N지식인 수집 중단",
+            "진행 중인 수집·글작성·답변 작업을 취소하고 처음 상태로 돌아왔습니다.",
+            "#ffb86b",
+        )
+        append_runtime_log("NKin", "사용자가 수집중단 버튼을 눌러 전체 작업을 초기화했습니다.")
+        if not active_workers:
+            self.naver_kin_cancel_requested = False
+
+    def _handle_naver_kin_cancelled(self, payload) -> None:
+        worker_key = str((payload or {}).get("worker") or "")
+        worker_attrs = {
+            "bootstrap": "naver_kin_worker",
+            "direct": "naver_kin_direct_worker",
+            "automation": "naver_kin_automation_worker",
+        }
+        worker_attr = worker_attrs.get(worker_key)
+        if worker_attr:
+            setattr(self, worker_attr, None)
+        remaining_workers = (
+            getattr(self, "naver_kin_worker", None),
+            getattr(self, "naver_kin_direct_worker", None),
+            getattr(self, "naver_kin_automation_worker", None),
+        )
+        self.naver_kin_cancel_requested = any(
+            worker is not None and worker.is_alive() for worker in remaining_workers
+        )
+
     def _naver_kin_daily_answer_count(self) -> int:
         profile_scope_getter = getattr(self, "_selected_naver_kin_profile_scope", None)
         profile_scope = (
@@ -27858,6 +28081,8 @@ class KeywordApp(ctk.CTk):
         direct_mode: bool = False,
         preserve_log: bool = False,
     ) -> bool:
+        self.naver_kin_cancel_requested = False
+        self.naver_kin_cancel_ignore_until = 0.0
         answer_count = self._naver_kin_daily_answer_count()
         if answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT:
             self._stop_naver_kin_automation_for_daily_limit(answer_count)
@@ -28111,6 +28336,8 @@ class KeywordApp(ctk.CTk):
         ):
             messagebox.showinfo("진행 중", "진행 중인 N지식인 작업을 마친 뒤 다시 실행해 주세요.")
             return
+        self.naver_kin_cancel_requested = False
+        self.naver_kin_cancel_ignore_until = 0.0
         answer_count = self._naver_kin_daily_answer_count()
         if answer_count >= NAVER_KIN_DAILY_ANSWER_LIMIT:
             self._stop_naver_kin_automation_for_daily_limit(answer_count)
@@ -28226,6 +28453,8 @@ class KeywordApp(ctk.CTk):
         if self.naver_kin_worker and self.naver_kin_worker.is_alive():
             messagebox.showinfo("진행 중", "N지식인 질문 목록 수집이 이미 진행 중입니다.")
             return
+        self.naver_kin_cancel_requested = False
+        self.naver_kin_cancel_ignore_until = 0.0
         self._save_naver_kin_settings(silent=True)
         self.naver_kin_progress_fraction = 0.0
         self._set_naver_kin_progress("질문 목록 수집을 준비하고 있습니다...", 0.02)
@@ -40453,6 +40682,26 @@ class KeywordApp(ctk.CTk):
             while processed_events < 24:
                 event_type, payload = self.result_queue.get_nowait()
                 processed_events += 1
+                if event_type == "naver_kin_cancelled":
+                    self._handle_naver_kin_cancelled(payload)
+                    continue
+                if event_type in {
+                    "naver_kin_progress",
+                    "naver_kin_done",
+                    "naver_kin_error",
+                    "naver_kin_direct_progress",
+                    "naver_kin_direct_collected",
+                    "naver_kin_direct_error",
+                    "naver_kin_auto_progress",
+                    "naver_kin_auto_log",
+                    "naver_kin_auto_done",
+                    "naver_kin_auto_error",
+                } and (
+                    getattr(self, "naver_kin_cancel_requested", False)
+                    or time.monotonic()
+                    < float(getattr(self, "naver_kin_cancel_ignore_until", 0.0) or 0.0)
+                ):
+                    continue
                 if event_type == "update_available":
                     self._handle_update_available(payload)
                 elif event_type == "update_progress":
