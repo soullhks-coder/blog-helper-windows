@@ -25118,8 +25118,20 @@ class KeywordApp(ctk.CTk):
             "<KeyRelease>",
             lambda _event: self._save_naver_kin_settings(silent=True),
         )
-        self.naver_kin_collect_stop_button = ctk.CTkButton(
+        self.naver_kin_direct_action_frame = ctk.CTkFrame(
             setup_card,
+            fg_color="transparent",
+        )
+        self.naver_kin_direct_action_frame.grid(
+            row=4,
+            column=2,
+            columnspan=2,
+            padx=(0, 18),
+            pady=8,
+            sticky="e",
+        )
+        self.naver_kin_collect_stop_button = ctk.CTkButton(
+            self.naver_kin_direct_action_frame,
             text="수집중단",
             width=110,
             height=40,
@@ -25130,14 +25142,13 @@ class KeywordApp(ctk.CTk):
             command=self._stop_naver_kin_collection,
         )
         self.naver_kin_collect_stop_button.grid(
-            row=4,
-            column=2,
-            padx=(0, 10),
-            pady=8,
+            row=0,
+            column=0,
+            padx=(0, 6),
             sticky="e",
         )
         self.naver_kin_direct_collect_button = ctk.CTkButton(
-            setup_card,
+            self.naver_kin_direct_action_frame,
             text="수집",
             width=110,
             height=40,
@@ -25148,10 +25159,8 @@ class KeywordApp(ctk.CTk):
             command=self._start_naver_kin_direct_automation,
         )
         self.naver_kin_direct_collect_button.grid(
-            row=4,
-            column=3,
-            padx=(0, 18),
-            pady=8,
+            row=0,
+            column=1,
             sticky="e",
         )
 

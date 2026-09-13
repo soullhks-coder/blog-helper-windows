@@ -479,6 +479,17 @@ class NaverKinAutomationTests(unittest.TestCase):
         self.assertIn("naver_kin_collect_stop_button", source)
         self.assertIn("command=self._stop_naver_kin_collection", source)
         self.assertIn("naver_kin_direct_collect_button", source)
+        self.assertIn("naver_kin_direct_action_frame", source)
+        self.assertIn("columnspan=2", source)
+        self.assertIn("padx=(0, 6)", source)
+        self.assertIn(
+            "self.naver_kin_collect_stop_button = ctk.CTkButton(\n            self.naver_kin_direct_action_frame,",
+            source,
+        )
+        self.assertIn(
+            "self.naver_kin_direct_collect_button = ctk.CTkButton(\n            self.naver_kin_direct_action_frame,",
+            source,
+        )
         self.assertIn("naver_kin_clipboard_status_label", source)
         self.assertIn("지식인 상세 URL을 복사하면", source)
         self.assertIn("naver_kin_fixed_progress_bar", source)
