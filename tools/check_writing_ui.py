@@ -382,11 +382,22 @@ def main() -> None:
             # Every page uses the same white-theme contrast rule: selected or
             # otherwise dark buttons have white labels, and segmented controls
             # never reintroduce native outline seams.
+            sidebar_button_names = {
+                "writing": "writing_nav_button",
+                "automation": "automation_nav_button",
+                "naver_blog": "naver_blog_nav_button",
+                "naver_kin": "naver_kin_nav_button",
+                "public_data": "public_data_nav_button",
+                "prompts": "prompt_nav_button",
+                "settings": "settings_nav_button",
+            }
             for page_name, page_frame in app._page_frame_map().items():
                 app._switch_page(page_name)
                 settle(220)
                 app._finish_theme_paint(force=True)
                 settle(80)
+                selected_nav = getattr(app, sidebar_button_names[page_name])
+                assert resolved_color(selected_nav, "text_color") == app._theme_palette()["accent"]
                 assert_white_button_contrast(page_frame)
             app._switch_page("public_data")
             settle(220)

@@ -22592,7 +22592,27 @@ class KeywordApp(ctk.CTk):
             if isinstance(widget, ctk.CTkButton):
                 widget.configure(corner_radius=22)
                 fg_color = widget.cget("fg_color")
-                if self._color_matches(
+                sidebar_buttons = {
+                    "writing": getattr(self, "writing_nav_button", None),
+                    "automation": getattr(self, "automation_nav_button", None),
+                    "naver_blog": getattr(self, "naver_blog_nav_button", None),
+                    "naver_kin": getattr(self, "naver_kin_nav_button", None),
+                    "public_data": getattr(self, "public_data_nav_button", None),
+                    "prompts": getattr(self, "prompt_nav_button", None),
+                    "settings": getattr(self, "settings_nav_button", None),
+                }
+                active_sidebar_button = sidebar_buttons.get(
+                    getattr(self, "current_page", "writing")
+                )
+                if widget is active_sidebar_button:
+                    # 선택된 사이드 메뉴는 아이콘과 동일한 테마 강조색을
+                    # 유지한다. 밝은 선택 배경용 일반 보정이 파란 글자를
+                    # 검정으로 다시 덮어쓰지 않도록 먼저 처리한다.
+                    widget.configure(
+                        text_color=palette["accent"],
+                        text_color_disabled=palette["accent"],
+                    )
+                elif self._color_matches(
                     fg_color,
                     {"#ffffff", "#edf2f8", "#e6eefc", "#f7f9fc", "#d7e3f4", "#dce7f7", "#c5d6ef"},
                 ):
