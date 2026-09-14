@@ -402,6 +402,27 @@ def main() -> None:
             app._switch_page("public_data")
             settle(220)
             assert_segmented_contrast(app.public_data_source_switch)
+            public_selected = app.public_data_source_switch._buttons_dict["구석구석 축제"]
+            public_unselected = app.public_data_source_switch._buttons_dict["공공 복지"]
+            expected_public_colors = (
+                {
+                    "selected": "#2563eb",
+                    "selected_hover": "#1d4ed8",
+                    "unselected": "#e8eff9",
+                    "unselected_hover": "#d4e2f5",
+                }
+                if args.theme == "light"
+                else {
+                    "selected": "#3468e8",
+                    "selected_hover": "#2d5cd0",
+                    "unselected": "#1d2635",
+                    "unselected_hover": "#27364b",
+                }
+            )
+            assert resolved_color(public_selected, "fg_color") == expected_public_colors["selected"]
+            assert resolved_color(public_selected, "hover_color") == expected_public_colors["selected_hover"]
+            assert resolved_color(public_unselected, "fg_color") == expected_public_colors["unselected"]
+            assert resolved_color(public_unselected, "hover_color") == expected_public_colors["unselected_hover"]
             app.public_data_source_switch._buttons_dict["공공 복지"].invoke()
             assert app.public_data_source_switch.get() == "공공 복지"
             assert_segmented_contrast(app.public_data_source_switch)
