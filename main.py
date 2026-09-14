@@ -8198,10 +8198,19 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     if not image_button.count():
         raise RuntimeError("블로그스팟의 이미지 삽입 버튼을 찾지 못했습니다.")
     image_button.first.click()
-    upload_option = page.get_by_text("컴퓨터에서 업로드", exact=True)
+    # Blogger renders several hidden copies of this menu item. Selecting by text
+    # alone violates Playwright strict mode, and a pointer click on the visible
+    # Material menu item is occasionally swallowed. Target the one open menu item
+    # and activate it with the keyboard, which reliably launches Google Picker.
+    upload_option = page.locator('[role="menuitem"]:visible').filter(
+        has_text=re.compile(r"컴퓨터에서 업로드")
+    ).first
     upload_option.wait_for(state="visible", timeout=15_000)
-    upload_option.click()
-    picker_frame = page.frame_locator('iframe[src*="docs.google.com/picker"]')
+    upload_option.focus()
+    upload_option.press("Enter")
+    picker_iframe = page.locator('iframe[src*="docs.google.com/picker"]:visible')
+    picker_iframe.first.wait_for(state="visible", timeout=20_000)
+    picker_frame = page.frame_locator('iframe[src*="docs.google.com/picker"]:visible')
     browse_button = picker_frame.get_by_role("button", name="찾아보기", exact=True)
     browse_button.wait_for(state="visible", timeout=20_000)
     with page.expect_file_chooser(timeout=20_000) as chooser_info:

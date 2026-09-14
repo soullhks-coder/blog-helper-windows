@@ -87,7 +87,10 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("element.CodeMirror.setValue", html_fill_source)
         self.assertIn("element.CodeMirror.getValue", html_fill_source)
         self.assertIn('textarea[aria-label*="라벨을 구분"]', source)
-        self.assertIn("컴퓨터에서 업로드", upload_source)
+        self.assertIn('[role="menuitem"]:visible', upload_source)
+        self.assertIn('upload_option.press("Enter")', upload_source)
+        self.assertNotIn('get_by_text("컴퓨터에서 업로드"', upload_source)
+        self.assertIn('iframe[src*="docs.google.com/picker"]:visible', upload_source)
         self.assertIn("expect_file_chooser", upload_source)
         self.assertIn("set_files(valid_paths)", upload_source)
 
