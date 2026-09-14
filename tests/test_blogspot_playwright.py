@@ -97,6 +97,24 @@ class BlogspotPlaywrightTests(unittest.TestCase):
             cleaned = main.remove_blogspot_image_slot_marker(cleaned, marker)
         self.assertNotIn(main.BLOGSPOT_IMAGE_SLOT_PREFIX, cleaned)
 
+    def test_thumbnail_slot_is_pinned_above_article_body(self) -> None:
+        html = "".join(
+            [
+                "<h2>첫째</h2><p>첫 문단</p>",
+                "<h2>둘째</h2><p>둘째 문단</p>",
+                "<h2>셋째</h2><p>셋째 문단</p>",
+            ]
+        )
+        slotted, markers = main.insert_blogspot_image_slot_markers(
+            html,
+            3,
+            first_image_at_top=True,
+        )
+        self.assertTrue(slotted.startswith(f"<p>{markers[0]}</p>\n<h2>"))
+        self.assertLess(slotted.index(markers[0]), slotted.index("<h2>"))
+        self.assertGreater(slotted.index(markers[1]), slotted.index("<h2>"))
+        self.assertGreater(slotted.index(markers[2]), slotted.index(markers[1]))
+
     def test_blogger_editor_uses_open_html_option_and_codemirror(self) -> None:
         source = inspect.getsource(main.run_blogspot_playwright_automation)
         html_switch_source = inspect.getsource(main.open_blogspot_html_editor)
@@ -144,6 +162,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         pipeline_source = inspect.getsource(main.PublishPipelineWorker.run)
         settings_source = inspect.getsource(main.KeywordApp._build_blogspot_card)
         self.assertIn("insert_blogspot_image_slot_markers", source)
+        self.assertIn("first_image_at_top=thumbnail_at_top", source)
         self.assertIn("focus_blogspot_image_slot", source)
         self.assertIn("remove_blogspot_image_slot_marker", source)
         self.assertIn('_open_blogspot_view_option(page, "compose")', compose_source)

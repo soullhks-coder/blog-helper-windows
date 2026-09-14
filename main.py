@@ -8203,8 +8203,10 @@ def prepare_blogspot_html_and_images(
 def insert_blogspot_image_slot_markers(
     article_html: str,
     image_count: int,
+    *,
+    first_image_at_top: bool = False,
 ) -> tuple[str, list[str]]:
-    """Insert evenly distributed visible cursor markers for Blogger compose mode."""
+    """Insert visible cursor markers for Blogger compose-mode image uploads."""
     content = re.sub(
         rf"<p\b[^>]*>\s*{BLOGSPOT_IMAGE_SLOT_PREFIX}\d{{3}}\s*</p>",
         "",
@@ -8215,6 +8217,14 @@ def insert_blogspot_image_slot_markers(
     markers = [f"{BLOGSPOT_IMAGE_SLOT_PREFIX}{index:03d}" for index in range(1, count + 1)]
     if not markers:
         return content, []
+
+    distributed_markers = markers
+    top_marker_html = ""
+    if first_image_at_top:
+        top_marker_html = f"<p>{markers[0]}</p>\n"
+        distributed_markers = markers[1:]
+        if not distributed_markers:
+            return top_marker_html + content, markers
 
     protected_ranges = [
         (match.start(), match.end())
@@ -8230,11 +8240,14 @@ def insert_blogspot_image_slot_markers(
         if not any(start < match.end() < end for start, end in protected_ranges)
     ]
     if not block_ends:
-        return content + "".join(f"\n<p>{marker}</p>" for marker in markers), markers
+        content += "".join(
+            f"\n<p>{marker}</p>" for marker in distributed_markers
+        )
+        return top_marker_html + content, markers
 
     insertions: dict[int, list[str]] = {}
-    for index, marker in enumerate(markers, start=1):
-        fraction = index / (len(markers) + 1)
+    for index, marker in enumerate(distributed_markers, start=1):
+        fraction = index / (len(distributed_markers) + 1)
         target_index = min(
             max(0, round((len(block_ends) - 1) * fraction)),
             len(block_ends) - 1,
@@ -8248,7 +8261,7 @@ def insert_blogspot_image_slot_markers(
             + "".join(insertions[insert_at])
             + content[insert_at:]
         )
-    return content, markers
+    return top_marker_html + content, markers
 
 
 def remove_blogspot_image_slot_marker(article_html: str, marker: str) -> str:
@@ -8753,13 +8766,23 @@ def run_blogspot_playwright_automation(
             blogspot_article_html,
             thumbnail_path,
         )
+        thumbnail_candidate = Path(thumbnail_path).expanduser()
+        thumbnail_at_top = bool(
+            str(thumbnail_path or "").strip()
+            and thumbnail_candidate.is_file()
+            and image_paths
+            and Path(image_paths[0]).expanduser().resolve()
+            == thumbnail_candidate.resolve()
+        )
         prepared_html, image_slot_markers = insert_blogspot_image_slot_markers(
             prepared_html,
             len(image_paths),
+            first_image_at_top=thumbnail_at_top,
         )
         append_runtime_log(
             "BLOGSPOT",
-            f"본문 준비 완료: html={len(prepared_html)}자, images={len(image_paths)}, slots={len(image_slot_markers)}",
+            f"본문 준비 완료: html={len(prepared_html)}자, images={len(image_paths)}, "
+            f"slots={len(image_slot_markers)}, thumbnail_top={thumbnail_at_top}",
         )
         with sync_playwright() as playwright:
             context = launch_blogspot_persistent_context(playwright)
