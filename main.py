@@ -8216,21 +8216,58 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     with page.expect_file_chooser(timeout=20_000) as chooser_info:
         browse_button.click()
     chooser_info.value.set_files(valid_paths)
-    page.wait_for_timeout(max(2_000, min(12_000, len(valid_paths) * 1_500)))
-    inserted = False
-    for button_name in ("선택", "추가", "삽입"):
-        try:
-            button = picker_frame.get_by_role("button", name=button_name, exact=True)
-            if button.count() and button.first.is_visible():
-                button.first.click()
-                inserted = True
-                break
-        except Exception:
-            continue
-    if not inserted:
-        raise RuntimeError("이미지는 업로드했지만 Blogger 선택기의 삽입 버튼을 찾지 못했습니다.")
-    page.wait_for_timeout(2_000)
-    return len(valid_paths)
+    result_queue.put(("publish_progress", (0.97, "업로드한 이미지의 Blogger 레이아웃을 적용하고 있습니다...")))
+
+    # The current Blogger picker closes itself after the upload and opens a
+    # separate "레이아웃 선택" modal in the parent editor. Older variants keep
+    # a Select/Add/Insert button inside Google Picker first, so support both.
+    picker_action_clicked = False
+    deadline = time.time() + max(35, min(120, len(valid_paths) * 20))
+    while time.time() < deadline:
+        layout_titles = page.get_by_text("레이아웃 선택", exact=True)
+        layout_visible = any(
+            layout_titles.nth(index).is_visible()
+            for index in range(layout_titles.count())
+        )
+        if layout_visible:
+            confirm_buttons = page.get_by_role("button", name="확인", exact=True)
+            confirm_button = next(
+                (
+                    confirm_buttons.nth(index)
+                    for index in range(confirm_buttons.count())
+                    if confirm_buttons.nth(index).is_visible()
+                ),
+                None,
+            )
+            if confirm_button is None:
+                raise RuntimeError("Blogger 이미지 레이아웃 창의 확인 버튼을 찾지 못했습니다.")
+            confirm_button.click()
+            page.wait_for_timeout(1_200)
+            return len(valid_paths)
+
+        if not picker_action_clicked:
+            for button_name in ("선택", "추가", "삽입"):
+                try:
+                    buttons = picker_frame.get_by_role(
+                        "button", name=button_name, exact=True
+                    )
+                    button = next(
+                        (
+                            buttons.nth(index)
+                            for index in range(buttons.count())
+                            if buttons.nth(index).is_visible()
+                        ),
+                        None,
+                    )
+                    if button is not None:
+                        button.click()
+                        picker_action_clicked = True
+                        break
+                except Exception:
+                    continue
+        page.wait_for_timeout(350)
+
+    raise RuntimeError("이미지는 업로드했지만 Blogger 이미지 레이아웃 확인창을 찾지 못했습니다.")
 
 
 def open_blogspot_html_editor(page):

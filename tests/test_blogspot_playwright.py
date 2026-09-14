@@ -93,6 +93,9 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn('iframe[src*="docs.google.com/picker"]:visible', upload_source)
         self.assertIn("expect_file_chooser", upload_source)
         self.assertIn("set_files(valid_paths)", upload_source)
+        self.assertIn('get_by_text("레이아웃 선택", exact=True)', upload_source)
+        self.assertIn('get_by_role("button", name="확인", exact=True)', upload_source)
+        self.assertIn("return len(valid_paths)", upload_source)
 
 
 if __name__ == "__main__":
