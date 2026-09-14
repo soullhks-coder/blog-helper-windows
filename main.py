@@ -8820,6 +8820,48 @@ def confirm_blogspot_publish_dialog(page, timeout_ms: int = 20_000) -> None:
     raise RuntimeError("블로그스팟 최종 발행 확인 버튼을 눌렀지만 확인창이 닫히지 않았습니다.")
 
 
+def fill_blogspot_labels(page, labels: list[str]) -> int:
+    """Type Blogger labels with real key events so its editor state is updated."""
+    normalized_labels = [
+        re.sub(r"\s+", " ", str(label or "")).strip()
+        for label in labels
+    ]
+    normalized_labels = [label for label in normalized_labels if label]
+    if not normalized_labels:
+        return 0
+
+    fields = page.locator('textarea[aria-label*="라벨을 구분"]:visible')
+    if not fields.count():
+        raise RuntimeError("블로그스팟의 라벨 입력란을 찾지 못했습니다.")
+    field = fields.first
+    field.wait_for(state="visible", timeout=15_000)
+    field.click()
+    field.press("ControlOrMeta+A")
+    field.press("Backspace")
+    for index, label in enumerate(normalized_labels):
+        field.press_sequentially(label, delay=12)
+        if index < len(normalized_labels) - 1:
+            field.press(",")
+    field.press("Tab")
+    page.wait_for_timeout(350)
+
+    written_labels = [
+        re.sub(r"\s+", " ", label).strip()
+        for label in re.split(r"\s*[,，]\s*", field.input_value())
+        if label.strip()
+    ]
+    if written_labels != normalized_labels:
+        raise RuntimeError(
+            "블로그스팟 라벨 입력값을 확인하지 못했습니다. "
+            f"요청 {len(normalized_labels)}개, 확인 {len(written_labels)}개"
+        )
+    append_runtime_log(
+        "BLOGSPOT",
+        f"키보드 입력 방식으로 Blogger 라벨 {len(written_labels)}개 확정 완료",
+    )
+    return len(written_labels)
+
+
 def run_blogspot_playwright_automation(
     title: str,
     article_html: str,
@@ -9007,12 +9049,19 @@ def run_blogspot_playwright_automation(
                     "BLOGSPOT",
                     f"본문 이미지 배치 완료: attached={attached_count}",
                 )
-                label_field = page.locator('textarea[aria-label*="라벨을 구분"]')
-                if label_field.count() and blogspot_prompt_labels:
-                    label_field.first.fill(", ".join(blogspot_prompt_labels))
-                    append_runtime_log(
-                        "BLOGSPOT",
-                        f"본문 주요 태그 {len(blogspot_prompt_labels)}개를 Blogger 라벨에 입력 완료",
+                entered_label_count = fill_blogspot_labels(
+                    page,
+                    blogspot_prompt_labels,
+                )
+                if entered_label_count:
+                    result_queue.put(
+                        (
+                            "publish_progress",
+                            (
+                                0.978,
+                                f"본문 주요 태그 {entered_label_count}개를 블로그스팟 라벨에 입력했습니다.",
+                            ),
+                        )
                     )
                 save_blogspot_storage_state(context)
                 page.wait_for_timeout(1_500)

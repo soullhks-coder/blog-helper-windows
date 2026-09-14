@@ -152,6 +152,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         publish_confirm_source = inspect.getsource(
             main.confirm_blogspot_publish_dialog
         )
+        label_input_source = inspect.getsource(main.fill_blogspot_labels)
         self.assertIn("fill_blogspot_html_editor", source)
         self.assertIn('[role="listbox"][aria-label="보기 전환"]:visible', view_switch_source)
         self.assertIn('[role="option"][data-value="{option_value}"]:visible', view_switch_source)
@@ -162,9 +163,13 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertNotIn('get_by_text("HTML 보기", exact=True)', html_switch_source)
         self.assertIn("element.CodeMirror.setValue", html_fill_source)
         self.assertIn("element.CodeMirror.getValue", html_fill_source)
-        self.assertIn('textarea[aria-label*="라벨을 구분"]', source)
+        self.assertIn('textarea[aria-label*="라벨을 구분"]:visible', label_input_source)
         self.assertIn("extract_blogspot_prompt_labels(article_html)", source)
-        self.assertIn('join(blogspot_prompt_labels)', source)
+        self.assertIn("fill_blogspot_labels", source)
+        self.assertIn("field.press_sequentially", label_input_source)
+        self.assertIn('field.press(",")', label_input_source)
+        self.assertIn("field.input_value()", label_input_source)
+        self.assertNotIn("field.fill", label_input_source)
         self.assertNotIn('str(tag or "").strip() for tag in tag_names', source)
         self.assertIn('[role="menuitem"]:visible', upload_source)
         self.assertIn('upload_option.press("Enter")', upload_source)
