@@ -8315,13 +8315,20 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     chooser_info.value.set_files(valid_paths)
     result_queue.put(("publish_progress", (0.97, "업로드한 이미지의 Blogger 레이아웃을 적용하고 있습니다...")))
 
+    # Google Picker returns from set_files before Blogger has finished processing
+    # the upload. Its Select button and the parent layout dialog can both appear
+    # about 1–2 seconds later, so let the picker settle before inspecting either.
+    page.wait_for_timeout(2_500)
+
     # The current Blogger picker closes itself after the upload and opens a
     # separate "레이아웃 선택" modal in the parent editor. Older variants keep
     # a Select/Add/Insert button inside Google Picker first, so support both.
-    picker_action_clicked = False
-    deadline = time.time() + max(35, min(120, len(valid_paths) * 20))
+    last_picker_action_at = 0.0
+    deadline = time.time() + max(60, min(150, len(valid_paths) * 25))
     while time.time() < deadline:
-        layout_titles = page.get_by_text("레이아웃 선택", exact=True)
+        layout_titles = page.get_by_text(
+            re.compile(r"^\s*레이아웃 선택\s*$")
+        )
         layout_visible = any(
             layout_titles.nth(index).is_visible()
             for index in range(layout_titles.count())
@@ -8337,7 +8344,8 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
             page.wait_for_timeout(1_200)
             return len(valid_paths)
 
-        if not picker_action_clicked:
+        now = time.time()
+        if now - last_picker_action_at >= 2.0:
             for button_name in ("선택", "추가", "삽입"):
                 try:
                     buttons = picker_frame.get_by_role(
@@ -8351,9 +8359,12 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
                         ),
                         None,
                     )
-                    if button is not None:
+                    if button is not None and button.is_enabled():
                         button.click()
-                        picker_action_clicked = True
+                        last_picker_action_at = time.time()
+                        # The Blogger layout dialog is created asynchronously
+                        # after the picker accepts the uploaded file.
+                        page.wait_for_timeout(2_000)
                         break
                 except Exception:
                     continue
