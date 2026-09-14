@@ -124,6 +124,9 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         current_layout_source = inspect.getsource(
             main.configure_blogspot_inserted_image
         )
+        publish_confirm_source = inspect.getsource(
+            main.confirm_blogspot_publish_dialog
+        )
         self.assertIn("fill_blogspot_html_editor", source)
         self.assertIn('[role="listbox"][aria-label="보기 전환"]:visible', view_switch_source)
         self.assertIn('[role="option"][data-value="{option_value}"]:visible', view_switch_source)
@@ -154,6 +157,11 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn('_select_blogspot_layout_choice(page, "가운데")', upload_source)
         self.assertIn('get_by_role("button", name="확인", exact=True)', upload_source)
         self.assertIn("return len(valid_paths)", upload_source)
+        self.assertIn("글을\\s*게시하시겠습니까", publish_confirm_source)
+        self.assertIn('name="확인", exact=True', publish_confirm_source)
+        self.assertIn("confirm_button.click(force=True)", publish_confirm_source)
+        self.assertIn("확인창 닫힘 확인", publish_confirm_source)
+        self.assertIn("confirm_blogspot_publish_dialog(page)", source)
 
     def test_blogger_toggles_compose_mode_for_each_body_image(self) -> None:
         source = inspect.getsource(main.run_blogspot_playwright_automation)

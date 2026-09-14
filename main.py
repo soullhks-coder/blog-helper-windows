@@ -8685,6 +8685,48 @@ def fill_blogspot_html_editor(page, article_html: str) -> None:
     page.wait_for_timeout(400)
 
 
+def confirm_blogspot_publish_dialog(page, timeout_ms: int = 20_000) -> None:
+    """Wait for Blogger's final publish prompt, confirm it, and verify dismissal."""
+    question_pattern = re.compile(r"글을\s*게시하시겠습니까\s*\?")
+    deadline = time.monotonic() + max(1, timeout_ms) / 1_000
+    question = None
+    append_runtime_log("BLOGSPOT", "최종 공개 발행 확인창 대기 시작")
+
+    while time.monotonic() < deadline:
+        questions = page.get_by_text(question_pattern)
+        question = _first_visible_blogspot_locator(questions)
+        if question is not None:
+            break
+        page.wait_for_timeout(250)
+    if question is None:
+        raise RuntimeError(
+            "블로그스팟의 '글을 게시하시겠습니까?' 최종 확인창이 나타나지 않았습니다."
+        )
+
+    dialog = question.locator("xpath=ancestor::*[@role='dialog'][1]")
+    scope = dialog.first if dialog.count() and dialog.first.is_visible() else page
+    confirm_button = _first_visible_blogspot_locator(
+        scope.get_by_role("button", name="확인", exact=True)
+    )
+    if confirm_button is None and scope is not page:
+        confirm_button = _first_visible_blogspot_locator(
+            page.get_by_role("button", name="확인", exact=True)
+        )
+    if confirm_button is None:
+        raise RuntimeError("블로그스팟 최종 발행 확인창의 확인 버튼을 찾지 못했습니다.")
+
+    confirm_button.click(force=True)
+    append_runtime_log("BLOGSPOT", "최종 공개 발행 확인 버튼 클릭 완료")
+    dismiss_deadline = time.monotonic() + 10
+    while time.monotonic() < dismiss_deadline:
+        questions = page.get_by_text(question_pattern)
+        if _first_visible_blogspot_locator(questions) is None:
+            append_runtime_log("BLOGSPOT", "최종 공개 발행 확인창 닫힘 확인")
+            return
+        page.wait_for_timeout(250)
+    raise RuntimeError("블로그스팟 최종 발행 확인 버튼을 눌렀지만 확인창이 닫히지 않았습니다.")
+
+
 def run_blogspot_playwright_automation(
     title: str,
     article_html: str,
@@ -8882,19 +8924,14 @@ def run_blogspot_playwright_automation(
                 result_queue.put(("publish_progress", (0.98, "블로그스팟 공개 발행을 진행하고 있습니다...")))
                 publish_button = page.get_by_role("button", name="게시", exact=True)
                 publish_button.first.click()
-                page.wait_for_timeout(900)
-                dialogs = page.get_by_role("dialog")
-                if dialogs.count():
-                    dialog = dialogs.last
-                    confirmed = False
-                    for label in ("확인", "게시"):
-                        button = dialog.get_by_role("button", name=label, exact=True)
-                        if button.count() and button.first.is_visible():
-                            button.first.click()
-                            confirmed = True
-                            break
-                    if not confirmed:
-                        raise RuntimeError("블로그스팟 발행 확인창의 확인 버튼을 찾지 못했습니다.")
+                append_runtime_log("BLOGSPOT", "상단 게시 버튼 클릭 완료")
+                result_queue.put(
+                    (
+                        "publish_progress",
+                        (0.985, "블로그스팟 최종 발행 확인을 진행하고 있습니다..."),
+                    )
+                )
+                confirm_blogspot_publish_dialog(page)
                 page.wait_for_timeout(3_000)
                 published_url = ""
                 for attempt in range(6):
