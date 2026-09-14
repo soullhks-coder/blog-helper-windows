@@ -20654,6 +20654,223 @@ def build_wordpress_post(seed_keyword: str, insight: KeywordInsight) -> tuple[st
     return title, content
 
 
+class ContrastSegmentedButton(ctk.CTkFrame):
+    """Clean segmented control with per-segment contrast and no outline seams."""
+
+    def __init__(
+        self,
+        master,
+        width: int = 140,
+        height: int = 28,
+        corner_radius: int = 10,
+        border_width: int = 0,
+        bg_color="transparent",
+        fg_color=None,
+        selected_color=None,
+        selected_hover_color=None,
+        unselected_color=None,
+        unselected_hover_color=None,
+        text_color=None,
+        text_color_disabled=None,
+        font=None,
+        values=None,
+        variable=None,
+        dynamic_resizing: bool = True,
+        command=None,
+        state: str = "normal",
+        orientation: str = "horizontal",
+        selected_text_color="#ffffff",
+        unselected_text_color=None,
+        **kwargs,
+    ):
+        if orientation != "horizontal":
+            raise ValueError("ContrastSegmentedButton supports horizontal layout only")
+        self._value_list = list(values or ["Segment"])
+        self._current_value = ""
+        self._command = command
+        self._variable = variable
+        self._variable_callback_blocked = False
+        self._variable_callback_name = None
+        self._state = state
+        self._segment_height = height
+        self._segment_corner_radius = corner_radius
+        self._segment_font = font
+        self._sb_border_width = 0
+        self._sb_selected_color = selected_color or ("#2563eb", "#3468e8")
+        self._sb_selected_hover_color = selected_hover_color or ("#1d4ed8", "#2d5cd0")
+        self._sb_unselected_color = unselected_color or ("#d7e3f4", "#314761")
+        self._sb_unselected_hover_color = unselected_hover_color or ("#c5d6ef", "#3f5c7f")
+        self._selected_segment_text_color = selected_text_color
+        self._unselected_segment_text_color = (
+            unselected_text_color
+            if unselected_text_color is not None
+            else text_color or ("#1f2937", "#e6edf7")
+        )
+        self._sb_text_color_disabled = text_color_disabled or ("#8793a4", "#aab7c8")
+        self._sb_fg_color = fg_color or self._sb_unselected_color
+        super().__init__(
+            master,
+            width=width,
+            height=height,
+            corner_radius=corner_radius,
+            border_width=0,
+            bg_color=bg_color,
+            fg_color=self._sb_fg_color,
+            **kwargs,
+        )
+        if not dynamic_resizing:
+            self.grid_propagate(False)
+        self.grid_rowconfigure(0, weight=1)
+        self._buttons_dict: dict[str, ctk.CTkButton] = {}
+        self._create_segment_buttons()
+        if self._variable is not None:
+            self._variable_callback_name = self._variable.trace_add(
+                "write",
+                self._variable_callback,
+            )
+            self.set(self._variable.get(), from_variable_callback=True)
+        self._sync_segment_styles()
+
+    def _create_segment_buttons(self) -> None:
+        for index, value in enumerate(self._value_list):
+            self.grid_columnconfigure(index, weight=1)
+            button = ctk.CTkButton(
+                self,
+                width=1,
+                height=self._segment_height,
+                corner_radius=self._segment_corner_radius,
+                border_width=0,
+                text=value,
+                font=self._segment_font,
+                state=self._state,
+                command=lambda selected=value: self.set(
+                    selected,
+                    from_button_callback=True,
+                ),
+            )
+            button.grid(
+                row=0,
+                column=index,
+                padx=(0, 2) if index < len(self._value_list) - 1 else 0,
+                sticky="nsew",
+            )
+            self._buttons_dict[value] = button
+
+    def _sync_segment_styles(self) -> None:
+        for value, button in getattr(self, "_buttons_dict", {}).items():
+            selected = value == self._current_value
+            button.configure(
+                fg_color=(
+                    self._sb_selected_color
+                    if selected
+                    else self._sb_unselected_color
+                ),
+                hover_color=(
+                    self._sb_selected_hover_color
+                    if selected
+                    else self._sb_unselected_hover_color
+                ),
+                text_color=(
+                    self._selected_segment_text_color
+                    if selected
+                    else self._unselected_segment_text_color
+                ),
+                text_color_disabled=self._sb_text_color_disabled,
+                border_width=0,
+            )
+
+    def _variable_callback(self, *_args) -> None:
+        if not self._variable_callback_blocked:
+            self.set(self._variable.get(), from_variable_callback=True)
+
+    def set(
+        self,
+        value: str,
+        from_variable_callback: bool = False,
+        from_button_callback: bool = False,
+    ) -> None:
+        if value not in self._buttons_dict:
+            return
+        if value == self._current_value:
+            self._sync_segment_styles()
+            return
+        self._current_value = value
+        self._sync_segment_styles()
+        if self._variable is not None and not from_variable_callback:
+            self._variable_callback_blocked = True
+            self._variable.set(value)
+            self._variable_callback_blocked = False
+        if from_button_callback and self._command is not None:
+            self._command(value)
+
+    def get(self) -> str:
+        return self._current_value
+
+    def configure(self, **kwargs):
+        if "width" in kwargs or "height" in kwargs or "corner_radius" in kwargs:
+            frame_values = {
+                name: kwargs.pop(name)
+                for name in ("width", "height", "corner_radius")
+                if name in kwargs
+            }
+            super().configure(**frame_values)
+        kwargs.pop("border_width", None)
+        if "fg_color" in kwargs:
+            self._sb_fg_color = kwargs.pop("fg_color")
+            super().configure(fg_color=self._sb_fg_color)
+        option_attributes = {
+            "selected_color": "_sb_selected_color",
+            "selected_hover_color": "_sb_selected_hover_color",
+            "unselected_color": "_sb_unselected_color",
+            "unselected_hover_color": "_sb_unselected_hover_color",
+            "selected_text_color": "_selected_segment_text_color",
+            "unselected_text_color": "_unselected_segment_text_color",
+            "text_color": "_unselected_segment_text_color",
+            "text_color_disabled": "_sb_text_color_disabled",
+            "state": "_state",
+        }
+        for option, attribute in option_attributes.items():
+            if option in kwargs:
+                setattr(self, attribute, kwargs.pop(option))
+        if "command" in kwargs:
+            self._command = kwargs.pop("command")
+        if kwargs:
+            super().configure(**kwargs)
+        if hasattr(self, "_buttons_dict"):
+            for button in self._buttons_dict.values():
+                button.configure(state=self._state)
+            self._sync_segment_styles()
+
+    config = configure
+
+    def cget(self, attribute_name: str):
+        values = {
+            "border_width": self._sb_border_width,
+            "fg_color": self._sb_fg_color,
+            "selected_color": self._sb_selected_color,
+            "selected_hover_color": self._sb_selected_hover_color,
+            "unselected_color": self._sb_unselected_color,
+            "unselected_hover_color": self._sb_unselected_hover_color,
+            "text_color": self._unselected_segment_text_color,
+            "text_color_disabled": self._sb_text_color_disabled,
+            "values": list(self._value_list),
+            "variable": self._variable,
+            "command": self._command,
+            "state": self._state,
+        }
+        if attribute_name in values:
+            return values[attribute_name]
+        return super().cget(attribute_name)
+
+    def destroy(self):
+        if self._variable is not None and self._variable_callback_name is not None:
+            try:
+                self._variable.trace_remove("write", self._variable_callback_name)
+            except (tk.TclError, ValueError):
+                pass
+        super().destroy()
+
+
 class KeywordApp(ctk.CTk):
     def __init__(self) -> None:
         if os.name == "nt":
@@ -21846,6 +22063,49 @@ class KeywordApp(ctk.CTk):
             return any(self._color_matches(item, candidates) for item in value)
         return str(value).lower() in candidates
 
+    def _is_dark_button_fill(self, value) -> bool:
+        if isinstance(value, (tuple, list)):
+            if not value:
+                return False
+            value = value[0]
+        match = re.fullmatch(r"#([0-9a-fA-F]{6})", str(value or "").strip())
+        if match is None:
+            return False
+        color = match.group(1)
+        red = int(color[0:2], 16)
+        green = int(color[2:4], 16)
+        blue = int(color[4:6], 16)
+        perceived_brightness = (red * 299 + green * 587 + blue * 114) / 1000
+        return perceived_brightness < 145
+
+    def _apply_segmented_control_theme(
+        self,
+        control: ContrastSegmentedButton,
+        palette: dict[str, str],
+    ) -> None:
+        color_options = (
+            "selected_color",
+            "selected_hover_color",
+            "unselected_color",
+            "unselected_hover_color",
+        )
+        configure_values = {
+            "border_width": 0,
+            "fg_color": palette["input"],
+            "selected_text_color": "#ffffff",
+            "unselected_text_color": palette["text"],
+        }
+        for option in color_options:
+            try:
+                value = control.cget(option)
+            except Exception:
+                continue
+            configure_values[option] = self._map_theme_color(value, palette, option)
+        try:
+            control.configure(**configure_values)
+        except Exception:
+            pass
+
     def _apply_white_widget_polish(self, widget, palette: dict[str, str]) -> None:
         if self._normalize_app_theme(self.wordpress_settings.app_theme) != "화이트테마":
             return
@@ -21858,6 +22118,11 @@ class KeywordApp(ctk.CTk):
                     {"#ffffff", "#edf2f8", "#e6eefc", "#f7f9fc", "#d7e3f4", "#dce7f7", "#c5d6ef"},
                 ):
                     widget.configure(text_color=palette["text"])
+                elif self._is_dark_button_fill(fg_color):
+                    widget.configure(
+                        text_color="#ffffff",
+                        text_color_disabled="#ffffff",
+                    )
             elif isinstance(widget, ctk.CTkOptionMenu):
                 widget.configure(corner_radius=22)
             elif isinstance(widget, ctk.CTkEntry):
@@ -21893,7 +22158,12 @@ class KeywordApp(ctk.CTk):
             # theme palette, including preview canvases and semantic buttons.
             if getattr(child, "_uses_writing_design_theme", False):
                 continue
+            if isinstance(child, ContrastSegmentedButton):
+                self._apply_segmented_control_theme(child, palette)
+                self._theme_painted_widgets.add(child)
+                continue
             if child in self._theme_painted_widgets:
+                self._apply_white_widget_polish(child, palette)
                 self._retint_widget_tree(child, palette)
                 continue
             configure_values = {}
@@ -25063,7 +25333,7 @@ class KeywordApp(ctk.CTk):
                 )
             ]
         )
-        self.naver_kin_automation_mode_control = ctk.CTkSegmentedButton(
+        self.naver_kin_automation_mode_control = ContrastSegmentedButton(
             setup_card,
             values=["반자동", "완전자동"],
             variable=self.naver_kin_automation_mode_var,
@@ -25712,7 +25982,7 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=1, column=0, padx=(18, 10), pady=(0, 10), sticky="w")
-        self.naver_blog_image_mode_control = ctk.CTkSegmentedButton(
+        self.naver_blog_image_mode_control = ContrastSegmentedButton(
             image_panel,
             values=["이미지 자동", "이미지 수동"],
             variable=self.naver_blog_image_mode_var,
@@ -25835,7 +26105,7 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=1, column=0, padx=(18, 10), pady=(0, 10), sticky="w")
-        self.naver_blog_automation_mode_control = ctk.CTkSegmentedButton(
+        self.naver_blog_automation_mode_control = ContrastSegmentedButton(
             control_panel,
             values=["반자동", "완전자동"],
             variable=self.naver_blog_automation_mode_var,
@@ -29595,7 +29865,7 @@ class KeywordApp(ctk.CTk):
         body.grid_columnconfigure(0, weight=1)
         self.public_data_scroll = body
 
-        self.public_data_source_switch = ctk.CTkSegmentedButton(
+        self.public_data_source_switch = ContrastSegmentedButton(
             body,
             values=["구석구석 축제", "공공 복지"],
             height=42,
@@ -33222,7 +33492,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         ).grid(row=0, column=0, padx=(16, 12), pady=(14, 8), sticky="w")
         self.tistory_input_mode_var = tk.StringVar(value=TEXT_INPUT_MODE_FAST)
-        self.tistory_input_mode_selector = ctk.CTkSegmentedButton(
+        self.tistory_input_mode_selector = ContrastSegmentedButton(
             input_mode_frame,
             values=list(TEXT_INPUT_MODE_OPTIONS),
             variable=self.tistory_input_mode_var,
@@ -33267,7 +33537,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_save_mode_var = tk.StringVar(
             value=TISTORY_SAVE_MODE_PUBLISH
         )
-        self.tistory_save_mode_selector = ctk.CTkSegmentedButton(
+        self.tistory_save_mode_selector = ContrastSegmentedButton(
             input_mode_frame,
             values=list(TISTORY_SAVE_MODE_OPTIONS),
             variable=self.tistory_save_mode_var,

@@ -74,6 +74,46 @@ def main() -> None:
                 x, y = app.winfo_rootx(), app.winfo_rooty()
                 ImageGrab.grab(bbox=(x, y, x + app.winfo_width(), y + app.winfo_height())).save(destination)
 
+        def resolved_color(widget, option):
+            value = widget.cget(option)
+            try:
+                return str(widget._apply_appearance_mode(value)).lower()
+            except Exception:
+                if isinstance(value, (tuple, list)):
+                    value = value[0] if args.theme == "light" else value[-1]
+                return str(value).lower()
+
+        def assert_segmented_contrast(control):
+            assert isinstance(control, app_module.ContrastSegmentedButton)
+            assert control.cget("border_width") == 0
+            assert control.get() in control._buttons_dict
+            for value, button in control._buttons_dict.items():
+                assert button.cget("border_width") == 0
+                if value == control.get():
+                    assert resolved_color(button, "text_color") == "#ffffff"
+                elif args.theme == "light":
+                    assert resolved_color(button, "text_color") == "#1f2937"
+
+        def assert_white_button_contrast(root):
+            if args.theme != "light":
+                return
+            pending = [root]
+            while pending:
+                widget = pending.pop()
+                if isinstance(widget, app_module.ContrastSegmentedButton):
+                    assert_segmented_contrast(widget)
+                    continue
+                pending.extend(widget.winfo_children())
+                if not isinstance(widget, app_module.ctk.CTkButton):
+                    continue
+                fill = resolved_color(widget, "fg_color")
+                if app._is_dark_button_fill(fill):
+                    assert resolved_color(widget, "text_color") == "#ffffff", (
+                        widget.cget("text"),
+                        fill,
+                        resolved_color(widget, "text_color"),
+                    )
+
         try:
             app.geometry("1500x1000+30+35")
             app._switch_page("writing")
@@ -155,6 +195,18 @@ def main() -> None:
             for widget in (app.save_thumbnail_button, app.generate_cardnews_button):
                 assert widget.cget("text_color") == "#ffffff"
                 assert widget.cget("fg_color") == "#2563eb"
+            assert_segmented_contrast(app.tistory_input_mode_selector)
+            assert_segmented_contrast(app.tistory_save_mode_selector)
+            original_input_mode = app.tistory_input_mode_selector.get()
+            alternate_input_mode = next(
+                value
+                for value in app.tistory_input_mode_selector._buttons_dict
+                if value != original_input_mode
+            )
+            app.tistory_input_mode_selector._buttons_dict[alternate_input_mode].invoke()
+            assert app.tistory_input_mode_var.get() == alternate_input_mode
+            assert_segmented_contrast(app.tistory_input_mode_selector)
+            app.tistory_input_mode_selector._buttons_dict[original_input_mode].invoke()
 
             # Both compact laptop and wider desktop layouts retain all controls.
             for geometry in ("1500x1000+30+35", "1100x900+30+35", "860x680+30+35"):
@@ -213,6 +265,7 @@ def main() -> None:
             assert "자동화 흐름" not in visible_copy
             assert app.naver_kin_start_button.cget("text") == "질문 목록 수집"
             assert app.naver_kin_direct_collect_button.cget("text") == "수집"
+            assert_segmented_contrast(app.naver_kin_automation_mode_control)
             assert set(app.naver_kin_tab_buttons) == {"writing", "settings"}
             writing_profile_radios = [
                 widget
@@ -311,6 +364,9 @@ def main() -> None:
                 (int(widget.grid_info()["row"]), int(widget.grid_info()["column"]))
                 for widget in writing_radios
             } == {(1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2)}
+            assert_segmented_contrast(app.naver_blog_image_mode_control)
+            assert_segmented_contrast(app.naver_blog_automation_mode_control)
+            screenshot("naver-blog-writing")
 
             app._switch_naver_blog_tab("settings")
             settle(700)
@@ -321,6 +377,24 @@ def main() -> None:
                 for card in profile_cards
             } == {(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)}
             print(f"{sys.platform} {args.theme}: NBlog six-profile 3 x 2 layouts passed")
+
+            # Every page uses the same white-theme contrast rule: selected or
+            # otherwise dark buttons have white labels, and segmented controls
+            # never reintroduce native outline seams.
+            for page_name, page_frame in app._page_frame_map().items():
+                app._switch_page(page_name)
+                settle(220)
+                app._finish_theme_paint(force=True)
+                settle(80)
+                assert_white_button_contrast(page_frame)
+            app._switch_page("public_data")
+            settle(220)
+            assert_segmented_contrast(app.public_data_source_switch)
+            app.public_data_source_switch._buttons_dict["공공 복지"].invoke()
+            assert app.public_data_source_switch.get() == "공공 복지"
+            assert_segmented_contrast(app.public_data_source_switch)
+            app.public_data_source_switch._buttons_dict["구석구석 축제"].invoke()
+            screenshot("public-data")
             assert not errors, errors
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:

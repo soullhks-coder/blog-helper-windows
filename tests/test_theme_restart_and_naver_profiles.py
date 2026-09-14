@@ -17,6 +17,15 @@ class _WidgetStub:
 
 
 class ThemeRestartTests(unittest.TestCase):
+    def test_white_theme_dark_button_detection_uses_perceived_brightness(self) -> None:
+        app = SimpleNamespace()
+        is_dark = main.KeywordApp._is_dark_button_fill.__get__(app)
+
+        self.assertTrue(is_dark("#2563eb"))
+        self.assertTrue(is_dark("#8f3535"))
+        self.assertFalse(is_dark("#d7e3f4"))
+        self.assertFalse(is_dark("transparent"))
+
     def test_theme_change_saves_then_schedules_restart_without_live_rebuild(self) -> None:
         scheduled = []
         saved = []
