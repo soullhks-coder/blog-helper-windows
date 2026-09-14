@@ -41,6 +41,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                 blogspot_blog_url="https://example.blogspot.com/",
                 blogspot_blog_name="테스트 블로그",
                 blogspot_save_mode=main.TISTORY_SAVE_MODE_DRAFT,
+                blogspot_reference_image_protection_mode=True,
             )
             with (
                 patch.object(main, "STATE_FILE", state_file),
@@ -53,6 +54,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertEqual(loaded.blogspot_blog_url, "https://example.blogspot.com/")
         self.assertEqual(loaded.blogspot_blog_name, "테스트 블로그")
         self.assertEqual(loaded.blogspot_save_mode, main.TISTORY_SAVE_MODE_DRAFT)
+        self.assertTrue(loaded.blogspot_reference_image_protection_mode)
 
     def test_local_images_are_removed_from_html_and_queued_for_native_upload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -62,6 +64,8 @@ class BlogspotPlaywrightTests(unittest.TestCase):
             thumbnail_path.write_bytes(b"thumbnail")
             html = (
                 f'<p>본문</p><figure><img src="{image_path}"></figure>'
+                f'<figure class="blog-helper-inline-image" '
+                f'data-blog-helper-inline-image-path="{image_path}">참고 이미지</figure>'
                 '<img src="data:image/png;base64,AAAA">'
                 '<img src="https://example.com/remote.jpg">'
             )
@@ -74,14 +78,35 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("https://example.com/remote.jpg", cleaned)
         self.assertEqual(images, [str(thumbnail_path), str(image_path)])
 
+    def test_image_slots_are_distributed_and_removed_after_upload(self) -> None:
+        html = "".join(
+            [
+                "<h2>첫째</h2><p>첫 문단</p>",
+                "<h2>둘째</h2><p>둘째 문단</p>",
+                "<h2>셋째</h2><p>셋째 문단</p>",
+                "<h2>넷째</h2><p>넷째 문단</p>",
+            ]
+        )
+        slotted, markers = main.insert_blogspot_image_slot_markers(html, 3)
+        self.assertEqual(len(markers), 3)
+        self.assertEqual(slotted.count(main.BLOGSPOT_IMAGE_SLOT_PREFIX), 3)
+        self.assertLess(slotted.index(markers[0]), slotted.index(markers[1]))
+        self.assertLess(slotted.index(markers[1]), slotted.index(markers[2]))
+        cleaned = slotted
+        for marker in markers:
+            cleaned = main.remove_blogspot_image_slot_marker(cleaned, marker)
+        self.assertNotIn(main.BLOGSPOT_IMAGE_SLOT_PREFIX, cleaned)
+
     def test_blogger_editor_uses_open_html_option_and_codemirror(self) -> None:
         source = inspect.getsource(main.run_blogspot_playwright_automation)
         html_switch_source = inspect.getsource(main.open_blogspot_html_editor)
+        view_switch_source = inspect.getsource(main._open_blogspot_view_option)
         html_fill_source = inspect.getsource(main.fill_blogspot_html_editor)
         upload_source = inspect.getsource(main.upload_blogspot_images)
         self.assertIn("fill_blogspot_html_editor", source)
-        self.assertIn('[role="listbox"][aria-label="보기 전환"]:visible', html_switch_source)
-        self.assertIn('[role="option"][data-value="html"]:visible', html_switch_source)
+        self.assertIn('[role="listbox"][aria-label="보기 전환"]:visible', view_switch_source)
+        self.assertIn('[role="option"][data-value="{option_value}"]:visible', view_switch_source)
+        self.assertIn('option.first.press("Enter")', view_switch_source)
         self.assertIn('page.locator(".CodeMirror:visible")', html_switch_source)
         self.assertNotIn('get_by_text("HTML 보기", exact=True)', html_switch_source)
         self.assertIn("element.CodeMirror.setValue", html_fill_source)
@@ -94,8 +119,26 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("expect_file_chooser", upload_source)
         self.assertIn("set_files(valid_paths)", upload_source)
         self.assertIn('get_by_text("레이아웃 선택", exact=True)', upload_source)
+        self.assertIn('_select_blogspot_layout_choice(page, "아주 크게")', upload_source)
+        self.assertIn('_select_blogspot_layout_choice(page, "가운데")', upload_source)
         self.assertIn('get_by_role("button", name="확인", exact=True)', upload_source)
         self.assertIn("return len(valid_paths)", upload_source)
+
+    def test_blogger_toggles_compose_mode_for_each_body_image(self) -> None:
+        source = inspect.getsource(main.run_blogspot_playwright_automation)
+        compose_source = inspect.getsource(main.open_blogspot_compose_editor)
+        focus_source = inspect.getsource(main.focus_blogspot_image_slot)
+        pipeline_source = inspect.getsource(main.PublishPipelineWorker.run)
+        settings_source = inspect.getsource(main.KeywordApp._build_blogspot_card)
+        self.assertIn("insert_blogspot_image_slot_markers", source)
+        self.assertIn("focus_blogspot_image_slot", source)
+        self.assertIn("remove_blogspot_image_slot_marker", source)
+        self.assertIn('_open_blogspot_view_option(page, "compose")', compose_source)
+        self.assertIn("range.collapse(true)", focus_source)
+        self.assertIn("collect_tistory_reference_image_files", source)
+        self.assertIn("reference_image_protection_mode", source)
+        self.assertIn("blogspot_reference_image_protection_mode", pipeline_source)
+        self.assertIn("저작권 보호 모드", settings_source)
 
 
 if __name__ == "__main__":

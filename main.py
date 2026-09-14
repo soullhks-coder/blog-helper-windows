@@ -295,6 +295,7 @@ BLOGSPOT_CHROME_PROFILE_DIR = DATA_DIR / "Blogspot Chrome Profile"
 BLOGSPOT_STORAGE_STATE_FILE = DATA_DIR / "blogspot-storage-state.json"
 BLOGSPOT_LOGIN_URL = "https://draft.blogger.com/about/?bpli=1"
 BLOGSPOT_HOME_URL = "https://draft.blogger.com/home"
+BLOGSPOT_IMAGE_SLOT_PREFIX = "BLOG_HELPER_IMAGE_SLOT_"
 THREADS_CHROME_PROFILE_DIR = DATA_DIR / "Threads Chrome Profile"
 THREADS_STORAGE_STATE_FILE = DATA_DIR / "threads-storage-state.json"
 THREADS_HOME_URL = "https://www.threads.com/"
@@ -2980,6 +2981,7 @@ class WordPressSettings:
     blogspot_blog_url: str = ""
     blogspot_blog_name: str = ""
     blogspot_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
+    blogspot_reference_image_protection_mode: bool = False
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
     tistory_daily_publish_limit: int = 0
@@ -3527,6 +3529,9 @@ class AppStateStore:
             blogspot_blog_name=payload.get("blogspot_blog_name", ""),
             blogspot_save_mode=normalize_tistory_save_mode(
                 payload.get("blogspot_save_mode", TISTORY_SAVE_MODE_PUBLISH)
+            ),
+            blogspot_reference_image_protection_mode=bool(
+                payload.get("blogspot_reference_image_protection_mode", False)
             ),
             tistory_blog_url=payload.get("tistory_blog_url", ""),
             tistory_write_url=payload.get("tistory_write_url", ""),
@@ -8175,9 +8180,15 @@ def prepare_blogspot_html_and_images(
         if value and Path(value).expanduser().is_file() and value not in image_paths:
             image_paths.append(value)
     cleaned = re.sub(
-        r"<figure\b[^>]*>\s*<img\b[^>]*\bsrc\s*=\s*(['\"])(?:data:image/|file:|/[A-Za-z]|[A-Za-z]:[\\/])[^'\"]*\1[^>]*>.*?</figure>",
+        r"<figure\b(?=[^>]*blog-helper-inline-image)[^>]*>.*?</figure>",
         "",
         article_html,
+        flags=re.I | re.S,
+    )
+    cleaned = re.sub(
+        r"<figure\b[^>]*>\s*<img\b[^>]*\bsrc\s*=\s*(['\"])(?:data:image/|file:|/[A-Za-z]|[A-Za-z]:[\\/])[^'\"]*\1[^>]*>.*?</figure>",
+        "",
+        cleaned,
         flags=re.I | re.S,
     )
     cleaned = re.sub(
@@ -8187,6 +8198,92 @@ def prepare_blogspot_html_and_images(
         flags=re.I | re.S,
     )
     return cleaned.strip(), image_paths
+
+
+def insert_blogspot_image_slot_markers(
+    article_html: str,
+    image_count: int,
+) -> tuple[str, list[str]]:
+    """Insert evenly distributed visible cursor markers for Blogger compose mode."""
+    content = re.sub(
+        rf"<p\b[^>]*>\s*{BLOGSPOT_IMAGE_SLOT_PREFIX}\d{{3}}\s*</p>",
+        "",
+        article_html or "",
+        flags=re.I,
+    )
+    count = max(0, int(image_count or 0))
+    markers = [f"{BLOGSPOT_IMAGE_SLOT_PREFIX}{index:03d}" for index in range(1, count + 1)]
+    if not markers:
+        return content, []
+
+    protected_ranges = [
+        (match.start(), match.end())
+        for match in re.finditer(
+            r"<(figure|table|script|style)\b[^>]*>.*?</\1>",
+            content,
+            flags=re.I | re.S,
+        )
+    ]
+    block_ends = [
+        match.end()
+        for match in re.finditer(r"</(?:p|h2|h3|ul|ol)>", content, flags=re.I)
+        if not any(start < match.end() < end for start, end in protected_ranges)
+    ]
+    if not block_ends:
+        return content + "".join(f"\n<p>{marker}</p>" for marker in markers), markers
+
+    insertions: dict[int, list[str]] = {}
+    for index, marker in enumerate(markers, start=1):
+        fraction = index / (len(markers) + 1)
+        target_index = min(
+            max(0, round((len(block_ends) - 1) * fraction)),
+            len(block_ends) - 1,
+        )
+        insertions.setdefault(block_ends[target_index], []).append(
+            f"\n<p>{marker}</p>"
+        )
+    for insert_at in sorted(insertions, reverse=True):
+        content = (
+            content[:insert_at]
+            + "".join(insertions[insert_at])
+            + content[insert_at:]
+        )
+    return content, markers
+
+
+def remove_blogspot_image_slot_marker(article_html: str, marker: str) -> str:
+    cleaned = re.sub(
+        rf"<p\b[^>]*>\s*{re.escape(marker)}\s*</p>",
+        "",
+        article_html or "",
+        flags=re.I,
+    )
+    return cleaned.replace(marker, "")
+
+
+def _first_visible_blogspot_locator(locator):
+    try:
+        for index in range(locator.count()):
+            candidate = locator.nth(index)
+            if candidate.is_visible():
+                return candidate
+    except Exception:
+        return None
+    return None
+
+
+def _select_blogspot_layout_choice(page, label: str) -> None:
+    choice = _first_visible_blogspot_locator(
+        page.get_by_role("radio", name=label, exact=True)
+    )
+    if choice is None:
+        choice = _first_visible_blogspot_locator(
+            page.get_by_text(label, exact=True)
+        )
+    if choice is None:
+        raise RuntimeError(f"Blogger 이미지 레이아웃의 '{label}' 항목을 찾지 못했습니다.")
+    if choice.get_attribute("aria-checked") != "true":
+        choice.click()
 
 
 def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Queue) -> int:
@@ -8230,15 +8327,10 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
             for index in range(layout_titles.count())
         )
         if layout_visible:
+            _select_blogspot_layout_choice(page, "아주 크게")
+            _select_blogspot_layout_choice(page, "가운데")
             confirm_buttons = page.get_by_role("button", name="확인", exact=True)
-            confirm_button = next(
-                (
-                    confirm_buttons.nth(index)
-                    for index in range(confirm_buttons.count())
-                    if confirm_buttons.nth(index).is_visible()
-                ),
-                None,
-            )
+            confirm_button = _first_visible_blogspot_locator(confirm_buttons)
             if confirm_button is None:
                 raise RuntimeError("Blogger 이미지 레이아웃 창의 확인 버튼을 찾지 못했습니다.")
             confirm_button.click()
@@ -8270,36 +8362,88 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     raise RuntimeError("이미지는 업로드했지만 Blogger 이미지 레이아웃 확인창을 찾지 못했습니다.")
 
 
+def _open_blogspot_view_option(page, option_value: str) -> None:
+    selected_option = page.locator(
+        f'[role="option"][data-value="{option_value}"]:visible'
+    )
+    if (
+        selected_option.count()
+        and selected_option.first.get_attribute("aria-selected") == "true"
+    ):
+        return
+
+    switcher = page.locator('[role="listbox"][aria-label="보기 전환"]:visible')
+    if not switcher.count():
+        switcher = page.locator('[role="listbox"]:visible').filter(
+            has=page.locator(f'[role="option"][data-value="{option_value}"]')
+        )
+    if not switcher.count():
+        raise RuntimeError("블로그스팟의 HTML/작성 보기 전환 버튼을 찾지 못했습니다.")
+    switcher = switcher.first
+    switcher.wait_for(state="visible", timeout=20_000)
+    if switcher.get_attribute("aria-expanded") != "true":
+        switcher.click()
+    option = page.locator(
+        f'[role="option"][data-value="{option_value}"]:visible'
+    )
+    option.first.wait_for(state="visible", timeout=10_000)
+    if option.first.get_attribute("aria-selected") != "true":
+        # Blogger's Material menu places a presentation layer above the visible
+        # option, which can intercept pointer clicks. Keyboard activation targets
+        # the focused option directly and works in both light and dark Chrome UI.
+        option.first.focus()
+        option.first.press("Enter")
+
+
 def open_blogspot_html_editor(page):
     """Switch Blogger's editor to HTML view and return its visible CodeMirror root."""
     html_editor = page.locator(".CodeMirror:visible")
     if html_editor.count() and html_editor.first.is_visible():
         return html_editor.first
 
-    # Blogger keeps a hidden copy of every mode option in the collapsed selector.
-    # Clicking the text node ("HTML 보기") can therefore resolve to that hidden copy,
-    # while the currently selected compose option intercepts the pointer event. Open
-    # the real view switcher first, then click only the option in the open menu.
-    switcher = page.locator('[role="listbox"][aria-label="보기 전환"]:visible')
-    if not switcher.count():
-        switcher = page.locator('[role="listbox"]:visible').filter(
-            has=page.locator('[role="option"][data-value="html"]')
-        )
-    if not switcher.count():
-        raise RuntimeError("블로그스팟의 HTML/작성 보기 전환 버튼을 찾지 못했습니다.")
-
-    switcher = switcher.first
-    switcher.wait_for(state="visible", timeout=20_000)
-    if switcher.get_attribute("aria-expanded") != "true":
-        switcher.click()
-
-    html_option = page.locator('[role="option"][data-value="html"]:visible')
-    html_option.first.wait_for(state="visible", timeout=10_000)
-    html_option.first.click()
+    # Blogger keeps hidden copies of both options in the collapsed selector, so
+    # always open the real switcher and choose only its visible option.
+    _open_blogspot_view_option(page, "html")
 
     html_editor = page.locator(".CodeMirror:visible")
     html_editor.first.wait_for(state="visible", timeout=20_000)
     return html_editor.first
+
+
+def open_blogspot_compose_editor(page):
+    """Switch Blogger to compose view and return the editable iframe body."""
+    iframe = page.locator("iframe.editable:visible")
+    if not (iframe.count() and iframe.first.is_visible()):
+        _open_blogspot_view_option(page, "compose")
+        iframe = page.locator("iframe.editable:visible")
+        iframe.first.wait_for(state="visible", timeout=20_000)
+    editor_body = page.frame_locator("iframe.editable:visible").locator("body")
+    editor_body.wait_for(state="visible", timeout=20_000)
+    return editor_body
+
+
+def focus_blogspot_image_slot(page, marker: str) -> None:
+    """Place the compose caret immediately before a visible HTML slot marker."""
+    open_blogspot_compose_editor(page)
+    frame = page.frame_locator("iframe.editable:visible")
+    slot = frame.get_by_text(marker, exact=True).first
+    slot.wait_for(state="visible", timeout=20_000)
+    slot.scroll_into_view_if_needed()
+    slot.evaluate(
+        """
+        element => {
+            const document = element.ownerDocument;
+            const selection = document.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.body.focus();
+        }
+        """
+    )
+    page.wait_for_timeout(250)
 
 
 def fill_blogspot_html_editor(page, article_html: str) -> None:
@@ -8344,6 +8488,7 @@ def run_blogspot_playwright_automation(
     thumbnail_path: str = "",
     login_timeout_seconds: int = 300,
     daily_publish_limit: int = 0,
+    reference_image_protection_mode: bool = False,
 ) -> dict[str, object]:
     try:
         from playwright.sync_api import sync_playwright
@@ -8354,6 +8499,7 @@ def run_blogspot_playwright_automation(
 
     normalized_save_mode = normalize_tistory_save_mode(save_mode)
     reservation_key = ""
+    reference_image_paths: list[str] = []
     daily_account = blog_url or blog_id
     if normalized_save_mode == TISTORY_SAVE_MODE_PUBLISH:
         reservation_key = DailyPublishLimitStore.reserve_publish(
@@ -8362,7 +8508,56 @@ def run_blogspot_playwright_automation(
             daily_publish_limit,
         )
     try:
-        prepared_html, image_paths = prepare_blogspot_html_and_images(article_html, thumbnail_path)
+        blogspot_article_html = article_html
+        if GOOGLE_IMAGE_COLLAGE_ENABLED:
+            mode_message = (
+                "블로그스팟용 재사용 허용 참고 이미지를 찾고 있습니다..."
+                if reference_image_protection_mode
+                else "블로그스팟 저작권 보호 모드 OFF: 뉴스·포털 등 일반 웹 이미지를 찾고 있습니다..."
+            )
+            result_queue.put(("publish_progress", (0.925, mode_message)))
+            reference_images = collect_tistory_reference_image_files(
+                title,
+                tag_names,
+                GOOGLE_IMAGE_COLLAGE_COUNT,
+                protection_mode=reference_image_protection_mode,
+            )
+            reference_image_paths = [
+                str(image.get("path") or "").strip()
+                for image in reference_images
+                if str(image.get("path") or "").strip()
+            ]
+            if reference_images:
+                figures = [
+                    build_tistory_reference_image_figure(
+                        image,
+                        title,
+                        index,
+                        show_source_attribution=reference_image_protection_mode,
+                    )
+                    for index, image in enumerate(reference_images, start=1)
+                ]
+                blogspot_article_html = insert_reference_images_in_article_middle(
+                    blogspot_article_html,
+                    figures,
+                )
+                result_queue.put(
+                    (
+                        "publish_progress",
+                        (
+                            0.935,
+                            f"블로그스팟 참고 이미지 {len(reference_images)}장을 본문 배치용으로 준비했습니다.",
+                        ),
+                    )
+                )
+        prepared_html, image_paths = prepare_blogspot_html_and_images(
+            blogspot_article_html,
+            thumbnail_path,
+        )
+        prepared_html, image_slot_markers = insert_blogspot_image_slot_markers(
+            prepared_html,
+            len(image_paths),
+        )
         with sync_playwright() as playwright:
             context = launch_blogspot_persistent_context(playwright)
             try:
@@ -8398,12 +8593,44 @@ def run_blogspot_playwright_automation(
                 title_field.wait_for(state="visible", timeout=20_000)
                 title_field.fill(title)
                 fill_blogspot_html_editor(page, prepared_html)
+                attached_count = 0
+                for image_index, (image_path, marker) in enumerate(
+                    zip(image_paths, image_slot_markers),
+                    start=1,
+                ):
+                    result_queue.put(
+                        (
+                            "publish_progress",
+                            (
+                                0.955 + (0.02 * image_index / max(1, len(image_paths))),
+                                f"블로그스팟 본문 위치 {image_index}/{len(image_paths)}에 이미지를 배치하고 있습니다...",
+                            ),
+                        )
+                    )
+                    focus_blogspot_image_slot(page, marker)
+                    attached_count += upload_blogspot_images(
+                        page,
+                        [image_path],
+                        result_queue,
+                    )
+                    html_editor = open_blogspot_html_editor(page)
+                    current_html = html_editor.evaluate(
+                        "element => element.CodeMirror.getValue()"
+                    )
+                    fill_blogspot_html_editor(
+                        page,
+                        remove_blogspot_image_slot_marker(current_html, marker),
+                    )
+                final_html = open_blogspot_html_editor(page).evaluate(
+                    "element => element.CodeMirror.getValue()"
+                )
+                if BLOGSPOT_IMAGE_SLOT_PREFIX in final_html:
+                    raise RuntimeError("블로그스팟 본문 이미지 배치 표시를 모두 제거하지 못했습니다.")
                 labels = [re.sub(r"^#", "", str(tag or "")).strip() for tag in tag_names]
                 labels = [label for label in labels if label][:20]
                 label_field = page.locator('textarea[aria-label*="라벨을 구분"]')
                 if label_field.count() and labels:
                     label_field.first.fill(", ".join(labels))
-                attached_count = upload_blogspot_images(page, image_paths, result_queue)
                 save_blogspot_storage_state(context)
                 page.wait_for_timeout(1_500)
 
@@ -8466,6 +8693,7 @@ def run_blogspot_playwright_automation(
                 context.close()
     finally:
         DailyPublishLimitStore.cancel_reservation(reservation_key)
+        cleanup_generated_upload_images(reference_image_paths)
 
 
 def is_threads_auth_cookie(cookie: dict) -> bool:
@@ -21138,6 +21366,9 @@ class PublishPipelineWorker(threading.Thread):
                     save_mode=self.settings.blogspot_save_mode,
                     thumbnail_path=self.thumbnail_path,
                     daily_publish_limit=self.settings.blogspot_daily_publish_limit,
+                    reference_image_protection_mode=(
+                        self.settings.blogspot_reference_image_protection_mode
+                    ),
                 )
 
             threads_result = None
@@ -33958,17 +34189,37 @@ class KeywordApp(ctk.CTk):
             sticky="ew",
         )
 
+        self.blogspot_reference_image_protection_var = tk.BooleanVar(value=False)
+        self.blogspot_reference_protection_switch = ctk.CTkSwitch(
+            self.blogspot_card,
+            text="저작권 보호 모드 OFF · 뉴스·포털 등 일반 웹 이미지도 캡처 (사용자 책임)",
+            variable=self.blogspot_reference_image_protection_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=48,
+            switch_height=24,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_blogspot_reference_image_mode_changed,
+        )
+        self.blogspot_reference_protection_switch.grid(
+            row=7,
+            column=0,
+            padx=24,
+            pady=(0, 18),
+            sticky="w",
+        )
+
         (
             self.blogspot_daily_publish_limit_entry,
             self.blogspot_daily_publish_limit_status_label,
         ) = self._build_daily_publish_limit_control(
             self.blogspot_card,
-            row=7,
+            row=8,
             platform="blogspot",
         )
 
         button_row = ctk.CTkFrame(self.blogspot_card, fg_color="transparent")
-        button_row.grid(row=9, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=10, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -34015,7 +34266,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.blogspot_status_label.grid(row=10, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.blogspot_status_label.grid(row=11, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_tistory_card(self) -> None:
         title = ctk.CTkLabel(
@@ -37910,6 +38161,10 @@ class KeywordApp(ctk.CTk):
         self.blogspot_save_mode_var.set(
             normalize_tistory_save_mode(self.wordpress_settings.blogspot_save_mode)
         )
+        self.blogspot_reference_image_protection_var.set(
+            self.wordpress_settings.blogspot_reference_image_protection_mode
+        )
+        self._on_blogspot_reference_image_mode_changed(save=False)
         self.blogspot_daily_publish_limit_entry.insert(
             0,
             str(self.wordpress_settings.blogspot_daily_publish_limit),
@@ -38898,6 +39153,9 @@ class KeywordApp(ctk.CTk):
             blogspot_save_mode=normalize_tistory_save_mode(
                 self.blogspot_save_mode_var.get()
             ),
+            blogspot_reference_image_protection_mode=bool(
+                self.blogspot_reference_image_protection_var.get()
+            ),
             tistory_blog_url=self.tistory_blog_url_entry.get().strip(),
             tistory_write_url=self.tistory_write_url_entry.get().strip(),
             tistory_daily_publish_limit=normalize_daily_publish_limit(
@@ -39380,6 +39638,21 @@ class KeywordApp(ctk.CTk):
             )
         self._save_ui_state()
 
+    def _on_blogspot_reference_image_mode_changed(
+        self,
+        save: bool = True,
+    ) -> None:
+        enabled = bool(self.blogspot_reference_image_protection_var.get())
+        text = (
+            "저작권 보호 모드 ON · 재사용 허용 이미지만 사용"
+            if enabled
+            else "저작권 보호 모드 OFF · 뉴스·포털 등 일반 웹 이미지도 캡처 (사용자 책임)"
+        )
+        self.blogspot_reference_protection_switch.configure(text=text)
+        self.wordpress_settings.blogspot_reference_image_protection_mode = enabled
+        if save:
+            self._save_ui_state()
+
     def _start_blogspot_profile_check(self) -> None:
         if self.blogspot_profile_worker and self.blogspot_profile_worker.is_alive():
             messagebox.showinfo("진행 중", "블로그스팟 로그인 상태를 확인하고 있습니다.")
@@ -39737,12 +40010,14 @@ class KeywordApp(ctk.CTk):
         self.blogspot_blog_url_entry.delete(0, "end")
         self.blogspot_blog_id_entry.delete(0, "end")
         self.blogspot_save_mode_var.set(TISTORY_SAVE_MODE_PUBLISH)
+        self.blogspot_reference_image_protection_var.set(False)
         self.blogspot_daily_publish_limit_entry.delete(0, "end")
         self.blogspot_daily_publish_limit_entry.insert(0, "0")
         self.wordpress_settings.blogspot_blog_id = ""
         self.wordpress_settings.blogspot_blog_url = ""
         self.wordpress_settings.blogspot_blog_name = ""
         self.wordpress_settings.blogspot_save_mode = TISTORY_SAVE_MODE_PUBLISH
+        self.wordpress_settings.blogspot_reference_image_protection_mode = False
         self.wordpress_settings.blogspot_client_id = ""
         self.wordpress_settings.blogspot_client_secret = ""
         self.wordpress_settings.blogspot_redirect_uri = "http://localhost"
