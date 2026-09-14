@@ -8284,12 +8284,126 @@ def _select_blogspot_layout_choice(page, label: str) -> None:
         raise RuntimeError(f"Blogger 이미지 레이아웃의 '{label}' 항목을 찾지 못했습니다.")
     if choice.get_attribute("aria-checked") != "true":
         choice.click()
+    append_runtime_log("BLOGSPOT", f"이미지 레이아웃 선택 완료: {label}")
+
+
+def describe_blogspot_upload_state(page) -> str:
+    """Return a compact, non-sensitive DOM summary for failed Blogger uploads."""
+    try:
+        picker_count = page.locator(
+            'iframe[src*="docs.google.com/picker"]:visible'
+        ).count()
+    except Exception:
+        picker_count = -1
+    try:
+        dialogs = page.locator('[role="dialog"]:visible')
+        dialog_texts = []
+        for index in range(min(dialogs.count(), 4)):
+            text_value = re.sub(r"\s+", " ", dialogs.nth(index).inner_text()).strip()
+            if text_value:
+                dialog_texts.append(text_value[:240])
+    except Exception:
+        dialog_texts = []
+    try:
+        visible_buttons = page.locator('button:visible, [role="button"]:visible')
+        button_names = []
+        for index in range(min(visible_buttons.count(), 30)):
+            candidate = visible_buttons.nth(index)
+            name = re.sub(
+                r"\s+",
+                " ",
+                str(candidate.get_attribute("aria-label") or candidate.inner_text() or ""),
+            ).strip()
+            if name and name not in button_names:
+                button_names.append(name[:80])
+        button_summary = ", ".join(button_names[-12:])
+    except Exception:
+        button_summary = ""
+    return (
+        f"url={str(page.url or '')[:180]} · picker={picker_count} · "
+        f"dialogs={dialog_texts or '없음'} · buttons={button_summary or '확인 불가'}"
+    )
+
+
+def collect_blogspot_compose_image_sources(page) -> list[str]:
+    try:
+        images = page.frame_locator("iframe.editable:visible").locator("img")
+        sources: list[str] = []
+        for index in range(images.count()):
+            source = str(images.nth(index).get_attribute("src") or "").strip()
+            if source:
+                sources.append(source)
+        return sources
+    except Exception:
+        return []
+
+
+def find_blogspot_compose_image(page, source: str):
+    images = page.frame_locator("iframe.editable:visible").locator("img")
+    for index in range(images.count()):
+        candidate = images.nth(index)
+        if str(candidate.get_attribute("src") or "").strip() == source:
+            return candidate
+    return None
+
+
+def configure_blogspot_inserted_image(page, image_source: str) -> None:
+    """Apply Blogger's current compose-toolbar layout to one uploaded image."""
+    image = find_blogspot_compose_image(page, image_source)
+    if image is None:
+        raise RuntimeError("업로드된 Blogger 이미지를 본문에서 다시 찾지 못했습니다.")
+
+    image.scroll_into_view_if_needed()
+    image.click()
+    page.wait_for_timeout(350)
+
+    center_button = _first_visible_blogspot_locator(
+        page.get_by_role("button", name="가운데 정렬", exact=True)
+    )
+    if center_button is None:
+        raise RuntimeError("Blogger 이미지의 가운데 정렬 버튼을 찾지 못했습니다.")
+    center_button.click(force=True)
+    append_runtime_log("BLOGSPOT", "현재 Blogger 도구에서 이미지 가운데 정렬 완료")
+    page.wait_for_timeout(350)
+
+    # Alignment can dismiss the floating image toolbar, so select the image once
+    # more before opening its size menu.
+    image.click()
+    page.wait_for_timeout(250)
+    size_button = _first_visible_blogspot_locator(
+        page.get_by_role("button", name="이미지 크기", exact=True)
+    )
+    if size_button is None:
+        raise RuntimeError("Blogger 이미지 크기 버튼을 찾지 못했습니다.")
+    size_button.click(force=True)
+    page.wait_for_timeout(350)
+
+    size_choice = None
+    for label in ("매우 크게", "아주 크게"):
+        size_choice = _first_visible_blogspot_locator(
+            page.get_by_text(label, exact=True)
+        )
+        if size_choice is not None:
+            size_choice.click(force=True)
+            append_runtime_log(
+                "BLOGSPOT",
+                f"현재 Blogger 도구에서 이미지 크기 선택 완료: {label}",
+            )
+            break
+    if size_choice is None:
+        raise RuntimeError("Blogger 이미지 크기의 '매우 크게' 항목을 찾지 못했습니다.")
+    page.wait_for_timeout(600)
 
 
 def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Queue) -> int:
     valid_paths = [str(Path(path).expanduser().resolve()) for path in image_paths if Path(path).expanduser().is_file()]
     if not valid_paths:
         return 0
+    append_runtime_log(
+        "BLOGSPOT",
+        f"이미지 업로드 시작: {', '.join(Path(path).name for path in valid_paths)}",
+    )
+    before_image_sources = set(collect_blogspot_compose_image_sources(page))
     result_queue.put(("publish_progress", (0.965, f"블로그스팟에 이미지 {len(valid_paths)}장을 첨부하고 있습니다...")))
     image_button = page.get_by_role("button", name=re.compile(r"이미지 삽입"))
     if not image_button.count():
@@ -8305,6 +8419,7 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     upload_option.wait_for(state="visible", timeout=15_000)
     upload_option.focus()
     upload_option.press("Enter")
+    append_runtime_log("BLOGSPOT", "Google 이미지 선택기 열기 완료")
     picker_iframe = page.locator('iframe[src*="docs.google.com/picker"]:visible')
     picker_iframe.first.wait_for(state="visible", timeout=20_000)
     picker_frame = page.frame_locator('iframe[src*="docs.google.com/picker"]:visible')
@@ -8313,19 +8428,42 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     with page.expect_file_chooser(timeout=20_000) as chooser_info:
         browse_button.click()
     chooser_info.value.set_files(valid_paths)
+    append_runtime_log("BLOGSPOT", "파일 선택 완료 · Blogger 처리 대기 2.5초 시작")
     result_queue.put(("publish_progress", (0.97, "업로드한 이미지의 Blogger 레이아웃을 적용하고 있습니다...")))
 
     # Google Picker returns from set_files before Blogger has finished processing
     # the upload. Its Select button and the parent layout dialog can both appear
     # about 1–2 seconds later, so let the picker settle before inspecting either.
     page.wait_for_timeout(2_500)
+    append_runtime_log(
+        "BLOGSPOT",
+        f"최초 안정화 대기 완료 · {describe_blogspot_upload_state(page)}",
+    )
 
     # The current Blogger picker closes itself after the upload and opens a
     # separate "레이아웃 선택" modal in the parent editor. Older variants keep
     # a Select/Add/Insert button inside Google Picker first, so support both.
     last_picker_action_at = 0.0
+    last_state_log_at = 0.0
     deadline = time.time() + max(60, min(150, len(valid_paths) * 25))
     while time.time() < deadline:
+        current_image_sources = collect_blogspot_compose_image_sources(page)
+        new_image_sources = [
+            source
+            for source in current_image_sources
+            if source not in before_image_sources
+            and "blogger.googleusercontent.com" in source
+        ]
+        if new_image_sources:
+            uploaded_source = new_image_sources[-1]
+            append_runtime_log(
+                "BLOGSPOT",
+                "업로드된 이미지가 Blogger 본문에 직접 삽입된 현재 UI 감지",
+            )
+            configure_blogspot_inserted_image(page, uploaded_source)
+            append_runtime_log("BLOGSPOT", "현재 Blogger 이미지 배치 처리 완료")
+            return len(valid_paths)
+
         layout_titles = page.get_by_text(
             re.compile(r"^\s*레이아웃 선택\s*$")
         )
@@ -8334,6 +8472,10 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
             for index in range(layout_titles.count())
         )
         if layout_visible:
+            append_runtime_log(
+                "BLOGSPOT",
+                f"이미지 레이아웃 창 감지 · {describe_blogspot_upload_state(page)}",
+            )
             _select_blogspot_layout_choice(page, "아주 크게")
             _select_blogspot_layout_choice(page, "가운데")
             confirm_buttons = page.get_by_role("button", name="확인", exact=True)
@@ -8342,9 +8484,16 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
                 raise RuntimeError("Blogger 이미지 레이아웃 창의 확인 버튼을 찾지 못했습니다.")
             confirm_button.click()
             page.wait_for_timeout(1_200)
+            append_runtime_log("BLOGSPOT", "이미지 레이아웃 확인 완료")
             return len(valid_paths)
 
         now = time.time()
+        if now - last_state_log_at >= 5.0:
+            append_runtime_log(
+                "BLOGSPOT",
+                f"레이아웃 창 대기 중 · {describe_blogspot_upload_state(page)}",
+            )
+            last_state_log_at = now
         if now - last_picker_action_at >= 2.0:
             for button_name in ("선택", "추가", "삽입"):
                 try:
@@ -8360,6 +8509,10 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
                         None,
                     )
                     if button is not None and button.is_enabled():
+                        append_runtime_log(
+                            "BLOGSPOT",
+                            f"Google 선택기 '{button_name}' 버튼 실행",
+                        )
                         button.click()
                         last_picker_action_at = time.time()
                         # The Blogger layout dialog is created asynchronously
@@ -8370,40 +8523,71 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
                     continue
         page.wait_for_timeout(350)
 
-    raise RuntimeError("이미지는 업로드했지만 Blogger 이미지 레이아웃 확인창을 찾지 못했습니다.")
+    final_state = describe_blogspot_upload_state(page)
+    append_runtime_log(
+        "BLOGSPOT",
+        f"이미지 레이아웃 창 감지 실패 · {final_state}",
+    )
+    raise RuntimeError(
+        "이미지는 업로드했지만 Blogger 이미지 레이아웃 확인창을 찾지 못했습니다. "
+        f"상세 로그: {RUNTIME_LOG_FILE}"
+    )
 
 
 def _open_blogspot_view_option(page, option_value: str) -> None:
-    selected_option = page.locator(
-        f'[role="option"][data-value="{option_value}"]:visible'
-    )
-    if (
-        selected_option.count()
-        and selected_option.first.get_attribute("aria-selected") == "true"
-    ):
-        return
-
-    switcher = page.locator('[role="listbox"][aria-label="보기 전환"]:visible')
-    if not switcher.count():
-        switcher = page.locator('[role="listbox"]:visible').filter(
-            has=page.locator(f'[role="option"][data-value="{option_value}"]')
+    for attempt in range(3):
+        selected_option = page.locator(
+            f'[role="option"][data-value="{option_value}"]:visible'
         )
-    if not switcher.count():
-        raise RuntimeError("블로그스팟의 HTML/작성 보기 전환 버튼을 찾지 못했습니다.")
-    switcher = switcher.first
-    switcher.wait_for(state="visible", timeout=20_000)
-    if switcher.get_attribute("aria-expanded") != "true":
-        switcher.click()
-    option = page.locator(
-        f'[role="option"][data-value="{option_value}"]:visible'
-    )
-    option.first.wait_for(state="visible", timeout=10_000)
-    if option.first.get_attribute("aria-selected") != "true":
-        # Blogger's Material menu places a presentation layer above the visible
-        # option, which can intercept pointer clicks. Keyboard activation targets
-        # the focused option directly and works in both light and dark Chrome UI.
-        option.first.focus()
-        option.first.press("Enter")
+        if (
+            selected_option.count()
+            and selected_option.first.get_attribute("aria-selected") == "true"
+        ):
+            return
+
+        # A newly inserted image leaves its floating toolbar active for a moment.
+        # Close that surface before opening Blogger's main view selector.
+        page.keyboard.press("Escape")
+        switcher = page.locator(
+            '[role="listbox"][aria-label="보기 전환"]:visible'
+        )
+        if not switcher.count():
+            switcher = page.locator('[role="listbox"]:visible').filter(
+                has=page.locator(
+                    f'[role="option"][data-value="{option_value}"]'
+                )
+            )
+        if not switcher.count():
+            if attempt < 2:
+                page.wait_for_timeout(700)
+                continue
+            raise RuntimeError("블로그스팟의 HTML/작성 보기 전환 버튼을 찾지 못했습니다.")
+        switcher = switcher.first
+        switcher.wait_for(state="visible", timeout=20_000)
+        if switcher.get_attribute("aria-expanded") != "true":
+            # The compose image toolbar can intercept a normal pointer click even
+            # after it visually disappears. Force targets the actual selector.
+            switcher.click(force=True)
+        option = page.locator(
+            f'[role="option"][data-value="{option_value}"]:visible'
+        )
+        try:
+            option.first.wait_for(state="visible", timeout=4_000)
+        except Exception:
+            if attempt < 2:
+                page.wait_for_timeout(700)
+                continue
+            raise RuntimeError(
+                "블로그스팟의 HTML/작성 보기 선택 항목을 열지 못했습니다."
+            )
+        if option.first.get_attribute("aria-selected") != "true":
+            # Blogger's Material menu places a presentation layer above the visible
+            # option, which can intercept pointer clicks. Keyboard activation targets
+            # the focused option directly and works in both light and dark Chrome UI.
+            option.first.focus()
+            option.first.press("Enter")
+        page.wait_for_timeout(350)
+        return
 
 
 def open_blogspot_html_editor(page):
@@ -8511,6 +8695,10 @@ def run_blogspot_playwright_automation(
     normalized_save_mode = normalize_tistory_save_mode(save_mode)
     reservation_key = ""
     reference_image_paths: list[str] = []
+    append_runtime_log(
+        "BLOGSPOT",
+        f"자동화 시작: mode={normalized_save_mode}, title={title[:120]}",
+    )
     daily_account = blog_url or blog_id
     if normalized_save_mode == TISTORY_SAVE_MODE_PUBLISH:
         reservation_key = DailyPublishLimitStore.reserve_publish(
@@ -8569,6 +8757,10 @@ def run_blogspot_playwright_automation(
             prepared_html,
             len(image_paths),
         )
+        append_runtime_log(
+            "BLOGSPOT",
+            f"본문 준비 완료: html={len(prepared_html)}자, images={len(image_paths)}, slots={len(image_slot_markers)}",
+        )
         with sync_playwright() as playwright:
             context = launch_blogspot_persistent_context(playwright)
             try:
@@ -8604,6 +8796,7 @@ def run_blogspot_playwright_automation(
                 title_field.wait_for(state="visible", timeout=20_000)
                 title_field.fill(title)
                 fill_blogspot_html_editor(page, prepared_html)
+                append_runtime_log("BLOGSPOT", "제목·HTML 본문 최초 입력 완료")
                 attached_count = 0
                 for image_index, (image_path, marker) in enumerate(
                     zip(image_paths, image_slot_markers),
@@ -8619,6 +8812,10 @@ def run_blogspot_playwright_automation(
                         )
                     )
                     focus_blogspot_image_slot(page, marker)
+                    append_runtime_log(
+                        "BLOGSPOT",
+                        f"본문 이미지 위치 선택 완료: {image_index}/{len(image_paths)} · {marker}",
+                    )
                     attached_count += upload_blogspot_images(
                         page,
                         [image_path],
@@ -8637,6 +8834,10 @@ def run_blogspot_playwright_automation(
                 )
                 if BLOGSPOT_IMAGE_SLOT_PREFIX in final_html:
                     raise RuntimeError("블로그스팟 본문 이미지 배치 표시를 모두 제거하지 못했습니다.")
+                append_runtime_log(
+                    "BLOGSPOT",
+                    f"본문 이미지 배치 완료: attached={attached_count}",
+                )
                 labels = [re.sub(r"^#", "", str(tag or "")).strip() for tag in tag_names]
                 labels = [label for label in labels if label][:20]
                 label_field = page.locator('textarea[aria-label*="라벨을 구분"]')
@@ -8702,6 +8903,12 @@ def run_blogspot_playwright_automation(
                 }
             finally:
                 context.close()
+    except Exception as exc:
+        append_runtime_log(
+            "BLOGSPOT",
+            f"자동화 실패: {exc}\n{traceback.format_exc()}",
+        )
+        raise
     finally:
         DailyPublishLimitStore.cancel_reservation(reservation_key)
         cleanup_generated_upload_images(reference_image_paths)
