@@ -8200,6 +8200,99 @@ def prepare_blogspot_html_and_images(
     return cleaned.strip(), image_paths
 
 
+def _parse_blogspot_prompt_label_text(
+    value: str,
+    *,
+    allow_unlabeled: bool = False,
+) -> list[str]:
+    text = unescape(re.sub(r"<[^>]+>", " ", value or ""))
+    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+
+    prefix = re.match(
+        r"^(?:\[\s*)?(?:블로그스팟\s*)?(?:(?:주요|핵심|추천)\s*)?"
+        r"(?:태그|라벨|labels?)(?:\s*\])?(?:\s*[:：\-]\s*|\s+)(.+)$",
+        text,
+        flags=re.I,
+    )
+    has_prefix = prefix is not None
+    label_text = str(prefix.group(1) if prefix else text).strip()
+    raw_labels = re.split(r"\s*[,，]\s*", label_text)
+    raw_labels = [label for label in raw_labels if label.strip()]
+    if len(raw_labels) < 2:
+        return []
+    if not has_prefix:
+        if not allow_unlabeled:
+            return []
+        if len(raw_labels) < 3 and not all(label.lstrip().startswith("#") for label in raw_labels):
+            return []
+        if len(label_text) > 400 or any(re.search(r"[.!?。！？]", label) for label in raw_labels):
+            return []
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw_label in raw_labels:
+        label = re.sub(r"^[#*•·\-\s]+", "", raw_label).strip(" \t\r\n'\"`[]()")
+        label = re.sub(r"\s+", " ", label)
+        if not label or len(label) > 50:
+            continue
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+        if len(labels) >= 20:
+            break
+    return labels if len(labels) >= 2 else []
+
+
+def extract_blogspot_prompt_labels(article_html: str) -> tuple[str, list[str]]:
+    """Move the AI-written final comma-separated tag line into Blogger labels."""
+    content = (article_html or "").strip()
+    if not content:
+        return content, []
+
+    block_pattern = re.compile(
+        r"<(?P<tag>p|div|section)\b[^>]*>.*?</(?P=tag)>",
+        flags=re.I | re.S,
+    )
+    blocks = list(block_pattern.finditer(content))
+    for block in reversed(blocks):
+        labels = _parse_blogspot_prompt_label_text(block.group(0))
+        if labels:
+            cleaned = (content[: block.start()] + content[block.end() :]).strip()
+            return cleaned, labels
+
+    if blocks:
+        last_block = blocks[-1]
+        labels = _parse_blogspot_prompt_label_text(
+            last_block.group(0),
+            allow_unlabeled=True,
+        )
+        if labels:
+            cleaned = (content[: last_block.start()] + content[last_block.end() :]).strip()
+            return cleaned, labels
+
+    lines = list(re.finditer(r"(?m)^[ \t]*(\S[^\r\n]*?)[ \t]*$", content))
+    for line in reversed(lines[-8:]):
+        labels = _parse_blogspot_prompt_label_text(line.group(1))
+        if labels:
+            cleaned = (content[: line.start()] + content[line.end() :]).strip()
+            return cleaned, labels
+    if lines:
+        last_line = lines[-1]
+        labels = _parse_blogspot_prompt_label_text(
+            last_line.group(1),
+            allow_unlabeled=True,
+        )
+        if labels:
+            cleaned = (content[: last_line.start()] + content[last_line.end() :]).strip()
+            return cleaned, labels
+    return content, []
+
+
 def insert_blogspot_image_slot_markers(
     article_html: str,
     image_count: int,
@@ -8762,7 +8855,18 @@ def run_blogspot_playwright_automation(
             daily_publish_limit,
         )
     try:
-        blogspot_article_html = article_html
+        blogspot_article_html, blogspot_prompt_labels = (
+            extract_blogspot_prompt_labels(article_html)
+        )
+        append_runtime_log(
+            "BLOGSPOT",
+            (
+                "본문 마지막 주요 태그를 Blogger 라벨로 분리 완료: "
+                + ", ".join(blogspot_prompt_labels)
+                if blogspot_prompt_labels
+                else "본문 마지막에서 Blogger 라벨용 주요 태그를 찾지 못했습니다."
+            ),
+        )
         if GOOGLE_IMAGE_COLLAGE_ENABLED:
             mode_message = (
                 "블로그스팟용 재사용 허용 참고 이미지를 찾고 있습니다..."
@@ -8903,11 +9007,13 @@ def run_blogspot_playwright_automation(
                     "BLOGSPOT",
                     f"본문 이미지 배치 완료: attached={attached_count}",
                 )
-                labels = [re.sub(r"^#", "", str(tag or "")).strip() for tag in tag_names]
-                labels = [label for label in labels if label][:20]
                 label_field = page.locator('textarea[aria-label*="라벨을 구분"]')
-                if label_field.count() and labels:
-                    label_field.first.fill(", ".join(labels))
+                if label_field.count() and blogspot_prompt_labels:
+                    label_field.first.fill(", ".join(blogspot_prompt_labels))
+                    append_runtime_log(
+                        "BLOGSPOT",
+                        f"본문 주요 태그 {len(blogspot_prompt_labels)}개를 Blogger 라벨에 입력 완료",
+                    )
                 save_blogspot_storage_state(context)
                 page.wait_for_timeout(1_500)
 

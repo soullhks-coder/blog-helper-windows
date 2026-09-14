@@ -115,6 +115,31 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertGreater(slotted.index(markers[1]), slotted.index("<h2>"))
         self.assertGreater(slotted.index(markers[2]), slotted.index(markers[1]))
 
+    def test_prompt_tag_footer_is_moved_to_blogspot_labels(self) -> None:
+        html = (
+            "<h2>본문 제목</h2><p>본문 내용입니다.</p>"
+            "<p><strong>주요 태그:</strong> 블로그스팟, 자동 포스팅, AI 글쓰기</p>"
+        )
+        cleaned, labels = main.extract_blogspot_prompt_labels(html)
+        self.assertEqual(labels, ["블로그스팟", "자동 포스팅", "AI 글쓰기"])
+        self.assertNotIn("주요 태그", cleaned)
+        self.assertIn("본문 내용입니다.", cleaned)
+
+    def test_unlabeled_comma_tag_footer_is_supported(self) -> None:
+        html = (
+            "<h2>본문 제목</h2><p>본문 내용입니다.</p>"
+            "<p>#블로그스팟, #자동포스팅, #Blogger</p>"
+        )
+        cleaned, labels = main.extract_blogspot_prompt_labels(html)
+        self.assertEqual(labels, ["블로그스팟", "자동포스팅", "Blogger"])
+        self.assertNotIn("#블로그스팟", cleaned)
+
+    def test_normal_final_sentence_is_not_used_as_blogspot_labels(self) -> None:
+        html = "<h2>마무리</h2><p>가격, 후기, 신청 방법을 차례로 확인해 보세요.</p>"
+        cleaned, labels = main.extract_blogspot_prompt_labels(html)
+        self.assertEqual(labels, [])
+        self.assertEqual(cleaned, html)
+
     def test_blogger_editor_uses_open_html_option_and_codemirror(self) -> None:
         source = inspect.getsource(main.run_blogspot_playwright_automation)
         html_switch_source = inspect.getsource(main.open_blogspot_html_editor)
@@ -138,6 +163,9 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("element.CodeMirror.setValue", html_fill_source)
         self.assertIn("element.CodeMirror.getValue", html_fill_source)
         self.assertIn('textarea[aria-label*="라벨을 구분"]', source)
+        self.assertIn("extract_blogspot_prompt_labels(article_html)", source)
+        self.assertIn('join(blogspot_prompt_labels)', source)
+        self.assertNotIn('str(tag or "").strip() for tag in tag_names', source)
         self.assertIn('[role="menuitem"]:visible', upload_source)
         self.assertIn('upload_option.press("Enter")', upload_source)
         self.assertNotIn('get_by_text("컴퓨터에서 업로드"', upload_source)
