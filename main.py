@@ -8224,6 +8224,69 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     return len(valid_paths)
 
 
+def open_blogspot_html_editor(page):
+    """Switch Blogger's editor to HTML view and return its visible CodeMirror root."""
+    html_editor = page.locator(".CodeMirror:visible")
+    if html_editor.count() and html_editor.first.is_visible():
+        return html_editor.first
+
+    # Blogger keeps a hidden copy of every mode option in the collapsed selector.
+    # Clicking the text node ("HTML 보기") can therefore resolve to that hidden copy,
+    # while the currently selected compose option intercepts the pointer event. Open
+    # the real view switcher first, then click only the option in the open menu.
+    switcher = page.locator('[role="listbox"][aria-label="보기 전환"]:visible')
+    if not switcher.count():
+        switcher = page.locator('[role="listbox"]:visible').filter(
+            has=page.locator('[role="option"][data-value="html"]')
+        )
+    if not switcher.count():
+        raise RuntimeError("블로그스팟의 HTML/작성 보기 전환 버튼을 찾지 못했습니다.")
+
+    switcher = switcher.first
+    switcher.wait_for(state="visible", timeout=20_000)
+    if switcher.get_attribute("aria-expanded") != "true":
+        switcher.click()
+
+    html_option = page.locator('[role="option"][data-value="html"]:visible')
+    html_option.first.wait_for(state="visible", timeout=10_000)
+    html_option.first.click()
+
+    html_editor = page.locator(".CodeMirror:visible")
+    html_editor.first.wait_for(state="visible", timeout=20_000)
+    return html_editor.first
+
+
+def fill_blogspot_html_editor(page, article_html: str) -> None:
+    """Write raw HTML through Blogger's CodeMirror instance and verify the value."""
+    html_editor = open_blogspot_html_editor(page)
+    has_api = bool(
+        html_editor.evaluate(
+            "element => Boolean(element.CodeMirror && element.CodeMirror.setValue)"
+        )
+    )
+    if not has_api:
+        raise RuntimeError("블로그스팟 HTML 편집기를 불러왔지만 입력 기능을 확인하지 못했습니다.")
+
+    html_editor.evaluate(
+        """
+        (element, value) => {
+            const editor = element.CodeMirror;
+            editor.setValue(value);
+            editor.save();
+            const input = editor.getInputField();
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            editor.focus();
+        }
+        """,
+        article_html,
+    )
+    written_html = html_editor.evaluate("element => element.CodeMirror.getValue()")
+    if written_html != article_html:
+        raise RuntimeError("블로그스팟 HTML 본문 입력값을 확인하지 못했습니다.")
+    page.wait_for_timeout(400)
+
+
 def run_blogspot_playwright_automation(
     title: str,
     article_html: str,
@@ -8288,12 +8351,7 @@ def run_blogspot_playwright_automation(
                 title_field = page.get_by_role("textbox", name="제목", exact=True)
                 title_field.wait_for(state="visible", timeout=20_000)
                 title_field.fill(title)
-                html_view = page.get_by_text("HTML 보기", exact=True)
-                html_view.first.click()
-                page.wait_for_timeout(700)
-                editor_body = page.frame_locator("iframe.editable").locator("body")
-                editor_body.wait_for(state="visible", timeout=20_000)
-                editor_body.fill(prepared_html)
+                fill_blogspot_html_editor(page, prepared_html)
                 labels = [re.sub(r"^#", "", str(tag or "")).strip() for tag in tag_names]
                 labels = [label for label in labels if label][:20]
                 label_field = page.locator('textarea[aria-label*="라벨을 구분"]')

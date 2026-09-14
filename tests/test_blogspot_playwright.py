@@ -74,11 +74,18 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("https://example.com/remote.jpg", cleaned)
         self.assertEqual(images, [str(thumbnail_path), str(image_path)])
 
-    def test_blogger_editor_uses_html_iframe_and_native_image_picker(self) -> None:
+    def test_blogger_editor_uses_open_html_option_and_codemirror(self) -> None:
         source = inspect.getsource(main.run_blogspot_playwright_automation)
+        html_switch_source = inspect.getsource(main.open_blogspot_html_editor)
+        html_fill_source = inspect.getsource(main.fill_blogspot_html_editor)
         upload_source = inspect.getsource(main.upload_blogspot_images)
-        self.assertIn('get_by_text("HTML 보기", exact=True)', source)
-        self.assertIn('frame_locator("iframe.editable").locator("body")', source)
+        self.assertIn("fill_blogspot_html_editor", source)
+        self.assertIn('[role="listbox"][aria-label="보기 전환"]:visible', html_switch_source)
+        self.assertIn('[role="option"][data-value="html"]:visible', html_switch_source)
+        self.assertIn('page.locator(".CodeMirror:visible")', html_switch_source)
+        self.assertNotIn('get_by_text("HTML 보기", exact=True)', html_switch_source)
+        self.assertIn("element.CodeMirror.setValue", html_fill_source)
+        self.assertIn("element.CodeMirror.getValue", html_fill_source)
         self.assertIn('textarea[aria-label*="라벨을 구분"]', source)
         self.assertIn("컴퓨터에서 업로드", upload_source)
         self.assertIn("expect_file_chooser", upload_source)
