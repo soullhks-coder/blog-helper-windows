@@ -291,6 +291,10 @@ TISTORY_AUTOMATION_SCRIPT_FILE = DATA_DIR / "tistory-automation.js"
 TISTORY_AUTOMATION_RUNNER_FILE = DATA_DIR / "tistory-automation-runner.js"
 TISTORY_CHROME_PROFILE_DIR = DATA_DIR / "Tistory Chrome Profile"
 TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
+BLOGSPOT_CHROME_PROFILE_DIR = DATA_DIR / "Blogspot Chrome Profile"
+BLOGSPOT_STORAGE_STATE_FILE = DATA_DIR / "blogspot-storage-state.json"
+BLOGSPOT_LOGIN_URL = "https://draft.blogger.com/about/?bpli=1"
+BLOGSPOT_HOME_URL = "https://draft.blogger.com/home"
 THREADS_CHROME_PROFILE_DIR = DATA_DIR / "Threads Chrome Profile"
 THREADS_STORAGE_STATE_FILE = DATA_DIR / "threads-storage-state.json"
 THREADS_HOME_URL = "https://www.threads.com/"
@@ -2973,6 +2977,9 @@ class WordPressSettings:
     blogspot_refresh_token: str = ""
     blogspot_access_token: str = ""
     blogspot_daily_publish_limit: int = 0
+    blogspot_blog_url: str = ""
+    blogspot_blog_name: str = ""
+    blogspot_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
     tistory_daily_publish_limit: int = 0
@@ -3381,6 +3388,8 @@ class AppStateStore:
         "naver_kin_profiles",
         "naver_kin_active_profile",
         "blogspot_blog_id",
+        "blogspot_blog_url",
+        "blogspot_blog_name",
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
@@ -3513,6 +3522,11 @@ class AppStateStore:
             blogspot_access_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_ACCOUNT) or blogspot_fallback,
             blogspot_daily_publish_limit=normalize_daily_publish_limit(
                 payload.get("blogspot_daily_publish_limit", 0)
+            ),
+            blogspot_blog_url=payload.get("blogspot_blog_url", ""),
+            blogspot_blog_name=payload.get("blogspot_blog_name", ""),
+            blogspot_save_mode=normalize_tistory_save_mode(
+                payload.get("blogspot_save_mode", TISTORY_SAVE_MODE_PUBLISH)
             ),
             tistory_blog_url=payload.get("tistory_blog_url", ""),
             tistory_write_url=payload.get("tistory_write_url", ""),
@@ -7893,6 +7907,461 @@ def save_tistory_storage_state(context) -> None:
             context.add_cookies(cookies)
     except Exception:
         pass
+
+
+def load_blogspot_storage_state() -> dict:
+    if not BLOGSPOT_STORAGE_STATE_FILE.exists():
+        return {"cookies": [], "origins": []}
+    try:
+        state = json.loads(BLOGSPOT_STORAGE_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {"cookies": [], "origins": []}
+    if not isinstance(state, dict):
+        return {"cookies": [], "origins": []}
+    if not isinstance(state.get("cookies"), list):
+        state["cookies"] = []
+    if not isinstance(state.get("origins"), list):
+        state["origins"] = []
+    return state
+
+
+def save_blogspot_storage_state(context) -> None:
+    """Keep a portable cookie snapshot in addition to Chromium's persistent profile."""
+    try:
+        state = context.storage_state()
+        BLOGSPOT_STORAGE_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def blogspot_dashboard_url(blog_id: str = "") -> str:
+    normalized_id = re.sub(r"\D", "", str(blog_id or ""))
+    return (
+        f"https://draft.blogger.com/blog/posts/{normalized_id}"
+        if normalized_id
+        else BLOGSPOT_HOME_URL
+    )
+
+
+def extract_blogspot_profile(page) -> dict[str, str]:
+    current_url = str(page.url or "")
+    match = re.search(r"/blog/(?:posts|post/edit)/(\d+)", current_url)
+    blog_id = match.group(1) if match else ""
+    if not blog_id:
+        try:
+            blog_links = page.locator('a[href*="/blog/posts/"]')
+            for index in range(blog_links.count()):
+                href = str(blog_links.nth(index).get_attribute("href") or "")
+                match = re.search(r"/blog/posts/(\d+)", href)
+                if match:
+                    blog_id = match.group(1)
+                    break
+        except Exception:
+            pass
+    blog_name = ""
+    public_url = ""
+    try:
+        selected = page.locator('[role="option"][aria-selected="true"]')
+        if selected.count():
+            blog_name = re.sub(r"\s+", " ", selected.first.inner_text()).strip()
+    except Exception:
+        pass
+    if not blog_name:
+        try:
+            # Blogger는 블로그 선택 메뉴를 닫아 두면 aria-selected를 노출하지
+            # 않고, 현재 블로그명만 보이는 .hMNMsd 요소로 렌더링한다.
+            visible_names = page.locator(".hMNMsd:visible")
+            if visible_names.count():
+                blog_name = re.sub(
+                    r"\s+", " ", visible_names.first.inner_text()
+                ).strip()
+        except Exception:
+            pass
+    try:
+        public_link = page.get_by_role("link", name=re.compile(r"^블로그 보기$"))
+        if public_link.count():
+            public_url = str(public_link.first.get_attribute("href") or "").strip()
+    except Exception:
+        pass
+    return {
+        "blog_id": blog_id,
+        "blog_name": blog_name,
+        "blog_url": public_url,
+        "dashboard_url": blogspot_dashboard_url(blog_id),
+    }
+
+
+def is_blogspot_dashboard_ready(page) -> bool:
+    try:
+        current_url = str(page.url or "")
+        if re.search(r"/blog/posts/\d+", current_url):
+            return True
+        return bool(
+            "/home" in current_url
+            and page.locator('a[href*="/blog/posts/"]').count()
+        )
+    except Exception:
+        return False
+
+
+def wait_for_blogspot_dashboard(
+    context,
+    page,
+    result_queue: queue.Queue,
+    timeout_seconds: int = 300,
+    event_type: str = "blogspot_profile_progress",
+) -> object:
+    deadline = time.time() + max(30, timeout_seconds)
+    login_notice_sent = False
+    while time.time() < deadline:
+        pages = list(context.pages)
+        for candidate in reversed(pages):
+            if is_blogspot_dashboard_ready(candidate):
+                candidate.bring_to_front()
+                return candidate
+        if pages:
+            page = pages[-1]
+        try:
+            current_url = str(page.url or "").lower()
+            if "/about" in current_url:
+                login_link = page.get_by_role("link", name=re.compile(r"^로그인$"))
+                if login_link.count() and login_link.first.is_visible():
+                    login_link.first.click()
+                    page.wait_for_timeout(700)
+                    continue
+            if not login_notice_sent and (
+                "accounts.google.com" in current_url
+                or "/about" in current_url
+                or "signin" in current_url
+            ):
+                result_queue.put(
+                    (
+                        event_type,
+                        "블로그스팟 전용 Chrome에서 Google 로그인을 완료해 주세요. 로그인 정보는 다음 실행에도 유지됩니다.",
+                    )
+                )
+                login_notice_sent = True
+        except Exception:
+            pass
+        time.sleep(1)
+    raise RuntimeError(
+        "5분 안에 블로그스팟 로그인이 완료되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 시도해 주세요."
+    )
+
+
+def launch_blogspot_persistent_context(playwright):
+    BLOGSPOT_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    return playwright.chromium.launch_persistent_context(
+        user_data_dir=str(BLOGSPOT_CHROME_PROFILE_DIR),
+        executable_path=str(require_google_chrome_executable()),
+        headless=False,
+        no_viewport=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-session-crashed-bubble",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
+
+
+def run_blogspot_profile_bootstrap(
+    result_queue: queue.Queue,
+    login_timeout_seconds: int = 300,
+) -> dict[str, str]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+
+    result_queue.put(("blogspot_profile_progress", "블로그스팟 전용 Chrome을 시작합니다..."))
+    with sync_playwright() as playwright:
+        context = launch_blogspot_persistent_context(playwright)
+        try:
+            state = load_blogspot_storage_state()
+            if state.get("cookies"):
+                context.add_cookies(state["cookies"])
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            page.bring_to_front()
+            # 저장된 전용 프로필이 있으면 로그인 페이지를 다시 거치지 않고
+            # 곧바로 Blogger 대시보드에서 세션을 확인한다. 세션이 없을 때만
+            # 소개 페이지의 로그인 흐름으로 보낸다.
+            page.goto(BLOGSPOT_HOME_URL, wait_until="domcontentloaded")
+            if not is_blogspot_dashboard_ready(page):
+                page.goto(BLOGSPOT_LOGIN_URL, wait_until="domcontentloaded")
+            page = wait_for_blogspot_dashboard(
+                context,
+                page,
+                result_queue,
+                timeout_seconds=login_timeout_seconds,
+            )
+            save_blogspot_storage_state(context)
+            profile = extract_blogspot_profile(page)
+            if not profile.get("blog_id"):
+                raise RuntimeError("로그인은 확인했지만 선택된 블로그의 ID를 찾지 못했습니다.")
+            result_queue.put(
+                (
+                    "blogspot_profile_progress",
+                    f"로그인 상태 저장 완료 · {profile.get('blog_name') or profile.get('blog_id')}",
+                )
+            )
+            return profile
+        finally:
+            context.close()
+
+
+def _blogspot_public_origin(blog_url: str) -> str:
+    value = str(blog_url or "").strip()
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        value = "https://" + value
+    parsed = urlparse(value)
+    return f"{parsed.scheme or 'https'}://{parsed.netloc}" if parsed.netloc else ""
+
+
+def fetch_blogspot_post_url_from_feed(
+    blog_url: str,
+    expected_title: str,
+    timeout: float = 8.0,
+) -> str:
+    origin = _blogspot_public_origin(blog_url)
+    if not origin or not expected_title.strip():
+        return ""
+    feed_url = origin.rstrip("/") + "/feeds/posts/default?alt=json&max-results=15"
+    request = Request(feed_url, headers={"User-Agent": "Mozilla/5.0 BlogHelper/1.0"})
+    with urlopen(request, timeout=timeout, context=ssl.create_default_context(cafile=certifi.where())) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    expected = re.sub(r"\s+", " ", unescape(expected_title)).strip().casefold()
+    for entry in ((payload.get("feed") or {}).get("entry") or []):
+        title = re.sub(r"\s+", " ", unescape(str((entry.get("title") or {}).get("$t") or ""))).strip().casefold()
+        if title != expected:
+            continue
+        for link in entry.get("link") or []:
+            if str(link.get("rel") or "") == "alternate":
+                return str(link.get("href") or "").strip()
+    return ""
+
+
+def prepare_blogspot_html_and_images(
+    article_html: str,
+    thumbnail_path: str = "",
+) -> tuple[str, list[str]]:
+    image_paths: list[str] = []
+    html_image_paths: list[str] = []
+    for match in re.finditer(
+        r"<img\b[^>]*\bsrc\s*=\s*(['\"])(.*?)\1",
+        article_html,
+        flags=re.I | re.S,
+    ):
+        source = unescape(str(match.group(2) or "")).strip()
+        if source.lower().startswith("file://"):
+            source = unquote(urlparse(source).path)
+        if source and not source.lower().startswith(("http://", "https://", "data:")):
+            html_image_paths.append(source)
+    for raw_path in [
+        thumbnail_path,
+        *extract_inline_image_paths(article_html),
+        *html_image_paths,
+    ]:
+        value = str(raw_path or "").strip()
+        if value and Path(value).expanduser().is_file() and value not in image_paths:
+            image_paths.append(value)
+    cleaned = re.sub(
+        r"<figure\b[^>]*>\s*<img\b[^>]*\bsrc\s*=\s*(['\"])(?:data:image/|file:|/[A-Za-z]|[A-Za-z]:[\\/])[^'\"]*\1[^>]*>.*?</figure>",
+        "",
+        article_html,
+        flags=re.I | re.S,
+    )
+    cleaned = re.sub(
+        r"<img\b[^>]*\bsrc\s*=\s*(['\"])(?:data:image/|file:|/[A-Za-z]|[A-Za-z]:[\\/])[^'\"]*\1[^>]*>",
+        "",
+        cleaned,
+        flags=re.I | re.S,
+    )
+    return cleaned.strip(), image_paths
+
+
+def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Queue) -> int:
+    valid_paths = [str(Path(path).expanduser().resolve()) for path in image_paths if Path(path).expanduser().is_file()]
+    if not valid_paths:
+        return 0
+    result_queue.put(("publish_progress", (0.965, f"블로그스팟에 이미지 {len(valid_paths)}장을 첨부하고 있습니다...")))
+    image_button = page.get_by_role("button", name=re.compile(r"이미지 삽입"))
+    if not image_button.count():
+        raise RuntimeError("블로그스팟의 이미지 삽입 버튼을 찾지 못했습니다.")
+    image_button.first.click()
+    upload_option = page.get_by_text("컴퓨터에서 업로드", exact=True)
+    upload_option.wait_for(state="visible", timeout=15_000)
+    upload_option.click()
+    picker_frame = page.frame_locator('iframe[src*="docs.google.com/picker"]')
+    browse_button = picker_frame.get_by_role("button", name="찾아보기", exact=True)
+    browse_button.wait_for(state="visible", timeout=20_000)
+    with page.expect_file_chooser(timeout=20_000) as chooser_info:
+        browse_button.click()
+    chooser_info.value.set_files(valid_paths)
+    page.wait_for_timeout(max(2_000, min(12_000, len(valid_paths) * 1_500)))
+    inserted = False
+    for button_name in ("선택", "추가", "삽입"):
+        try:
+            button = picker_frame.get_by_role("button", name=button_name, exact=True)
+            if button.count() and button.first.is_visible():
+                button.first.click()
+                inserted = True
+                break
+        except Exception:
+            continue
+    if not inserted:
+        raise RuntimeError("이미지는 업로드했지만 Blogger 선택기의 삽입 버튼을 찾지 못했습니다.")
+    page.wait_for_timeout(2_000)
+    return len(valid_paths)
+
+
+def run_blogspot_playwright_automation(
+    title: str,
+    article_html: str,
+    tag_names: list[str],
+    result_queue: queue.Queue,
+    blog_id: str = "",
+    blog_url: str = "",
+    save_mode: str = TISTORY_SAVE_MODE_PUBLISH,
+    thumbnail_path: str = "",
+    login_timeout_seconds: int = 300,
+    daily_publish_limit: int = 0,
+) -> dict[str, object]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+
+    normalized_save_mode = normalize_tistory_save_mode(save_mode)
+    reservation_key = ""
+    daily_account = blog_url or blog_id
+    if normalized_save_mode == TISTORY_SAVE_MODE_PUBLISH:
+        reservation_key = DailyPublishLimitStore.reserve_publish(
+            "blogspot",
+            daily_account,
+            daily_publish_limit,
+        )
+    try:
+        prepared_html, image_paths = prepare_blogspot_html_and_images(article_html, thumbnail_path)
+        with sync_playwright() as playwright:
+            context = launch_blogspot_persistent_context(playwright)
+            try:
+                state = load_blogspot_storage_state()
+                if state.get("cookies"):
+                    context.add_cookies(state["cookies"])
+                page = context.pages[-1] if context.pages else context.new_page()
+                page.set_default_timeout(20_000)
+                page.set_default_navigation_timeout(60_000)
+                page.bring_to_front()
+                page.on("dialog", lambda dialog: dialog.accept())
+                result_queue.put(("publish_progress", (0.94, "저장된 블로그스팟 로그인 상태를 확인하고 있습니다...")))
+                page.goto(blogspot_dashboard_url(blog_id), wait_until="domcontentloaded")
+                if not is_blogspot_dashboard_ready(page):
+                    page.goto(BLOGSPOT_LOGIN_URL, wait_until="domcontentloaded")
+                    page = wait_for_blogspot_dashboard(
+                        context,
+                        page,
+                        result_queue,
+                        timeout_seconds=login_timeout_seconds,
+                        event_type="blogspot_profile_progress",
+                    )
+                if blog_id and blog_id not in str(page.url or ""):
+                    page.goto(blogspot_dashboard_url(blog_id), wait_until="domcontentloaded")
+                if not is_blogspot_dashboard_ready(page):
+                    raise RuntimeError("블로그스팟 글 목록 화면을 열지 못했습니다. 설정에서 로그인/프로필 확인을 다시 실행해 주세요.")
+                save_blogspot_storage_state(context)
+                result_queue.put(("publish_progress", (0.95, "블로그스팟 새 글 편집기를 열고 있습니다...")))
+                new_post = page.get_by_role("button", name=re.compile(r"새 글"))
+                new_post.first.click()
+                page.wait_for_url(re.compile(r"/blog/post/edit/\d+/\d+"), timeout=40_000)
+                title_field = page.get_by_role("textbox", name="제목", exact=True)
+                title_field.wait_for(state="visible", timeout=20_000)
+                title_field.fill(title)
+                html_view = page.get_by_text("HTML 보기", exact=True)
+                html_view.first.click()
+                page.wait_for_timeout(700)
+                editor_body = page.frame_locator("iframe.editable").locator("body")
+                editor_body.wait_for(state="visible", timeout=20_000)
+                editor_body.fill(prepared_html)
+                labels = [re.sub(r"^#", "", str(tag or "")).strip() for tag in tag_names]
+                labels = [label for label in labels if label][:20]
+                label_field = page.locator('textarea[aria-label*="라벨을 구분"]')
+                if label_field.count() and labels:
+                    label_field.first.fill(", ".join(labels))
+                attached_count = upload_blogspot_images(page, image_paths, result_queue)
+                save_blogspot_storage_state(context)
+                page.wait_for_timeout(1_500)
+
+                if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
+                    result_queue.put(("publish_progress", (0.99, "블로그스팟 임시글 자동 저장을 확인하고 있습니다...")))
+                    page.wait_for_timeout(2_500)
+                    return {
+                        "status": "draft",
+                        "message": "블로그스팟 HTML 본문과 이미지를 입력하고 임시글로 저장했습니다.",
+                        "link": "",
+                        "image_count": attached_count,
+                    }
+
+                result_queue.put(("publish_progress", (0.98, "블로그스팟 공개 발행을 진행하고 있습니다...")))
+                publish_button = page.get_by_role("button", name="게시", exact=True)
+                publish_button.first.click()
+                page.wait_for_timeout(900)
+                dialogs = page.get_by_role("dialog")
+                if dialogs.count():
+                    dialog = dialogs.last
+                    confirmed = False
+                    for label in ("확인", "게시"):
+                        button = dialog.get_by_role("button", name=label, exact=True)
+                        if button.count() and button.first.is_visible():
+                            button.first.click()
+                            confirmed = True
+                            break
+                    if not confirmed:
+                        raise RuntimeError("블로그스팟 발행 확인창의 확인 버튼을 찾지 못했습니다.")
+                page.wait_for_timeout(3_000)
+                published_url = ""
+                for attempt in range(6):
+                    try:
+                        published_url = fetch_blogspot_post_url_from_feed(blog_url, title)
+                    except (OSError, HTTPError, URLError, ValueError, json.JSONDecodeError):
+                        published_url = ""
+                    if published_url:
+                        break
+                    if attempt < 5:
+                        page.wait_for_timeout(2_000)
+                if not published_url:
+                    raise RuntimeError(
+                        "게시 버튼은 눌렀지만 공개 블로그에서 새 글 주소를 확인하지 못했습니다. "
+                        "환경설정의 블로그스팟 주소가 실제 공개 주소와 같은지 확인해 주세요."
+                    )
+                count = DailyPublishLimitStore.record_reserved_success(
+                    "blogspot",
+                    daily_account,
+                    reservation_key,
+                )
+                reservation_key = ""
+                return {
+                    "status": "publish",
+                    "message": "블로그스팟 HTML 글쓰기와 이미지 첨부·공개 발행을 완료했습니다.",
+                    "link": published_url,
+                    "image_count": attached_count,
+                    "daily_publish_count": count,
+                }
+            finally:
+                context.close()
+    finally:
+        DailyPublishLimitStore.cancel_reservation(reservation_key)
 
 
 def is_threads_auth_cookie(cookie: dict) -> bool:
@@ -19967,6 +20436,19 @@ class ThumbnailAIWorker(threading.Thread):
         return enforce_imagen_no_text_prompt(value[:1800])
 
 
+class BlogspotProfileWorker(threading.Thread):
+    def __init__(self, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            profile = run_blogspot_profile_bootstrap(self.result_queue)
+            self.result_queue.put(("blogspot_profile_done", profile))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("blogspot_profile_error", str(exc)))
+
+
 class TistoryAutomationWorker(threading.Thread):
     def __init__(
         self,
@@ -20403,10 +20885,14 @@ class PublishPipelineWorker(threading.Thread):
                     f"{self.settings.blog_url}|{self.settings.username}",
                     self.settings.wordpress_daily_publish_limit,
                 )
-            if is_public_post and "blogspot" in target_platforms:
+            if (
+                "blogspot" in target_platforms
+                and normalize_tistory_save_mode(self.settings.blogspot_save_mode)
+                == TISTORY_SAVE_MODE_PUBLISH
+            ):
                 DailyPublishLimitStore.ensure_can_publish(
                     "blogspot",
-                    self.settings.blogspot_blog_id,
+                    self.settings.blogspot_blog_url or self.settings.blogspot_blog_id,
                     self.settings.blogspot_daily_publish_limit,
                 )
             if (
@@ -20537,30 +21023,18 @@ class PublishPipelineWorker(threading.Thread):
 
             blogspot_result = None
             if "blogspot" in target_platforms:
-                self.result_queue.put(("publish_progress", (0.94, "블로그스팟에 글을 등록하고 있습니다...")))
-                blogspot_content = prepared_article_html
-                if self.thumbnail_path and Path(self.thumbnail_path).exists():
-                    try:
-                        thumbnail_data_url = image_file_to_data_url(self.thumbnail_path)
-                        blogspot_content = (
-                            f"<figure><img src='{thumbnail_data_url}' alt='{escape(self.title)}' /></figure>\n"
-                            f"{blogspot_content}"
-                        )
-                    except Exception:
-                        pass
-                blogspot_result = BlogspotClient(
-                    blog_id=self.settings.blogspot_blog_id,
-                    access_token=self.settings.blogspot_access_token,
-                    client_id=self.settings.blogspot_client_id,
-                    client_secret=self.settings.blogspot_client_secret,
-                    refresh_token=self.settings.blogspot_refresh_token,
-                    daily_publish_limit=self.settings.blogspot_daily_publish_limit,
-                ).publish_post(
+                self.result_queue.put(("publish_progress", (0.92, "블로그스팟 Playwright 발행을 준비하고 있습니다...")))
+                blogspot_result = run_blogspot_playwright_automation(
                     title=self.title,
-                    content=blogspot_content,
-                    status="draft" if self.settings.post_mode == "임시저장" else "publish",
+                    article_html=prepared_article_html,
+                    tag_names=self.tag_names,
+                    result_queue=self.result_queue,
+                    blog_id=self.settings.blogspot_blog_id,
+                    blog_url=self.settings.blogspot_blog_url,
+                    save_mode=self.settings.blogspot_save_mode,
+                    thumbnail_path=self.thumbnail_path,
+                    daily_publish_limit=self.settings.blogspot_daily_publish_limit,
                 )
-                blogspot_result["message"] = "블로그스팟 등록 완료"
 
             threads_result = None
             if self.settings.threads_auto_publish:
@@ -20986,6 +21460,7 @@ class KeywordApp(ctk.CTk):
         self.reference_collection_worker: ReferenceCollectionWorker | None = None
         self.pending_reference_keyword = ""
         self.tistory_automation_worker: TistoryAutomationWorker | None = None
+        self.blogspot_profile_worker: BlogspotProfileWorker | None = None
         self.article_worker: ArticleGenerationWorker | None = None
         self.benchmark_worker: BenchmarkBlogWorker | None = None
         self.pipeline_worker: PublishPipelineWorker | None = None
@@ -21619,6 +22094,10 @@ class KeywordApp(ctk.CTk):
             "tistory": (
                 "티스토리",
                 self.wordpress_settings.tistory_daily_publish_limit,
+            ),
+            "blogspot": (
+                "블로그스팟",
+                self.wordpress_settings.blogspot_daily_publish_limit,
             ),
         }
         rows: list[tuple[str, str, int | None]] = []
@@ -24683,7 +25162,11 @@ class KeywordApp(ctk.CTk):
 
         selected_targets = set(self.wordpress_settings.target_platforms or ["wordpress"])
         for index, (platform_key, label) in enumerate(
-            [("wordpress", "워드프레스"), ("tistory", "티스토리")],
+            [
+                ("wordpress", "워드프레스"),
+                ("tistory", "티스토리"),
+                ("blogspot", "블로그스팟"),
+            ],
             start=1,
         ):
             variable = ctk.BooleanVar(value=platform_key in selected_targets)
@@ -24931,7 +25414,10 @@ class KeywordApp(ctk.CTk):
             return False
         if not self._selected_writing_targets():
             self._stop_writing_auto_progress()
-            messagebox.showwarning("자동 발행 대상 필요", "워드프레스 또는 티스토리를 한 개 이상 선택해 주세요.")
+            messagebox.showwarning(
+                "자동 발행 대상 필요",
+                "워드프레스, 티스토리 또는 블로그스팟을 한 개 이상 선택해 주세요.",
+            )
             return False
         self.writing_auto_run_active = True
         self.writing_auto_stage = "keyword"
@@ -32350,12 +32836,17 @@ class KeywordApp(ctk.CTk):
                 else self.wordpress_settings.tistory_write_url
             )
             return blog_url or write_url
+        blog_url = (
+            self.blogspot_blog_url_entry.get().strip()
+            if hasattr(self, "blogspot_blog_url_entry")
+            else self.wordpress_settings.blogspot_blog_url
+        )
         blog_id = (
             self.blogspot_blog_id_entry.get().strip()
             if hasattr(self, "blogspot_blog_id_entry")
             else self.wordpress_settings.blogspot_blog_id
         )
-        return blog_id
+        return blog_url or blog_id
 
     def _refresh_daily_publish_limit_statuses(self) -> None:
         controls = {
@@ -33277,88 +33768,86 @@ class KeywordApp(ctk.CTk):
         )
         title.grid(row=0, column=0, padx=24, pady=(22, 18), sticky="w")
 
-        self.blogspot_blog_id_entry = self._labeled_entry(
+        self.blogspot_blog_url_entry = self._labeled_entry(
             self.blogspot_card,
             row=1,
-            label="블로그 ID",
-            placeholder="Blogger Blog ID",
+            label="블로그스팟 블로그 주소",
+            placeholder="https://example.blogspot.com 또는 연결된 맞춤 도메인",
         )
-
-        self.blogspot_client_id_entry = self._labeled_entry(
+        self.blogspot_blog_id_entry = self._labeled_entry(
             self.blogspot_card,
             row=3,
-            label="Client ID",
-            placeholder="Google OAuth Client ID",
-        )
-
-        self.blogspot_redirect_uri_entry = self._labeled_entry(
-            self.blogspot_card,
-            row=5,
-            label="Redirect URI",
-            placeholder="http://localhost",
-        )
-
-        secret_label = ctk.CTkLabel(
-            self.blogspot_card,
-            text="Client Secret",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        secret_label.grid(row=7, column=0, padx=24, pady=(18, 8), sticky="w")
-
-        secret_row = ctk.CTkFrame(self.blogspot_card, fg_color="transparent")
-        secret_row.grid(row=8, column=0, padx=24, sticky="ew")
-        secret_row.grid_columnconfigure(0, weight=1)
-
-        self.blogspot_client_secret_entry = ctk.CTkEntry(
-            secret_row,
-            height=56,
-            corner_radius=16,
-            placeholder_text="Google OAuth Client Secret",
-            show="*",
-            fg_color="#3b4658",
-            border_width=0,
-            font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        self.blogspot_client_secret_entry.grid(row=0, column=0, sticky="ew")
-
-        self.blogspot_auth_code_entry = self._labeled_entry(
-            self.blogspot_card,
-            row=9,
-            label="인증 코드",
-            placeholder="브라우저 인증 후 발급된 code를 붙여넣고 인증코드 저장을 눌러주세요.",
+            label="블로그 ID",
+            placeholder="로그인/프로필 확인을 누르면 자동으로 입력됩니다.",
         )
 
         helper = ctk.CTkLabel(
             self.blogspot_card,
             text=(
-                "Google Cloud에서 Blogger API OAuth2 Client ID/Secret을 만든 뒤 저장하세요. "
-                "Google Cloud의 승인된 리디렉션 URI에는 위 Redirect URI 값을 그대로 등록해야 합니다. "
-                "인증 버튼으로 브라우저 승인을 열고, 발급된 code를 인증 코드에 붙여넣으면 자동 업로드 토큰이 저장됩니다."
+                "블로그스팟은 API 키 없이 Playwright 전용 Chrome으로 작성합니다. "
+                "로그인/프로필 확인을 한 번 실행하면 Google 로그인 상태와 선택된 블로그를 저장하고, "
+                "다음 발행부터 새 글 → HTML 보기 → 본문·이미지·라벨 입력 순서로 자동 처리합니다."
             ),
-            text_color="#c3cfdf",
+            text_color=("#607089", "#c3cfdf"),
             justify="left",
             anchor="w",
             wraplength=900,
             font=ctk.CTkFont(size=14),
         )
-        helper.grid(row=11, column=0, padx=24, pady=(16, 18), sticky="ew")
+        helper.grid(row=5, column=0, padx=24, pady=(16, 18), sticky="ew")
+
+        mode_frame = ctk.CTkFrame(
+            self.blogspot_card,
+            corner_radius=16,
+            fg_color=("#e8eff9", "#111b2b"),
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        mode_frame.grid(row=6, column=0, padx=24, pady=(0, 16), sticky="ew")
+        mode_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            mode_frame,
+            text="저장 방식",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=(16, 12), pady=14, sticky="w")
+        self.blogspot_save_mode_var = tk.StringVar(value=TISTORY_SAVE_MODE_PUBLISH)
+        self.blogspot_save_mode_selector = ContrastSegmentedButton(
+            mode_frame,
+            values=list(TISTORY_SAVE_MODE_OPTIONS),
+            variable=self.blogspot_save_mode_var,
+            height=38,
+            corner_radius=12,
+            selected_color="#1faa4a",
+            selected_hover_color="#16913e",
+            unselected_color=("#f7f9fc", "#263247"),
+            unselected_hover_color=("#dce7f6", "#314761"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_blogspot_save_mode_changed,
+        )
+        self.blogspot_save_mode_selector.grid(
+            row=0,
+            column=1,
+            padx=(0, 16),
+            pady=12,
+            sticky="ew",
+        )
 
         (
             self.blogspot_daily_publish_limit_entry,
             self.blogspot_daily_publish_limit_status_label,
         ) = self._build_daily_publish_limit_control(
             self.blogspot_card,
-            row=12,
+            row=7,
             platform="blogspot",
         )
 
         button_row = ctk.CTkFrame(self.blogspot_card, fg_color="transparent")
-        button_row.grid(row=14, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=9, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
             button_row,
-            text="수정",
+            text="저장",
             height=52,
             corner_radius=16,
             fg_color="#1faa4a",
@@ -33368,57 +33857,18 @@ class KeywordApp(ctk.CTk):
         )
         save_button.grid(row=0, column=0, sticky="ew")
 
-        auth_button = ctk.CTkButton(
+        self.blogspot_profile_button = ctk.CTkButton(
             button_row,
-            text="Google 인증",
-            width=130,
+            text="로그인/프로필 확인",
+            width=190,
             height=52,
             corner_radius=16,
             fg_color="#3468e8",
             hover_color="#2d5cd0",
             font=ctk.CTkFont(size=16, weight="bold"),
-            command=lambda: self._open_blogspot_auth(include_indexing=False),
+            command=self._start_blogspot_profile_check,
         )
-        auth_button.grid(row=0, column=1, padx=(12, 0))
-
-        auth_index_button = ctk.CTkButton(
-            button_row,
-            text="인증+색인",
-            width=130,
-            height=52,
-            corner_radius=16,
-            fg_color="#3468e8",
-            hover_color="#2d5cd0",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            command=lambda: self._open_blogspot_auth(include_indexing=True),
-        )
-        auth_index_button.grid(row=0, column=2, padx=(12, 0))
-
-        code_button = ctk.CTkButton(
-            button_row,
-            text="코드저장",
-            width=120,
-            height=52,
-            corner_radius=16,
-            fg_color="#1faa4a",
-            hover_color="#16913e",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            command=self._complete_blogspot_auth,
-        )
-        code_button.grid(row=0, column=3, padx=(12, 0))
-
-        revoke_button = ctk.CTkButton(
-            button_row,
-            text="인증해제",
-            width=120,
-            height=52,
-            corner_radius=16,
-            fg_color="#596579",
-            hover_color="#6a768b",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            command=self._revoke_blogspot_auth,
-        )
-        revoke_button.grid(row=0, column=4, padx=(12, 0))
+        self.blogspot_profile_button.grid(row=0, column=1, padx=(12, 0))
 
         reset_button = ctk.CTkButton(
             button_row,
@@ -33431,15 +33881,15 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
             command=self._reset_blogspot_settings,
         )
-        reset_button.grid(row=0, column=5, padx=(12, 0))
+        reset_button.grid(row=0, column=2, padx=(12, 0))
 
         self.blogspot_status_label = ctk.CTkLabel(
             self.blogspot_card,
-            text="● 저장 대기 중",
+            text="● 로그인/프로필 확인 전",
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.blogspot_status_label.grid(row=15, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.blogspot_status_label.grid(row=10, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_tistory_card(self) -> None:
         title = ctk.CTkLabel(
@@ -37329,14 +37779,23 @@ class KeywordApp(ctk.CTk):
             str(normalize_tistory_ad_count(self.wordpress_settings.tistory_ads_count) or 1)
         )
         self._on_tistory_ads_enabled_changed(save=False)
+        self.blogspot_blog_url_entry.insert(0, self.wordpress_settings.blogspot_blog_url)
         self.blogspot_blog_id_entry.insert(0, self.wordpress_settings.blogspot_blog_id)
-        self.blogspot_client_id_entry.insert(0, self.wordpress_settings.blogspot_client_id)
-        self.blogspot_redirect_uri_entry.insert(0, self.wordpress_settings.blogspot_redirect_uri or "http://localhost")
-        self.blogspot_client_secret_entry.insert(0, self.wordpress_settings.blogspot_client_secret)
+        self.blogspot_save_mode_var.set(
+            normalize_tistory_save_mode(self.wordpress_settings.blogspot_save_mode)
+        )
         self.blogspot_daily_publish_limit_entry.insert(
             0,
             str(self.wordpress_settings.blogspot_daily_publish_limit),
         )
+        if self.wordpress_settings.blogspot_blog_name or self.wordpress_settings.blogspot_blog_id:
+            self.blogspot_status_label.configure(
+                text=(
+                    "● 저장된 프로필: "
+                    f"{self.wordpress_settings.blogspot_blog_name or self.wordpress_settings.blogspot_blog_id}"
+                ),
+                text_color="#48d980",
+            )
         self._refresh_daily_publish_limit_statuses()
         self.threads_auto_publish_var.set(self.wordpress_settings.threads_auto_publish)
         self.threads_post_prompt_box.insert(
@@ -37675,7 +38134,11 @@ class KeywordApp(ctk.CTk):
         elif tab_name == "codex":
             self._update_quick_status("Codex CLI 설정", "썸네일 배경 이미지 프롬프트 설계에 Codex CLI를 사용합니다.", palette["accent"])
         elif tab_name == "blogspot":
-            self._update_quick_status("블로그스팟 설정", "Blog ID와 Google OAuth Client 정보를 저장해 Blogger API를 연결합니다.", palette["accent"])
+            self._update_quick_status(
+                "블로그스팟 설정",
+                "전용 Chrome 로그인과 Playwright HTML 자동 발행 상태를 관리합니다.",
+                palette["accent"],
+            )
         elif tab_name == "threads":
             self._update_quick_status(
                 "Threads 설정",
@@ -38294,15 +38757,20 @@ class KeywordApp(ctk.CTk):
                 self.ai_provider_menu.get()
             ),
             blogspot_blog_id=self.blogspot_blog_id_entry.get().strip(),
-            blogspot_client_id=self.blogspot_client_id_entry.get().strip(),
-            blogspot_client_secret=self.blogspot_client_secret_entry.get().strip(),
-            blogspot_redirect_uri=self.blogspot_redirect_uri_entry.get().strip() or "http://localhost",
+            blogspot_client_id=self.wordpress_settings.blogspot_client_id,
+            blogspot_client_secret=self.wordpress_settings.blogspot_client_secret,
+            blogspot_redirect_uri=self.wordpress_settings.blogspot_redirect_uri or "http://localhost",
             blogspot_refresh_token=self.wordpress_settings.blogspot_refresh_token,
             blogspot_access_token=self.wordpress_settings.blogspot_access_token,
             blogspot_daily_publish_limit=normalize_daily_publish_limit(
                 self.blogspot_daily_publish_limit_entry.get()
                 if hasattr(self, "blogspot_daily_publish_limit_entry")
                 else self.wordpress_settings.blogspot_daily_publish_limit
+            ),
+            blogspot_blog_url=self.blogspot_blog_url_entry.get().strip(),
+            blogspot_blog_name=self.wordpress_settings.blogspot_blog_name,
+            blogspot_save_mode=normalize_tistory_save_mode(
+                self.blogspot_save_mode_var.get()
             ),
             tistory_blog_url=self.tistory_blog_url_entry.get().strip(),
             tistory_write_url=self.tistory_write_url_entry.get().strip(),
@@ -38773,7 +39241,38 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(settings)
         self._refresh_daily_publish_limit_statuses()
         self.blogspot_status_label.configure(text="● 블로그스팟 설정 저장 완료", text_color="#48d980")
-        self._update_quick_status("블로그스팟 저장됨", "Blog ID와 OAuth Client 정보를 저장했습니다.", "#48d980")
+        self._update_quick_status(
+            "블로그스팟 저장됨",
+            "Playwright 블로그 주소와 발행 설정을 저장했습니다.",
+            "#48d980",
+        )
+
+    def _on_blogspot_save_mode_changed(self, _value: str = "") -> None:
+        if hasattr(self, "blogspot_save_mode_var"):
+            self.wordpress_settings.blogspot_save_mode = normalize_tistory_save_mode(
+                self.blogspot_save_mode_var.get()
+            )
+        self._save_ui_state()
+
+    def _start_blogspot_profile_check(self) -> None:
+        if self.blogspot_profile_worker and self.blogspot_profile_worker.is_alive():
+            messagebox.showinfo("진행 중", "블로그스팟 로그인 상태를 확인하고 있습니다.")
+            return
+        settings = self._read_wordpress_settings(include_prompts=False)
+        self.wordpress_settings = settings
+        AppStateStore.save(settings, save_secrets=False)
+        self.blogspot_profile_button.configure(state="disabled", text="로그인 확인 중...")
+        self.blogspot_status_label.configure(
+            text="● 전용 Chrome에서 Google 로그인을 확인해 주세요.",
+            text_color="#6dadff",
+        )
+        self._update_quick_status(
+            "블로그스팟 로그인 확인",
+            "전용 Chrome 로그인 상태를 확인하고 선택된 블로그 정보를 저장합니다.",
+            "#6dadff",
+        )
+        self.blogspot_profile_worker = BlogspotProfileWorker(self.result_queue)
+        self.blogspot_profile_worker.start()
 
     def _blogspot_oauth_scopes(self, include_indexing: bool = False) -> list[str]:
         scopes = ["https://www.googleapis.com/auth/blogger"]
@@ -39109,15 +39608,15 @@ class KeywordApp(ctk.CTk):
         )
 
     def _reset_blogspot_settings(self) -> None:
+        self.blogspot_blog_url_entry.delete(0, "end")
         self.blogspot_blog_id_entry.delete(0, "end")
-        self.blogspot_client_id_entry.delete(0, "end")
-        self.blogspot_redirect_uri_entry.delete(0, "end")
-        self.blogspot_redirect_uri_entry.insert(0, "http://localhost")
-        self.blogspot_client_secret_entry.delete(0, "end")
-        self.blogspot_auth_code_entry.delete(0, "end")
+        self.blogspot_save_mode_var.set(TISTORY_SAVE_MODE_PUBLISH)
         self.blogspot_daily_publish_limit_entry.delete(0, "end")
         self.blogspot_daily_publish_limit_entry.insert(0, "0")
         self.wordpress_settings.blogspot_blog_id = ""
+        self.wordpress_settings.blogspot_blog_url = ""
+        self.wordpress_settings.blogspot_blog_name = ""
+        self.wordpress_settings.blogspot_save_mode = TISTORY_SAVE_MODE_PUBLISH
         self.wordpress_settings.blogspot_client_id = ""
         self.wordpress_settings.blogspot_client_secret = ""
         self.wordpress_settings.blogspot_redirect_uri = "http://localhost"
@@ -39129,8 +39628,16 @@ class KeywordApp(ctk.CTk):
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_ACCOUNT)
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET)
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN)
+        try:
+            BLOGSPOT_STORAGE_STATE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
         self.blogspot_status_label.configure(text="● 블로그스팟 초기화 완료", text_color="#9aa7bb")
-        self._update_quick_status("블로그스팟 초기화", "새로운 Blog ID와 OAuth Client 정보를 입력해 주세요.", "#9aa7bb")
+        self._update_quick_status(
+            "블로그스팟 초기화",
+            "새 블로그 주소를 저장하고 로그인/프로필 확인을 실행해 주세요.",
+            "#9aa7bb",
+        )
 
     def _reset_gpt_settings(self) -> None:
         self.gpt_secret_entry.delete(0, "end")
@@ -40488,12 +40995,12 @@ class KeywordApp(ctk.CTk):
             self.automation_status_label.configure(text="티스토리 글쓰기 URL 또는 블로그 주소가 필요합니다.", text_color="#ff6b6b")
             return False
         if "blogspot" in automation_targets and (
-            not settings.blogspot_blog_id
-            or not settings.blogspot_client_id
-            or not settings.blogspot_client_secret
-            or not settings.blogspot_refresh_token
+            not settings.blogspot_blog_id or not settings.blogspot_blog_url
         ):
-            self.automation_status_label.configure(text="블로그스팟 Blog ID와 OAuth 인증 정보가 필요합니다.", text_color="#ff6b6b")
+            self.automation_status_label.configure(
+                text="환경설정에서 블로그스팟 주소를 입력하고 로그인/프로필 확인을 실행해 주세요.",
+                text_color="#ff6b6b",
+            )
             return False
         title = str(item.get("title") or item.get("keyword") or "자동화 글").strip()
         article_html = str(item.get("article_html") or "").strip()
@@ -40680,6 +41187,14 @@ class KeywordApp(ctk.CTk):
         if "tistory" in settings.target_platforms and not self._build_tistory_write_url(settings):
             messagebox.showerror("입력 오류", "티스토리 발행을 선택했다면 환경설정에서 티스토리 블로그 주소 또는 글쓰기 URL을 입력해 주세요.")
             return
+        if "blogspot" in settings.target_platforms and (
+            not settings.blogspot_blog_id or not settings.blogspot_blog_url
+        ):
+            messagebox.showerror(
+                "입력 오류",
+                "블로그스팟 발행을 선택했다면 환경설정에서 블로그 주소를 입력하고 로그인/프로필 확인을 실행해 주세요.",
+            )
+            return
         self.wordpress_settings = settings
         AppStateStore.save(settings)
         try:
@@ -40707,7 +41222,7 @@ class KeywordApp(ctk.CTk):
         self.writing_completion_platforms = [
             platform
             for platform in settings.target_platforms
-            if platform in {"wordpress", "tistory"}
+            if platform in {"wordpress", "tistory", "blogspot"}
         ]
         if hasattr(self, "open_published_post_button"):
             self.open_published_post_button.configure(state="disabled")
@@ -41558,6 +42073,51 @@ class KeywordApp(ctk.CTk):
                         self.automation_status_label.configure(text=message, text_color="#6dadff")
                     else:
                         self._set_writing_progress(4, message, progress)
+                elif event_type == "blogspot_profile_progress":
+                    if hasattr(self, "blogspot_status_label"):
+                        self.blogspot_status_label.configure(text=f"● {payload}", text_color="#6dadff")
+                    if self.active_automation_upload_item_id and hasattr(self, "automation_status_label"):
+                        self.automation_status_label.configure(text=str(payload), text_color="#6dadff")
+                    elif hasattr(self, "publish_status_label") and self.pipeline_worker and self.pipeline_worker.is_alive():
+                        self.publish_status_label.configure(text=str(payload), text_color="#6dadff")
+                elif event_type == "blogspot_profile_done":
+                    profile = payload if isinstance(payload, dict) else {}
+                    blog_id = str(profile.get("blog_id") or "").strip()
+                    blog_name = str(profile.get("blog_name") or "").strip()
+                    blog_url = str(profile.get("blog_url") or "").strip()
+                    if blog_url:
+                        self.blogspot_blog_url_entry.delete(0, "end")
+                        self.blogspot_blog_url_entry.insert(0, blog_url)
+                    if blog_id:
+                        self.blogspot_blog_id_entry.delete(0, "end")
+                        self.blogspot_blog_id_entry.insert(0, blog_id)
+                    self.wordpress_settings.blogspot_blog_id = blog_id
+                    self.wordpress_settings.blogspot_blog_name = blog_name
+                    self.wordpress_settings.blogspot_blog_url = blog_url
+                    AppStateStore.update_fields(
+                        blogspot_blog_id=blog_id,
+                        blogspot_blog_name=blog_name,
+                        blogspot_blog_url=blog_url,
+                    )
+                    self.blogspot_profile_worker = None
+                    self.blogspot_profile_button.configure(state="normal", text="로그인/프로필 확인")
+                    self.blogspot_status_label.configure(
+                        text=f"● 저장된 프로필: {blog_name or blog_id}",
+                        text_color="#48d980",
+                    )
+                    self._update_quick_status(
+                        "블로그스팟 로그인 저장 완료",
+                        f"{blog_name or blog_id}\n{blog_url or '공개 주소를 직접 입력해 주세요.'}",
+                        "#48d980",
+                    )
+                elif event_type == "blogspot_profile_error":
+                    self.blogspot_profile_worker = None
+                    if hasattr(self, "blogspot_profile_button"):
+                        self.blogspot_profile_button.configure(state="normal", text="로그인/프로필 확인")
+                    if hasattr(self, "blogspot_status_label"):
+                        self.blogspot_status_label.configure(text="● 로그인 확인 실패", text_color="#ff6b6b")
+                    self._update_quick_status("블로그스팟 로그인 확인 실패", str(payload), "#ff6b6b")
+                    messagebox.showwarning("블로그스팟 로그인 확인 실패", str(payload))
                 elif event_type == "tistory_progress":
                     self.publish_progress_bar.configure(mode="indeterminate")
                     self.publish_progress_bar.start()

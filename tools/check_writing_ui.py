@@ -35,7 +35,7 @@ def main() -> None:
         settings = app_module.WordPressSettings(
             app_theme="블랙테마" if args.theme == "dark" else "화이트테마",
             window_geometry="1500x1000",
-            target_platforms=["wordpress", "tistory"],
+            target_platforms=["wordpress", "tistory", "blogspot"],
         )
         stack.enter_context(patch.object(app_module.AppStateStore, "load", return_value=settings))
         for method in ("save", "update_fields"):
@@ -122,7 +122,7 @@ def main() -> None:
             # consume that timer before Tk's actual event loop has started.
             app.update()
             settle()
-            assert app._selected_writing_targets() == ["wordpress", "tistory"]
+            assert app._selected_writing_targets() == ["wordpress", "tistory", "blogspot"]
             assert not hasattr(app, "writing_auto_progress_status")
             for step in range(1, 5):
                 assert app._bootstrap_sidebar_icon_image(f"{step}-circle", "#2563eb") is not None
@@ -133,7 +133,7 @@ def main() -> None:
             assert app.writing_auto_progress_var.get()
             app.target_platform_vars["wordpress"].set(False)
             app._on_writing_target_changed()
-            assert app._selected_writing_targets() == ["tistory"]
+            assert app._selected_writing_targets() == ["tistory", "blogspot"]
             app.target_platform_vars["wordpress"].set(True)
             app.writing_auto_progress_switch.toggle()
 
@@ -197,6 +197,7 @@ def main() -> None:
                 assert widget.cget("fg_color") == "#2563eb"
             assert_segmented_contrast(app.tistory_input_mode_selector)
             assert_segmented_contrast(app.tistory_save_mode_selector)
+            assert_segmented_contrast(app.blogspot_save_mode_selector)
             original_input_mode = app.tistory_input_mode_selector.get()
             alternate_input_mode = next(
                 value
