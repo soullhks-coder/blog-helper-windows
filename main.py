@@ -3059,6 +3059,8 @@ class WordPressSettings:
     threads_auto_publish: bool = False
     threads_post_prompt: str = DEFAULT_THREADS_POST_PROMPT
     target_platforms: list[str] = field(default_factory=lambda: ["wordpress"])
+    writing_target_prompt_ids: dict[str, str] = field(default_factory=dict)
+    writing_prompt_active_target: str = "wordpress"
     title_prompt_template: str = DEFAULT_TITLE_PROMPT
     article_prompt_template: str = DEFAULT_ARTICLE_PROMPT
     prompt_sets: list[dict] = field(default_factory=list)
@@ -3391,6 +3393,36 @@ def resolve_naver_kin_wordpress_prompt_set(settings: WordPressSettings) -> dict:
     }
 
 
+def normalize_writing_target_prompt_ids(
+    value: object,
+    legacy_selected_prompt_id: object = "",
+) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    normalized = {
+        platform: str(source.get(platform) or "").strip()
+        for platform in ("wordpress", "tistory", "blogspot")
+    }
+    if not normalized["wordpress"]:
+        normalized["wordpress"] = str(legacy_selected_prompt_id or "").strip()
+    return normalized
+
+
+def normalize_writing_prompt_active_target(
+    value: object,
+    selected_targets: object = None,
+) -> str:
+    target = str(value or "").strip().lower()
+    allowed = ("wordpress", "tistory", "blogspot")
+    targets = [
+        str(item or "").strip().lower()
+        for item in (selected_targets if isinstance(selected_targets, list) else [])
+    ]
+    targets = [item for item in targets if item in allowed]
+    if target in allowed and (not targets or target in targets):
+        return target
+    return targets[0] if targets else "wordpress"
+
+
 class AppStateStore:
     PRESERVE_ON_AUTOSAVE = (
         "blog_url",
@@ -3412,6 +3444,8 @@ class AppStateStore:
         "blogspot_blog_name",
         "blogspot_profiles",
         "blogspot_active_profile",
+        "writing_target_prompt_ids",
+        "writing_prompt_active_target",
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
@@ -3739,6 +3773,14 @@ class AppStateStore:
             threads_auto_publish=payload.get("threads_auto_publish", False),
             threads_post_prompt=nonempty_text(payload.get("threads_post_prompt"), DEFAULT_THREADS_POST_PROMPT),
             target_platforms=payload.get("target_platforms", ["wordpress"]),
+            writing_target_prompt_ids=normalize_writing_target_prompt_ids(
+                payload.get("writing_target_prompt_ids", {}),
+                legacy_selected_prompt_id=payload.get("selected_prompt_id", ""),
+            ),
+            writing_prompt_active_target=normalize_writing_prompt_active_target(
+                payload.get("writing_prompt_active_target", ""),
+                payload.get("target_platforms", ["wordpress"]),
+            ),
             title_prompt_template=nonempty_text(payload.get("title_prompt_template"), DEFAULT_TITLE_PROMPT),
             article_prompt_template=nonempty_text(payload.get("article_prompt_template"), DEFAULT_ARTICLE_PROMPT),
             prompt_sets=payload.get("prompt_sets", []),
@@ -26642,7 +26684,7 @@ class KeywordApp(ctk.CTk):
                 checkbox_height=22,
                 corner_radius=6,
                 font=ctk.CTkFont(size=14, weight="bold"),
-                command=self._on_writing_target_changed,
+                command=lambda target=platform_key: self._on_writing_target_changed(target),
             ).grid(row=0, column=index, padx=(0, 16), sticky="w")
 
         self._refresh_writing_auto_progress_ui()
@@ -26862,21 +26904,24 @@ class KeywordApp(ctk.CTk):
         self._refresh_writing_auto_progress_ui()
         self._save_ui_state()
 
-    def _on_writing_target_changed(self) -> None:
+    def _on_writing_target_changed(self, changed_platform: str = "") -> None:
         targets = self._selected_writing_targets()
-        primary = self._primary_prompt_platform(targets)
-        if primary == "tistory":
-            profile = service_profile_by_name(
-                normalize_tistory_profiles(self.wordpress_settings.tistory_profiles),
-                self.wordpress_settings.tistory_active_profile,
+        changed_platform = str(changed_platform or "").strip().lower()
+        if changed_platform in targets:
+            active_target = changed_platform
+        else:
+            current_active = normalize_writing_prompt_active_target(
+                self.wordpress_settings.writing_prompt_active_target,
+                targets,
             )
-            self._restore_service_profile_prompt(profile, "tistory")
-        elif primary == "blogspot":
-            profile = service_profile_by_name(
-                normalize_blogspot_profiles(self.wordpress_settings.blogspot_profiles),
-                self.wordpress_settings.blogspot_active_profile,
+            active_target = (
+                current_active
+                if current_active in targets
+                else self._primary_prompt_platform(targets)
             )
-            self._restore_service_profile_prompt(profile, "blogspot")
+        self.wordpress_settings.writing_prompt_active_target = active_target
+        if targets:
+            self._restore_writing_target_prompt(active_target)
         self._save_ui_state()
         self._refresh_writing_auto_progress_ui()
 
@@ -34144,20 +34189,14 @@ class KeywordApp(ctk.CTk):
         selected = self._prompt_set_by_label(label)
         if selected:
             prompt_id = str(selected.get("id") or "")
-            platform = str(selected.get("platform") or "")
             self.wordpress_settings.selected_prompt_id = prompt_id
-            if platform == "tistory" and hasattr(self, "tistory_active_profile_var"):
-                profiles = self._capture_tistory_profile_from_ui()
-                service_profile_by_name(
-                    profiles, self.tistory_active_profile_var.get()
-                )["last_prompt_id"] = prompt_id
-                self.wordpress_settings.tistory_profiles = profiles
-            elif platform == "blogspot" and hasattr(self, "blogspot_active_profile_var"):
-                profiles = self._capture_blogspot_profile_from_ui()
-                service_profile_by_name(
-                    profiles, self.blogspot_active_profile_var.get()
-                )["last_prompt_id"] = prompt_id
-                self.wordpress_settings.blogspot_profiles = profiles
+            targets = self._selected_writing_targets()
+            active_target = normalize_writing_prompt_active_target(
+                self.wordpress_settings.writing_prompt_active_target,
+                targets,
+            )
+            self.wordpress_settings.writing_prompt_active_target = active_target
+            self._remember_writing_prompt_for_targets(prompt_id, targets)
         self._save_ui_state()
 
     def _platform_prompt_values_from_boxes(self) -> dict[str, str]:
@@ -39489,31 +39528,13 @@ class KeywordApp(ctk.CTk):
                     )
                 if active:
                     self.active_prompt_set_ids[platform] = str(active.get("id"))
-            primary_platform = self._primary_prompt_platform(list(target_platforms))
-            if primary_platform in {"tistory", "blogspot"}:
-                primary_profiles = (
-                    self.wordpress_settings.tistory_profiles
-                    if primary_platform == "tistory"
-                    else self.wordpress_settings.blogspot_profiles
-                )
-                primary_active = (
-                    self.wordpress_settings.tistory_active_profile
-                    if primary_platform == "tistory"
-                    else self.wordpress_settings.blogspot_active_profile
-                )
-                remembered_prompt_id = str(
-                    service_profile_by_name(
-                        primary_profiles, primary_active
-                    ).get("last_prompt_id")
-                    or ""
-                )
-                remembered_prompt = self._prompt_set_by_id(remembered_prompt_id)
-                if (
-                    remembered_prompt
-                    and remembered_prompt.get("platform") == primary_platform
-                ):
-                    self.wordpress_settings.selected_prompt_id = remembered_prompt_id
+            active_target = normalize_writing_prompt_active_target(
+                self.wordpress_settings.writing_prompt_active_target,
+                list(target_platforms),
+            )
+            self.wordpress_settings.writing_prompt_active_target = active_target
             self._refresh_prompt_set_menus()
+            self._restore_writing_target_prompt(active_target)
             self._load_prompt_set_into_boxes(self.active_prompt_platform)
         if hasattr(self, "public_data_key_entry"):
             self.public_data_key_entry.insert(0, self.wordpress_settings.public_data_api_key)
@@ -40607,6 +40628,11 @@ class KeywordApp(ctk.CTk):
             threads_auto_publish=self.threads_auto_publish_var.get(),
             threads_post_prompt=self.threads_post_prompt_box.get("1.0", "end").strip() or DEFAULT_THREADS_POST_PROMPT,
             target_platforms=target_platforms,
+            writing_target_prompt_ids=self._current_writing_target_prompt_ids(),
+            writing_prompt_active_target=normalize_writing_prompt_active_target(
+                self.wordpress_settings.writing_prompt_active_target,
+                target_platforms,
+            ),
             title_prompt_template=selected_title_prompt,
             article_prompt_template=selected_article_prompt,
             prompt_sets=prompt_sets,
@@ -40904,9 +40930,108 @@ class KeywordApp(ctk.CTk):
         if not hasattr(self, "writing_prompt_menu"):
             return ""
         selected = self._prompt_set_by_label(self.writing_prompt_menu.get())
-        if selected and selected.get("platform") == platform:
+        if selected:
             return str(selected.get("id") or "")
         return ""
+
+    def _current_writing_target_prompt_ids(self) -> dict[str, str]:
+        return normalize_writing_target_prompt_ids(
+            getattr(self.wordpress_settings, "writing_target_prompt_ids", {}),
+            legacy_selected_prompt_id=self.wordpress_settings.selected_prompt_id,
+        )
+
+    def _remember_writing_prompt_for_targets(
+        self,
+        prompt_id: str,
+        targets: list[str] | None = None,
+    ) -> None:
+        prompt_id = str(prompt_id or "").strip()
+        if not prompt_id or self._prompt_set_by_id(prompt_id) is None:
+            return
+        selected_targets = [
+            platform
+            for platform in (targets or [])
+            if platform in {"wordpress", "tistory", "blogspot"}
+        ]
+        if not selected_targets:
+            selected_targets = [
+                normalize_writing_prompt_active_target(
+                    self.wordpress_settings.writing_prompt_active_target
+                )
+            ]
+
+        remembered = self._current_writing_target_prompt_ids()
+        for platform in selected_targets:
+            remembered[platform] = prompt_id
+            if platform == "tistory":
+                profiles = normalize_tistory_profiles(
+                    self.wordpress_settings.tistory_profiles,
+                    legacy={
+                        "blog_url": self.wordpress_settings.tistory_blog_url,
+                        "write_url": self.wordpress_settings.tistory_write_url,
+                    },
+                )
+                service_profile_by_name(
+                    profiles,
+                    self.wordpress_settings.tistory_active_profile,
+                )["last_prompt_id"] = prompt_id
+                self.wordpress_settings.tistory_profiles = profiles
+            elif platform == "blogspot":
+                profiles = normalize_blogspot_profiles(
+                    self.wordpress_settings.blogspot_profiles,
+                    legacy={
+                        "blog_id": self.wordpress_settings.blogspot_blog_id,
+                        "blog_url": self.wordpress_settings.blogspot_blog_url,
+                        "blog_name": self.wordpress_settings.blogspot_blog_name,
+                    },
+                )
+                service_profile_by_name(
+                    profiles,
+                    self.wordpress_settings.blogspot_active_profile,
+                )["last_prompt_id"] = prompt_id
+                self.wordpress_settings.blogspot_profiles = profiles
+        self.wordpress_settings.writing_target_prompt_ids = remembered
+
+    def _remembered_writing_prompt_id(self, platform: str) -> str:
+        platform = str(platform or "").strip().lower()
+        if platform == "tistory":
+            profile = service_profile_by_name(
+                normalize_tistory_profiles(self.wordpress_settings.tistory_profiles),
+                self.wordpress_settings.tistory_active_profile,
+            )
+            profile_prompt_id = str(profile.get("last_prompt_id") or "").strip()
+            return profile_prompt_id
+        elif platform == "blogspot":
+            profile = service_profile_by_name(
+                normalize_blogspot_profiles(self.wordpress_settings.blogspot_profiles),
+                self.wordpress_settings.blogspot_active_profile,
+            )
+            profile_prompt_id = str(profile.get("last_prompt_id") or "").strip()
+            return profile_prompt_id
+        return str(self._current_writing_target_prompt_ids().get(platform) or "")
+
+    def _restore_writing_target_prompt(self, platform: str) -> None:
+        platform = normalize_writing_prompt_active_target(platform)
+        prompt_id = self._remembered_writing_prompt_id(platform)
+        selected = self._prompt_set_by_id(prompt_id) if prompt_id else None
+        if selected is None:
+            selected = next(
+                (
+                    item
+                    for item in self._prompt_sets()
+                    if item.get("platform") == platform
+                ),
+                None,
+            )
+        if selected:
+            selected_id = str(selected.get("id") or "")
+            self.wordpress_settings.selected_prompt_id = selected_id
+            self.wordpress_settings.writing_prompt_active_target = platform
+            self.wordpress_settings.writing_target_prompt_ids = {
+                **self._current_writing_target_prompt_ids(),
+                platform: selected_id,
+            }
+            self._refresh_writing_prompt_menu()
 
     def _refresh_service_profile_radios(self, platform: str) -> None:
         if platform == "tistory":
@@ -40970,9 +41095,6 @@ class KeywordApp(ctk.CTk):
                 ),
             }
         )
-        prompt_id = self._selected_prompt_id_for_platform("tistory")
-        if prompt_id:
-            target["last_prompt_id"] = prompt_id
         return normalize_tistory_profiles(profiles)
 
     def _capture_blogspot_profile_from_ui(
@@ -41008,15 +41130,12 @@ class KeywordApp(ctk.CTk):
                 ),
             }
         )
-        prompt_id = self._selected_prompt_id_for_platform("blogspot")
-        if prompt_id:
-            target["last_prompt_id"] = prompt_id
         return normalize_blogspot_profiles(profiles)
 
     def _restore_service_profile_prompt(self, profile: dict, platform: str) -> None:
         prompt_id = str(profile.get("last_prompt_id") or "")
         selected = self._prompt_set_by_id(prompt_id) if prompt_id else None
-        if not selected or selected.get("platform") != platform:
+        if not selected:
             selected = next(
                 (
                     item
@@ -41027,7 +41146,10 @@ class KeywordApp(ctk.CTk):
             )
         if selected:
             self.wordpress_settings.selected_prompt_id = str(selected.get("id") or "")
-            profile["last_prompt_id"] = self.wordpress_settings.selected_prompt_id
+            remembered = self._current_writing_target_prompt_ids()
+            remembered[platform] = self.wordpress_settings.selected_prompt_id
+            self.wordpress_settings.writing_target_prompt_ids = remembered
+            self.wordpress_settings.writing_prompt_active_target = platform
             self._refresh_writing_prompt_menu()
 
     def _apply_tistory_profile_to_ui(self, profile: dict) -> None:
@@ -41097,7 +41219,15 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_active_profile = active_name
         self._loaded_tistory_profile_name = active_name
         self._apply_tistory_profile_to_ui(profile)
-        self._restore_service_profile_prompt(profile, "tistory")
+        selected_targets = self._selected_writing_targets()
+        if (
+            "tistory" in selected_targets
+            and normalize_writing_prompt_active_target(
+                self.wordpress_settings.writing_prompt_active_target,
+                selected_targets,
+            ) == "tistory"
+        ):
+            self._restore_service_profile_prompt(profile, "tistory")
         self.wordpress_settings.tistory_blog_url = str(profile.get("blog_url") or "")
         self.wordpress_settings.tistory_write_url = str(profile.get("write_url") or "")
         self.wordpress_settings.tistory_daily_publish_limit = normalize_daily_publish_limit(
@@ -41152,7 +41282,15 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.blogspot_active_profile = active_name
         self._loaded_blogspot_profile_name = active_name
         self._apply_blogspot_profile_to_ui(profile)
-        self._restore_service_profile_prompt(profile, "blogspot")
+        selected_targets = self._selected_writing_targets()
+        if (
+            "blogspot" in selected_targets
+            and normalize_writing_prompt_active_target(
+                self.wordpress_settings.writing_prompt_active_target,
+                selected_targets,
+            ) == "blogspot"
+        ):
+            self._restore_service_profile_prompt(profile, "blogspot")
         self.wordpress_settings.blogspot_blog_id = str(profile.get("blog_id") or "")
         self.wordpress_settings.blogspot_blog_url = str(profile.get("blog_url") or "")
         self.wordpress_settings.blogspot_blog_name = str(profile.get("blog_name") or "")

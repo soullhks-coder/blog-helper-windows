@@ -137,6 +137,40 @@ def main() -> None:
             app.target_platform_vars["wordpress"].set(True)
             app.writing_auto_progress_switch.toggle()
 
+            # The selected prompt belongs to the publish target's history, not
+            # to the prompt's own platform. Cross-platform choices must round-trip.
+            app.target_platform_vars["wordpress"].set(True)
+            app.target_platform_vars["tistory"].set(False)
+            app.target_platform_vars["blogspot"].set(False)
+            app._on_writing_target_changed("wordpress")
+            app.writing_prompt_menu.set("티스토리 · 기본")
+            app._on_writing_prompt_selected("티스토리 · 기본")
+            assert app.wordpress_settings.writing_target_prompt_ids["wordpress"] == "tistory-default"
+
+            app.target_platform_vars["wordpress"].set(False)
+            app.target_platform_vars["tistory"].set(True)
+            app._on_writing_target_changed("tistory")
+            app.writing_prompt_menu.set("블로그스팟 · 기본")
+            app._on_writing_prompt_selected("블로그스팟 · 기본")
+            active_tistory = app_module.service_profile_by_name(
+                app.wordpress_settings.tistory_profiles,
+                app.wordpress_settings.tistory_active_profile,
+            )
+            assert active_tistory["last_prompt_id"] == "blogspot-default"
+
+            app.target_platform_vars["wordpress"].set(True)
+            app.target_platform_vars["tistory"].set(False)
+            app._on_writing_target_changed("wordpress")
+            assert app.writing_prompt_menu.get() == "티스토리 · 기본"
+            app.target_platform_vars["wordpress"].set(False)
+            app.target_platform_vars["tistory"].set(True)
+            app._on_writing_target_changed("tistory")
+            assert app.writing_prompt_menu.get() == "블로그스팟 · 기본"
+
+            for variable in app.target_platform_vars.values():
+                variable.set(True)
+            app._on_writing_target_changed("blogspot")
+
             app.article_title_entry.delete(0, "end")
             app.article_title_entry.insert(0, "오늘의 여행 이야기")
             app.article_editor.delete("1.0", "end")

@@ -105,6 +105,13 @@ class ServiceMultiProfileTests(unittest.TestCase):
             blogspot_blog_url="https://third.blogspot.com",
             blogspot_blog_name="세 번째 블로그",
             blogspot_daily_publish_limit=12,
+            target_platforms=["blogspot"],
+            writing_target_prompt_ids={
+                "wordpress": "tistory-news",
+                "tistory": "blogspot-guide",
+                "blogspot": "wordpress-review",
+            },
+            writing_prompt_active_target="blogspot",
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -130,6 +137,109 @@ class ServiceMultiProfileTests(unittest.TestCase):
         self.assertEqual(
             loaded.blogspot_profiles[2]["last_prompt_id"], "blogspot-third"
         )
+        self.assertEqual(
+            loaded.writing_target_prompt_ids,
+            {
+                "wordpress": "tistory-news",
+                "tistory": "blogspot-guide",
+                "blogspot": "wordpress-review",
+            },
+        )
+        self.assertEqual(loaded.writing_prompt_active_target, "blogspot")
+
+    def test_writing_targets_remember_any_prompt_type_independently(self) -> None:
+        settings = main.WordPressSettings()
+        settings.prompt_sets = main.PromptFileStore.default_prompt_sets(settings)
+        settings.tistory_profiles = main.normalize_tistory_profiles([])
+        settings.blogspot_profiles = main.normalize_blogspot_profiles([])
+        app = object.__new__(main.KeywordApp)
+        app.wordpress_settings = settings
+
+        app._remember_writing_prompt_for_targets(
+            "tistory-default",
+            ["wordpress"],
+        )
+        app._remember_writing_prompt_for_targets(
+            "blogspot-default",
+            ["tistory"],
+        )
+        app._remember_writing_prompt_for_targets(
+            "wordpress-default",
+            ["blogspot"],
+        )
+
+        self.assertEqual(
+            app.wordpress_settings.writing_target_prompt_ids["wordpress"],
+            "tistory-default",
+        )
+        self.assertEqual(
+            main.service_profile_by_name(
+                app.wordpress_settings.tistory_profiles,
+                app.wordpress_settings.tistory_active_profile,
+            )["last_prompt_id"],
+            "blogspot-default",
+        )
+        self.assertEqual(
+            main.service_profile_by_name(
+                app.wordpress_settings.blogspot_profiles,
+                app.wordpress_settings.blogspot_active_profile,
+            )["last_prompt_id"],
+            "wordpress-default",
+        )
+        self.assertEqual(
+            app._remembered_writing_prompt_id("wordpress"),
+            "tistory-default",
+        )
+        self.assertEqual(
+            app._remembered_writing_prompt_id("tistory"),
+            "blogspot-default",
+        )
+        self.assertEqual(
+            app._remembered_writing_prompt_id("blogspot"),
+            "wordpress-default",
+        )
+
+        class FakePromptMenu:
+            def __init__(self) -> None:
+                self.value = ""
+                self.values: list[str] = []
+
+            def configure(self, values) -> None:
+                self.values = list(values)
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+            def get(self) -> str:
+                return self.value
+
+        app.writing_prompt_menu = FakePromptMenu()
+        app._restore_writing_target_prompt("wordpress")
+        self.assertEqual(
+            app.wordpress_settings.selected_prompt_id,
+            "tistory-default",
+        )
+        self.assertEqual(
+            app.writing_prompt_menu.value,
+            "티스토리 · 기본",
+        )
+
+        app.wordpress_settings.tistory_active_profile = "티스토리 2"
+        self.assertEqual(app._remembered_writing_prompt_id("tistory"), "")
+        app._restore_writing_target_prompt("tistory")
+        self.assertEqual(
+            app.wordpress_settings.selected_prompt_id,
+            "tistory-default",
+        )
+
+        tistory_capture_source = inspect.getsource(
+            main.KeywordApp._capture_tistory_profile_from_ui
+        )
+        blogspot_capture_source = inspect.getsource(
+            main.KeywordApp._capture_blogspot_profile_from_ui
+        )
+        self.assertNotIn("_selected_prompt_id_for_platform", tistory_capture_source)
+        self.assertNotIn("_selected_prompt_id_for_platform", blogspot_capture_source)
 
     def test_tistory_footer_tags_are_removed_and_used_instead_of_old_guesses(self) -> None:
         article = (
