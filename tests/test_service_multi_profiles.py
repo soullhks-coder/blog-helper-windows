@@ -169,6 +169,10 @@ class ServiceMultiProfileTests(unittest.TestCase):
             automation.call_args.kwargs["profile_scope"],
             main.TISTORY_PROFILE_SCOPES[1],
         )
+        self.assertEqual(
+            automation.call_args.kwargs["tag_names"],
+            ["국회", "정책", "정치 뉴스"],
+        )
 
     def test_login_recovery_clicks_kakao_and_first_saved_account(self) -> None:
         source = inspect.getsource(main.advance_tistory_kakao_login)

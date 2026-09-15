@@ -926,6 +926,7 @@ class TistoryNativeImageTests(unittest.TestCase):
             native_files = call.kwargs["native_image_files"]
             self.assertEqual(call.kwargs["expected_title"], "일본 지진 피해 정리")
             self.assertEqual(call.kwargs["public_blog_url"], "https://info.example.com/")
+            self.assertEqual(call.kwargs["tag_names"], [])
             self.assertIn(str(image_path), native_files.values())
             self.assertNotIn("Wikimedia Commons", script)
             self.assertNotIn("CC BY-SA 4.0", script)
@@ -968,7 +969,7 @@ class TistoryNativeImageTests(unittest.TestCase):
         actions_start = script.index("const automationActions = ")
         actions_end = script.index(";", actions_start)
         actions_line = script[actions_start:actions_end]
-        self.assertIn("click_complete", actions_line)
+        self.assertNotIn("click_complete", actions_line)
         self.assertNotIn("attach_representative_image", actions_line)
         self.assertNotIn("click_public_publish", actions_line)
 
@@ -992,11 +993,96 @@ class TistoryNativeImageTests(unittest.TestCase):
         actions_start = script.index("const automationActions = ")
         actions_end = script.index(";", actions_start)
         actions_line = script[actions_start:actions_end]
-        self.assertIn("set_tags", actions_line)
+        self.assertNotIn("set_tags", actions_line)
         self.assertNotIn("click_complete", actions_line)
         self.assertNotIn("attach_representative_image", actions_line)
         self.assertNotIn("set_publish_now", actions_line)
         self.assertNotIn("click_public_publish", actions_line)
+
+    def test_native_tag_input_uses_real_enter_and_verifies_each_chip(self) -> None:
+        class FakeTagItem:
+            def __init__(self, page, index: int) -> None:
+                self.page = page
+                self.index = index
+
+            def is_visible(self) -> bool:
+                return True
+
+            def inner_text(self) -> str:
+                return f"#{self.page.tags[self.index]}"
+
+            def get_attribute(self, _name: str) -> str:
+                return ""
+
+        class FakeTagsLocator:
+            def __init__(self, page) -> None:
+                self.page = page
+
+            def count(self) -> int:
+                return len(self.page.tags)
+
+            def nth(self, index: int):
+                return FakeTagItem(self.page, index)
+
+        class FakeInput:
+            def __init__(self, page) -> None:
+                self.page = page
+                self.value = ""
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def scroll_into_view_if_needed(self) -> None:
+                pass
+
+            def click(self) -> None:
+                pass
+
+            def fill(self, value: str) -> None:
+                self.value = value
+
+            def press(self, key: str) -> None:
+                self.page.pressed.append(key)
+                if key == "Enter" and self.value:
+                    self.page.tags.append(self.value)
+                    self.value = ""
+
+        class FakeInputLocator:
+            def __init__(self, input_field) -> None:
+                self.input_field = input_field
+
+            def count(self) -> int:
+                return 1
+
+            def nth(self, _index: int):
+                return self.input_field
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.tags: list[str] = []
+                self.pressed: list[str] = []
+                self.input_field = FakeInput(self)
+
+            def locator(self, selector: str):
+                if "editor_tag" in selector:
+                    return FakeTagsLocator(self)
+                return FakeInputLocator(self.input_field)
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+        page = FakePage()
+        inserted = main.enter_tistory_tags_native(
+            page,
+            ["#정치 뉴스", "국회", "정치 뉴스", "정책"],
+        )
+
+        self.assertEqual(inserted, 3)
+        self.assertEqual(page.tags, ["정치 뉴스", "국회", "정책"])
+        self.assertEqual(page.pressed, ["Enter", "Enter", "Enter"])
 
     def test_draft_save_click_uses_bottom_button_and_waits_for_confirmation(self) -> None:
         class FakeMouse:

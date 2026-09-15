@@ -7195,25 +7195,28 @@ def build_tistory_editor_automation_script(
         )
     )
     if publish_after_input:
-        # 발행일/공개발행은 React UI가 synthetic JS click을 무시할 수 있어
-        # run_tistory_playwright_automation()에서 Playwright 네이티브 클릭으로 처리합니다.
+        # 태그/완료/발행 UI는 React가 synthetic JS 이벤트를 무시할 수 있어
+        # run_tistory_playwright_automation()에서 Playwright 네이티브 입력·클릭으로 처리합니다.
         # 대표이미지도 기존 편집기 파일 입력칸과 혼동하지 않도록 Playwright 파일 선택기로 처리합니다.
         actions = [
             action
             for action in actions
-            if action not in {"attach_representative_image", "set_publish_now", "click_public_publish"}
+            if action not in {
+                "set_tags",
+                "click_complete",
+                "attach_representative_image",
+                "set_publish_now",
+                "click_public_publish",
+            }
         ]
-        # 태그 입력은 사용자가 프롬프트에서 제거하면 실행하지 않아야 하므로 강제 추가하지 않습니다.
-        for required_action in ("click_complete",):
-            if required_action not in actions:
-                actions.append(required_action)
     elif normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
-        # 임시저장은 발행 바텀시트와 캡차에 진입하지 않습니다. 태그까지 입력한 뒤
-        # Playwright가 편집기 상단의 임시저장 버튼을 네이티브 클릭으로 처리합니다.
+        # 임시저장은 발행 바텀시트와 캡차에 진입하지 않습니다. 태그 입력과
+        # 편집기 하단의 임시저장 버튼 모두 Playwright 네이티브 동작으로 처리합니다.
         actions = [
             action
             for action in actions
             if action not in {
+                "set_tags",
                 "click_complete",
                 "attach_representative_image",
                 "set_publish_now",
@@ -10503,6 +10506,211 @@ def find_tistory_draft_save_button_rect(page) -> dict | None:
 }
 """
     )
+
+
+def normalize_tistory_tag_names(tag_names: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    normalized_keys: set[str] = set()
+    for raw_tag in tag_names or []:
+        tag = re.sub(r"^[#＃]+", "", str(raw_tag or "").strip())
+        tag = re.sub(r"\s+", " ", tag).strip(" ,，")
+        key = tag.casefold()
+        if not tag or key in normalized_keys:
+            continue
+        normalized.append(tag)
+        normalized_keys.add(key)
+        if len(normalized) >= 10:
+            break
+    return normalized
+
+
+def read_tistory_registered_tag_names(page) -> list[str]:
+    """Read only tags that Tistory has turned into visible tag chips."""
+    tags: list[str] = []
+    tag_keys: set[str] = set()
+    locator = page.locator(
+        ".editor_tag .txt_tag a[aria-label$='태그 수정'], "
+        ".editor_tag .txt_tag a:not(.btn_delete)"
+    )
+    try:
+        count = locator.count()
+    except Exception:
+        return tags
+    for index in range(count):
+        item = locator.nth(index)
+        try:
+            if not item.is_visible():
+                continue
+            text = str(item.inner_text() or "").strip()
+            if not text:
+                aria_label = str(item.get_attribute("aria-label") or "").strip()
+                text = re.sub(r"\s*태그\s*수정\s*$", "", aria_label).strip()
+            tag = re.sub(r"^[#＃]+", "", text).strip()
+            key = tag.casefold()
+            if tag and key not in tag_keys:
+                tags.append(tag)
+                tag_keys.add(key)
+        except Exception:
+            continue
+    return tags
+
+
+def find_visible_tistory_tag_input(page):
+    locator = page.locator(
+        "#tagText, input[name='tagText'], input[placeholder='태그입력'], input[title='태그']"
+    )
+    try:
+        count = locator.count()
+    except Exception:
+        return None
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible() and candidate.is_enabled():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def enter_tistory_tags_native(
+    page,
+    tag_names: list[str] | None,
+    result_queue: queue.Queue | None = None,
+) -> int:
+    """Enter each tag with native Playwright keyboard input and verify its chip."""
+    desired_tags = normalize_tistory_tag_names(tag_names)
+    if not desired_tags:
+        append_runtime_log("TISTORY", "입력할 티스토리 태그가 없어 태그 단계를 건너뜀")
+        return 0
+
+    if result_queue:
+        result_queue.put(
+            (
+                "tistory_progress",
+                f"본문에서 추출한 태그 {len(desired_tags)}개를 티스토리에 입력하고 있습니다...",
+            )
+        )
+
+    for tag in desired_tags:
+        registered_keys = {
+            value.casefold() for value in read_tistory_registered_tag_names(page)
+        }
+        if tag.casefold() in registered_keys:
+            continue
+
+        inserted = False
+        for attempt in range(2):
+            input_field = find_visible_tistory_tag_input(page)
+            if input_field is None:
+                break
+            input_field.scroll_into_view_if_needed()
+            input_field.click()
+            input_field.fill("")
+            input_field.fill(tag)
+            # Tistory's React handler ignores a synthetic KeyboardEvent. This
+            # Playwright press is a real browser keyboard event and creates the chip.
+            input_field.press("Enter")
+
+            for _ in range(16):
+                page.wait_for_timeout(150)
+                registered_keys = {
+                    value.casefold()
+                    for value in read_tistory_registered_tag_names(page)
+                }
+                if tag.casefold() in registered_keys:
+                    inserted = True
+                    break
+            if inserted:
+                break
+            append_runtime_log(
+                "TISTORY",
+                f"태그 등록 확인 재시도 {attempt + 1}/2: {tag}",
+            )
+
+        if not inserted:
+            raise RuntimeError(
+                f"티스토리 태그 '{tag}'를 입력했지만 등록된 태그로 확인되지 않아 발행을 중단했습니다."
+            )
+
+    registered_keys = {
+        value.casefold() for value in read_tistory_registered_tag_names(page)
+    }
+    missing = [tag for tag in desired_tags if tag.casefold() not in registered_keys]
+    if missing:
+        raise RuntimeError(
+            "티스토리 태그 등록 확인에 실패해 발행을 중단했습니다: " + ", ".join(missing)
+        )
+
+    append_runtime_log(
+        "TISTORY",
+        f"태그 {len(desired_tags)}개 네이티브 입력·등록 확인 완료: {', '.join(desired_tags)}",
+    )
+    if result_queue:
+        result_queue.put(
+            (
+                "tistory_progress",
+                f"티스토리 태그 {len(desired_tags)}개가 실제 등록된 것을 확인했습니다.",
+            )
+        )
+    return len(desired_tags)
+
+
+def click_tistory_complete_native(
+    page,
+    result_queue: queue.Queue | None = None,
+) -> bool:
+    """Open the publish sheet only after native tag registration is complete."""
+    if result_queue:
+        result_queue.put(("tistory_progress", "태그 등록을 마치고 티스토리 '완료' 버튼을 누르는 중입니다..."))
+
+    for _attempt in range(30):
+        candidates = page.get_by_role("button", name=re.compile(r"^\s*완료\s*$"))
+        visible_candidates: list[tuple[float, float, object]] = []
+        try:
+            count = candidates.count()
+        except Exception:
+            count = 0
+        for index in range(count):
+            candidate = candidates.nth(index)
+            try:
+                if not candidate.is_visible() or not candidate.is_enabled():
+                    continue
+                box = candidate.bounding_box() or {}
+                visible_candidates.append(
+                    (float(box.get("y") or 0), float(box.get("x") or 0), candidate)
+                )
+            except Exception:
+                continue
+
+        if visible_candidates:
+            candidate = sorted(
+                visible_candidates,
+                key=lambda item: (item[0], item[1]),
+                reverse=True,
+            )[0][2]
+            candidate.scroll_into_view_if_needed()
+            candidate.click()
+            append_runtime_log("TISTORY", "태그 등록 후 완료 버튼 네이티브 클릭")
+        else:
+            rect = find_visible_text_rect(
+                page,
+                [r"^완료$"],
+                min_top=80,
+                max_left_ratio=0.98,
+            )
+            if not rect:
+                page.wait_for_timeout(300)
+                continue
+            page.mouse.click(rect["x"], rect["y"])
+            append_runtime_log("TISTORY", "태그 등록 후 완료 버튼 좌표 클릭")
+
+        for _ in range(24):
+            page.wait_for_timeout(250)
+            if find_tistory_public_publish_button_rect(page):
+                return True
+        return False
+    return False
 
 
 def is_tistory_draft_save_confirmed(page) -> bool:
@@ -16708,6 +16916,7 @@ def run_tistory_playwright_automation(
     representative_image_path: str = "",
     public_blog_url: str = "",
     expected_title: str = "",
+    tag_names: list[str] | None = None,
     save_mode: str = "",
     profile_scope: str = TISTORY_PROFILE_SCOPES[0],
 ) -> tuple[bool, str | dict[str, str]]:
@@ -16790,7 +16999,13 @@ def run_tistory_playwright_automation(
                     else TISTORY_SAVE_MODE_DRAFT
                 )
             )
+            if not result_payload.get("modeOnly"):
+                enter_tistory_tags_native(page, tag_names, result_queue)
             if publish_after_input:
+                if not click_tistory_complete_native(page, result_queue):
+                    raise RuntimeError(
+                        "티스토리 태그 입력 후 '완료' 버튼을 누르지 못했거나 발행 설정 화면을 확인하지 못했습니다."
+                    )
                 if representative_image_path:
                     attach_tistory_representative_image_file(
                         page,
@@ -21839,6 +22054,7 @@ class TistoryAutomationWorker(threading.Thread):
                 representative_image_path=self.thumbnail_path if self.publish_after_input else "",
                 public_blog_url=self.public_blog_url,
                 expected_title=self.title,
+                tag_names=self.tag_names,
                 save_mode=self.save_mode,
                 profile_scope=self.profile_scope,
             )
