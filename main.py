@@ -44632,7 +44632,7 @@ class KeywordApp(ctk.CTk):
                         ),
                         daily_publish_limit=resolve_tistory_publish_limit(
                             tistory,
-                            DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT,
+                            self.wordpress_settings.tistory_daily_publish_limit,
                         ),
                         profile_scope=str(
                             tistory.get("profile_scope")
@@ -44755,7 +44755,7 @@ class KeywordApp(ctk.CTk):
                         ),
                         daily_publish_limit=resolve_tistory_publish_limit(
                             tistory,
-                            DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT,
+                            self.wordpress_settings.tistory_daily_publish_limit,
                         ),
                         profile_scope=str(
                             tistory.get("profile_scope")

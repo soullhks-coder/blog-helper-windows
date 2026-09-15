@@ -31,6 +31,14 @@ class ServiceMultiProfileTests(unittest.TestCase):
         )
         self.assertIn("resolve_tistory_publish_limit", manual_source)
         self.assertIn("resolve_tistory_publish_limit", automatic_source)
+        self.assertIn(
+            "self.wordpress_settings.tistory_daily_publish_limit", manual_source
+        )
+        self.assertIn(
+            "self.wordpress_settings.tistory_daily_publish_limit", automatic_source
+        )
+        self.assertNotIn("DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT", manual_source)
+        self.assertNotIn("DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT", automatic_source)
 
     def test_queue_poll_reports_callback_failures_instead_of_freezing(self) -> None:
         source = inspect.getsource(main.KeywordApp._poll_queue)
