@@ -2703,6 +2703,14 @@ def normalize_daily_publish_limit(value: object) -> int:
     return max(0, min(parsed, 999))
 
 
+def resolve_tistory_publish_limit(payload: dict, fallback: object = 0) -> int:
+    """Resolve a profile snapshot limit while preserving the configured fallback."""
+    value = payload.get("daily_publish_limit")
+    if value is None:
+        value = fallback
+    return normalize_daily_publish_limit(value)
+
+
 def format_daily_publish_usage(count: object, limit: object) -> str:
     try:
         normalized_count = max(0, int(count))
@@ -22293,6 +22301,10 @@ class PublishPipelineWorker(threading.Thread):
                 )
             )
         except Exception as exc:  # pragma: no cover - runtime handling
+            append_runtime_log(
+                "PUBLISH",
+                f"업로드 파이프라인 실패: {exc}\n{traceback.format_exc()}",
+            )
             self.result_queue.put(("publish_pipeline_error", str(exc)))
 
 
@@ -43286,10 +43298,12 @@ class KeywordApp(ctk.CTk):
 
     def _poll_queue(self) -> None:
         processed_events = 0
+        current_event_type = ""
         try:
             while processed_events < 24:
                 event_type, payload = self.result_queue.get_nowait()
                 processed_events += 1
+                current_event_type = str(event_type)
                 if event_type == "naver_kin_cancelled":
                     self._handle_naver_kin_cancelled(payload)
                     continue
@@ -44288,6 +44302,45 @@ class KeywordApp(ctk.CTk):
                     messagebox.showerror("워드프레스 오류", payload)
         except queue.Empty:
             pass
+        except Exception as exc:  # pragma: no cover - defensive UI recovery
+            error_message = str(exc).strip() or exc.__class__.__name__
+            append_runtime_log(
+                "QUEUE",
+                (
+                    f"{current_event_type or 'unknown'} 처리 실패: {error_message}\n"
+                    f"{traceback.format_exc()}"
+                ),
+            )
+            if current_event_type == "publish_pipeline_done":
+                self._stop_writing_auto_progress()
+                if self.active_automation_upload_item_id:
+                    self._handle_automation_publish_error(error_message)
+                else:
+                    self.publish_progress_bar.stop()
+                    self.publish_progress_bar.configure(mode="determinate")
+                    self.publish_progress_bar.set(0)
+                    self.publish_pipeline_button.configure(
+                        state="normal", text="썸네일 완료 후 업로드"
+                    )
+                    self.publish_status_label.configure(
+                        text="업로드 후처리에 실패했습니다. 오류 내용을 확인해 주세요.",
+                        text_color="#ff6b6b",
+                    )
+                    self.keyword_status_label.configure(text="업로드 후처리 실패")
+                    self._set_writing_progress(
+                        4,
+                        f"업로드 후처리에 실패했습니다: {error_message}",
+                        state="error",
+                    )
+                    messagebox.showerror("업로드 후처리 오류", error_message)
+            else:
+                messagebox.showerror(
+                    "프로그램 처리 오류",
+                    (
+                        f"{current_event_type or '작업'} 처리 중 오류가 발생했습니다.\n\n"
+                        f"{error_message}"
+                    ),
+                )
         finally:
             if not self.result_queue.empty():
                 next_delay = 60
@@ -44577,8 +44630,8 @@ class KeywordApp(ctk.CTk):
                             tistory.get("ads_count")
                             or self.tistory_ads_count_menu.get()
                         ),
-                        daily_publish_limit=normalize_daily_publish_limit(
-                            tistory.get("daily_publish_limit"),
+                        daily_publish_limit=resolve_tistory_publish_limit(
+                            tistory,
                             DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT,
                         ),
                         profile_scope=str(
@@ -44700,8 +44753,8 @@ class KeywordApp(ctk.CTk):
                             tistory.get("ads_count")
                             or self.tistory_ads_count_menu.get()
                         ),
-                        daily_publish_limit=normalize_daily_publish_limit(
-                            tistory.get("daily_publish_limit"),
+                        daily_publish_limit=resolve_tistory_publish_limit(
+                            tistory,
                             DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT,
                         ),
                         profile_scope=str(

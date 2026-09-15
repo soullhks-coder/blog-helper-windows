@@ -11,6 +11,33 @@ import main
 
 
 class ServiceMultiProfileTests(unittest.TestCase):
+    def test_tistory_profile_publish_limit_uses_value_or_fallback(self) -> None:
+        self.assertEqual(
+            main.resolve_tistory_publish_limit({"daily_publish_limit": 15}, 30),
+            15,
+        )
+        self.assertEqual(main.resolve_tistory_publish_limit({}, 30), 30)
+        self.assertEqual(
+            main.resolve_tistory_publish_limit({"daily_publish_limit": None}, 30),
+            30,
+        )
+
+    def test_tistory_pipeline_handlers_use_profile_limit_resolver(self) -> None:
+        manual_source = inspect.getsource(
+            main.KeywordApp._handle_publish_pipeline_success
+        )
+        automatic_source = inspect.getsource(
+            main.KeywordApp._handle_automation_publish_success
+        )
+        self.assertIn("resolve_tistory_publish_limit", manual_source)
+        self.assertIn("resolve_tistory_publish_limit", automatic_source)
+
+    def test_queue_poll_reports_callback_failures_instead_of_freezing(self) -> None:
+        source = inspect.getsource(main.KeywordApp._poll_queue)
+        self.assertIn("except Exception as exc", source)
+        self.assertIn('append_runtime_log(\n                "QUEUE"', source)
+        self.assertIn('current_event_type == "publish_pipeline_done"', source)
+
     def test_tistory_and_blogspot_have_three_isolated_profiles(self) -> None:
         tistory = main.normalize_tistory_profiles(
             [],
