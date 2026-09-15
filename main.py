@@ -293,6 +293,10 @@ TISTORY_CHROME_PROFILE_DIR = DATA_DIR / "Tistory Chrome Profile"
 TISTORY_STORAGE_STATE_FILE = DATA_DIR / "tistory-storage-state.json"
 BLOGSPOT_CHROME_PROFILE_DIR = DATA_DIR / "Blogspot Chrome Profile"
 BLOGSPOT_STORAGE_STATE_FILE = DATA_DIR / "blogspot-storage-state.json"
+TISTORY_PROFILE_SCOPES = ("tistory_1", "tistory_2", "tistory_3")
+BLOGSPOT_PROFILE_SCOPES = ("blogspot_1", "blogspot_2", "blogspot_3")
+TISTORY_PROFILES_DIR = DATA_DIR / "Tistory Profiles"
+BLOGSPOT_PROFILES_DIR = DATA_DIR / "Blogspot Profiles"
 BLOGSPOT_LOGIN_URL = "https://draft.blogger.com/about/?bpli=1"
 BLOGSPOT_HOME_URL = "https://draft.blogger.com/home"
 BLOGSPOT_IMAGE_SLOT_PREFIX = "BLOG_HELPER_IMAGE_SLOT_"
@@ -1557,7 +1561,8 @@ DEFAULT_TISTORY_ARTICLE_PROMPT = (
     "2. 참고내용의 사실을 우선 반영하고 문장은 새롭게 재작성\n"
     "3. 도입부, 핵심 정리, 상세 설명, 주의사항, FAQ 구성\n"
     "4. 과도한 inline style 없이 h2, h3, p, ul, ol, table 중심으로 작성\n"
-    "5. HTML 본문만 반환"
+    "5. 본문 마지막에 <p>주요태그: 태그1, 태그2, 태그3</p> 형식으로 검색 핵심 태그를 쉼표로 구분해 작성\n"
+    "6. HTML 본문만 반환"
 )
 DEFAULT_BLOGSPOT_TITLE_PROMPT = (
     "당신은 블로그스팟/Blogger 제목 전문가입니다.\n"
@@ -1574,7 +1579,8 @@ DEFAULT_BLOGSPOT_ARTICLE_PROMPT = (
     "1. Blogger에 바로 등록 가능한 단순하고 호환성 좋은 HTML 작성\n"
     "2. 참고내용 기반으로 사실 중심 작성\n"
     "3. h2, h3, p, ul, ol 중심의 가벼운 구조 사용\n"
-    "4. HTML 본문만 반환"
+    "4. 본문 마지막에 <p>주요라벨: 라벨1, 라벨2, 라벨3</p> 형식으로 핵심 라벨을 쉼표로 구분해 작성\n"
+    "5. HTML 본문만 반환"
 )
 DEFAULT_TISTORY_AUTOMATION_PROMPT = (
     "【STEP 1】 티스토리 글쓰기 화면 준비\n\n"
@@ -1595,11 +1601,9 @@ DEFAULT_TISTORY_AUTOMATION_PROMPT = (
     "⑥ 기본모드 본문이 비어 있거나 HTML 반영이 부족하면 본문 영역에 다시 한 번 본문을 반영한다.\n\n"
     "【STEP 4】 태그 입력\n\n"
     "① 하단의 #태그입력 버튼을 누른다.\n"
-    "② 글 제목과 중심 키워드 맥락에 맞는 태그 5~8개를 입력한다.\n"
-    "③ 태그는 제목 전체를 억지로 반복하지 말고, 실제 검색 의도에 맞는 자연스러운 키워드로 넣는다.\n"
-    "④ 예: 청년도약계좌 → 청년도약계좌 가입조건, 청년도약계좌 신청방법, 청년도약계좌 신청기간, 청년도약계좌 나이\n"
-    "⑤ 예: 바나바잎 → 바나바잎 효과, 바나바잎 효능, 바나바잎 영양, 바나바잎 부작용\n"
-    "⑥ 태그 입력 후 오른쪽 하단 완료 버튼을 누른다.\n\n"
+    "② AI가 본문 마지막 줄에 쉼표로 구분해 작성한 주요태그만 분리해 입력한다.\n"
+    "③ 주요태그 줄은 실제 본문에서는 제거하고, 기존 추측 태그는 사용하지 않는다.\n"
+    "④ 각 태그 입력 후 Enter를 눌러 등록하고 오른쪽 하단 완료 버튼을 누른다.\n\n"
     "【STEP 5】 대표이미지와 발행\n\n"
     "① 완료 버튼 후 바텀시트/발행 설정 팝업이 뜨면 대표이미지 추가 버튼을 누른다.\n"
     "② 앱에서 만든 썸네일 PNG를 대표이미지로 첨부한다.\n"
@@ -2971,6 +2975,8 @@ class WordPressSettings:
     inline_images_count: int = 2
     inline_images_provider: str = "Imagen API"
     preferred_ai_provider: str = WRITING_MODEL_CODEX
+    blogspot_profiles: list[dict] = field(default_factory=list)
+    blogspot_active_profile: str = "블로그스팟 1"
     blogspot_blog_id: str = ""
     blogspot_client_id: str = ""
     blogspot_client_secret: str = ""
@@ -2982,6 +2988,8 @@ class WordPressSettings:
     blogspot_blog_name: str = ""
     blogspot_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     blogspot_reference_image_protection_mode: bool = False
+    tistory_profiles: list[dict] = field(default_factory=list)
+    tistory_active_profile: str = "티스토리 1"
     tistory_blog_url: str = ""
     tistory_write_url: str = ""
     tistory_daily_publish_limit: int = 0
@@ -3379,6 +3387,8 @@ class AppStateStore:
     PRESERVE_ON_AUTOSAVE = (
         "blog_url",
         "username",
+        "tistory_profiles",
+        "tistory_active_profile",
         "tistory_blog_url",
         "tistory_write_url",
         "naver_blog_profiles",
@@ -3392,6 +3402,8 @@ class AppStateStore:
         "blogspot_blog_id",
         "blogspot_blog_url",
         "blogspot_blog_name",
+        "blogspot_profiles",
+        "blogspot_active_profile",
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
@@ -3467,6 +3479,57 @@ class AppStateStore:
         naver_kin_profiles = normalize_naver_kin_profiles(
             payload.get("naver_kin_profiles", [])
         )
+        tistory_profiles = normalize_tistory_profiles(
+            payload.get("tistory_profiles", []),
+            legacy={
+                "blog_url": payload.get("tistory_blog_url", ""),
+                "write_url": payload.get("tistory_write_url", ""),
+                "daily_publish_limit": payload.get("tistory_daily_publish_limit", 0),
+                "input_mode": payload.get("tistory_input_mode", TEXT_INPUT_MODE_FAST),
+                "save_mode": payload.get("tistory_save_mode", TISTORY_SAVE_MODE_PUBLISH),
+                "reference_image_protection_mode": payload.get(
+                    "tistory_reference_image_protection_mode", False
+                ),
+                "ads_enabled": payload.get("tistory_ads_enabled", True),
+                "ads_code": payload.get("tistory_ads_code", DEFAULT_TISTORY_AD_CODE),
+                "ads_slot_id": payload.get(
+                    "tistory_ads_slot_id", DEFAULT_TISTORY_AD_SLOT_ID
+                ),
+                "ads_position": payload.get(
+                    "tistory_ads_position", TISTORY_AD_POSITION_ABOVE
+                ),
+                "ads_count": payload.get("tistory_ads_count", 1),
+                "last_prompt_id": payload.get("selected_prompt_id", ""),
+            },
+        )
+        tistory_active_profile = normalize_service_active_profile(
+            payload.get("tistory_active_profile", "티스토리 1"),
+            tistory_profiles,
+        )
+        active_tistory = service_profile_by_name(
+            tistory_profiles, tistory_active_profile
+        )
+        blogspot_profiles = normalize_blogspot_profiles(
+            payload.get("blogspot_profiles", []),
+            legacy={
+                "blog_id": payload.get("blogspot_blog_id", ""),
+                "blog_url": payload.get("blogspot_blog_url", ""),
+                "blog_name": payload.get("blogspot_blog_name", ""),
+                "daily_publish_limit": payload.get("blogspot_daily_publish_limit", 0),
+                "save_mode": payload.get("blogspot_save_mode", TISTORY_SAVE_MODE_PUBLISH),
+                "reference_image_protection_mode": payload.get(
+                    "blogspot_reference_image_protection_mode", False
+                ),
+                "last_prompt_id": payload.get("selected_prompt_id", ""),
+            },
+        )
+        blogspot_active_profile = normalize_service_active_profile(
+            payload.get("blogspot_active_profile", "블로그스팟 1"),
+            blogspot_profiles,
+        )
+        active_blogspot = service_profile_by_name(
+            blogspot_profiles, blogspot_active_profile
+        )
         naver_manual_image_paths = payload.get("naver_blog_manual_image_paths", [])
         if not isinstance(naver_manual_image_paths, list):
             naver_manual_image_paths = []
@@ -3516,53 +3579,53 @@ class AppStateStore:
             preferred_ai_provider=normalize_writing_model(
                 payload.get("preferred_ai_provider", WRITING_MODEL_CODEX)
             ),
-            blogspot_blog_id=payload.get("blogspot_blog_id", ""),
+            blogspot_profiles=blogspot_profiles,
+            blogspot_active_profile=blogspot_active_profile,
+            blogspot_blog_id=active_blogspot.get("blog_id", ""),
             blogspot_client_id=payload.get("blogspot_client_id", ""),
             blogspot_client_secret=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET) or blogspot_client_secret_fallback,
             blogspot_redirect_uri=payload.get("blogspot_redirect_uri", "http://localhost"),
             blogspot_refresh_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN) or blogspot_refresh_token_fallback,
             blogspot_access_token=KeychainStore.load_secret(KEYCHAIN_BLOGSPOT_ACCOUNT) or blogspot_fallback,
-            blogspot_daily_publish_limit=normalize_daily_publish_limit(
-                payload.get("blogspot_daily_publish_limit", 0)
-            ),
-            blogspot_blog_url=payload.get("blogspot_blog_url", ""),
-            blogspot_blog_name=payload.get("blogspot_blog_name", ""),
+            blogspot_daily_publish_limit=active_blogspot.get("daily_publish_limit", 0),
+            blogspot_blog_url=active_blogspot.get("blog_url", ""),
+            blogspot_blog_name=active_blogspot.get("blog_name", ""),
             blogspot_save_mode=normalize_tistory_save_mode(
-                payload.get("blogspot_save_mode", TISTORY_SAVE_MODE_PUBLISH)
+                active_blogspot.get("save_mode", TISTORY_SAVE_MODE_PUBLISH)
             ),
             blogspot_reference_image_protection_mode=bool(
-                payload.get("blogspot_reference_image_protection_mode", False)
+                active_blogspot.get("reference_image_protection_mode", False)
             ),
-            tistory_blog_url=payload.get("tistory_blog_url", ""),
-            tistory_write_url=payload.get("tistory_write_url", ""),
-            tistory_daily_publish_limit=normalize_daily_publish_limit(
-                payload.get("tistory_daily_publish_limit", 0)
-            ),
+            tistory_profiles=tistory_profiles,
+            tistory_active_profile=tistory_active_profile,
+            tistory_blog_url=active_tistory.get("blog_url", ""),
+            tistory_write_url=active_tistory.get("write_url", ""),
+            tistory_daily_publish_limit=active_tistory.get("daily_publish_limit", 0),
             tistory_input_mode=(
-                payload.get("tistory_input_mode")
-                if payload.get("tistory_input_mode") in TEXT_INPUT_MODE_OPTIONS
+                active_tistory.get("input_mode")
+                if active_tistory.get("input_mode") in TEXT_INPUT_MODE_OPTIONS
                 else TEXT_INPUT_MODE_FAST
             ),
             tistory_save_mode=normalize_tistory_save_mode(
-                str(payload.get("tistory_save_mode", TISTORY_SAVE_MODE_PUBLISH))
+                str(active_tistory.get("save_mode", TISTORY_SAVE_MODE_PUBLISH))
             ),
-            tistory_reference_image_protection_mode=payload.get(
-                "tistory_reference_image_protection_mode",
+            tistory_reference_image_protection_mode=active_tistory.get(
+                "reference_image_protection_mode",
                 False,
             ),
-            tistory_ads_enabled=bool(payload.get("tistory_ads_enabled", True)),
+            tistory_ads_enabled=bool(active_tistory.get("ads_enabled", True)),
             tistory_ads_code=str(
-                payload.get("tistory_ads_code", DEFAULT_TISTORY_AD_CODE)
+                active_tistory.get("ads_code", DEFAULT_TISTORY_AD_CODE)
                 or ""
             ),
             tistory_ads_slot_id=normalize_tistory_ad_slot_id(
-                payload.get("tistory_ads_slot_id", DEFAULT_TISTORY_AD_SLOT_ID)
+                active_tistory.get("ads_slot_id", DEFAULT_TISTORY_AD_SLOT_ID)
             ),
             tistory_ads_position=normalize_tistory_ad_position(
-                str(payload.get("tistory_ads_position", TISTORY_AD_POSITION_ABOVE))
+                str(active_tistory.get("ads_position", TISTORY_AD_POSITION_ABOVE))
             ),
             tistory_ads_count=normalize_tistory_ad_count(
-                payload.get("tistory_ads_count", 1)
+                active_tistory.get("ads_count", 1)
             ),
             applied_settings_migrations=payload.get(
                 "applied_settings_migrations",
@@ -7889,21 +7952,27 @@ def normalize_tistory_storage_state(state: dict) -> dict:
     return normalized_state
 
 
-def load_tistory_storage_state() -> dict:
-    if not TISTORY_STORAGE_STATE_FILE.exists():
+def load_tistory_storage_state(profile_scope: str = TISTORY_PROFILE_SCOPES[0]) -> dict:
+    _profile_dir, state_file = tistory_profile_paths(profile_scope)
+    if not state_file.exists():
         return {"cookies": [], "origins": []}
     try:
-        state = json.loads(TISTORY_STORAGE_STATE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return {"cookies": [], "origins": []}
     return normalize_tistory_storage_state(state)
 
 
-def save_tistory_storage_state(context) -> None:
+def save_tistory_storage_state(
+    context,
+    profile_scope: str = TISTORY_PROFILE_SCOPES[0],
+) -> None:
     try:
         state = context.storage_state()
         normalized_state = normalize_tistory_storage_state(state)
-        TISTORY_STORAGE_STATE_FILE.write_text(
+        _profile_dir, state_file = tistory_profile_paths(profile_scope)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
             json.dumps(normalized_state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -7914,11 +7983,12 @@ def save_tistory_storage_state(context) -> None:
         pass
 
 
-def load_blogspot_storage_state() -> dict:
-    if not BLOGSPOT_STORAGE_STATE_FILE.exists():
+def load_blogspot_storage_state(profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0]) -> dict:
+    _profile_dir, state_file = blogspot_profile_paths(profile_scope)
+    if not state_file.exists():
         return {"cookies": [], "origins": []}
     try:
-        state = json.loads(BLOGSPOT_STORAGE_STATE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return {"cookies": [], "origins": []}
     if not isinstance(state, dict):
@@ -7930,11 +8000,16 @@ def load_blogspot_storage_state() -> dict:
     return state
 
 
-def save_blogspot_storage_state(context) -> None:
+def save_blogspot_storage_state(
+    context,
+    profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
+) -> None:
     """Keep a portable cookie snapshot in addition to Chromium's persistent profile."""
     try:
         state = context.storage_state()
-        BLOGSPOT_STORAGE_STATE_FILE.write_text(
+        _profile_dir, state_file = blogspot_profile_paths(profile_scope)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
             json.dumps(state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -8057,10 +8132,14 @@ def wait_for_blogspot_dashboard(
     )
 
 
-def launch_blogspot_persistent_context(playwright):
-    BLOGSPOT_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+def launch_blogspot_persistent_context(
+    playwright,
+    profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
+):
+    profile_dir, _state_file = blogspot_profile_paths(profile_scope)
+    profile_dir.mkdir(parents=True, exist_ok=True)
     return playwright.chromium.launch_persistent_context(
-        user_data_dir=str(BLOGSPOT_CHROME_PROFILE_DIR),
+        user_data_dir=str(profile_dir),
         executable_path=str(require_google_chrome_executable()),
         headless=False,
         no_viewport=True,
@@ -8076,6 +8155,7 @@ def launch_blogspot_persistent_context(playwright):
 def run_blogspot_profile_bootstrap(
     result_queue: queue.Queue,
     login_timeout_seconds: int = 300,
+    profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
 ) -> dict[str, str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -8086,9 +8166,9 @@ def run_blogspot_profile_bootstrap(
 
     result_queue.put(("blogspot_profile_progress", "블로그스팟 전용 Chrome을 시작합니다..."))
     with sync_playwright() as playwright:
-        context = launch_blogspot_persistent_context(playwright)
+        context = launch_blogspot_persistent_context(playwright, profile_scope)
         try:
-            state = load_blogspot_storage_state()
+            state = load_blogspot_storage_state(profile_scope)
             if state.get("cookies"):
                 context.add_cookies(state["cookies"])
             page = context.pages[-1] if context.pages else context.new_page()
@@ -8107,8 +8187,9 @@ def run_blogspot_profile_bootstrap(
                 result_queue,
                 timeout_seconds=login_timeout_seconds,
             )
-            save_blogspot_storage_state(context)
+            save_blogspot_storage_state(context, profile_scope)
             profile = extract_blogspot_profile(page)
+            profile["profile_scope"] = profile_scope
             if not profile.get("blog_id"):
                 raise RuntimeError("로그인은 확인했지만 선택된 블로그의 ID를 찾지 못했습니다.")
             result_queue.put(
@@ -8291,6 +8372,11 @@ def extract_blogspot_prompt_labels(article_html: str) -> tuple[str, list[str]]:
             cleaned = (content[: last_line.start()] + content[last_line.end() :]).strip()
             return cleaned, labels
     return content, []
+
+
+def extract_tistory_prompt_tags(article_html: str) -> tuple[str, list[str]]:
+    """Move the AI-written final comma-separated tag line into Tistory tags."""
+    return extract_blogspot_prompt_labels(article_html)
 
 
 def insert_blogspot_image_slot_markers(
@@ -8874,6 +8960,7 @@ def run_blogspot_playwright_automation(
     login_timeout_seconds: int = 300,
     daily_publish_limit: int = 0,
     reference_image_protection_mode: bool = False,
+    profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
 ) -> dict[str, object]:
     try:
         from playwright.sync_api import sync_playwright
@@ -8973,9 +9060,9 @@ def run_blogspot_playwright_automation(
             f"slots={len(image_slot_markers)}, thumbnail_top={thumbnail_at_top}",
         )
         with sync_playwright() as playwright:
-            context = launch_blogspot_persistent_context(playwright)
+            context = launch_blogspot_persistent_context(playwright, profile_scope)
             try:
-                state = load_blogspot_storage_state()
+                state = load_blogspot_storage_state(profile_scope)
                 if state.get("cookies"):
                     context.add_cookies(state["cookies"])
                 page = context.pages[-1] if context.pages else context.new_page()
@@ -8998,7 +9085,7 @@ def run_blogspot_playwright_automation(
                     page.goto(blogspot_dashboard_url(blog_id), wait_until="domcontentloaded")
                 if not is_blogspot_dashboard_ready(page):
                     raise RuntimeError("블로그스팟 글 목록 화면을 열지 못했습니다. 설정에서 로그인/프로필 확인을 다시 실행해 주세요.")
-                save_blogspot_storage_state(context)
+                save_blogspot_storage_state(context, profile_scope)
                 result_queue.put(("publish_progress", (0.95, "블로그스팟 새 글 편집기를 열고 있습니다...")))
                 new_post = page.get_by_role("button", name=re.compile(r"새 글"))
                 new_post.first.click()
@@ -9063,7 +9150,7 @@ def run_blogspot_playwright_automation(
                             ),
                         )
                     )
-                save_blogspot_storage_state(context)
+                save_blogspot_storage_state(context, profile_scope)
                 page.wait_for_timeout(1_500)
 
                 if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
@@ -9288,6 +9375,137 @@ def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
         )
         normalized_profiles.append(profile)
     return normalized_profiles
+
+
+def tistory_profile_paths(profile_scope: object) -> tuple[Path, Path]:
+    """Return an isolated browser profile and cookie snapshot for one Tistory account."""
+    scope = str(profile_scope or "").strip().lower()
+    if scope not in TISTORY_PROFILE_SCOPES:
+        scope = TISTORY_PROFILE_SCOPES[0]
+    if scope == TISTORY_PROFILE_SCOPES[0]:
+        # Keep the legacy paths for profile 1 so existing users stay logged in.
+        return TISTORY_CHROME_PROFILE_DIR, TISTORY_STORAGE_STATE_FILE
+    profile_number = TISTORY_PROFILE_SCOPES.index(scope) + 1
+    profile_root = TISTORY_PROFILES_DIR / f"Profile {profile_number}"
+    return profile_root / "Chrome Profile", profile_root / "storage-state.json"
+
+
+def blogspot_profile_paths(profile_scope: object) -> tuple[Path, Path]:
+    """Return an isolated browser profile and cookie snapshot for one Blogger account."""
+    scope = str(profile_scope or "").strip().lower()
+    if scope not in BLOGSPOT_PROFILE_SCOPES:
+        scope = BLOGSPOT_PROFILE_SCOPES[0]
+    if scope == BLOGSPOT_PROFILE_SCOPES[0]:
+        return BLOGSPOT_CHROME_PROFILE_DIR, BLOGSPOT_STORAGE_STATE_FILE
+    profile_number = BLOGSPOT_PROFILE_SCOPES.index(scope) + 1
+    profile_root = BLOGSPOT_PROFILES_DIR / f"Profile {profile_number}"
+    return profile_root / "Chrome Profile", profile_root / "storage-state.json"
+
+
+def normalize_tistory_profiles(
+    profiles: object,
+    legacy: dict | None = None,
+) -> list[dict]:
+    raw_profiles = profiles if isinstance(profiles, list) else []
+    legacy_values = dict(legacy or {}) if not raw_profiles else {}
+    normalized: list[dict] = []
+    for index, scope in enumerate(TISTORY_PROFILE_SCOPES):
+        raw = raw_profiles[index] if index < len(raw_profiles) else {}
+        profile = dict(raw) if isinstance(raw, dict) else {}
+        if index == 0 and legacy_values:
+            for key, value in legacy_values.items():
+                profile.setdefault(key, value)
+        profile_dir, _state_file = tistory_profile_paths(scope)
+        normalized.append(
+            {
+                "name": f"티스토리 {index + 1}",
+                "profile_scope": scope,
+                "profile_path": str(profile_dir),
+                "blog_url": str(profile.get("blog_url") or ""),
+                "write_url": str(profile.get("write_url") or ""),
+                "kakao_account": str(profile.get("kakao_account") or ""),
+                "daily_publish_limit": normalize_daily_publish_limit(
+                    profile.get("daily_publish_limit", 0)
+                ),
+                "input_mode": normalize_text_input_mode(
+                    str(profile.get("input_mode") or TEXT_INPUT_MODE_FAST)
+                ),
+                "save_mode": normalize_tistory_save_mode(
+                    str(profile.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
+                ),
+                "reference_image_protection_mode": bool(
+                    profile.get("reference_image_protection_mode", False)
+                ),
+                "ads_enabled": bool(profile.get("ads_enabled", True)),
+                "ads_code": str(
+                    profile.get("ads_code", DEFAULT_TISTORY_AD_CODE) or ""
+                ),
+                "ads_slot_id": normalize_tistory_ad_slot_id(
+                    profile.get("ads_slot_id", DEFAULT_TISTORY_AD_SLOT_ID)
+                ),
+                "ads_position": normalize_tistory_ad_position(
+                    str(profile.get("ads_position") or TISTORY_AD_POSITION_ABOVE)
+                ),
+                "ads_count": normalize_tistory_ad_count(
+                    profile.get("ads_count", 1)
+                ),
+                "last_prompt_id": str(profile.get("last_prompt_id") or ""),
+            }
+        )
+    return normalized
+
+
+def normalize_blogspot_profiles(
+    profiles: object,
+    legacy: dict | None = None,
+) -> list[dict]:
+    raw_profiles = profiles if isinstance(profiles, list) else []
+    legacy_values = dict(legacy or {}) if not raw_profiles else {}
+    normalized: list[dict] = []
+    for index, scope in enumerate(BLOGSPOT_PROFILE_SCOPES):
+        raw = raw_profiles[index] if index < len(raw_profiles) else {}
+        profile = dict(raw) if isinstance(raw, dict) else {}
+        if index == 0 and legacy_values:
+            for key, value in legacy_values.items():
+                profile.setdefault(key, value)
+        profile_dir, _state_file = blogspot_profile_paths(scope)
+        normalized.append(
+            {
+                "name": f"블로그스팟 {index + 1}",
+                "profile_scope": scope,
+                "profile_path": str(profile_dir),
+                "blog_id": str(profile.get("blog_id") or ""),
+                "blog_url": str(profile.get("blog_url") or ""),
+                "blog_name": str(profile.get("blog_name") or ""),
+                "daily_publish_limit": normalize_daily_publish_limit(
+                    profile.get("daily_publish_limit", 0)
+                ),
+                "save_mode": normalize_tistory_save_mode(
+                    str(profile.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
+                ),
+                "reference_image_protection_mode": bool(
+                    profile.get("reference_image_protection_mode", False)
+                ),
+                "last_prompt_id": str(profile.get("last_prompt_id") or ""),
+            }
+        )
+    return normalized
+
+
+def normalize_service_active_profile(
+    profile_name: object,
+    profiles: list[dict],
+) -> str:
+    names = [str(profile.get("name") or "") for profile in profiles]
+    requested = str(profile_name or "").strip()
+    return requested if requested in names else names[0]
+
+
+def service_profile_by_name(profiles: list[dict], profile_name: object) -> dict:
+    active_name = normalize_service_active_profile(profile_name, profiles)
+    return next(
+        profile for profile in profiles if str(profile.get("name") or "") == active_name
+    )
 
 
 def naver_kin_profile_scope(
@@ -16282,6 +16500,196 @@ def attach_tistory_representative_image_file(
     )
 
 
+def launch_tistory_persistent_context(
+    playwright,
+    profile_scope: str = TISTORY_PROFILE_SCOPES[0],
+):
+    profile_dir, _state_file = tistory_profile_paths(profile_scope)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return playwright.chromium.launch_persistent_context(
+        user_data_dir=str(profile_dir),
+        executable_path=str(require_google_chrome_executable()),
+        headless=False,
+        no_viewport=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-session-crashed-bubble",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
+
+
+def is_tistory_editor_ready(page) -> bool:
+    try:
+        current_url = str(page.url or "")
+        return bool(
+            "/manage/newpost" in current_url
+            or page.locator(
+                '#post-title-inp, textarea[placeholder*="제목"], input[placeholder*="제목"], #editor-mode-layer-btn-open'
+            ).count()
+        )
+    except Exception:
+        return False
+
+
+def advance_tistory_kakao_login(page) -> str:
+    """Advance known Tistory/Kakao login screens and return the chosen account text."""
+    current_url = str(page.url or "").lower()
+    if "/auth/login" in current_url and "tistory.com" in current_url:
+        for role in ("button", "link"):
+            try:
+                candidates = page.get_by_role(
+                    role,
+                    name=re.compile(r"^\s*카카오계정으로\s*로그인\s*$"),
+                )
+                for index in range(candidates.count()):
+                    candidate = candidates.nth(index)
+                    if candidate.is_visible() and candidate.is_enabled():
+                        candidate.click(timeout=5_000)
+                        page.wait_for_timeout(700)
+                        return ""
+            except Exception:
+                continue
+        try:
+            candidates = page.get_by_text("카카오계정으로 로그인", exact=True)
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                if candidate.is_visible():
+                    candidate.click(timeout=5_000)
+                    page.wait_for_timeout(700)
+                    return ""
+        except Exception:
+            return ""
+
+    if "accounts.kakao.com" not in current_url:
+        return ""
+    try:
+        if not page.get_by_text(
+            re.compile(r"로그인할\s*카카오계정\s*선택")
+        ).count():
+            return ""
+    except Exception:
+        return ""
+
+    # Each browser profile is isolated. If its Kakao session expires, choose the
+    # first saved account shown in that profile, never "새로운 계정으로 로그인".
+    for selector in ("a", "button", '[role="button"]', "li"):
+        try:
+            candidates = page.locator(selector).filter(
+                has_text=re.compile(r"[^\s@]+@[^\s@]+")
+            )
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                if not candidate.is_visible():
+                    continue
+                account_text = re.sub(
+                    r"\s+", " ", str(candidate.inner_text() or "")
+                ).strip()
+                if not account_text or "새로운 계정" in account_text:
+                    continue
+                candidate.click(timeout=5_000)
+                page.wait_for_timeout(800)
+                return account_text
+        except Exception:
+            continue
+    return ""
+
+
+def wait_for_tistory_editor(
+    context,
+    page,
+    write_url: str,
+    result_queue: queue.Queue,
+    timeout_seconds: int = 300,
+    event_type: str = "tistory_progress",
+) -> tuple[object, str]:
+    deadline = time.time() + max(30, timeout_seconds)
+    login_notice_sent = False
+    chosen_account = ""
+    while time.time() < deadline:
+        pages = list(context.pages)
+        if pages:
+            page = pages[-1]
+        if is_tistory_editor_ready(page):
+            return page, chosen_account
+        try:
+            current_url = str(page.url or "").lower()
+            advanced_account = advance_tistory_kakao_login(page)
+            if advanced_account:
+                chosen_account = advanced_account
+                result_queue.put(
+                    (
+                        event_type,
+                        f"이 프로필에 저장된 첫 번째 카카오계정({advanced_account})을 선택했습니다...",
+                    )
+                )
+                continue
+            if not login_notice_sent and (
+                "/auth/login" in current_url
+                or "accounts.kakao.com" in current_url
+                or "kauth.kakao.com" in current_url
+            ):
+                result_queue.put(
+                    (
+                        event_type,
+                        "로그인 세션을 복구하고 있습니다. 비밀번호나 추가 인증이 나오면 전용 Chrome에서 완료해 주세요...",
+                    )
+                )
+                login_notice_sent = True
+        except Exception:
+            pass
+        time.sleep(0.6)
+    raise RuntimeError(
+        "5분 안에 티스토리 로그인이 완료되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 시도해 주세요."
+    )
+
+
+def run_tistory_profile_bootstrap(
+    write_url: str,
+    result_queue: queue.Queue,
+    profile_scope: str = TISTORY_PROFILE_SCOPES[0],
+    login_timeout_seconds: int = 300,
+) -> dict[str, str]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
+        ) from exc
+    if not write_url:
+        raise RuntimeError("티스토리 블로그 주소 또는 글쓰기 URL을 먼저 입력해 주세요.")
+    with sync_playwright() as playwright:
+        context = launch_tistory_persistent_context(playwright, profile_scope)
+        try:
+            saved_state = load_tistory_storage_state(profile_scope)
+            if saved_state.get("cookies"):
+                context.add_cookies(saved_state["cookies"])
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(20_000)
+            page.set_default_navigation_timeout(60_000)
+            page.bring_to_front()
+            result_queue.put(("tistory_profile_progress", "티스토리 전용 Chrome을 시작합니다..."))
+            page.goto(write_url, wait_until="domcontentloaded")
+            page, account_text = wait_for_tistory_editor(
+                context,
+                page,
+                write_url,
+                result_queue,
+                timeout_seconds=login_timeout_seconds,
+                event_type="tistory_profile_progress",
+            )
+            save_tistory_storage_state(context, profile_scope)
+            return {
+                "profile_scope": profile_scope,
+                "kakao_account": account_text,
+                "write_url": write_url,
+            }
+        finally:
+            save_tistory_storage_state(context, profile_scope)
+            context.close()
+
+
 def run_tistory_playwright_automation(
     write_url: str,
     script: str,
@@ -16293,6 +16701,7 @@ def run_tistory_playwright_automation(
     public_blog_url: str = "",
     expected_title: str = "",
     save_mode: str = "",
+    profile_scope: str = TISTORY_PROFILE_SCOPES[0],
 ) -> tuple[bool, str | dict[str, str]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -16302,26 +16711,13 @@ def run_tistory_playwright_automation(
             "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
         ) from exc
 
-    chrome_path = require_google_chrome_executable()
     if not write_url:
         raise RuntimeError("티스토리 글쓰기 URL이 비어 있습니다.")
 
-    TISTORY_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(TISTORY_CHROME_PROFILE_DIR),
-            executable_path=str(chrome_path),
-            headless=False,
-            no_viewport=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-session-crashed-bubble",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        )
+        context = launch_tistory_persistent_context(playwright, profile_scope)
         try:
-            saved_state = load_tistory_storage_state()
+            saved_state = load_tistory_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
                 context.add_cookies(saved_cookies)
@@ -16349,45 +16745,17 @@ def run_tistory_playwright_automation(
             )
             page.goto(write_url, wait_until="domcontentloaded")
 
-            deadline = time.time() + max(30, login_timeout_seconds)
-            editor_ready = False
-            login_notice_sent = False
-            while time.time() < deadline:
-                try:
-                    current_url = page.url or ""
-                    editor_ready = (
-                        "/manage/newpost" in current_url
-                        or page.locator(
-                            '#post-title-inp, textarea[placeholder*="제목"], input[placeholder*="제목"], #editor-mode-layer-btn-open'
-                        ).count()
-                        > 0
-                    )
-                    if editor_ready:
-                        break
-                    if not login_notice_sent and (
-                        "/auth/login" in current_url
-                        or "accounts.kakao.com" in current_url
-                        or "kauth.kakao.com" in current_url
-                    ):
-                        result_queue.put(
-                            (
-                                "tistory_progress",
-                                "저장된 로그인 세션이 없거나 만료되었습니다. 전용 Chrome에서 한 번만 로그인해 주세요...",
-                            )
-                        )
-                        login_notice_sent = True
-                except Exception:
-                    pass
-                time.sleep(1)
-
-            if not editor_ready:
-                raise RuntimeError(
-                    "5분 안에 티스토리 로그인이 완료되지 않았습니다. 전용 Chrome에서 로그인한 뒤 다시 실행해 주세요."
-                )
+            page, _chosen_account = wait_for_tistory_editor(
+                context,
+                page,
+                write_url,
+                result_queue,
+                timeout_seconds=login_timeout_seconds,
+            )
             if "/manage/newpost" not in (page.url or ""):
                 page.goto(write_url, wait_until="domcontentloaded")
 
-            save_tistory_storage_state(context)
+            save_tistory_storage_state(context, profile_scope)
             result_queue.put(("tistory_progress", "로그인 확인 완료. 프롬프트 순서에 따라 제목·본문·이미지를 자동 입력하고 있습니다..."))
             page.wait_for_timeout(1800)
             page.evaluate("window.onbeforeunload = null")
@@ -16621,7 +16989,7 @@ def run_tistory_playwright_automation(
         except PlaywrightTimeoutError as exc:
             raise RuntimeError(f"티스토리 화면 응답 시간이 초과되었습니다: {exc}") from exc
         finally:
-            save_tistory_storage_state(context)
+            save_tistory_storage_state(context, profile_scope)
             context.close()
 
 
@@ -21202,16 +21570,48 @@ class ThumbnailAIWorker(threading.Thread):
 
 
 class BlogspotProfileWorker(threading.Thread):
-    def __init__(self, result_queue: queue.Queue) -> None:
+    def __init__(
+        self,
+        result_queue: queue.Queue,
+        profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
+    ) -> None:
         super().__init__(daemon=True)
         self.result_queue = result_queue
+        self.profile_scope = profile_scope
 
     def run(self) -> None:
         try:
-            profile = run_blogspot_profile_bootstrap(self.result_queue)
+            profile = run_blogspot_profile_bootstrap(
+                self.result_queue,
+                profile_scope=self.profile_scope,
+            )
             self.result_queue.put(("blogspot_profile_done", profile))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("blogspot_profile_error", str(exc)))
+
+
+class TistoryProfileWorker(threading.Thread):
+    def __init__(
+        self,
+        write_url: str,
+        result_queue: queue.Queue,
+        profile_scope: str = TISTORY_PROFILE_SCOPES[0],
+    ) -> None:
+        super().__init__(daemon=True)
+        self.write_url = write_url
+        self.result_queue = result_queue
+        self.profile_scope = profile_scope
+
+    def run(self) -> None:
+        try:
+            profile = run_tistory_profile_bootstrap(
+                self.write_url,
+                self.result_queue,
+                profile_scope=self.profile_scope,
+            )
+            self.result_queue.put(("tistory_profile_done", profile))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("tistory_profile_error", str(exc)))
 
 
 class TistoryAutomationWorker(threading.Thread):
@@ -21238,6 +21638,7 @@ class TistoryAutomationWorker(threading.Thread):
         ads_position: str = TISTORY_AD_POSITION_ABOVE,
         ads_count: int = 1,
         daily_publish_limit: int = 0,
+        profile_scope: str = TISTORY_PROFILE_SCOPES[0],
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -21269,6 +21670,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.daily_publish_limit = normalize_daily_publish_limit(
             daily_publish_limit
         )
+        self.profile_scope = profile_scope
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -21290,7 +21692,21 @@ class TistoryAutomationWorker(threading.Thread):
                 thumbnail_content_url = "__BLOG_HELPER_TISTORY_NATIVE_THUMBNAIL__"
                 native_image_files[thumbnail_content_url] = self.thumbnail_path
 
-            article_html = self.article_html
+            article_html, prompt_tag_names = extract_tistory_prompt_tags(
+                self.article_html
+            )
+            # Tistory tags now come only from the AI-written comma-separated
+            # footer. Do not fall back to the old title/context guesses.
+            self.tag_names = prompt_tag_names[:10]
+            append_runtime_log(
+                "TISTORY",
+                (
+                    "본문 마지막 주요 태그를 티스토리 태그로 분리 완료: "
+                    + ", ".join(self.tag_names)
+                    if self.tag_names
+                    else "본문 마지막에서 티스토리 태그용 주요 태그를 찾지 못했습니다."
+                ),
+            )
             if GOOGLE_IMAGE_COLLAGE_ENABLED:
                 mode_message = (
                     "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다..."
@@ -21416,6 +21832,7 @@ class TistoryAutomationWorker(threading.Thread):
                 public_blog_url=self.public_blog_url,
                 expected_title=self.title,
                 save_mode=self.save_mode,
+                profile_scope=self.profile_scope,
             )
             if success:
                 if isinstance(message, dict):
@@ -21784,6 +22201,24 @@ class PublishPipelineWorker(threading.Thread):
                     "focus_keyword": self.focus_keyword,
                     "tag_names": self.tag_names,
                     "wordpress_url": wordpress_url,
+                    "profile_scope": str(
+                        service_profile_by_name(
+                            normalize_tistory_profiles(
+                                self.settings.tistory_profiles
+                            ),
+                            self.settings.tistory_active_profile,
+                        ).get("profile_scope")
+                        or TISTORY_PROFILE_SCOPES[0]
+                    ),
+                    "save_mode": self.settings.tistory_save_mode,
+                    "reference_image_protection_mode": self.settings.tistory_reference_image_protection_mode,
+                    "input_mode": self.settings.tistory_input_mode,
+                    "ads_enabled": self.settings.tistory_ads_enabled,
+                    "ads_code": self.settings.tistory_ads_code,
+                    "ads_slot_id": self.settings.tistory_ads_slot_id,
+                    "ads_position": self.settings.tistory_ads_position,
+                    "ads_count": self.settings.tistory_ads_count,
+                    "daily_publish_limit": self.settings.tistory_daily_publish_limit,
                 }
 
             blogspot_result = None
@@ -21801,6 +22236,15 @@ class PublishPipelineWorker(threading.Thread):
                     daily_publish_limit=self.settings.blogspot_daily_publish_limit,
                     reference_image_protection_mode=(
                         self.settings.blogspot_reference_image_protection_mode
+                    ),
+                    profile_scope=str(
+                        service_profile_by_name(
+                            normalize_blogspot_profiles(
+                                self.settings.blogspot_profiles
+                            ),
+                            self.settings.blogspot_active_profile,
+                        ).get("profile_scope")
+                        or BLOGSPOT_PROFILE_SCOPES[0]
                     ),
                 )
 
@@ -22228,6 +22672,7 @@ class KeywordApp(ctk.CTk):
         self.reference_collection_worker: ReferenceCollectionWorker | None = None
         self.pending_reference_keyword = ""
         self.tistory_automation_worker: TistoryAutomationWorker | None = None
+        self.tistory_profile_worker: TistoryProfileWorker | None = None
         self.blogspot_profile_worker: BlogspotProfileWorker | None = None
         self.article_worker: ArticleGenerationWorker | None = None
         self.benchmark_worker: BenchmarkBlogWorker | None = None
@@ -26190,6 +26635,20 @@ class KeywordApp(ctk.CTk):
         self._save_ui_state()
 
     def _on_writing_target_changed(self) -> None:
+        targets = self._selected_writing_targets()
+        primary = self._primary_prompt_platform(targets)
+        if primary == "tistory":
+            profile = service_profile_by_name(
+                normalize_tistory_profiles(self.wordpress_settings.tistory_profiles),
+                self.wordpress_settings.tistory_active_profile,
+            )
+            self._restore_service_profile_prompt(profile, "tistory")
+        elif primary == "blogspot":
+            profile = service_profile_by_name(
+                normalize_blogspot_profiles(self.wordpress_settings.blogspot_profiles),
+                self.wordpress_settings.blogspot_active_profile,
+            )
+            self._restore_service_profile_prompt(profile, "blogspot")
         self._save_ui_state()
         self._refresh_writing_auto_progress_ui()
 
@@ -33456,7 +33915,21 @@ class KeywordApp(ctk.CTk):
     def _on_writing_prompt_selected(self, label: str) -> None:
         selected = self._prompt_set_by_label(label)
         if selected:
-            self.wordpress_settings.selected_prompt_id = str(selected.get("id") or "")
+            prompt_id = str(selected.get("id") or "")
+            platform = str(selected.get("platform") or "")
+            self.wordpress_settings.selected_prompt_id = prompt_id
+            if platform == "tistory" and hasattr(self, "tistory_active_profile_var"):
+                profiles = self._capture_tistory_profile_from_ui()
+                service_profile_by_name(
+                    profiles, self.tistory_active_profile_var.get()
+                )["last_prompt_id"] = prompt_id
+                self.wordpress_settings.tistory_profiles = profiles
+            elif platform == "blogspot" and hasattr(self, "blogspot_active_profile_var"):
+                profiles = self._capture_blogspot_profile_from_ui()
+                service_profile_by_name(
+                    profiles, self.blogspot_active_profile_var.get()
+                )["last_prompt_id"] = prompt_id
+                self.wordpress_settings.blogspot_profiles = profiles
         self._save_ui_state()
 
     def _platform_prompt_values_from_boxes(self) -> dict[str, str]:
@@ -34571,6 +35044,40 @@ class KeywordApp(ctk.CTk):
             placeholder="로그인/프로필 확인을 누르면 자동으로 입력됩니다.",
         )
 
+        blogspot_profiles = normalize_blogspot_profiles(
+            self.wordpress_settings.blogspot_profiles
+        )
+        self.blogspot_active_profile_var = tk.StringVar(
+            value=normalize_service_active_profile(
+                self.wordpress_settings.blogspot_active_profile,
+                blogspot_profiles,
+            )
+        )
+        self._loaded_blogspot_profile_name = self.blogspot_active_profile_var.get()
+        self.blogspot_profile_radios: dict[str, ctk.CTkRadioButton] = {}
+        profile_frame = ctk.CTkFrame(
+            self.blogspot_card,
+            corner_radius=16,
+            fg_color=("#e8eff9", "#111b2b"),
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        profile_frame.grid(row=5, column=0, padx=24, pady=(16, 12), sticky="ew")
+        for index in range(3):
+            profile_frame.grid_columnconfigure(index, weight=1)
+            profile = blogspot_profiles[index]
+            name = str(profile.get("name") or f"블로그스팟 {index + 1}")
+            radio = ctk.CTkRadioButton(
+                profile_frame,
+                text=self._service_profile_radio_text(profile),
+                variable=self.blogspot_active_profile_var,
+                value=name,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=self._on_blogspot_profile_selected,
+            )
+            radio.grid(row=0, column=index, padx=16, pady=14, sticky="w")
+            self.blogspot_profile_radios[name] = radio
+
         helper = ctk.CTkLabel(
             self.blogspot_card,
             text=(
@@ -34584,7 +35091,7 @@ class KeywordApp(ctk.CTk):
             wraplength=900,
             font=ctk.CTkFont(size=14),
         )
-        helper.grid(row=5, column=0, padx=24, pady=(16, 18), sticky="ew")
+        helper.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="ew")
 
         mode_frame = ctk.CTkFrame(
             self.blogspot_card,
@@ -34593,7 +35100,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color=("#cbd8ea", "#314761"),
         )
-        mode_frame.grid(row=6, column=0, padx=24, pady=(0, 16), sticky="ew")
+        mode_frame.grid(row=7, column=0, padx=24, pady=(0, 16), sticky="ew")
         mode_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             mode_frame,
@@ -34635,7 +35142,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_blogspot_reference_image_mode_changed,
         )
         self.blogspot_reference_protection_switch.grid(
-            row=7,
+            row=8,
             column=0,
             padx=24,
             pady=(0, 18),
@@ -34647,12 +35154,12 @@ class KeywordApp(ctk.CTk):
             self.blogspot_daily_publish_limit_status_label,
         ) = self._build_daily_publish_limit_control(
             self.blogspot_card,
-            row=8,
+            row=9,
             platform="blogspot",
         )
 
         button_row = ctk.CTkFrame(self.blogspot_card, fg_color="transparent")
-        button_row.grid(row=10, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=11, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -34699,7 +35206,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.blogspot_status_label.grid(row=11, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.blogspot_status_label.grid(row=12, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_tistory_card(self) -> None:
         title = ctk.CTkLabel(
@@ -34723,6 +35230,40 @@ class KeywordApp(ctk.CTk):
             placeholder="비워두면 블로그 주소 기준으로 /manage/newpost 를 사용합니다.",
         )
 
+        tistory_profiles = normalize_tistory_profiles(
+            self.wordpress_settings.tistory_profiles
+        )
+        self.tistory_active_profile_var = tk.StringVar(
+            value=normalize_service_active_profile(
+                self.wordpress_settings.tistory_active_profile,
+                tistory_profiles,
+            )
+        )
+        self._loaded_tistory_profile_name = self.tistory_active_profile_var.get()
+        self.tistory_profile_radios: dict[str, ctk.CTkRadioButton] = {}
+        profile_frame = ctk.CTkFrame(
+            self.tistory_card,
+            corner_radius=16,
+            fg_color=("#e8eff9", "#111b2b"),
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        profile_frame.grid(row=5, column=0, padx=24, pady=(16, 12), sticky="ew")
+        for index in range(3):
+            profile_frame.grid_columnconfigure(index, weight=1)
+            profile = tistory_profiles[index]
+            name = str(profile.get("name") or f"티스토리 {index + 1}")
+            radio = ctk.CTkRadioButton(
+                profile_frame,
+                text=self._service_profile_radio_text(profile),
+                variable=self.tistory_active_profile_var,
+                value=name,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=self._on_tistory_profile_selected,
+            )
+            radio.grid(row=0, column=index, padx=16, pady=14, sticky="w")
+            self.tistory_profile_radios[name] = radio
+
         helper = ctk.CTkLabel(
             self.tistory_card,
             text=(
@@ -34735,7 +35276,7 @@ class KeywordApp(ctk.CTk):
             wraplength=900,
             font=ctk.CTkFont(size=14),
         )
-        helper.grid(row=5, column=0, padx=24, pady=(16, 18), sticky="ew")
+        helper.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="ew")
 
         input_mode_frame = ctk.CTkFrame(
             self.tistory_card,
@@ -34744,7 +35285,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color=("#cbd8ea", "#314761"),
         )
-        input_mode_frame.grid(row=6, column=0, padx=24, pady=(0, 16), sticky="ew")
+        input_mode_frame.grid(row=7, column=0, padx=24, pady=(0, 16), sticky="ew")
         input_mode_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             input_mode_frame,
@@ -34842,7 +35383,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color=("#cbd8ea", "#314761"),
         )
-        ads_frame.grid(row=7, column=0, padx=24, pady=(0, 16), sticky="ew")
+        ads_frame.grid(row=8, column=0, padx=24, pady=(0, 16), sticky="ew")
         ads_frame.grid_columnconfigure(0, weight=1)
         ads_frame.grid_columnconfigure(1, weight=1)
 
@@ -34998,7 +35539,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_tistory_reference_image_mode_changed,
         )
         self.tistory_reference_protection_switch.grid(
-            row=8,
+            row=9,
             column=0,
             padx=24,
             pady=(0, 18),
@@ -35010,12 +35551,12 @@ class KeywordApp(ctk.CTk):
             self.tistory_daily_publish_limit_status_label,
         ) = self._build_daily_publish_limit_control(
             self.tistory_card,
-            row=9,
+            row=10,
             platform="tistory",
         )
 
         button_row = ctk.CTkFrame(self.tistory_card, fg_color="transparent")
-        button_row.grid(row=11, column=0, padx=24, pady=(0, 0), sticky="ew")
+        button_row.grid(row=12, column=0, padx=24, pady=(0, 0), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -35030,18 +35571,18 @@ class KeywordApp(ctk.CTk):
         )
         save_button.grid(row=0, column=0, sticky="ew")
 
-        open_button = ctk.CTkButton(
+        self.tistory_profile_button = ctk.CTkButton(
             button_row,
-            text="글쓰기 열기",
+            text="로그인/프로필 확인",
             width=150,
             height=52,
             corner_radius=16,
             fg_color="#3468e8",
             hover_color="#2d5cd0",
             font=ctk.CTkFont(size=18, weight="bold"),
-            command=self._open_tistory_write_page,
+            command=self._start_tistory_profile_check,
         )
-        open_button.grid(row=0, column=1, padx=(12, 0))
+        self.tistory_profile_button.grid(row=0, column=1, padx=(12, 0))
 
         reset_button = ctk.CTkButton(
             button_row,
@@ -35062,7 +35603,7 @@ class KeywordApp(ctk.CTk):
             text_color="#48d980",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.tistory_status_label.grid(row=12, column=0, padx=24, pady=(18, 22), sticky="w")
+        self.tistory_status_label.grid(row=13, column=0, padx=24, pady=(18, 22), sticky="w")
 
     def _build_threads_card(self) -> None:
         ctk.CTkLabel(
@@ -38553,60 +39094,67 @@ class KeywordApp(ctk.CTk):
             self.writing_inline_images_count_menu.set(str(self.wordpress_settings.inline_images_count or 2))
         if hasattr(self, "writing_inline_images_provider_menu"):
             self.writing_inline_images_provider_menu.set(self.wordpress_settings.inline_images_provider or "Imagen API")
-        self.tistory_blog_url_entry.insert(0, self.wordpress_settings.tistory_blog_url)
-        self.tistory_write_url_entry.insert(0, self.wordpress_settings.tistory_write_url)
-        self.tistory_daily_publish_limit_entry.insert(
-            0,
-            str(self.wordpress_settings.tistory_daily_publish_limit),
+        self.wordpress_settings.tistory_profiles = normalize_tistory_profiles(
+            self.wordpress_settings.tistory_profiles,
+            legacy={
+                "blog_url": self.wordpress_settings.tistory_blog_url,
+                "write_url": self.wordpress_settings.tistory_write_url,
+                "daily_publish_limit": self.wordpress_settings.tistory_daily_publish_limit,
+                "input_mode": self.wordpress_settings.tistory_input_mode,
+                "save_mode": self.wordpress_settings.tistory_save_mode,
+                "reference_image_protection_mode": self.wordpress_settings.tistory_reference_image_protection_mode,
+                "ads_enabled": self.wordpress_settings.tistory_ads_enabled,
+                "ads_code": self.wordpress_settings.tistory_ads_code,
+                "ads_slot_id": self.wordpress_settings.tistory_ads_slot_id,
+                "ads_position": self.wordpress_settings.tistory_ads_position,
+                "ads_count": self.wordpress_settings.tistory_ads_count,
+            },
         )
-        self.tistory_input_mode_var.set(
-            normalize_text_input_mode(self.wordpress_settings.tistory_input_mode)
+        self.wordpress_settings.tistory_active_profile = normalize_service_active_profile(
+            self.wordpress_settings.tistory_active_profile,
+            self.wordpress_settings.tistory_profiles,
         )
-        self._on_tistory_input_mode_changed(save=False)
-        self.tistory_save_mode_var.set(
-            normalize_tistory_save_mode(self.wordpress_settings.tistory_save_mode)
+        self.tistory_active_profile_var.set(
+            self.wordpress_settings.tistory_active_profile
         )
-        self._on_tistory_save_mode_changed(save=False)
-        self.tistory_reference_image_protection_var.set(
-            self.wordpress_settings.tistory_reference_image_protection_mode
+        self._loaded_tistory_profile_name = self.wordpress_settings.tistory_active_profile
+        self._apply_tistory_profile_to_ui(
+            service_profile_by_name(
+                self.wordpress_settings.tistory_profiles,
+                self.wordpress_settings.tistory_active_profile,
+            )
         )
-        self._on_tistory_reference_image_mode_changed(save=False)
-        self.tistory_ads_enabled_var.set(self.wordpress_settings.tistory_ads_enabled)
-        self.tistory_ads_code_box.delete("1.0", "end")
-        self.tistory_ads_code_box.insert(
-            "1.0",
-            self.wordpress_settings.tistory_ads_code or DEFAULT_TISTORY_AD_CODE,
+        self.wordpress_settings.blogspot_profiles = normalize_blogspot_profiles(
+            self.wordpress_settings.blogspot_profiles,
+            legacy={
+                "blog_id": self.wordpress_settings.blogspot_blog_id,
+                "blog_url": self.wordpress_settings.blogspot_blog_url,
+                "blog_name": self.wordpress_settings.blogspot_blog_name,
+                "daily_publish_limit": self.wordpress_settings.blogspot_daily_publish_limit,
+                "save_mode": self.wordpress_settings.blogspot_save_mode,
+                "reference_image_protection_mode": self.wordpress_settings.blogspot_reference_image_protection_mode,
+            },
         )
-        self.tistory_ads_slot_entry.delete(0, "end")
-        self.tistory_ads_slot_entry.insert(
-            0,
-            self.wordpress_settings.tistory_ads_slot_id or DEFAULT_TISTORY_AD_SLOT_ID,
+        self.wordpress_settings.blogspot_active_profile = normalize_service_active_profile(
+            self.wordpress_settings.blogspot_active_profile,
+            self.wordpress_settings.blogspot_profiles,
         )
-        self.tistory_ads_position_menu.set(
-            normalize_tistory_ad_position(self.wordpress_settings.tistory_ads_position)
+        self.blogspot_active_profile_var.set(
+            self.wordpress_settings.blogspot_active_profile
         )
-        self.tistory_ads_count_menu.set(
-            str(normalize_tistory_ad_count(self.wordpress_settings.tistory_ads_count) or 1)
+        self._loaded_blogspot_profile_name = self.wordpress_settings.blogspot_active_profile
+        active_blogspot_profile = service_profile_by_name(
+            self.wordpress_settings.blogspot_profiles,
+            self.wordpress_settings.blogspot_active_profile,
         )
-        self._on_tistory_ads_enabled_changed(save=False)
-        self.blogspot_blog_url_entry.insert(0, self.wordpress_settings.blogspot_blog_url)
-        self.blogspot_blog_id_entry.insert(0, self.wordpress_settings.blogspot_blog_id)
-        self.blogspot_save_mode_var.set(
-            normalize_tistory_save_mode(self.wordpress_settings.blogspot_save_mode)
-        )
-        self.blogspot_reference_image_protection_var.set(
-            self.wordpress_settings.blogspot_reference_image_protection_mode
-        )
-        self._on_blogspot_reference_image_mode_changed(save=False)
-        self.blogspot_daily_publish_limit_entry.insert(
-            0,
-            str(self.wordpress_settings.blogspot_daily_publish_limit),
-        )
-        if self.wordpress_settings.blogspot_blog_name or self.wordpress_settings.blogspot_blog_id:
+        self._apply_blogspot_profile_to_ui(active_blogspot_profile)
+        self._refresh_service_profile_radios("tistory")
+        self._refresh_service_profile_radios("blogspot")
+        if active_blogspot_profile.get("blog_name") or active_blogspot_profile.get("blog_id"):
             self.blogspot_status_label.configure(
                 text=(
                     "● 저장된 프로필: "
-                    f"{self.wordpress_settings.blogspot_blog_name or self.wordpress_settings.blogspot_blog_id}"
+                    f"{active_blogspot_profile.get('blog_name') or active_blogspot_profile.get('blog_id')}"
                 ),
                 text_color="#48d980",
             )
@@ -38672,16 +39220,31 @@ class KeywordApp(ctk.CTk):
                 self.wordpress_settings,
             )
             for platform in ("wordpress", "tistory", "naver_blog", "blogspot"):
-                preferred_id = (
-                    naver_blog_prompt_id_for_profile(
+                if platform == "naver_blog":
+                    preferred_id = naver_blog_prompt_id_for_profile(
                         self.wordpress_settings.naver_blog_profile_prompt_ids,
                         self.wordpress_settings.naver_blog_profiles,
                         self.wordpress_settings.naver_blog_active_profile,
                         legacy_prompt_id=self.wordpress_settings.naver_blog_prompt_id,
                     )
-                    if platform == "naver_blog"
-                    else ""
-                )
+                elif platform == "tistory":
+                    preferred_id = str(
+                        service_profile_by_name(
+                            self.wordpress_settings.tistory_profiles,
+                            self.wordpress_settings.tistory_active_profile,
+                        ).get("last_prompt_id")
+                        or ""
+                    )
+                elif platform == "blogspot":
+                    preferred_id = str(
+                        service_profile_by_name(
+                            self.wordpress_settings.blogspot_profiles,
+                            self.wordpress_settings.blogspot_active_profile,
+                        ).get("last_prompt_id")
+                        or ""
+                    )
+                else:
+                    preferred_id = ""
                 active = next(
                     (
                         item
@@ -38698,6 +39261,30 @@ class KeywordApp(ctk.CTk):
                     )
                 if active:
                     self.active_prompt_set_ids[platform] = str(active.get("id"))
+            primary_platform = self._primary_prompt_platform(list(target_platforms))
+            if primary_platform in {"tistory", "blogspot"}:
+                primary_profiles = (
+                    self.wordpress_settings.tistory_profiles
+                    if primary_platform == "tistory"
+                    else self.wordpress_settings.blogspot_profiles
+                )
+                primary_active = (
+                    self.wordpress_settings.tistory_active_profile
+                    if primary_platform == "tistory"
+                    else self.wordpress_settings.blogspot_active_profile
+                )
+                remembered_prompt_id = str(
+                    service_profile_by_name(
+                        primary_profiles, primary_active
+                    ).get("last_prompt_id")
+                    or ""
+                )
+                remembered_prompt = self._prompt_set_by_id(remembered_prompt_id)
+                if (
+                    remembered_prompt
+                    and remembered_prompt.get("platform") == primary_platform
+                ):
+                    self.wordpress_settings.selected_prompt_id = remembered_prompt_id
             self._refresh_prompt_set_menus()
             self._load_prompt_set_into_boxes(self.active_prompt_platform)
         if hasattr(self, "public_data_key_entry"):
@@ -39570,6 +40157,16 @@ class KeywordApp(ctk.CTk):
             preferred_ai_provider=normalize_writing_model(
                 self.ai_provider_menu.get()
             ),
+            blogspot_profiles=(
+                self._capture_blogspot_profile_from_ui()
+                if hasattr(self, "blogspot_active_profile_var")
+                else list(self.wordpress_settings.blogspot_profiles or [])
+            ),
+            blogspot_active_profile=(
+                self.blogspot_active_profile_var.get()
+                if hasattr(self, "blogspot_active_profile_var")
+                else self.wordpress_settings.blogspot_active_profile
+            ),
             blogspot_blog_id=self.blogspot_blog_id_entry.get().strip(),
             blogspot_client_id=self.wordpress_settings.blogspot_client_id,
             blogspot_client_secret=self.wordpress_settings.blogspot_client_secret,
@@ -39588,6 +40185,16 @@ class KeywordApp(ctk.CTk):
             ),
             blogspot_reference_image_protection_mode=bool(
                 self.blogspot_reference_image_protection_var.get()
+            ),
+            tistory_profiles=(
+                self._capture_tistory_profile_from_ui()
+                if hasattr(self, "tistory_active_profile_var")
+                else list(self.wordpress_settings.tistory_profiles or [])
+            ),
+            tistory_active_profile=(
+                self.tistory_active_profile_var.get()
+                if hasattr(self, "tistory_active_profile_var")
+                else self.wordpress_settings.tistory_active_profile
             ),
             tistory_blog_url=self.tistory_blog_url_entry.get().strip(),
             tistory_write_url=self.tistory_write_url_entry.get().strip(),
@@ -40052,6 +40659,296 @@ class KeywordApp(ctk.CTk):
         self._set_wp_status("● 설정 초기화 완료", "#9da7ba")
         self._update_quick_status("워드프레스 연결 전", "새로운 연결 정보를 입력해 주세요.", "#9da7ba")
 
+    def _service_profile_radio_text(self, profile: dict) -> str:
+        name = str(profile.get("name") or "프로필")
+        detail = str(
+            profile.get("kakao_account")
+            or profile.get("blog_name")
+            or profile.get("blog_url")
+            or profile.get("blog_id")
+            or "미등록"
+        ).strip()
+        if detail.startswith(("http://", "https://")):
+            detail = urlparse(detail).netloc or detail
+        return f"{name} · {detail[:24]}"
+
+    def _selected_prompt_id_for_platform(self, platform: str) -> str:
+        if not hasattr(self, "writing_prompt_menu"):
+            return ""
+        selected = self._prompt_set_by_label(self.writing_prompt_menu.get())
+        if selected and selected.get("platform") == platform:
+            return str(selected.get("id") or "")
+        return ""
+
+    def _refresh_service_profile_radios(self, platform: str) -> None:
+        if platform == "tistory":
+            profiles = normalize_tistory_profiles(
+                self.wordpress_settings.tistory_profiles
+            )
+            radios = getattr(self, "tistory_profile_radios", {})
+        else:
+            profiles = normalize_blogspot_profiles(
+                self.wordpress_settings.blogspot_profiles
+            )
+            radios = getattr(self, "blogspot_profile_radios", {})
+        for profile in profiles:
+            radio = radios.get(str(profile.get("name") or ""))
+            if radio is not None:
+                radio.configure(text=self._service_profile_radio_text(profile))
+
+    def _capture_tistory_profile_from_ui(
+        self,
+        profile_name: str | None = None,
+    ) -> list[dict]:
+        profiles = normalize_tistory_profiles(
+            self.wordpress_settings.tistory_profiles,
+            legacy={
+                "blog_url": self.wordpress_settings.tistory_blog_url,
+                "write_url": self.wordpress_settings.tistory_write_url,
+            },
+        )
+        name = str(
+            profile_name
+            or getattr(self, "_loaded_tistory_profile_name", "")
+            or self.wordpress_settings.tistory_active_profile
+        )
+        target = service_profile_by_name(profiles, name)
+        target.update(
+            {
+                "blog_url": self.tistory_blog_url_entry.get().strip(),
+                "write_url": self.tistory_write_url_entry.get().strip(),
+                "daily_publish_limit": normalize_daily_publish_limit(
+                    self.tistory_daily_publish_limit_entry.get()
+                ),
+                "input_mode": normalize_text_input_mode(
+                    self.tistory_input_mode_var.get()
+                ),
+                "save_mode": normalize_tistory_save_mode(
+                    self.tistory_save_mode_var.get()
+                ),
+                "reference_image_protection_mode": bool(
+                    self.tistory_reference_image_protection_var.get()
+                ),
+                "ads_enabled": bool(self.tistory_ads_enabled_var.get()),
+                "ads_code": self.tistory_ads_code_box.get("1.0", "end").strip(),
+                "ads_slot_id": normalize_tistory_ad_slot_id(
+                    self.tistory_ads_slot_entry.get()
+                ),
+                "ads_position": normalize_tistory_ad_position(
+                    self.tistory_ads_position_menu.get()
+                ),
+                "ads_count": normalize_tistory_ad_count(
+                    self.tistory_ads_count_menu.get()
+                ),
+            }
+        )
+        prompt_id = self._selected_prompt_id_for_platform("tistory")
+        if prompt_id:
+            target["last_prompt_id"] = prompt_id
+        return normalize_tistory_profiles(profiles)
+
+    def _capture_blogspot_profile_from_ui(
+        self,
+        profile_name: str | None = None,
+    ) -> list[dict]:
+        profiles = normalize_blogspot_profiles(
+            self.wordpress_settings.blogspot_profiles,
+            legacy={
+                "blog_id": self.wordpress_settings.blogspot_blog_id,
+                "blog_url": self.wordpress_settings.blogspot_blog_url,
+                "blog_name": self.wordpress_settings.blogspot_blog_name,
+            },
+        )
+        name = str(
+            profile_name
+            or getattr(self, "_loaded_blogspot_profile_name", "")
+            or self.wordpress_settings.blogspot_active_profile
+        )
+        target = service_profile_by_name(profiles, name)
+        target.update(
+            {
+                "blog_id": self.blogspot_blog_id_entry.get().strip(),
+                "blog_url": self.blogspot_blog_url_entry.get().strip(),
+                "daily_publish_limit": normalize_daily_publish_limit(
+                    self.blogspot_daily_publish_limit_entry.get()
+                ),
+                "save_mode": normalize_tistory_save_mode(
+                    self.blogspot_save_mode_var.get()
+                ),
+                "reference_image_protection_mode": bool(
+                    self.blogspot_reference_image_protection_var.get()
+                ),
+            }
+        )
+        prompt_id = self._selected_prompt_id_for_platform("blogspot")
+        if prompt_id:
+            target["last_prompt_id"] = prompt_id
+        return normalize_blogspot_profiles(profiles)
+
+    def _restore_service_profile_prompt(self, profile: dict, platform: str) -> None:
+        prompt_id = str(profile.get("last_prompt_id") or "")
+        selected = self._prompt_set_by_id(prompt_id) if prompt_id else None
+        if not selected or selected.get("platform") != platform:
+            selected = next(
+                (
+                    item
+                    for item in self._prompt_sets()
+                    if item.get("platform") == platform
+                ),
+                None,
+            )
+        if selected:
+            self.wordpress_settings.selected_prompt_id = str(selected.get("id") or "")
+            profile["last_prompt_id"] = self.wordpress_settings.selected_prompt_id
+            self._refresh_writing_prompt_menu()
+
+    def _apply_tistory_profile_to_ui(self, profile: dict) -> None:
+        for entry, value in (
+            (self.tistory_blog_url_entry, profile.get("blog_url", "")),
+            (self.tistory_write_url_entry, profile.get("write_url", "")),
+            (
+                self.tistory_daily_publish_limit_entry,
+                profile.get("daily_publish_limit", 0),
+            ),
+            (self.tistory_ads_slot_entry, profile.get("ads_slot_id", "")),
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, str(value or ""))
+        self.tistory_input_mode_var.set(
+            normalize_text_input_mode(str(profile.get("input_mode") or ""))
+        )
+        self.tistory_save_mode_var.set(
+            normalize_tistory_save_mode(str(profile.get("save_mode") or ""))
+        )
+        self.tistory_reference_image_protection_var.set(
+            bool(profile.get("reference_image_protection_mode", False))
+        )
+        self.tistory_ads_enabled_var.set(bool(profile.get("ads_enabled", True)))
+        self.tistory_ads_code_box.delete("1.0", "end")
+        self.tistory_ads_code_box.insert(
+            "1.0", str(profile.get("ads_code") or DEFAULT_TISTORY_AD_CODE)
+        )
+        self.tistory_ads_position_menu.set(
+            normalize_tistory_ad_position(str(profile.get("ads_position") or ""))
+        )
+        self.tistory_ads_count_menu.set(
+            str(normalize_tistory_ad_count(profile.get("ads_count", 1)))
+        )
+        self._on_tistory_input_mode_changed(save=False)
+        self._on_tistory_save_mode_changed(save=False)
+        self._on_tistory_reference_image_mode_changed(save=False)
+        self._on_tistory_ads_enabled_changed(save=False)
+
+    def _apply_blogspot_profile_to_ui(self, profile: dict) -> None:
+        for entry, value in (
+            (self.blogspot_blog_url_entry, profile.get("blog_url", "")),
+            (self.blogspot_blog_id_entry, profile.get("blog_id", "")),
+            (
+                self.blogspot_daily_publish_limit_entry,
+                profile.get("daily_publish_limit", 0),
+            ),
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, str(value or ""))
+        self.blogspot_save_mode_var.set(
+            normalize_tistory_save_mode(str(profile.get("save_mode") or ""))
+        )
+        self.blogspot_reference_image_protection_var.set(
+            bool(profile.get("reference_image_protection_mode", False))
+        )
+        self._on_blogspot_reference_image_mode_changed(save=False)
+
+    def _on_tistory_profile_selected(self) -> None:
+        previous_name = getattr(self, "_loaded_tistory_profile_name", "티스토리 1")
+        profiles = self._capture_tistory_profile_from_ui(previous_name)
+        active_name = normalize_service_active_profile(
+            self.tistory_active_profile_var.get(), profiles
+        )
+        profile = service_profile_by_name(profiles, active_name)
+        self.wordpress_settings.tistory_profiles = profiles
+        self.wordpress_settings.tistory_active_profile = active_name
+        self._loaded_tistory_profile_name = active_name
+        self._apply_tistory_profile_to_ui(profile)
+        self._restore_service_profile_prompt(profile, "tistory")
+        self.wordpress_settings.tistory_blog_url = str(profile.get("blog_url") or "")
+        self.wordpress_settings.tistory_write_url = str(profile.get("write_url") or "")
+        self.wordpress_settings.tistory_daily_publish_limit = normalize_daily_publish_limit(
+            profile.get("daily_publish_limit", 0)
+        )
+        self.wordpress_settings.tistory_input_mode = normalize_text_input_mode(
+            str(profile.get("input_mode") or "")
+        )
+        self.wordpress_settings.tistory_save_mode = normalize_tistory_save_mode(
+            str(profile.get("save_mode") or "")
+        )
+        self.wordpress_settings.tistory_reference_image_protection_mode = bool(
+            profile.get("reference_image_protection_mode", False)
+        )
+        self.wordpress_settings.tistory_ads_enabled = bool(
+            profile.get("ads_enabled", True)
+        )
+        self.wordpress_settings.tistory_ads_code = str(
+            profile.get("ads_code") or ""
+        )
+        self.wordpress_settings.tistory_ads_slot_id = normalize_tistory_ad_slot_id(
+            profile.get("ads_slot_id", "")
+        )
+        self.wordpress_settings.tistory_ads_position = normalize_tistory_ad_position(
+            str(profile.get("ads_position") or "")
+        )
+        self.wordpress_settings.tistory_ads_count = normalize_tistory_ad_count(
+            profile.get("ads_count", 1)
+        )
+        self._refresh_service_profile_radios("tistory")
+        self._refresh_daily_publish_limit_statuses()
+        if hasattr(self, "tistory_status_label"):
+            self.tistory_status_label.configure(
+                text=(
+                    "● 선택한 프로필: "
+                    f"{profile.get('kakao_account') or profile.get('blog_url') or active_name}"
+                ),
+                text_color="#48d980" if profile.get("blog_url") else "#9aa7bb",
+            )
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+
+    def _on_blogspot_profile_selected(self) -> None:
+        previous_name = getattr(
+            self, "_loaded_blogspot_profile_name", "블로그스팟 1"
+        )
+        profiles = self._capture_blogspot_profile_from_ui(previous_name)
+        active_name = normalize_service_active_profile(
+            self.blogspot_active_profile_var.get(), profiles
+        )
+        profile = service_profile_by_name(profiles, active_name)
+        self.wordpress_settings.blogspot_profiles = profiles
+        self.wordpress_settings.blogspot_active_profile = active_name
+        self._loaded_blogspot_profile_name = active_name
+        self._apply_blogspot_profile_to_ui(profile)
+        self._restore_service_profile_prompt(profile, "blogspot")
+        self.wordpress_settings.blogspot_blog_id = str(profile.get("blog_id") or "")
+        self.wordpress_settings.blogspot_blog_url = str(profile.get("blog_url") or "")
+        self.wordpress_settings.blogspot_blog_name = str(profile.get("blog_name") or "")
+        self.wordpress_settings.blogspot_daily_publish_limit = normalize_daily_publish_limit(
+            profile.get("daily_publish_limit", 0)
+        )
+        self.wordpress_settings.blogspot_save_mode = normalize_tistory_save_mode(
+            str(profile.get("save_mode") or "")
+        )
+        self.wordpress_settings.blogspot_reference_image_protection_mode = bool(
+            profile.get("reference_image_protection_mode", False)
+        )
+        self._refresh_service_profile_radios("blogspot")
+        self._refresh_daily_publish_limit_statuses()
+        if hasattr(self, "blogspot_status_label"):
+            self.blogspot_status_label.configure(
+                text=(
+                    "● 선택한 프로필: "
+                    f"{profile.get('blog_name') or profile.get('blog_url') or active_name}"
+                ),
+                text_color="#48d980" if profile.get("blog_id") else "#9aa7bb",
+            )
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+
     def _save_blogspot_settings(self) -> None:
         settings = self._read_wordpress_settings()
         self.wordpress_settings = settings
@@ -40093,6 +40990,13 @@ class KeywordApp(ctk.CTk):
         settings = self._read_wordpress_settings(include_prompts=False)
         self.wordpress_settings = settings
         AppStateStore.save(settings, save_secrets=False)
+        active_profile = service_profile_by_name(
+            normalize_blogspot_profiles(settings.blogspot_profiles),
+            settings.blogspot_active_profile,
+        )
+        profile_scope = str(
+            active_profile.get("profile_scope") or BLOGSPOT_PROFILE_SCOPES[0]
+        )
         self.blogspot_profile_button.configure(state="disabled", text="로그인 확인 중...")
         self.blogspot_status_label.configure(
             text="● 전용 Chrome에서 Google 로그인을 확인해 주세요.",
@@ -40103,7 +41007,10 @@ class KeywordApp(ctk.CTk):
             "전용 Chrome 로그인 상태를 확인하고 선택된 블로그 정보를 저장합니다.",
             "#6dadff",
         )
-        self.blogspot_profile_worker = BlogspotProfileWorker(self.result_queue)
+        self.blogspot_profile_worker = BlogspotProfileWorker(
+            self.result_queue,
+            profile_scope=profile_scope,
+        )
         self.blogspot_profile_worker.start()
 
     def _blogspot_oauth_scopes(self, include_indexing: bool = False) -> list[str]:
@@ -40404,14 +41311,63 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_ads_position = TISTORY_AD_POSITION_ABOVE
         self.wordpress_settings.tistory_ads_count = 1
         self.wordpress_settings.tistory_daily_publish_limit = 0
+        profiles = self._capture_tistory_profile_from_ui()
+        active_profile = service_profile_by_name(
+            profiles, self.tistory_active_profile_var.get()
+        )
+        active_profile.update(
+            {
+                "kakao_account": "",
+                "last_prompt_id": "",
+            }
+        )
+        self.wordpress_settings.tistory_profiles = normalize_tistory_profiles(
+            profiles
+        )
         self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_save_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
+        self._refresh_service_profile_radios("tistory")
         self._refresh_daily_publish_limit_statuses()
         self.tistory_status_label.configure(text="● 티스토리 초기화 완료", text_color="#9aa7bb")
         self._update_quick_status("티스토리 초기화", "새로운 티스토리 주소를 입력해 주세요.", "#9aa7bb")
+
+    def _start_tistory_profile_check(self) -> None:
+        if self.tistory_profile_worker and self.tistory_profile_worker.is_alive():
+            messagebox.showinfo("진행 중", "티스토리 로그인 상태를 확인하고 있습니다.")
+            return
+        settings = self._read_wordpress_settings(include_prompts=False)
+        write_url = self._build_tistory_write_url(settings)
+        if not write_url:
+            messagebox.showerror(
+                "입력 오류",
+                "티스토리 블로그 주소 또는 글쓰기 URL을 먼저 입력해 주세요.",
+            )
+            return
+        self.wordpress_settings = settings
+        AppStateStore.save(settings, save_secrets=False)
+        profile = service_profile_by_name(
+            normalize_tistory_profiles(settings.tistory_profiles),
+            settings.tistory_active_profile,
+        )
+        profile_scope = str(
+            profile.get("profile_scope") or TISTORY_PROFILE_SCOPES[0]
+        )
+        self.tistory_profile_button.configure(
+            state="disabled", text="로그인 확인 중..."
+        )
+        self.tistory_status_label.configure(
+            text="● 이 프로필 전용 Chrome에서 카카오 로그인을 확인하고 있습니다.",
+            text_color="#6dadff",
+        )
+        self.tistory_profile_worker = TistoryProfileWorker(
+            write_url,
+            self.result_queue,
+            profile_scope=profile_scope,
+        )
+        self.tistory_profile_worker.start()
 
     def _open_tistory_write_page(self) -> None:
         settings = self._read_wordpress_settings()
@@ -40457,13 +41413,30 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.blogspot_refresh_token = ""
         self.wordpress_settings.blogspot_access_token = ""
         self.wordpress_settings.blogspot_daily_publish_limit = 0
+        profiles = self._capture_blogspot_profile_from_ui()
+        active_profile = service_profile_by_name(
+            profiles, self.blogspot_active_profile_var.get()
+        )
+        active_profile.update(
+            {
+                "blog_name": "",
+                "last_prompt_id": "",
+            }
+        )
+        self.wordpress_settings.blogspot_profiles = normalize_blogspot_profiles(
+            profiles
+        )
         AppStateStore.save(self.wordpress_settings)
+        self._refresh_service_profile_radios("blogspot")
         self._refresh_daily_publish_limit_statuses()
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_ACCOUNT)
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET)
         KeychainStore.delete_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN)
         try:
-            BLOGSPOT_STORAGE_STATE_FILE.unlink(missing_ok=True)
+            _profile_dir, state_file = blogspot_profile_paths(
+                active_profile.get("profile_scope")
+            )
+            state_file.unlink(missing_ok=True)
         except OSError:
             pass
         self.blogspot_status_label.configure(text="● 블로그스팟 초기화 완료", text_color="#9aa7bb")
@@ -42165,6 +43138,13 @@ class KeywordApp(ctk.CTk):
             ads_position=settings.tistory_ads_position,
             ads_count=settings.tistory_ads_count,
             daily_publish_limit=settings.tistory_daily_publish_limit,
+            profile_scope=str(
+                service_profile_by_name(
+                    normalize_tistory_profiles(settings.tistory_profiles),
+                    settings.tistory_active_profile,
+                ).get("profile_scope")
+                or TISTORY_PROFILE_SCOPES[0]
+            ),
         )
         self.tistory_automation_worker.start()
 
@@ -42916,23 +43896,45 @@ class KeywordApp(ctk.CTk):
                         self.publish_status_label.configure(text=str(payload), text_color="#6dadff")
                 elif event_type == "blogspot_profile_done":
                     profile = payload if isinstance(payload, dict) else {}
+                    profile_scope = str(
+                        profile.get("profile_scope") or BLOGSPOT_PROFILE_SCOPES[0]
+                    )
                     blog_id = str(profile.get("blog_id") or "").strip()
                     blog_name = str(profile.get("blog_name") or "").strip()
                     blog_url = str(profile.get("blog_url") or "").strip()
-                    if blog_url:
+                    profiles = self._capture_blogspot_profile_from_ui()
+                    target_profile = next(
+                        (
+                            item
+                            for item in profiles
+                            if item.get("profile_scope") == profile_scope
+                        ),
+                        profiles[0],
+                    )
+                    target_profile.update(
+                        {
+                            "blog_id": blog_id,
+                            "blog_name": blog_name,
+                            "blog_url": blog_url,
+                        }
+                    )
+                    self.wordpress_settings.blogspot_profiles = profiles
+                    is_active_profile = (
+                        target_profile.get("name")
+                        == self.blogspot_active_profile_var.get()
+                    )
+                    if blog_url and is_active_profile:
                         self.blogspot_blog_url_entry.delete(0, "end")
                         self.blogspot_blog_url_entry.insert(0, blog_url)
-                    if blog_id:
+                    if blog_id and is_active_profile:
                         self.blogspot_blog_id_entry.delete(0, "end")
                         self.blogspot_blog_id_entry.insert(0, blog_id)
-                    self.wordpress_settings.blogspot_blog_id = blog_id
-                    self.wordpress_settings.blogspot_blog_name = blog_name
-                    self.wordpress_settings.blogspot_blog_url = blog_url
-                    AppStateStore.update_fields(
-                        blogspot_blog_id=blog_id,
-                        blogspot_blog_name=blog_name,
-                        blogspot_blog_url=blog_url,
-                    )
+                    if is_active_profile:
+                        self.wordpress_settings.blogspot_blog_id = blog_id
+                        self.wordpress_settings.blogspot_blog_name = blog_name
+                        self.wordpress_settings.blogspot_blog_url = blog_url
+                    AppStateStore.save(self.wordpress_settings, save_secrets=False)
+                    self._refresh_service_profile_radios("blogspot")
                     self.blogspot_profile_worker = None
                     self.blogspot_profile_button.configure(state="normal", text="로그인/프로필 확인")
                     self.blogspot_status_label.configure(
@@ -42952,6 +43954,53 @@ class KeywordApp(ctk.CTk):
                         self.blogspot_status_label.configure(text="● 로그인 확인 실패", text_color="#ff6b6b")
                     self._update_quick_status("블로그스팟 로그인 확인 실패", str(payload), "#ff6b6b")
                     messagebox.showwarning("블로그스팟 로그인 확인 실패", str(payload))
+                elif event_type == "tistory_profile_progress":
+                    if hasattr(self, "tistory_status_label"):
+                        self.tistory_status_label.configure(
+                            text=f"● {payload}", text_color="#6dadff"
+                        )
+                elif event_type == "tistory_profile_done":
+                    profile = payload if isinstance(payload, dict) else {}
+                    profile_scope = str(
+                        profile.get("profile_scope") or TISTORY_PROFILE_SCOPES[0]
+                    )
+                    profiles = self._capture_tistory_profile_from_ui()
+                    target_profile = next(
+                        (
+                            item
+                            for item in profiles
+                            if item.get("profile_scope") == profile_scope
+                        ),
+                        profiles[0],
+                    )
+                    account_text = str(profile.get("kakao_account") or "").strip()
+                    if account_text:
+                        target_profile["kakao_account"] = account_text
+                    self.wordpress_settings.tistory_profiles = profiles
+                    AppStateStore.save(self.wordpress_settings, save_secrets=False)
+                    self._refresh_service_profile_radios("tistory")
+                    self.tistory_profile_worker = None
+                    self.tistory_profile_button.configure(
+                        state="normal", text="로그인/프로필 확인"
+                    )
+                    self.tistory_status_label.configure(
+                        text=(
+                            "● 로그인 저장 완료: "
+                            f"{account_text or target_profile.get('blog_url') or target_profile.get('name')}"
+                        ),
+                        text_color="#48d980",
+                    )
+                elif event_type == "tistory_profile_error":
+                    self.tistory_profile_worker = None
+                    if hasattr(self, "tistory_profile_button"):
+                        self.tistory_profile_button.configure(
+                            state="normal", text="로그인/프로필 확인"
+                        )
+                    if hasattr(self, "tistory_status_label"):
+                        self.tistory_status_label.configure(
+                            text="● 로그인 확인 실패", text_color="#ff6b6b"
+                        )
+                    messagebox.showwarning("티스토리 로그인 확인 실패", str(payload))
                 elif event_type == "tistory_progress":
                     self.publish_progress_bar.configure(mode="indeterminate")
                     self.publish_progress_bar.start()
@@ -43474,7 +44523,7 @@ class KeywordApp(ctk.CTk):
         if tistory:
             write_url = tistory.get("write_url")
             tistory_save_mode = normalize_tistory_save_mode(
-                self.tistory_save_mode_var.get()
+                tistory.get("save_mode") or self.tistory_save_mode_var.get()
             )
             if write_url:
                 if not (self.tistory_automation_worker and self.tistory_automation_worker.is_alive()):
@@ -43497,23 +44546,45 @@ class KeywordApp(ctk.CTk):
                             or ""
                         ),
                         reference_image_protection_mode=bool(
-                            self.tistory_reference_image_protection_var.get()
+                            tistory.get(
+                                "reference_image_protection_mode",
+                                self.tistory_reference_image_protection_var.get(),
+                            )
                         ),
                         input_mode=normalize_text_input_mode(
-                            self.tistory_input_mode_var.get()
+                            tistory.get("input_mode")
+                            or self.tistory_input_mode_var.get()
                         ),
-                        ads_enabled=bool(self.tistory_ads_enabled_var.get()),
-                        ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+                        ads_enabled=bool(
+                            tistory.get(
+                                "ads_enabled",
+                                self.tistory_ads_enabled_var.get(),
+                            )
+                        ),
+                        ads_code=str(
+                            tistory.get("ads_code")
+                            or self.tistory_ads_code_box.get("1.0", "end").strip()
+                        ),
                         ads_slot_id=normalize_tistory_ad_slot_id(
-                            self.tistory_ads_slot_entry.get()
+                            tistory.get("ads_slot_id")
+                            or self.tistory_ads_slot_entry.get()
                         ),
                         ads_position=normalize_tistory_ad_position(
-                            self.tistory_ads_position_menu.get()
+                            tistory.get("ads_position")
+                            or self.tistory_ads_position_menu.get()
                         ),
                         ads_count=normalize_tistory_ad_count(
-                            self.tistory_ads_count_menu.get()
+                            tistory.get("ads_count")
+                            or self.tistory_ads_count_menu.get()
                         ),
-                        daily_publish_limit=self.wordpress_settings.tistory_daily_publish_limit,
+                        daily_publish_limit=normalize_daily_publish_limit(
+                            tistory.get("daily_publish_limit"),
+                            DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT,
+                        ),
+                        profile_scope=str(
+                            tistory.get("profile_scope")
+                            or TISTORY_PROFILE_SCOPES[0]
+                        ),
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
@@ -43575,7 +44646,7 @@ class KeywordApp(ctk.CTk):
         if tistory:
             write_url = tistory.get("write_url")
             tistory_save_mode = normalize_tistory_save_mode(
-                self.tistory_save_mode_var.get()
+                tistory.get("save_mode") or self.tistory_save_mode_var.get()
             )
             if write_url:
                 if not (self.tistory_automation_worker and self.tistory_automation_worker.is_alive()):
@@ -43598,23 +44669,45 @@ class KeywordApp(ctk.CTk):
                             or ""
                         ),
                         reference_image_protection_mode=bool(
-                            self.tistory_reference_image_protection_var.get()
+                            tistory.get(
+                                "reference_image_protection_mode",
+                                self.tistory_reference_image_protection_var.get(),
+                            )
                         ),
                         input_mode=normalize_text_input_mode(
-                            self.tistory_input_mode_var.get()
+                            tistory.get("input_mode")
+                            or self.tistory_input_mode_var.get()
                         ),
-                        ads_enabled=bool(self.tistory_ads_enabled_var.get()),
-                        ads_code=self.tistory_ads_code_box.get("1.0", "end").strip(),
+                        ads_enabled=bool(
+                            tistory.get(
+                                "ads_enabled",
+                                self.tistory_ads_enabled_var.get(),
+                            )
+                        ),
+                        ads_code=str(
+                            tistory.get("ads_code")
+                            or self.tistory_ads_code_box.get("1.0", "end").strip()
+                        ),
                         ads_slot_id=normalize_tistory_ad_slot_id(
-                            self.tistory_ads_slot_entry.get()
+                            tistory.get("ads_slot_id")
+                            or self.tistory_ads_slot_entry.get()
                         ),
                         ads_position=normalize_tistory_ad_position(
-                            self.tistory_ads_position_menu.get()
+                            tistory.get("ads_position")
+                            or self.tistory_ads_position_menu.get()
                         ),
                         ads_count=normalize_tistory_ad_count(
-                            self.tistory_ads_count_menu.get()
+                            tistory.get("ads_count")
+                            or self.tistory_ads_count_menu.get()
                         ),
-                        daily_publish_limit=self.wordpress_settings.tistory_daily_publish_limit,
+                        daily_publish_limit=normalize_daily_publish_limit(
+                            tistory.get("daily_publish_limit"),
+                            DEFAULT_TISTORY_DAILY_PUBLISH_LIMIT,
+                        ),
+                        profile_scope=str(
+                            tistory.get("profile_scope")
+                            or TISTORY_PROFILE_SCOPES[0]
+                        ),
                     )
                     self.active_automation_tistory_pending = True
                     self.tistory_automation_worker.start()
@@ -43622,7 +44715,7 @@ class KeywordApp(ctk.CTk):
             self._finalize_active_automation_publish(success=True, status_message="자동등록 완료")
         else:
             tistory_save_mode = normalize_tistory_save_mode(
-                self.tistory_save_mode_var.get()
+                tistory.get("save_mode") or self.tistory_save_mode_var.get()
             )
             self.automation_status_label.configure(
                 text=(
