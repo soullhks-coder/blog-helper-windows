@@ -177,6 +177,34 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertEqual(main.extract_tistory_attachment_url(response), uploaded_url)
         self.assertEqual(main.extract_tistory_attachment_url({"url": uploaded_url}), uploaded_url)
 
+    def test_attachment_response_finds_nested_and_escaped_uploaded_url(self) -> None:
+        uploaded_url = "https://blog.kakaocdn.net/dna/nested-key/image/img.png?x=1&y=2"
+        response = {
+            "result": {
+                "files": [
+                    {
+                        "replacer": (
+                            '<img src="'
+                            + uploaded_url.replace("/", "\\/").replace("&", "&amp;")
+                            + '" />'
+                        )
+                    }
+                ]
+            }
+        }
+
+        self.assertEqual(main.extract_tistory_attachment_url(response), uploaded_url)
+
+    def test_attachment_response_finds_tistory_image_marker(self) -> None:
+        response = {
+            "replacer": "[##_Image|kage@abc123/image/img.png?credential=test|alignCenter|data-origin-width=640|_##]"
+        }
+
+        self.assertEqual(
+            main.extract_tistory_attachment_url(response),
+            "https://blog.kakaocdn.net/dna/abc123/image/img.png?credential=test",
+        )
+
     def test_local_cardnews_placeholder_becomes_native_upload_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "body-cardnews-test.png"

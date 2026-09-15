@@ -16385,14 +16385,31 @@ def collect_tistory_hosted_image_urls(page) -> list[str]:
       add(node.getAttribute('data-file-url'));
       add(node.getAttribute('data-ke-src'));
     }
+    for (const node of Array.from(doc.querySelectorAll('input, textarea'))) {
+      const value = String(node.value || node.getAttribute('value') || '');
+      for (const match of value.matchAll(/https?:\/\/[^\s"'<>\\]+/g)) add(match[0]);
+    }
+    const source = String(doc.documentElement?.innerHTML || '');
+    for (const match of source.matchAll(/https?:\/\/[^\s"'<>\\]+/g)) add(match[0]);
+    const imageMarker = /\[##_Image\|kage@([^|]+)\|/g;
+    for (const match of source.matchAll(imageMarker)) {
+      add(`https://blog.kakaocdn.net/dna/${match[1].replace(/&amp;/g, '&')}`);
+    }
   }
   for (const entry of performance.getEntriesByType('resource')) {
     add(entry.name);
   }
-  const editorContent = String(window.tinymce?.activeEditor?.getContent?.() || '');
-  const imageMarker = /\[##_Image\|kage@([^|]+)\|/g;
-  for (const match of editorContent.matchAll(imageMarker)) {
-    add(`https://blog.kakaocdn.net/dna/${match[1].replace(/&amp;/g, '&')}`);
+  const editors = Array.from(window.tinymce?.editors || []);
+  if (window.tinymce?.activeEditor && !editors.includes(window.tinymce.activeEditor)) {
+    editors.push(window.tinymce.activeEditor);
+  }
+  for (const editor of editors) {
+    const editorContent = String(editor?.getContent?.() || '');
+    for (const match of editorContent.matchAll(/https?:\/\/[^\s"'<>\\]+/g)) add(match[0]);
+    const imageMarker = /\[##_Image\|kage@([^|]+)\|/g;
+    for (const match of editorContent.matchAll(imageMarker)) {
+      add(`https://blog.kakaocdn.net/dna/${match[1].replace(/&amp;/g, '&')}`);
+    }
   }
   return urls;
 }
@@ -16430,16 +16447,65 @@ def choose_fresh_tistory_image_url(before_urls: set[str], observed_urls: Iterabl
 
 
 def extract_tistory_attachment_url(payload: object) -> str:
-    if isinstance(payload, str):
+    candidates: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key in (
+                "url",
+                "imageUrl",
+                "image_url",
+                "fileUrl",
+                "file_url",
+                "downloadUrl",
+                "download_url",
+                "src",
+                "replacer",
+            ):
+                if key in value:
+                    collect(value.get(key))
+            for key, nested in value.items():
+                if key not in {
+                    "url",
+                    "imageUrl",
+                    "image_url",
+                    "fileUrl",
+                    "file_url",
+                    "downloadUrl",
+                    "download_url",
+                    "src",
+                    "replacer",
+                }:
+                    collect(nested)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for nested in value:
+                collect(nested)
+            return
+        if not isinstance(value, str):
+            return
+
+        text = unescape(value).replace("\\/", "/").replace("\\u0026", "&")
         try:
-            payload = json.loads(payload)
-        except json.JSONDecodeError:
-            match = re.search(r'"url"\s*:\s*"([^"]+)"', payload)
-            return match.group(1).replace("\\/", "/") if match else ""
-    if not isinstance(payload, dict):
-        return ""
-    url = str(payload.get("url") or "").strip()
-    return url if is_tistory_uploaded_image_url(url) else ""
+            decoded = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            decoded = None
+        if decoded is not None and decoded != value:
+            collect(decoded)
+        for match in re.findall(r"https?://[^\s\"'<>\\]+", text, flags=re.I):
+            candidate = match.rstrip("),.;]")
+            if candidate not in candidates:
+                candidates.append(candidate)
+        for marker in re.findall(r"\[##_Image\|kage@([^|]+)\|", text):
+            candidate = f"https://blog.kakaocdn.net/dna/{marker}"
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    collect(payload)
+    return next(
+        (url for url in candidates if is_tistory_uploaded_image_url(url)),
+        "",
+    )
 
 
 def upload_tistory_image_file(
@@ -16455,133 +16521,206 @@ def upload_tistory_image_file(
     before_urls = set(collect_tistory_hosted_image_urls(page))
     before_urls.update(excluded_urls or set())
     response_urls: list[str] = []
+    response_notes: list[str] = []
 
     def capture_image_response(response) -> None:
         try:
             response_url = str(response.url or "").strip()
+            request_method = str(response.request.method or "").upper()
+            status = int(response.status or 0)
         except Exception:
             return
-        if re.search(r"/manage/post/attach\.json(?:\?|$)", response_url, flags=re.I):
+        if is_tistory_uploaded_image_url(response_url) and response_url not in response_urls:
+            response_urls.append(response_url)
+
+        should_inspect_body = bool(
+            re.search(r"(?:attach|upload|image|file)", response_url, flags=re.I)
+            and re.search(r"(?:tistory|kakao|daum)", response_url, flags=re.I)
+        ) or bool(
+            request_method == "POST"
+            and re.search(r"(?:tistory|kakao|daum)", response_url, flags=re.I)
+        )
+        if should_inspect_body:
             try:
                 uploaded_url = extract_tistory_attachment_url(response.text())
             except Exception:
                 uploaded_url = ""
             if uploaded_url and uploaded_url not in response_urls:
                 response_urls.append(uploaded_url)
-        if is_tistory_uploaded_image_url(response_url) and response_url not in response_urls:
-            response_urls.append(response_url)
+            if len(response_notes) < 12:
+                endpoint = urlparse(response_url).path or response_url
+                response_notes.append(
+                    f"{status} {request_method} {endpoint[:120]}"
+                    f" url={'yes' if uploaded_url else 'no'}"
+                )
 
     page.on("response", capture_image_response)
-    file_input = None
 
-    try:
-        attach_button = page.locator("#mceu_0-open:visible").last
-        if attach_button.count():
+    def wait_for_uploaded_url(timeout_seconds: float) -> str:
+        deadline = time.time() + max(1.0, timeout_seconds)
+        while time.time() < deadline:
+            page.wait_for_timeout(400)
+            observed_urls = [
+                *response_urls,
+                *collect_tistory_hosted_image_urls(page),
+            ]
+            uploaded_url = choose_fresh_tistory_image_url(
+                before_urls,
+                observed_urls,
+            )
+            if uploaded_url:
+                append_runtime_log(
+                    "TISTORY",
+                    f"이미지 업로드 주소 확인 완료: {path.name} · {urlparse(uploaded_url).netloc}",
+                )
+                return uploaded_url
+        return ""
+
+    def select_from_editor_photo_menu() -> bool:
+        try:
+            attach_button = page.locator("#mceu_0-open:visible").last
+            attach_button.wait_for(state="visible", timeout=6_000)
             attach_button.click(force=True)
             photo_item = page.locator("#attach-image:visible").last
-            with page.expect_file_chooser(timeout=5000) as chooser_info:
+            photo_item.wait_for(state="visible", timeout=5_000)
+            with page.expect_file_chooser(timeout=7_000) as chooser_info:
                 photo_item.click(force=True)
-            response_urls.clear()
             chooser_info.value.set_files(str(path))
-            file_input = True
-    except Exception:
-        file_input = None
-
-    if file_input is None:
-        try:
-            page.keyboard.press("Escape")
+            append_runtime_log(
+                "TISTORY",
+                f"편집기 사진 메뉴에서 파일 선택 완료: {path.name}",
+            )
+            return True
         except Exception:
-            pass
-    inputs = page.locator('input[type="file"]')
-    if file_input is None:
-        for index in range(inputs.count() - 1, -1, -1):
-            candidate = inputs.nth(index)
-            try:
-                accept = (candidate.get_attribute("accept") or "").lower()
-                if not accept or "image" in accept or any(ext in accept for ext in ("png", "jpg", "jpeg", "webp")):
-                    file_input = candidate
-                    break
-            except Exception:
-                continue
+            return False
 
-    if file_input is None:
-        toolbar_selectors = [
+    def select_from_toolbar_file_chooser() -> bool:
+        toolbar_selectors = (
             'button[aria-label*="사진"]',
             'button[aria-label*="이미지"]',
             'button[title*="사진"]',
             'button[title*="이미지"]',
-            'button[id*="image"]',
-            'button[class*="image"]',
-            '[role="button"][class*="image"]',
-            '[data-tooltip*="사진"]',
-            '[data-tooltip*="이미지"]',
+            '[role="button"][data-tooltip*="사진"]',
+            '[role="button"][data-tooltip*="이미지"]',
             '[data-name="image"]',
             '[data-command="image"]',
-            '#mceu_0-open',
-            '.mce-i-image',
-        ]
+        )
         for selector in toolbar_selectors:
-            button = page.locator(selector).first
             try:
+                button = page.locator(f"{selector}:visible").first
                 if not button.count():
                     continue
-                with page.expect_file_chooser(timeout=2500) as chooser_info:
+                with page.expect_file_chooser(timeout=4_000) as chooser_info:
                     button.click(force=True)
-                response_urls.clear()
                 chooser_info.value.set_files(str(path))
-                file_input = True
-                break
+                append_runtime_log(
+                    "TISTORY",
+                    f"편집기 사진 도구에서 파일 선택 완료: {path.name} · {selector}",
+                )
+                return True
             except Exception:
                 continue
-        if file_input is None:
-            inputs = page.locator('input[type="file"]')
-            for index in range(inputs.count() - 1, -1, -1):
-                candidate = inputs.nth(index)
-                try:
-                    accept = (candidate.get_attribute("accept") or "").lower()
-                    if not accept or "image" in accept or any(ext in accept for ext in ("png", "jpg", "jpeg", "webp")):
-                        file_input = candidate
-                        break
-                except Exception:
-                    continue
-        if file_input is None:
-            try:
-                photo_button = page.get_by_text(re.compile(r"^(사진|이미지)$"), exact=True).first
-                with page.expect_file_chooser(timeout=2500) as chooser_info:
-                    photo_button.click(force=True)
-                response_urls.clear()
-                chooser_info.value.set_files(str(path))
-                file_input = True
-            except Exception:
-                pass
+        return False
 
-    if file_input is None:
-        try:
-            page.remove_listener("response", capture_image_response)
-        except Exception:
-            pass
-        raise RuntimeError(
-            "티스토리 사진 첨부 입력창을 찾지 못했습니다. 편집기 상단의 사진 버튼 구조가 변경되었는지 확인해 주세요."
-        )
-    try:
-        if file_input is not True:
+    def select_from_editor_file_input() -> bool:
+        inputs = page.locator('input[type="file"]')
+        for index in range(inputs.count() - 1, -1, -1):
+            candidate = inputs.nth(index)
             try:
-                file_input.set_input_files([])
+                is_editor_image_input = candidate.evaluate(
+                    """
+node => {
+  const accept = String(node.getAttribute('accept') || '').toLowerCase();
+  if (accept && !/(image|png|jpe?g|webp)/.test(accept)) return false;
+  if (node.closest('.ReactModal__Content--after-open, .box_thumb')) return false;
+  const context = [
+    node.id,
+    node.className,
+    node.getAttribute('name'),
+    node.getAttribute('aria-label'),
+    node.parentElement?.id,
+    node.parentElement?.className,
+  ].filter(Boolean).join(' ').toLowerCase();
+  return !/(representative|thumbnail|thumb|cover)/.test(context);
+}
+"""
+                )
+                if not is_editor_image_input:
+                    continue
+                candidate.set_input_files([])
+                candidate.set_input_files(str(path))
+                selected_name = candidate.evaluate(
+                    "node => node.files?.[0]?.name || ''"
+                )
+                if selected_name != path.name:
+                    continue
+                append_runtime_log(
+                    "TISTORY",
+                    f"편집기 이미지 파일 입력칸에서 파일 선택 완료: {path.name}",
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    try:
+        selected = select_from_editor_photo_menu()
+        if not selected:
+            try:
+                page.keyboard.press("Escape")
             except Exception:
                 pass
-            response_urls.clear()
-            file_input.set_input_files(str(path))
+            selected = select_from_toolbar_file_chooser()
+        if not selected:
+            selected = select_from_editor_file_input()
+
+        if not selected:
+            raise RuntimeError(
+                "티스토리 사진 첨부 입력창을 찾지 못했습니다. "
+                "편집기 상단의 사진 버튼 구조가 변경되었는지 확인해 주세요."
+            )
 
         result_queue.put(("tistory_progress", f"'{path.name}' 파일을 티스토리에 첨부하고 있습니다..."))
-        deadline = time.time() + 40
-        while time.time() < deadline:
-            page.wait_for_timeout(500)
-            observed_urls = [*response_urls, *collect_tistory_hosted_image_urls(page)]
-            uploaded_url = choose_fresh_tistory_image_url(before_urls, observed_urls)
+        uploaded_url = wait_for_uploaded_url(24)
+        if uploaded_url:
+            return uploaded_url
+
+        result_queue.put(
+            (
+                "tistory_progress",
+                f"'{path.name}' 업로드 응답이 늦어 편집기 사진 메뉴로 한 번 더 확인합니다...",
+            )
+        )
+        append_runtime_log(
+            "TISTORY",
+            f"이미지 업로드 URL 1차 감지 실패 · 재시도: {path.name} · "
+            f"responses={'; '.join(response_notes) or 'none'}",
+        )
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(800)
+
+        retried = select_from_editor_photo_menu()
+        if not retried:
+            retried = select_from_toolbar_file_chooser()
+        if not retried:
+            retried = select_from_editor_file_input()
+        if retried:
+            uploaded_url = wait_for_uploaded_url(32)
             if uploaded_url:
                 return uploaded_url
+
+        append_runtime_log(
+            "TISTORY",
+            f"이미지 업로드 URL 최종 감지 실패: {path.name} · "
+            f"responses={'; '.join(response_notes) or 'none'} · "
+            f"observed={len(collect_tistory_hosted_image_urls(page))}",
+        )
         raise RuntimeError(
-            f"'{path.name}' 파일은 선택했지만 새 티스토리 업로드 주소를 확인하지 못했습니다. "
+            f"'{path.name}' 파일을 두 번 선택했지만 새 티스토리 업로드 주소를 확인하지 못했습니다. "
+            "티스토리 업로드 서버 응답이 없거나 화면 구조가 바뀐 상태입니다. "
             "이전 이미지 주소를 재사용하지 않고 업로드를 중단했습니다."
         )
     finally:
