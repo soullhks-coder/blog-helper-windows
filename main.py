@@ -2935,6 +2935,7 @@ class ManualPublishCompletionStore:
 
     _lock = threading.RLock()
     _events: dict[tuple[str, str], threading.Event] = {}
+    _decisions: dict[tuple[str, str], str] = {}
 
     @classmethod
     def _key(cls, platform: object, profile_scope: object) -> tuple[str, str]:
@@ -2952,17 +2953,38 @@ class ManualPublishCompletionStore:
                 raise RuntimeError("이미 수동 발행 완료를 기다리는 작업이 있습니다.")
             event = threading.Event()
             cls._events[key] = event
+            cls._decisions[key] = ""
             return event
 
     @classmethod
     def complete(cls, platform: object, profile_scope: object) -> bool:
+        return cls._resolve(platform, profile_scope, "complete")
+
+    @classmethod
+    def cancel(cls, platform: object, profile_scope: object) -> bool:
+        return cls._resolve(platform, profile_scope, "cancel")
+
+    @classmethod
+    def _resolve(
+        cls,
+        platform: object,
+        profile_scope: object,
+        decision: str,
+    ) -> bool:
         key = cls._key(platform, profile_scope)
         with cls._lock:
             event = cls._events.get(key)
-            if event is None:
+            if event is None or event.is_set():
                 return False
+            cls._decisions[key] = decision
             event.set()
             return True
+
+    @classmethod
+    def decision(cls, platform: object, profile_scope: object) -> str:
+        key = cls._key(platform, profile_scope)
+        with cls._lock:
+            return cls._decisions.get(key, "")
 
     @classmethod
     def waiting_scopes(cls, platform: object) -> list[str]:
@@ -2985,6 +3007,19 @@ class ManualPublishCompletionStore:
         with cls._lock:
             if cls._events.get(key) is event:
                 cls._events.pop(key, None)
+                cls._decisions.pop(key, None)
+
+
+class ManualPublishCancelled(RuntimeError):
+    """Raised when the user cancels a manual-review publish flow."""
+
+    def __init__(self, platform: str, profile_scope: str) -> None:
+        self.platform = str(platform or "").strip().lower()
+        self.profile_scope = str(profile_scope or "").strip().lower()
+        platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(
+            self.platform, self.platform
+        )
+        super().__init__(f"{platform_label} 수동 발행 작업을 취소했습니다.")
 
 
 def wait_for_manual_publish_completion(
@@ -3006,7 +3041,8 @@ def wait_for_manual_publish_completion(
                 "message": (
                     f"{platform_label} 최종 발행 전까지 자동 작업을 마쳤습니다. "
                     "내용을 검수하고 브라우저에서 직접 공개 발행한 뒤 "
-                    "환경설정의 [수동으로 완료하기]를 눌러 주세요."
+                    "완료 팝업의 [완료하기]를 눌러 주세요. 작업을 버리려면 "
+                    "[취소하기]를 눌러 처음 상태로 돌아갈 수 있습니다."
                 ),
             },
         )
@@ -3022,6 +3058,18 @@ def wait_for_manual_publish_completion(
                 raise
             except Exception:
                 pass
+        if ManualPublishCompletionStore.decision(platform, profile_scope) == "cancel":
+            result_queue.put(
+                (
+                    "manual_publish_cancelled",
+                    {
+                        "platform": platform,
+                        "profile_scope": profile_scope,
+                        "message": f"{platform_label} 수동 발행 작업을 취소하고 초기화했습니다.",
+                    },
+                )
+            )
+            raise ManualPublishCancelled(platform, profile_scope)
         result_queue.put(
             (
                 "manual_publish_confirmed",
@@ -9334,7 +9382,7 @@ def run_blogspot_playwright_automation(
                             "publish_progress",
                             (
                                 0.985,
-                                "블로그스팟 라벨 입력까지 완료했습니다. 내용을 검수하고 직접 게시한 뒤 환경설정의 [수동으로 완료하기]를 눌러 주세요.",
+                                "블로그스팟 라벨 입력까지 완료했습니다. 내용을 검수하고 직접 게시한 뒤 완료 팝업의 [완료하기]를 눌러 주세요.",
                             ),
                         )
                     )
@@ -9428,6 +9476,9 @@ def run_blogspot_playwright_automation(
                 }
             finally:
                 context.close()
+    except ManualPublishCancelled:
+        append_runtime_log("BLOGSPOT", "사용자가 수동 발행 작업을 취소했습니다.")
+        raise
     except Exception as exc:
         append_runtime_log(
             "BLOGSPOT",
@@ -17220,7 +17271,7 @@ def run_tistory_playwright_automation(
                 result_queue.put(
                     (
                         "tistory_progress",
-                        "티스토리 태그 입력까지 완료했습니다. 내용을 검수하고 직접 공개 발행한 뒤 환경설정의 [수동으로 완료하기]를 눌러 주세요.",
+                        "티스토리 태그 입력까지 완료했습니다. 내용을 검수하고 직접 공개 발행한 뒤 완료 팝업의 [완료하기]를 눌러 주세요.",
                     )
                 )
                 wait_for_manual_publish_completion(
@@ -22338,6 +22389,8 @@ class TistoryAutomationWorker(threading.Thread):
                 self.result_queue.put(("tistory_automation_done", done_payload))
             else:
                 self.result_queue.put(("tistory_automation_error", message))
+        except ManualPublishCancelled:
+            pass
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("tistory_automation_error", str(exc)))
         finally:
@@ -22768,6 +22821,9 @@ class PublishPipelineWorker(threading.Thread):
                     },
                 )
             )
+        except ManualPublishCancelled:
+            append_runtime_log("PUBLISH", "사용자가 수동 발행 작업을 취소했습니다.")
+            cleanup_generated_upload_images(cleanup_paths)
         except Exception as exc:  # pragma: no cover - runtime handling
             append_runtime_log(
                 "PUBLISH",
@@ -23114,6 +23170,9 @@ class KeywordApp(ctk.CTk):
         self.update_close_button: ctk.CTkButton | None = None
         self.pending_update_payload: dict | None = None
         self.writing_complete_dialog: ctk.CTkToplevel | None = None
+        self.manual_publish_dialog: ctk.CTkToplevel | None = None
+        self.manual_publish_dialog_platform = ""
+        self.manual_publish_dialog_profile_scope = ""
         self.reference_collection_dialog: ctk.CTkToplevel | None = None
         self.naver_kin_complete_dialog: ctk.CTkToplevel | None = None
         self.naver_kin_complete_url = ""
@@ -23769,6 +23828,179 @@ class KeywordApp(ctk.CTk):
         self._clear_welfare_writing_context()
         self.writing_completion_platforms = []
         self._reset_writing_accordion_state()
+
+    def _show_manual_publish_completion_dialog(
+        self,
+        platform: str,
+        profile_scope: str,
+    ) -> None:
+        platform = str(platform or "").strip().lower()
+        profile_scope = str(profile_scope or "").strip().lower()
+        platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(
+            platform, platform
+        )
+        if self.manual_publish_dialog and self.manual_publish_dialog.winfo_exists():
+            if (
+                self.manual_publish_dialog_platform == platform
+                and self.manual_publish_dialog_profile_scope == profile_scope
+            ):
+                try:
+                    self.manual_publish_dialog.lift()
+                    self.manual_publish_dialog.focus_force()
+                except tk.TclError:
+                    pass
+                return
+            self._close_manual_publish_dialog()
+
+        palette = self._theme_palette()
+        dialog = ctk.CTkToplevel(self)
+        self.manual_publish_dialog = dialog
+        self.manual_publish_dialog_platform = platform
+        self.manual_publish_dialog_profile_scope = profile_scope
+        dialog.title("글작성 완료")
+        dialog.geometry("600x370")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.configure(fg_color=palette["shell"])
+        dialog.attributes("-topmost", True)
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._resolve_manual_publish_dialog("cancel"),
+        )
+
+        card = ctk.CTkFrame(
+            dialog,
+            corner_radius=24,
+            fg_color=palette["card"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        card.pack(fill="both", expand=True, padx=22, pady=22)
+        ctk.CTkLabel(
+            card,
+            text="✓",
+            text_color="#48d980",
+            font=ctk.CTkFont(size=40, weight="bold"),
+        ).pack(padx=24, pady=(24, 4))
+        ctk.CTkLabel(
+            card,
+            text="글작성이 완료되었습니다.",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=24, weight="bold"),
+        ).pack(padx=24, pady=(0, 10))
+        ctk.CTkLabel(
+            card,
+            text=(
+                f"{platform_label} 편집기 입력이 끝났습니다.\n"
+                "브라우저에서 내용을 검수하고 직접 발행했다면 완료하기를 눌러 주세요."
+            ),
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14),
+            justify="center",
+        ).pack(padx=28, pady=(0, 12))
+
+        notice = ctk.CTkFrame(
+            card,
+            corner_radius=14,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+        )
+        notice.pack(fill="x", padx=28, pady=(0, 18))
+        ctk.CTkLabel(
+            notice,
+            text=(
+                "완료하기 · 오늘 발행 횟수에 1회 반영 후 완료\n"
+                "취소하기 · 횟수 반영 없이 모든 진행 취소 및 초기화"
+            ),
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            justify="left",
+        ).pack(padx=16, pady=12)
+
+        action_row = ctk.CTkFrame(card, fg_color="transparent")
+        action_row.pack(padx=24, pady=(0, 18))
+        complete_button = ctk.CTkButton(
+            action_row,
+            text="완료하기",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#1faa4a",
+            hover_color="#16913e",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=lambda: self._resolve_manual_publish_dialog("complete"),
+        )
+        complete_button.grid(row=0, column=0, padx=(0, 10))
+        ctk.CTkButton(
+            action_row,
+            text="취소하기",
+            width=170,
+            height=44,
+            corner_radius=14,
+            fg_color="#a83a3a",
+            hover_color="#8f3030",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=lambda: self._resolve_manual_publish_dialog("cancel"),
+        ).grid(row=0, column=1)
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(
+            0, (self.winfo_width() - dialog.winfo_width()) // 2
+        )
+        y = self.winfo_rooty() + max(
+            0, (self.winfo_height() - dialog.winfo_height()) // 2
+        )
+        dialog.geometry(f"+{x}+{y}")
+        dialog.bind(
+            "<Return>",
+            lambda _event: self._resolve_manual_publish_dialog("complete"),
+        )
+        dialog.bind(
+            "<Escape>",
+            lambda _event: self._resolve_manual_publish_dialog("cancel"),
+        )
+        try:
+            dialog.lift()
+            complete_button.focus_set()
+        except tk.TclError:
+            pass
+
+    def _close_manual_publish_dialog(self) -> None:
+        dialog = self.manual_publish_dialog
+        self.manual_publish_dialog = None
+        self.manual_publish_dialog_platform = ""
+        self.manual_publish_dialog_profile_scope = ""
+        if dialog and dialog.winfo_exists():
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+    def _resolve_manual_publish_dialog(self, action: str) -> None:
+        platform = self.manual_publish_dialog_platform
+        profile_scope = self.manual_publish_dialog_profile_scope
+        if not platform or not profile_scope:
+            self._close_manual_publish_dialog()
+            return
+        if action == "complete":
+            resolved = self._complete_manual_service_publish(
+                platform,
+                profile_scope,
+                ask_confirmation=False,
+            )
+        else:
+            resolved = ManualPublishCompletionStore.cancel(
+                platform, profile_scope
+            )
+            if not resolved:
+                messagebox.showwarning(
+                    "취소 처리 실패",
+                    "취소할 수동 발행 대기 작업이 이미 종료되었습니다.",
+                )
+        if resolved:
+            self._close_manual_publish_dialog()
 
     def _writing_completion_daily_publish_usage_rows(
         self,
@@ -41649,13 +41881,19 @@ class KeywordApp(ctk.CTk):
         profile = service_profile_by_name(profiles, active_name)
         return str(profile.get("profile_scope") or fallback)
 
-    def _complete_manual_service_publish(self, platform: str) -> None:
+    def _complete_manual_service_publish(
+        self,
+        platform: str,
+        profile_scope: str = "",
+        ask_confirmation: bool = True,
+    ) -> bool:
         platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(
             platform, platform
         )
         active_scope = self._active_service_profile_scope(platform)
         waiting_scopes = ManualPublishCompletionStore.waiting_scopes(platform)
-        profile_scope = (
+        requested_scope = str(profile_scope or "").strip().lower()
+        profile_scope = requested_scope if requested_scope in waiting_scopes else (
             active_scope
             if active_scope in waiting_scopes
             else waiting_scopes[0]
@@ -41667,21 +41905,21 @@ class KeywordApp(ctk.CTk):
                 "수동 완료 대기 없음",
                 f"현재 {platform_label}에서 수동 완료를 기다리는 글이 없습니다.",
             )
-            return
-        if not messagebox.askyesno(
+            return False
+        if ask_confirmation and not messagebox.askyesno(
             "수동 발행 완료 확인",
             (
                 f"전용 Chrome에서 {platform_label} 글을 실제로 공개 발행했습니까?\n\n"
                 "[예]를 누르면 오늘 발행 횟수에 1회 반영하고 작업을 완료합니다."
             ),
         ):
-            return
+            return False
         if not ManualPublishCompletionStore.complete(platform, profile_scope):
             messagebox.showwarning(
                 "완료 처리 실패",
                 "수동 완료 대기 작업이 이미 종료되었습니다.",
             )
-            return
+            return False
         button = getattr(self, f"{platform}_manual_complete_button", None)
         if button is not None:
             button.configure(state="disabled", text="완료 처리 중...")
@@ -41691,6 +41929,7 @@ class KeywordApp(ctk.CTk):
                 text="● 수동 발행 완료를 확인하고 횟수에 반영 중...",
                 text_color="#6dadff",
             )
+        return True
 
     def _on_blogspot_auto_publish_changed(self, save: bool = True) -> None:
         enabled = bool(self.blogspot_auto_publish_var.get())
@@ -44752,6 +44991,9 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "manual_publish_waiting":
                     manual_payload = payload if isinstance(payload, dict) else {}
                     platform = str(manual_payload.get("platform") or "")
+                    profile_scope = str(
+                        manual_payload.get("profile_scope") or ""
+                    )
                     message = str(manual_payload.get("message") or "")
                     button = getattr(
                         self, f"{platform}_manual_complete_button", None
@@ -44766,7 +45008,7 @@ class KeywordApp(ctk.CTk):
                     )
                     if status_label is not None:
                         status_label.configure(
-                            text="● 직접 발행 후 수동 완료 버튼을 눌러 주세요.",
+                            text="● 직접 발행 후 완료 팝업에서 처리해 주세요.",
                             text_color="#f59e0b",
                         )
                     if hasattr(self, "publish_status_label"):
@@ -44784,14 +45026,85 @@ class KeywordApp(ctk.CTk):
                         )
                     else:
                         self._set_writing_progress(4, message, 0.99)
+                    self._show_manual_publish_completion_dialog(
+                        platform,
+                        profile_scope,
+                    )
                 elif event_type == "manual_publish_confirmed":
                     manual_payload = payload if isinstance(payload, dict) else {}
                     platform = str(manual_payload.get("platform") or "")
+                    self._close_manual_publish_dialog()
                     button = getattr(
                         self, f"{platform}_manual_complete_button", None
                     )
                     if button is not None:
                         button.configure(state="disabled", text="완료 처리 중...")
+                elif event_type == "manual_publish_cancelled":
+                    manual_payload = payload if isinstance(payload, dict) else {}
+                    platform = str(manual_payload.get("platform") or "")
+                    message = str(
+                        manual_payload.get("message")
+                        or "수동 발행 작업을 취소하고 초기화했습니다."
+                    )
+                    self._close_manual_publish_dialog()
+                    button = getattr(
+                        self, f"{platform}_manual_complete_button", None
+                    )
+                    if button is not None:
+                        button.configure(
+                            state="disabled",
+                            text="수동으로 완료하기 (직접 발행 후)",
+                        )
+                    status_label = getattr(
+                        self, f"{platform}_status_label", None
+                    )
+                    if status_label is not None:
+                        status_label.configure(
+                            text="● 수동 발행 취소 · 초기화 완료",
+                            text_color="#ffb86b",
+                        )
+                    self._stop_writing_auto_progress()
+                    if hasattr(self, "publish_progress_bar"):
+                        self.publish_progress_bar.stop()
+                        self.publish_progress_bar.configure(mode="determinate")
+                        self.publish_progress_bar.set(0)
+                    if hasattr(self, "publish_pipeline_button"):
+                        self.publish_pipeline_button.configure(
+                            state="normal", text="썸네일 완료 후 업로드"
+                        )
+                    if hasattr(self, "publish_status_label"):
+                        self.publish_status_label.configure(
+                            text=message,
+                            text_color="#ffb86b",
+                        )
+                    if hasattr(self, "keyword_status_label"):
+                        self.keyword_status_label.configure(
+                            text="수동 발행 취소 · 처음 상태로 초기화"
+                        )
+                    if self.active_automation_upload_item_id:
+                        self._finalize_active_automation_publish(
+                            success=False,
+                            status_message="사용자가 수동 발행을 취소했습니다.",
+                        )
+                    else:
+                        self.pipeline_worker = None
+                        self.tistory_automation_worker = None
+                        cleanup_tistory_automation_files()
+                        if self.pending_upload_cleanup_paths:
+                            self._cleanup_uploaded_generated_images(
+                                self.pending_upload_cleanup_paths,
+                                status_target=self.publish_status_label,
+                            )
+                            self.pending_upload_cleanup_paths = []
+                        self._clear_festival_writing_context()
+                        self._clear_welfare_writing_context()
+                        self.writing_completion_platforms = []
+                        self._reset_writing_accordion_state()
+                    self._update_quick_status(
+                        "수동 발행 취소",
+                        message,
+                        "#ffb86b",
+                    )
                 elif event_type == "blogspot_profile_progress":
                     if hasattr(self, "blogspot_status_label"):
                         self.blogspot_status_label.configure(text=f"● {payload}", text_color="#6dadff")
@@ -44969,7 +45282,15 @@ class KeywordApp(ctk.CTk):
                         self.tistory_automation_worker = None
                         cleanup_tistory_automation_files()
                         self._set_writing_section_completed("publish")
-                        self._show_writing_complete_dialog()
+                        if tistory_manual_completed:
+                            self._mark_active_festival_published()
+                            self._mark_active_welfare_published()
+                            self._clear_festival_writing_context()
+                            self._clear_welfare_writing_context()
+                            self.writing_completion_platforms = []
+                            self._reset_writing_accordion_state()
+                        else:
+                            self._show_writing_complete_dialog()
                 elif event_type == "tistory_automation_error":
                     self._stop_writing_auto_progress()
                     if hasattr(self, "tistory_auto_publish_var"):
@@ -45435,6 +45756,9 @@ class KeywordApp(ctk.CTk):
         wordpress = payload.get("wordpress")
         tistory = payload.get("tistory")
         blogspot = payload.get("blogspot", {})
+        blogspot_manual_completed = bool(
+            blogspot.get("manual_completed", False)
+        ) if isinstance(blogspot, dict) else False
         threads = payload.get("threads", {})
         if blogspot and hasattr(self, "blogspot_auto_publish_var"):
             self._on_blogspot_auto_publish_changed(save=False)
@@ -45590,7 +45914,15 @@ class KeywordApp(ctk.CTk):
         self._open_writing_section("publish", complete_previous=True)
         if not tistory_worker_started:
             self._stop_writing_auto_progress()
-            self._show_writing_complete_dialog()
+            if blogspot_manual_completed:
+                self._mark_active_festival_published()
+                self._mark_active_welfare_published()
+                self._clear_festival_writing_context()
+                self._clear_welfare_writing_context()
+                self.writing_completion_platforms = []
+                self._reset_writing_accordion_state()
+            else:
+                self._show_writing_complete_dialog()
 
     def _handle_automation_publish_success(self, payload: dict) -> None:
         self._refresh_daily_publish_limit_statuses()

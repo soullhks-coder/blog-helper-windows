@@ -176,9 +176,16 @@ class WritingCompletionFlowTests(unittest.TestCase):
         self.assertIn('key == "topic"', method_source)
         self.assertIn('self.active_writing_section = "topic"', method_source)
 
-    def test_manual_tistory_completion_opens_dialog(self) -> None:
+    def test_manual_tistory_completion_uses_choice_dialog_then_resets(self) -> None:
+        popup_source = ast.get_source_segment(
+            self.source,
+            self.methods["_show_manual_publish_completion_dialog"],
+        )
+        self.assertIn('text="완료하기"', popup_source)
+        self.assertIn('text="취소하기"', popup_source)
+        self.assertIn("if tistory_manual_completed:", self.source)
         self.assertIn(
-            'cleanup_tistory_automation_files()\n                        self._set_writing_section_completed("publish")\n                        self._show_writing_complete_dialog()',
+            "self._reset_writing_accordion_state()",
             self.source,
         )
 

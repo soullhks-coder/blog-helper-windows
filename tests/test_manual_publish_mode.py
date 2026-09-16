@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import queue
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -81,6 +82,48 @@ class ManualPublishModeTests(unittest.TestCase):
                 "tistory", "manual-test-profile", event
             )
 
+    def test_manual_completion_store_can_cancel_waiting_publish(self) -> None:
+        events: queue.Queue = queue.Queue()
+        errors: list[Exception] = []
+
+        class OpenPage:
+            @staticmethod
+            def is_closed() -> bool:
+                return False
+
+        def wait_for_choice() -> None:
+            try:
+                main.wait_for_manual_publish_completion(
+                    "blogspot",
+                    "cancel-test-profile",
+                    OpenPage(),
+                    events,
+                )
+            except Exception as exc:  # noqa: BLE001 - assert concrete type below
+                errors.append(exc)
+
+        waiter = threading.Thread(target=wait_for_choice)
+        waiter.start()
+        waiting_event, waiting_payload = events.get(timeout=1)
+        self.assertEqual(waiting_event, "manual_publish_waiting")
+        self.assertEqual(waiting_payload["profile_scope"], "cancel-test-profile")
+        self.assertTrue(
+            main.ManualPublishCompletionStore.cancel(
+                "blogspot", "cancel-test-profile"
+            )
+        )
+        waiter.join(timeout=1)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], main.ManualPublishCancelled)
+        cancelled_event, cancelled_payload = events.get_nowait()
+        self.assertEqual(cancelled_event, "manual_publish_cancelled")
+        self.assertEqual(cancelled_payload["platform"], "blogspot")
+        self.assertEqual(
+            main.ManualPublishCompletionStore.waiting_scopes("blogspot"), []
+        )
+
     def test_settings_cards_expose_toggle_disabled_mode_and_manual_completion(self) -> None:
         tistory_card = inspect.getsource(main.KeywordApp._build_tistory_card)
         blogspot_card = inspect.getsource(main.KeywordApp._build_blogspot_card)
@@ -98,6 +141,20 @@ class ManualPublishModeTests(unittest.TestCase):
         self.assertIn('state="normal" if enabled else "disabled"', blogspot_handler)
         self.assertIn("ManualPublishCompletionStore.waiting_scopes", tistory_handler)
         self.assertIn("ManualPublishCompletionStore.waiting_scopes", blogspot_handler)
+
+    def test_manual_publish_popup_exposes_complete_and_cancel_actions(self) -> None:
+        popup_source = inspect.getsource(
+            main.KeywordApp._show_manual_publish_completion_dialog
+        )
+        resolver_source = inspect.getsource(
+            main.KeywordApp._resolve_manual_publish_dialog
+        )
+
+        self.assertIn('text="글작성이 완료되었습니다."', popup_source)
+        self.assertIn('text="완료하기"', popup_source)
+        self.assertIn('text="취소하기"', popup_source)
+        self.assertIn("_complete_manual_service_publish", resolver_source)
+        self.assertIn("ManualPublishCompletionStore.cancel", resolver_source)
 
     def test_automation_stops_after_tags_or_labels_when_auto_publish_is_off(self) -> None:
         tistory_source = inspect.getsource(
@@ -190,6 +247,46 @@ class ManualPublishModeTests(unittest.TestCase):
                     event_type, payload = events.get_nowait()
                 self.assertTrue(payload["manual_completed"])
                 self.assertEqual(payload["daily_publish_count"], 1)
+
+    def test_cancelled_manual_tistory_publish_does_not_record_count(self) -> None:
+        events: queue.Queue = queue.Queue()
+        with tempfile.TemporaryDirectory() as directory:
+            count_file = Path(directory) / "daily-publish-counts.json"
+            with (
+                patch.object(main, "DAILY_PUBLISH_COUNTS_FILE", count_file),
+                patch.object(main, "GOOGLE_IMAGE_COLLAGE_ENABLED", False),
+                patch.object(
+                    main,
+                    "run_tistory_playwright_automation",
+                    side_effect=main.ManualPublishCancelled(
+                        "tistory", "tistory-profile-1"
+                    ),
+                ),
+                patch.object(main, "cleanup_tistory_automation_files"),
+            ):
+                worker = main.TistoryAutomationWorker(
+                    "취소할 수동 검수 글",
+                    "<p>본문</p><p><strong>주요태그:</strong> 취소, 수동발행</p>",
+                    events,
+                    write_url="https://manual.tistory.com/manage/newpost",
+                    public_blog_url="https://manual.tistory.com",
+                    daily_publish_limit=1,
+                    profile_scope="tistory-profile-1",
+                    auto_publish=False,
+                )
+                worker.run()
+
+                self.assertEqual(
+                    main.DailyPublishLimitStore.count(
+                        "tistory", "https://manual.tistory.com"
+                    ),
+                    0,
+                )
+                queued_event_types = []
+                while not events.empty():
+                    queued_event_types.append(events.get_nowait()[0])
+                self.assertNotIn("tistory_automation_done", queued_event_types)
+                self.assertNotIn("tistory_automation_error", queued_event_types)
 
 
 if __name__ == "__main__":
