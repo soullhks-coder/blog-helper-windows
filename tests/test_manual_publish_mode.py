@@ -118,6 +118,34 @@ class ManualPublishModeTests(unittest.TestCase):
         self.assertIn('"tistory",\n                    profile_scope', tistory_source)
         self.assertIn('"blogspot",\n                        profile_scope', blogspot_source)
 
+    def test_tistory_editor_script_never_runs_prompt_publish_actions(self) -> None:
+        script = main.build_tistory_editor_automation_script(
+            "검수 제목",
+            "<p>검수 본문</p>",
+            automation_actions=[
+                "set_title",
+                "set_body",
+                "set_tags",
+                "click_complete",
+                "attach_representative_image",
+                "set_publish_now",
+                "click_public_publish",
+            ],
+            publish_after_input=False,
+            save_mode=main.TISTORY_SAVE_MODE_PUBLISH,
+        )
+
+        actions_json = script.split("const automationActions = ", 1)[1].split(
+            ";", 1
+        )[0]
+        self.assertIn('"set_title"', actions_json)
+        self.assertIn('"set_body"', actions_json)
+        self.assertNotIn('"set_tags"', actions_json)
+        self.assertNotIn('"click_complete"', actions_json)
+        self.assertNotIn('"attach_representative_image"', actions_json)
+        self.assertNotIn('"set_publish_now"', actions_json)
+        self.assertNotIn('"click_public_publish"', actions_json)
+
     def test_manual_tistory_completion_records_daily_publish_count(self) -> None:
         events: queue.Queue = queue.Queue()
         with tempfile.TemporaryDirectory() as directory:

@@ -7340,42 +7340,21 @@ def build_tistory_editor_automation_script(
     thumbnail_content_url_json = json.dumps(thumbnail_content_url)
     collage_images_json = json.dumps(collage_images or [], ensure_ascii=False)
     actions = list(automation_actions or parse_tistory_automation_prompt(DEFAULT_TISTORY_AUTOMATION_PROMPT))
-    normalized_save_mode = normalize_tistory_save_mode(
-        save_mode or (
-            TISTORY_SAVE_MODE_PUBLISH
-            if publish_after_input
-            else TISTORY_SAVE_MODE_DRAFT
-        )
-    )
-    if publish_after_input:
-        # 태그/완료/발행 UI는 React가 synthetic JS 이벤트를 무시할 수 있어
-        # run_tistory_playwright_automation()에서 Playwright 네이티브 입력·클릭으로 처리합니다.
-        # 대표이미지도 기존 편집기 파일 입력칸과 혼동하지 않도록 Playwright 파일 선택기로 처리합니다.
-        actions = [
-            action
-            for action in actions
-            if action not in {
-                "set_tags",
-                "click_complete",
-                "attach_representative_image",
-                "set_publish_now",
-                "click_public_publish",
-            }
-        ]
-    elif normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
-        # 임시저장은 발행 바텀시트와 캡차에 진입하지 않습니다. 태그 입력과
-        # 편집기 하단의 임시저장 버튼 모두 Playwright 네이티브 동작으로 처리합니다.
-        actions = [
-            action
-            for action in actions
-            if action not in {
-                "set_tags",
-                "click_complete",
-                "attach_representative_image",
-                "set_publish_now",
-                "click_public_publish",
-            }
-        ]
+    # 태그 및 최종 저장/발행 UI는 아래 Playwright 네이티브 안전 경로에서만
+    # 처리합니다. 특히 자동발행 OFF일 때 저장 방식 값은 공개발행으로 남아
+    # 있을 수 있으므로, 사용자 프롬프트의 완료/발행 단계가 편집기 JS에서
+    # 먼저 실행되지 않도록 무조건 제거해야 합니다.
+    actions = [
+        action
+        for action in actions
+        if action not in {
+            "set_tags",
+            "click_complete",
+            "attach_representative_image",
+            "set_publish_now",
+            "click_public_publish",
+        }
+    ]
     if close_after_publish:
         # Disabled for safety: browser/tab closing during publishing can interrupt Tistory.
         pass
