@@ -3469,6 +3469,37 @@ def create_independent_prompt_set(
     return copied_sets, created
 
 
+def restore_single_prompt_set_defaults(
+    prompt_sets: list[dict],
+    platform: str,
+    prompt_id: str,
+) -> tuple[list[dict], dict | None]:
+    """Restore only one selected prompt set without touching sibling sets."""
+    defaults = {
+        "wordpress": (DEFAULT_WORDPRESS_TITLE_PROMPT, DEFAULT_WORDPRESS_ARTICLE_PROMPT),
+        "tistory": (DEFAULT_TISTORY_TITLE_PROMPT, DEFAULT_TISTORY_ARTICLE_PROMPT),
+        "naver_blog": (DEFAULT_NAVER_BLOG_TITLE_PROMPT, DEFAULT_NAVER_BLOG_TOPIC_PROMPT),
+        "blogspot": (DEFAULT_BLOGSPOT_TITLE_PROMPT, DEFAULT_BLOGSPOT_ARTICLE_PROMPT),
+    }
+    default_pair = defaults.get(str(platform or "").strip())
+    selected_id = str(prompt_id or "").strip()
+    copied_sets = [dict(item) for item in prompt_sets if isinstance(item, dict)]
+    if not default_pair or not selected_id:
+        return copied_sets, None
+
+    restored: dict | None = None
+    for item in copied_sets:
+        if (
+            str(item.get("platform") or "") == platform
+            and str(item.get("id") or "") == selected_id
+        ):
+            item["title_prompt"] = default_pair[0]
+            item["article_prompt"] = default_pair[1]
+            restored = item
+            break
+    return copied_sets, restored
+
+
 def resolve_naver_kin_wordpress_prompt_set(settings: WordPressSettings) -> dict:
     prompt_sets = PromptFileStore.normalize_prompt_sets(settings.prompt_sets, settings)
     preferred_ids = (
@@ -34105,8 +34136,8 @@ class KeywordApp(ctk.CTk):
 
         reset_button = ctk.CTkButton(
             button_row,
-            text="기본값 복원",
-            width=170,
+            text="선택 항목 기본값 복원",
+            width=205,
             height=52,
             corner_radius=16,
             fg_color="#596579",
@@ -42322,54 +42353,105 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("폴더 열기 실패", str(exc))
 
     def _reset_prompt_settings(self) -> None:
-        defaults = {
-            "wordpress": (DEFAULT_WORDPRESS_TITLE_PROMPT, DEFAULT_WORDPRESS_ARTICLE_PROMPT),
-            "tistory": (DEFAULT_TISTORY_TITLE_PROMPT, DEFAULT_TISTORY_ARTICLE_PROMPT),
-            "naver_blog": (DEFAULT_NAVER_BLOG_TITLE_PROMPT, DEFAULT_NAVER_BLOG_TOPIC_PROMPT),
-            "blogspot": (DEFAULT_BLOGSPOT_TITLE_PROMPT, DEFAULT_BLOGSPOT_ARTICLE_PROMPT),
+        platform = str(getattr(self, "active_prompt_platform", "wordpress") or "wordpress")
+        platform_labels = {
+            "wordpress": "워드프레스",
+            "tistory": "티스토리",
+            "naver_blog": "N블로그",
+            "blogspot": "블로그스팟",
+            "tistory_automation": "티스토리 자동화",
+            "naver_kin_automation": "N지식인자동화",
         }
-        for platform, (title_prompt, article_prompt) in defaults.items():
-            self.prompt_title_boxes[platform].delete("1.0", "end")
-            self.prompt_title_boxes[platform].insert("1.0", title_prompt)
-            self.prompt_article_boxes[platform].delete("1.0", "end")
-            self.prompt_article_boxes[platform].insert("1.0", article_prompt)
-        if self.tistory_automation_prompt_box:
-            self.tistory_automation_prompt_box.delete("1.0", "end")
-            self.tistory_automation_prompt_box.insert("1.0", DEFAULT_TISTORY_AUTOMATION_PROMPT)
-        if self.naver_kin_answer_prompt_box:
-            self.naver_kin_answer_prompt_box.delete("1.0", "end")
-            self.naver_kin_answer_prompt_box.insert("1.0", DEFAULT_NAVER_KIN_ANSWER_PROMPT)
-        self.wordpress_settings.wordpress_title_prompt_template = DEFAULT_WORDPRESS_TITLE_PROMPT
-        self.wordpress_settings.wordpress_article_prompt_template = DEFAULT_WORDPRESS_ARTICLE_PROMPT
-        self.wordpress_settings.tistory_title_prompt_template = DEFAULT_TISTORY_TITLE_PROMPT
-        self.wordpress_settings.tistory_article_prompt_template = DEFAULT_TISTORY_ARTICLE_PROMPT
-        self.wordpress_settings.tistory_automation_prompt = DEFAULT_TISTORY_AUTOMATION_PROMPT
-        self.wordpress_settings.naver_blog_title_prompt = DEFAULT_NAVER_BLOG_TITLE_PROMPT
-        self.wordpress_settings.naver_blog_topic_prompt = DEFAULT_NAVER_BLOG_TOPIC_PROMPT
-        self.wordpress_settings.naver_kin_answer_prompt = DEFAULT_NAVER_KIN_ANSWER_PROMPT
-        self.wordpress_settings.blogspot_title_prompt_template = DEFAULT_BLOGSPOT_TITLE_PROMPT
-        self.wordpress_settings.blogspot_article_prompt_template = DEFAULT_BLOGSPOT_ARTICLE_PROMPT
-        self.wordpress_settings.title_prompt_template = DEFAULT_WORDPRESS_TITLE_PROMPT
-        self.wordpress_settings.article_prompt_template = DEFAULT_WORDPRESS_ARTICLE_PROMPT
-        self.wordpress_settings.prompt_sets = PromptFileStore.default_prompt_sets(self.wordpress_settings)
-        self.wordpress_settings.selected_prompt_id = self.wordpress_settings.prompt_sets[0]["id"]
-        self.wordpress_settings.naver_blog_prompt_id = NAVER_BLOG_DEFAULT_PROMPT_ID
-        self.wordpress_settings.naver_blog_profile_prompt_ids = dict(
-            NAVER_BLOG_DEFAULT_PROFILE_PROMPT_IDS
-        )
-        self.wordpress_settings.naver_blog_prompt_type = "기본"
-        for platform in ("wordpress", "tistory", "naver_blog", "blogspot"):
-            active = next((item for item in self.wordpress_settings.prompt_sets if item.get("platform") == platform), None)
-            if active:
-                self.active_prompt_set_ids[platform] = str(active.get("id"))
-        self._refresh_prompt_set_menus()
-        self._load_prompt_set_into_boxes(self.active_prompt_platform)
-        PromptFileStore.save_settings(self.wordpress_settings)
+        setting_fields = {
+            "wordpress": (
+                "wordpress_title_prompt_template",
+                "wordpress_article_prompt_template",
+                DEFAULT_WORDPRESS_TITLE_PROMPT,
+                DEFAULT_WORDPRESS_ARTICLE_PROMPT,
+            ),
+            "tistory": (
+                "tistory_title_prompt_template",
+                "tistory_article_prompt_template",
+                DEFAULT_TISTORY_TITLE_PROMPT,
+                DEFAULT_TISTORY_ARTICLE_PROMPT,
+            ),
+            "naver_blog": (
+                "naver_blog_title_prompt",
+                "naver_blog_topic_prompt",
+                DEFAULT_NAVER_BLOG_TITLE_PROMPT,
+                DEFAULT_NAVER_BLOG_TOPIC_PROMPT,
+            ),
+            "blogspot": (
+                "blogspot_title_prompt_template",
+                "blogspot_article_prompt_template",
+                DEFAULT_BLOGSPOT_TITLE_PROMPT,
+                DEFAULT_BLOGSPOT_ARTICLE_PROMPT,
+            ),
+        }
+        restored_name = ""
+
+        if platform in setting_fields:
+            self._save_active_prompt_set_to_memory(platform)
+            active_id = str(self.active_prompt_set_ids.get(platform) or "")
+            restored_sets, restored = restore_single_prompt_set_defaults(
+                self._prompt_sets(),
+                platform,
+                active_id,
+            )
+            if not restored:
+                self.prompt_feedback_label.configure(
+                    text="복원할 프롬프트를 먼저 선택해 주세요.",
+                    text_color="#ffb84d",
+                )
+                return
+
+            self.wordpress_settings.prompt_sets = restored_sets
+            title_field, article_field, title_default, article_default = setting_fields[platform]
+            setattr(self.wordpress_settings, title_field, title_default)
+            setattr(self.wordpress_settings, article_field, article_default)
+            if platform == "wordpress":
+                self.wordpress_settings.title_prompt_template = title_default
+                self.wordpress_settings.article_prompt_template = article_default
+            if platform == "naver_blog":
+                self._apply_naver_blog_prompt_set(restored)
+
+            self._load_prompt_set_into_boxes(platform)
+            PromptFileStore.save_values(
+                {
+                    title_field: title_default,
+                    article_field: article_default,
+                }
+            )
+            PromptFileStore.save_prompt_sets(self.wordpress_settings.prompt_sets)
+            restored_name = str(restored.get("name") or "기본")
+            self._refresh_prompt_set_menus()
+        elif platform == "tistory_automation":
+            if self.tistory_automation_prompt_box:
+                self.tistory_automation_prompt_box.delete("1.0", "end")
+                self.tistory_automation_prompt_box.insert("1.0", DEFAULT_TISTORY_AUTOMATION_PROMPT)
+            self.wordpress_settings.tistory_automation_prompt = DEFAULT_TISTORY_AUTOMATION_PROMPT
+            PromptFileStore.save_values(
+                {"tistory_automation_prompt": DEFAULT_TISTORY_AUTOMATION_PROMPT}
+            )
+        elif platform == "naver_kin_automation":
+            if self.naver_kin_answer_prompt_box:
+                self.naver_kin_answer_prompt_box.delete("1.0", "end")
+                self.naver_kin_answer_prompt_box.insert("1.0", DEFAULT_NAVER_KIN_ANSWER_PROMPT)
+            self.wordpress_settings.naver_kin_answer_prompt = DEFAULT_NAVER_KIN_ANSWER_PROMPT
+            PromptFileStore.save_values(
+                {"naver_kin_answer_prompt": DEFAULT_NAVER_KIN_ANSWER_PROMPT}
+            )
+        else:
+            return
+
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
-        self.prompt_feedback_label.configure(text=f"기본값 TXT 복원 완료: {PROMPT_STORAGE_DIR}", text_color="#9aa7bb")
+        label = platform_labels.get(platform, "선택한")
+        selection = f" · {restored_name}" if restored_name else ""
+        message = f"{label}{selection} 프롬프트만 기본값으로 복원했습니다."
+        self.prompt_feedback_label.configure(text=message, text_color="#9aa7bb")
         self._update_quick_status(
-            "프롬프트 기본값 복원",
-            f"플랫폼별 기본 프롬프트를 TXT 파일로 복원했습니다.\n{PROMPT_STORAGE_DIR}",
+            "선택 프롬프트 기본값 복원",
+            f"{message}\n다른 프롬프트와 프로필 연결은 유지됩니다.",
             "#9aa7bb",
         )
 
