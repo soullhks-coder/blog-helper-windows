@@ -2930,6 +2930,111 @@ class DailyPublishLimitStore:
             return current_count
 
 
+class ManualPublishCompletionStore:
+    """Coordinate a visible manual publish with its waiting Playwright worker."""
+
+    _lock = threading.RLock()
+    _events: dict[tuple[str, str], threading.Event] = {}
+
+    @classmethod
+    def _key(cls, platform: object, profile_scope: object) -> tuple[str, str]:
+        return (
+            str(platform or "").strip().lower(),
+            str(profile_scope or "").strip().lower(),
+        )
+
+    @classmethod
+    def begin(cls, platform: object, profile_scope: object) -> threading.Event:
+        key = cls._key(platform, profile_scope)
+        with cls._lock:
+            existing = cls._events.get(key)
+            if existing is not None and not existing.is_set():
+                raise RuntimeError("이미 수동 발행 완료를 기다리는 작업이 있습니다.")
+            event = threading.Event()
+            cls._events[key] = event
+            return event
+
+    @classmethod
+    def complete(cls, platform: object, profile_scope: object) -> bool:
+        key = cls._key(platform, profile_scope)
+        with cls._lock:
+            event = cls._events.get(key)
+            if event is None:
+                return False
+            event.set()
+            return True
+
+    @classmethod
+    def waiting_scopes(cls, platform: object) -> list[str]:
+        normalized_platform = str(platform or "").strip().lower()
+        with cls._lock:
+            return [
+                profile_scope
+                for (event_platform, profile_scope), event in cls._events.items()
+                if event_platform == normalized_platform and not event.is_set()
+            ]
+
+    @classmethod
+    def finish(
+        cls,
+        platform: object,
+        profile_scope: object,
+        event: threading.Event,
+    ) -> None:
+        key = cls._key(platform, profile_scope)
+        with cls._lock:
+            if cls._events.get(key) is event:
+                cls._events.pop(key, None)
+
+
+def wait_for_manual_publish_completion(
+    platform: str,
+    profile_scope: str,
+    page,
+    result_queue: queue.Queue,
+) -> None:
+    """Keep the editor open until the user confirms their manual public publish."""
+
+    event = ManualPublishCompletionStore.begin(platform, profile_scope)
+    platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(platform, platform)
+    result_queue.put(
+        (
+            "manual_publish_waiting",
+            {
+                "platform": platform,
+                "profile_scope": profile_scope,
+                "message": (
+                    f"{platform_label} 최종 발행 전까지 자동 작업을 마쳤습니다. "
+                    "내용을 검수하고 브라우저에서 직접 공개 발행한 뒤 "
+                    "환경설정의 [수동으로 완료하기]를 눌러 주세요."
+                ),
+            },
+        )
+    )
+    try:
+        while not event.wait(0.5):
+            try:
+                if page.is_closed():
+                    raise RuntimeError(
+                        f"{platform_label} 수동 발행 완료 처리 전에 전용 Chrome이 닫혔습니다."
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+        result_queue.put(
+            (
+                "manual_publish_confirmed",
+                {
+                    "platform": platform,
+                    "profile_scope": profile_scope,
+                },
+            )
+        )
+    finally:
+        ManualPublishCompletionStore.finish(platform, profile_scope, event)
+
+
 @dataclass
 class KeywordInsight:
     keyword: str
@@ -2994,6 +3099,7 @@ class WordPressSettings:
     blogspot_daily_publish_limit: int = 0
     blogspot_blog_url: str = ""
     blogspot_blog_name: str = ""
+    blogspot_auto_publish: bool = True
     blogspot_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     blogspot_reference_image_protection_mode: bool = False
     tistory_profiles: list[dict] = field(default_factory=list)
@@ -3002,6 +3108,7 @@ class WordPressSettings:
     tistory_write_url: str = ""
     tistory_daily_publish_limit: int = 0
     tistory_input_mode: str = TEXT_INPUT_MODE_FAST
+    tistory_auto_publish: bool = True
     tistory_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     tistory_reference_image_protection_mode: bool = False
     tistory_ads_enabled: bool = True
@@ -3528,6 +3635,7 @@ class AppStateStore:
                 "write_url": payload.get("tistory_write_url", ""),
                 "daily_publish_limit": payload.get("tistory_daily_publish_limit", 0),
                 "input_mode": payload.get("tistory_input_mode", TEXT_INPUT_MODE_FAST),
+                "auto_publish": payload.get("tistory_auto_publish", True),
                 "save_mode": payload.get("tistory_save_mode", TISTORY_SAVE_MODE_PUBLISH),
                 "reference_image_protection_mode": payload.get(
                     "tistory_reference_image_protection_mode", False
@@ -3558,6 +3666,7 @@ class AppStateStore:
                 "blog_url": payload.get("blogspot_blog_url", ""),
                 "blog_name": payload.get("blogspot_blog_name", ""),
                 "daily_publish_limit": payload.get("blogspot_daily_publish_limit", 0),
+                "auto_publish": payload.get("blogspot_auto_publish", True),
                 "save_mode": payload.get("blogspot_save_mode", TISTORY_SAVE_MODE_PUBLISH),
                 "reference_image_protection_mode": payload.get(
                     "blogspot_reference_image_protection_mode", False
@@ -3632,6 +3741,7 @@ class AppStateStore:
             blogspot_daily_publish_limit=active_blogspot.get("daily_publish_limit", 0),
             blogspot_blog_url=active_blogspot.get("blog_url", ""),
             blogspot_blog_name=active_blogspot.get("blog_name", ""),
+            blogspot_auto_publish=bool(active_blogspot.get("auto_publish", True)),
             blogspot_save_mode=normalize_tistory_save_mode(
                 active_blogspot.get("save_mode", TISTORY_SAVE_MODE_PUBLISH)
             ),
@@ -3648,6 +3758,7 @@ class AppStateStore:
                 if active_tistory.get("input_mode") in TEXT_INPUT_MODE_OPTIONS
                 else TEXT_INPUT_MODE_FAST
             ),
+            tistory_auto_publish=bool(active_tistory.get("auto_publish", True)),
             tistory_save_mode=normalize_tistory_save_mode(
                 str(active_tistory.get("save_mode", TISTORY_SAVE_MODE_PUBLISH))
             ),
@@ -9014,6 +9125,7 @@ def run_blogspot_playwright_automation(
     daily_publish_limit: int = 0,
     reference_image_protection_mode: bool = False,
     profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
+    auto_publish: bool = True,
 ) -> dict[str, object]:
     try:
         from playwright.sync_api import sync_playwright
@@ -9030,7 +9142,7 @@ def run_blogspot_playwright_automation(
         f"자동화 시작: mode={normalized_save_mode}, title={title[:120]}",
     )
     daily_account = blog_url or blog_id
-    if normalized_save_mode == TISTORY_SAVE_MODE_PUBLISH:
+    if normalized_save_mode == TISTORY_SAVE_MODE_PUBLISH or not auto_publish:
         reservation_key = DailyPublishLimitStore.reserve_publish(
             "blogspot",
             daily_account,
@@ -9205,6 +9317,54 @@ def run_blogspot_playwright_automation(
                     )
                 save_blogspot_storage_state(context, profile_scope)
                 page.wait_for_timeout(1_500)
+
+                if not auto_publish:
+                    result_queue.put(
+                        (
+                            "publish_progress",
+                            (
+                                0.985,
+                                "블로그스팟 라벨 입력까지 완료했습니다. 내용을 검수하고 직접 게시한 뒤 환경설정의 [수동으로 완료하기]를 눌러 주세요.",
+                            ),
+                        )
+                    )
+                    wait_for_manual_publish_completion(
+                        "blogspot",
+                        profile_scope,
+                        page,
+                        result_queue,
+                    )
+                    page.wait_for_timeout(1_000)
+                    published_url = ""
+                    try:
+                        published_url = fetch_blogspot_post_url_from_feed(
+                            blog_url, title
+                        )
+                    except (
+                        OSError,
+                        HTTPError,
+                        URLError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ):
+                        pass
+                    count = DailyPublishLimitStore.record_reserved_success(
+                        "blogspot",
+                        daily_account,
+                        reservation_key,
+                    )
+                    reservation_key = ""
+                    return {
+                        "status": "manual",
+                        "message": (
+                            "블로그스팟 HTML 본문·이미지·라벨 입력 후 "
+                            "사용자 수동 공개 발행을 완료했습니다."
+                        ),
+                        "link": published_url,
+                        "image_count": attached_count,
+                        "daily_publish_count": count,
+                        "manual_completed": True,
+                    }
 
                 if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
                     result_queue.put(("publish_progress", (0.99, "블로그스팟 임시글 자동 저장을 확인하고 있습니다...")))
@@ -9483,6 +9643,7 @@ def normalize_tistory_profiles(
                 "input_mode": normalize_text_input_mode(
                     str(profile.get("input_mode") or TEXT_INPUT_MODE_FAST)
                 ),
+                "auto_publish": bool(profile.get("auto_publish", True)),
                 "save_mode": normalize_tistory_save_mode(
                     str(profile.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
                 ),
@@ -9533,6 +9694,7 @@ def normalize_blogspot_profiles(
                 "daily_publish_limit": normalize_daily_publish_limit(
                     profile.get("daily_publish_limit", 0)
                 ),
+                "auto_publish": bool(profile.get("auto_publish", True)),
                 "save_mode": normalize_tistory_save_mode(
                     str(profile.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
                 ),
@@ -16961,7 +17123,8 @@ def run_tistory_playwright_automation(
     tag_names: list[str] | None = None,
     save_mode: str = "",
     profile_scope: str = TISTORY_PROFILE_SCOPES[0],
-) -> tuple[bool, str | dict[str, str]]:
+    auto_publish: bool = True,
+) -> tuple[bool, str | dict[str, object]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -17043,6 +17206,29 @@ def run_tistory_playwright_automation(
             )
             if not result_payload.get("modeOnly"):
                 enter_tistory_tags_native(page, tag_names, result_queue)
+            if not auto_publish and not result_payload.get("modeOnly"):
+                result_queue.put(
+                    (
+                        "tistory_progress",
+                        "티스토리 태그 입력까지 완료했습니다. 내용을 검수하고 직접 공개 발행한 뒤 환경설정의 [수동으로 완료하기]를 눌러 주세요.",
+                    )
+                )
+                wait_for_manual_publish_completion(
+                    "tistory",
+                    profile_scope,
+                    page,
+                    result_queue,
+                )
+                mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
+                return True, {
+                    "message": (
+                        f"Playwright {mode_label} 모드로 티스토리 태그 입력과 "
+                        "사용자 수동 공개 발행을 완료했습니다."
+                    ),
+                    "published_url": "",
+                    "save_mode": TISTORY_SAVE_MODE_PUBLISH,
+                    "manual_completed": True,
+                }
             if publish_after_input:
                 if not click_tistory_complete_native(page, result_queue):
                     raise RuntimeError(
@@ -21904,6 +22090,7 @@ class TistoryAutomationWorker(threading.Thread):
         ads_count: int = 1,
         daily_publish_limit: int = 0,
         profile_scope: str = TISTORY_PROFILE_SCOPES[0],
+        auto_publish: bool = True,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -21921,7 +22108,10 @@ class TistoryAutomationWorker(threading.Thread):
                 else TISTORY_SAVE_MODE_DRAFT
             )
         )
-        self.publish_after_input = self.save_mode == TISTORY_SAVE_MODE_PUBLISH
+        self.auto_publish = bool(auto_publish)
+        self.publish_after_input = (
+            self.auto_publish and self.save_mode == TISTORY_SAVE_MODE_PUBLISH
+        )
         self.close_after_publish = close_after_publish
         self.write_url = write_url
         self.public_blog_url = public_blog_url
@@ -21942,7 +22132,7 @@ class TistoryAutomationWorker(threading.Thread):
         reservation_key = ""
         try:
             daily_account = self.public_blog_url or self.write_url
-            if self.publish_after_input:
+            if self.publish_after_input or not self.auto_publish:
                 reservation_key = DailyPublishLimitStore.reserve_publish(
                     "tistory",
                     daily_account,
@@ -22099,6 +22289,7 @@ class TistoryAutomationWorker(threading.Thread):
                 tag_names=self.tag_names,
                 save_mode=self.save_mode,
                 profile_scope=self.profile_scope,
+                auto_publish=self.auto_publish,
             )
             if success:
                 if isinstance(message, dict):
@@ -22108,16 +22299,23 @@ class TistoryAutomationWorker(threading.Thread):
                         "save_mode": normalize_tistory_save_mode(
                             str(message.get("save_mode") or self.save_mode)
                         ),
+                        "manual_completed": bool(
+                            message.get("manual_completed", False)
+                        ),
                     }
                 else:
                     done_payload = {
                         "message": str(message or "티스토리 자동화를 완료했습니다."),
                         "published_url": "",
                         "save_mode": self.save_mode,
+                        "manual_completed": False,
                     }
                 if (
                     done_payload["save_mode"] == TISTORY_SAVE_MODE_PUBLISH
-                    and done_payload["published_url"]
+                    and (
+                        done_payload["published_url"]
+                        or done_payload["manual_completed"]
+                    )
                 ):
                     done_payload["daily_publish_count"] = (
                         DailyPublishLimitStore.record_reserved_success(
@@ -22476,6 +22674,7 @@ class PublishPipelineWorker(threading.Thread):
                         ).get("profile_scope")
                         or TISTORY_PROFILE_SCOPES[0]
                     ),
+                    "auto_publish": bool(self.settings.tistory_auto_publish),
                     "save_mode": self.settings.tistory_save_mode,
                     "reference_image_protection_mode": self.settings.tistory_reference_image_protection_mode,
                     "input_mode": self.settings.tistory_input_mode,
@@ -22503,6 +22702,7 @@ class PublishPipelineWorker(threading.Thread):
                     reference_image_protection_mode=(
                         self.settings.blogspot_reference_image_protection_mode
                     ),
+                    auto_publish=bool(self.settings.blogspot_auto_publish),
                     profile_scope=str(
                         service_profile_by_name(
                             normalize_blogspot_profiles(
@@ -35371,9 +35571,33 @@ class KeywordApp(ctk.CTk):
         mode_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             mode_frame,
+            text="자동발행",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=(16, 12), pady=(14, 8), sticky="w")
+        self.blogspot_auto_publish_var = tk.BooleanVar(value=True)
+        self.blogspot_auto_publish_switch = ctk.CTkSwitch(
+            mode_frame,
+            text="ON · 라벨 입력 후 공개 발행까지 자동 진행",
+            variable=self.blogspot_auto_publish_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=48,
+            switch_height=24,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_blogspot_auto_publish_changed,
+        )
+        self.blogspot_auto_publish_switch.grid(
+            row=0,
+            column=1,
+            padx=(0, 16),
+            pady=(12, 8),
+            sticky="w",
+        )
+        ctk.CTkLabel(
+            mode_frame,
             text="저장 방식",
             font=ctk.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, padx=(16, 12), pady=14, sticky="w")
+        ).grid(row=1, column=0, padx=(16, 12), pady=8, sticky="w")
         self.blogspot_save_mode_var = tk.StringVar(value=TISTORY_SAVE_MODE_PUBLISH)
         self.blogspot_save_mode_selector = ContrastSegmentedButton(
             mode_frame,
@@ -35389,10 +35613,28 @@ class KeywordApp(ctk.CTk):
             command=self._on_blogspot_save_mode_changed,
         )
         self.blogspot_save_mode_selector.grid(
-            row=0,
+            row=1,
             column=1,
             padx=(0, 16),
-            pady=12,
+            pady=8,
+            sticky="ew",
+        )
+        self.blogspot_manual_complete_button = ctk.CTkButton(
+            mode_frame,
+            text="수동으로 완료하기 (직접 발행 후)",
+            height=40,
+            corner_radius=12,
+            fg_color="#d97706",
+            hover_color="#b45309",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda: self._complete_manual_service_publish("blogspot"),
+        )
+        self.blogspot_manual_complete_button.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(8, 14),
             sticky="ew",
         )
 
@@ -35599,9 +35841,33 @@ class KeywordApp(ctk.CTk):
         )
         ctk.CTkLabel(
             input_mode_frame,
-            text="저장 방식",
+            text="자동발행",
             font=ctk.CTkFont(size=15, weight="bold"),
         ).grid(row=2, column=0, padx=(16, 12), pady=(8, 8), sticky="w")
+        self.tistory_auto_publish_var = tk.BooleanVar(value=True)
+        self.tistory_auto_publish_switch = ctk.CTkSwitch(
+            input_mode_frame,
+            text="ON · 태그 입력 후 설정한 저장 방식까지 자동 진행",
+            variable=self.tistory_auto_publish_var,
+            onvalue=True,
+            offvalue=False,
+            switch_width=48,
+            switch_height=24,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_tistory_auto_publish_changed,
+        )
+        self.tistory_auto_publish_switch.grid(
+            row=2,
+            column=1,
+            padx=(0, 16),
+            pady=(8, 8),
+            sticky="w",
+        )
+        ctk.CTkLabel(
+            input_mode_frame,
+            text="저장 방식",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=3, column=0, padx=(16, 12), pady=(8, 8), sticky="w")
         self.tistory_save_mode_var = tk.StringVar(
             value=TISTORY_SAVE_MODE_PUBLISH
         )
@@ -35619,7 +35885,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_tistory_save_mode_changed,
         )
         self.tistory_save_mode_selector.grid(
-            row=2,
+            row=3,
             column=1,
             padx=(0, 16),
             pady=(8, 8),
@@ -35635,11 +35901,29 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13),
         )
         self.tistory_save_mode_help_label.grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=2,
             padx=16,
             pady=(0, 13),
+            sticky="ew",
+        )
+        self.tistory_manual_complete_button = ctk.CTkButton(
+            input_mode_frame,
+            text="수동으로 완료하기 (직접 발행 후)",
+            height=40,
+            corner_radius=12,
+            fg_color="#d97706",
+            hover_color="#b45309",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda: self._complete_manual_service_publish("tistory"),
+        )
+        self.tistory_manual_complete_button.grid(
+            row=5,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 14),
             sticky="ew",
         )
 
@@ -39368,6 +39652,7 @@ class KeywordApp(ctk.CTk):
                 "write_url": self.wordpress_settings.tistory_write_url,
                 "daily_publish_limit": self.wordpress_settings.tistory_daily_publish_limit,
                 "input_mode": self.wordpress_settings.tistory_input_mode,
+                "auto_publish": self.wordpress_settings.tistory_auto_publish,
                 "save_mode": self.wordpress_settings.tistory_save_mode,
                 "reference_image_protection_mode": self.wordpress_settings.tistory_reference_image_protection_mode,
                 "ads_enabled": self.wordpress_settings.tistory_ads_enabled,
@@ -39398,6 +39683,7 @@ class KeywordApp(ctk.CTk):
                 "blog_url": self.wordpress_settings.blogspot_blog_url,
                 "blog_name": self.wordpress_settings.blogspot_blog_name,
                 "daily_publish_limit": self.wordpress_settings.blogspot_daily_publish_limit,
+                "auto_publish": self.wordpress_settings.blogspot_auto_publish,
                 "save_mode": self.wordpress_settings.blogspot_save_mode,
                 "reference_image_protection_mode": self.wordpress_settings.blogspot_reference_image_protection_mode,
             },
@@ -40429,6 +40715,7 @@ class KeywordApp(ctk.CTk):
             ),
             blogspot_blog_url=self.blogspot_blog_url_entry.get().strip(),
             blogspot_blog_name=self.wordpress_settings.blogspot_blog_name,
+            blogspot_auto_publish=bool(self.blogspot_auto_publish_var.get()),
             blogspot_save_mode=normalize_tistory_save_mode(
                 self.blogspot_save_mode_var.get()
             ),
@@ -40455,6 +40742,7 @@ class KeywordApp(ctk.CTk):
             tistory_input_mode=normalize_text_input_mode(
                 self.tistory_input_mode_var.get()
             ),
+            tistory_auto_publish=bool(self.tistory_auto_publish_var.get()),
             tistory_save_mode=normalize_tistory_save_mode(
                 self.tistory_save_mode_var.get()
             ),
@@ -41076,6 +41364,7 @@ class KeywordApp(ctk.CTk):
                 "input_mode": normalize_text_input_mode(
                     self.tistory_input_mode_var.get()
                 ),
+                "auto_publish": bool(self.tistory_auto_publish_var.get()),
                 "save_mode": normalize_tistory_save_mode(
                     self.tistory_save_mode_var.get()
                 ),
@@ -41122,6 +41411,7 @@ class KeywordApp(ctk.CTk):
                 "daily_publish_limit": normalize_daily_publish_limit(
                     self.blogspot_daily_publish_limit_entry.get()
                 ),
+                "auto_publish": bool(self.blogspot_auto_publish_var.get()),
                 "save_mode": normalize_tistory_save_mode(
                     self.blogspot_save_mode_var.get()
                 ),
@@ -41167,6 +41457,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_input_mode_var.set(
             normalize_text_input_mode(str(profile.get("input_mode") or ""))
         )
+        self.tistory_auto_publish_var.set(bool(profile.get("auto_publish", True)))
         self.tistory_save_mode_var.set(
             normalize_tistory_save_mode(str(profile.get("save_mode") or ""))
         )
@@ -41185,6 +41476,7 @@ class KeywordApp(ctk.CTk):
             str(normalize_tistory_ad_count(profile.get("ads_count", 1)))
         )
         self._on_tistory_input_mode_changed(save=False)
+        self._on_tistory_auto_publish_changed(save=False)
         self._on_tistory_save_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
@@ -41203,9 +41495,11 @@ class KeywordApp(ctk.CTk):
         self.blogspot_save_mode_var.set(
             normalize_tistory_save_mode(str(profile.get("save_mode") or ""))
         )
+        self.blogspot_auto_publish_var.set(bool(profile.get("auto_publish", True)))
         self.blogspot_reference_image_protection_var.set(
             bool(profile.get("reference_image_protection_mode", False))
         )
+        self._on_blogspot_auto_publish_changed(save=False)
         self._on_blogspot_reference_image_mode_changed(save=False)
 
     def _on_tistory_profile_selected(self) -> None:
@@ -41235,6 +41529,9 @@ class KeywordApp(ctk.CTk):
         )
         self.wordpress_settings.tistory_input_mode = normalize_text_input_mode(
             str(profile.get("input_mode") or "")
+        )
+        self.wordpress_settings.tistory_auto_publish = bool(
+            profile.get("auto_publish", True)
         )
         self.wordpress_settings.tistory_save_mode = normalize_tistory_save_mode(
             str(profile.get("save_mode") or "")
@@ -41297,6 +41594,9 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.blogspot_daily_publish_limit = normalize_daily_publish_limit(
             profile.get("daily_publish_limit", 0)
         )
+        self.wordpress_settings.blogspot_auto_publish = bool(
+            profile.get("auto_publish", True)
+        )
         self.wordpress_settings.blogspot_save_mode = normalize_tistory_save_mode(
             str(profile.get("save_mode") or "")
         )
@@ -41327,12 +41627,128 @@ class KeywordApp(ctk.CTk):
             "#48d980",
         )
 
+    def _active_service_profile_scope(self, platform: str) -> str:
+        if platform == "tistory":
+            profiles = self._capture_tistory_profile_from_ui()
+            active_name = self.tistory_active_profile_var.get()
+            fallback = TISTORY_PROFILE_SCOPES[0]
+        else:
+            profiles = self._capture_blogspot_profile_from_ui()
+            active_name = self.blogspot_active_profile_var.get()
+            fallback = BLOGSPOT_PROFILE_SCOPES[0]
+        profile = service_profile_by_name(profiles, active_name)
+        return str(profile.get("profile_scope") or fallback)
+
+    def _complete_manual_service_publish(self, platform: str) -> None:
+        platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(
+            platform, platform
+        )
+        active_scope = self._active_service_profile_scope(platform)
+        waiting_scopes = ManualPublishCompletionStore.waiting_scopes(platform)
+        profile_scope = (
+            active_scope
+            if active_scope in waiting_scopes
+            else waiting_scopes[0]
+            if len(waiting_scopes) == 1
+            else ""
+        )
+        if not profile_scope:
+            messagebox.showinfo(
+                "수동 완료 대기 없음",
+                f"현재 {platform_label}에서 수동 완료를 기다리는 글이 없습니다.",
+            )
+            return
+        if not messagebox.askyesno(
+            "수동 발행 완료 확인",
+            (
+                f"전용 Chrome에서 {platform_label} 글을 실제로 공개 발행했습니까?\n\n"
+                "[예]를 누르면 오늘 발행 횟수에 1회 반영하고 작업을 완료합니다."
+            ),
+        ):
+            return
+        if not ManualPublishCompletionStore.complete(platform, profile_scope):
+            messagebox.showwarning(
+                "완료 처리 실패",
+                "수동 완료 대기 작업이 이미 종료되었습니다.",
+            )
+            return
+        button = getattr(self, f"{platform}_manual_complete_button", None)
+        if button is not None:
+            button.configure(state="disabled", text="완료 처리 중...")
+        status_label = getattr(self, f"{platform}_status_label", None)
+        if status_label is not None:
+            status_label.configure(
+                text="● 수동 발행 완료를 확인하고 횟수에 반영 중...",
+                text_color="#6dadff",
+            )
+
+    def _on_blogspot_auto_publish_changed(self, save: bool = True) -> None:
+        enabled = bool(self.blogspot_auto_publish_var.get())
+        self.blogspot_auto_publish_switch.configure(
+            text=(
+                "ON · 라벨 입력 후 공개 발행까지 자동 진행"
+                if enabled
+                else "OFF · 라벨 입력 후 멈춤 (검수 후 직접 발행)"
+            )
+        )
+        self.blogspot_save_mode_selector.configure(
+            state="normal" if enabled else "disabled"
+        )
+        has_waiting_publish = bool(
+            ManualPublishCompletionStore.waiting_scopes("blogspot")
+        )
+        self.blogspot_manual_complete_button.configure(
+            state=(
+                "normal"
+                if not enabled and has_waiting_publish
+                else "disabled"
+            ),
+            text="수동으로 완료하기 (직접 발행 후)",
+        )
+        self.wordpress_settings.blogspot_auto_publish = enabled
+        if save:
+            self._save_ui_state()
+
     def _on_blogspot_save_mode_changed(self, _value: str = "") -> None:
         if hasattr(self, "blogspot_save_mode_var"):
             self.wordpress_settings.blogspot_save_mode = normalize_tistory_save_mode(
                 self.blogspot_save_mode_var.get()
             )
         self._save_ui_state()
+
+    def _on_tistory_auto_publish_changed(self, save: bool = True) -> None:
+        enabled = bool(self.tistory_auto_publish_var.get())
+        self.tistory_auto_publish_switch.configure(
+            text=(
+                "ON · 태그 입력 후 설정한 저장 방식까지 자동 진행"
+                if enabled
+                else "OFF · 태그 입력 후 멈춤 (검수 후 직접 발행)"
+            )
+        )
+        self.tistory_save_mode_selector.configure(
+            state="normal" if enabled else "disabled"
+        )
+        has_waiting_publish = bool(
+            ManualPublishCompletionStore.waiting_scopes("tistory")
+        )
+        self.tistory_manual_complete_button.configure(
+            state=(
+                "normal"
+                if not enabled and has_waiting_publish
+                else "disabled"
+            ),
+            text="수동으로 완료하기 (직접 발행 후)",
+        )
+        if not enabled:
+            self.tistory_save_mode_help_label.configure(
+                text=(
+                    "자동발행 OFF · 제목·본문·이미지·태그 입력까지만 진행합니다. "
+                    "내용을 검수하고 직접 공개 발행한 뒤 수동 완료 버튼을 눌러 주세요."
+                )
+            )
+        self.wordpress_settings.tistory_auto_publish = enabled
+        if save:
+            self._save_ui_state()
 
     def _on_blogspot_reference_image_mode_changed(
         self,
@@ -41567,7 +41983,12 @@ class KeywordApp(ctk.CTk):
             value or self.tistory_save_mode_var.get()
         )
         self.tistory_save_mode_var.set(mode)
-        if mode == TISTORY_SAVE_MODE_DRAFT:
+        if not bool(self.tistory_auto_publish_var.get()):
+            help_text = (
+                "자동발행 OFF · 제목·본문·이미지·태그 입력까지만 진행합니다. "
+                "내용을 검수하고 직접 공개 발행한 뒤 수동 완료 버튼을 눌러 주세요."
+            )
+        elif mode == TISTORY_SAVE_MODE_DRAFT:
             help_text = (
                 "임시저장 · 제목·본문·태그·첨부 이미지를 입력한 뒤 편집기 상단의 임시저장 버튼으로 끝냅니다. "
                 "발행 화면과 캡차에는 진입하지 않습니다."
@@ -41655,6 +42076,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_blog_url_entry.delete(0, "end")
         self.tistory_write_url_entry.delete(0, "end")
         self.tistory_input_mode_var.set(TEXT_INPUT_MODE_FAST)
+        self.tistory_auto_publish_var.set(True)
         self.tistory_save_mode_var.set(TISTORY_SAVE_MODE_PUBLISH)
         self.tistory_reference_image_protection_var.set(False)
         self.tistory_ads_enabled_var.set(True)
@@ -41669,6 +42091,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_blog_url = ""
         self.wordpress_settings.tistory_write_url = ""
         self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
+        self.wordpress_settings.tistory_auto_publish = True
         self.wordpress_settings.tistory_save_mode = TISTORY_SAVE_MODE_PUBLISH
         self.wordpress_settings.tistory_reference_image_protection_mode = False
         self.wordpress_settings.tistory_ads_enabled = True
@@ -41691,6 +42114,7 @@ class KeywordApp(ctk.CTk):
             profiles
         )
         self._on_tistory_input_mode_changed(save=False)
+        self._on_tistory_auto_publish_changed(save=False)
         self._on_tistory_save_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
@@ -41764,6 +42188,7 @@ class KeywordApp(ctk.CTk):
     def _reset_blogspot_settings(self) -> None:
         self.blogspot_blog_url_entry.delete(0, "end")
         self.blogspot_blog_id_entry.delete(0, "end")
+        self.blogspot_auto_publish_var.set(True)
         self.blogspot_save_mode_var.set(TISTORY_SAVE_MODE_PUBLISH)
         self.blogspot_reference_image_protection_var.set(False)
         self.blogspot_daily_publish_limit_entry.delete(0, "end")
@@ -41771,6 +42196,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.blogspot_blog_id = ""
         self.wordpress_settings.blogspot_blog_url = ""
         self.wordpress_settings.blogspot_blog_name = ""
+        self.wordpress_settings.blogspot_auto_publish = True
         self.wordpress_settings.blogspot_save_mode = TISTORY_SAVE_MODE_PUBLISH
         self.wordpress_settings.blogspot_reference_image_protection_mode = False
         self.wordpress_settings.blogspot_client_id = ""
@@ -41792,6 +42218,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.blogspot_profiles = normalize_blogspot_profiles(
             profiles
         )
+        self._on_blogspot_auto_publish_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
         self._refresh_service_profile_radios("blogspot")
         self._refresh_daily_publish_limit_statuses()
@@ -43467,7 +43894,9 @@ class KeywordApp(ctk.CTk):
         )
         self.publish_status_label.configure(
             text=(
-                "전용 Chrome에서 제목/본문/태그를 입력한 뒤 티스토리에 임시저장합니다."
+                "전용 Chrome에서 제목/본문/이미지/태그까지만 입력합니다. 검수 후 직접 발행해 주세요."
+                if not settings.tistory_auto_publish
+                else "전용 Chrome에서 제목/본문/태그를 입력한 뒤 티스토리에 임시저장합니다."
                 if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT
                 else "전용 Chrome에서 티스토리 로그인 확인 후 제목/본문/태그/대표이미지와 공개발행을 진행합니다."
             ),
@@ -43491,8 +43920,10 @@ class KeywordApp(ctk.CTk):
             automation_prompt=settings.tistory_automation_prompt,
             tag_names=tag_names,
             publish_after_input=(
-                tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                settings.tistory_auto_publish
+                and tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
             ),
+            auto_publish=settings.tistory_auto_publish,
             save_mode=tistory_save_mode,
             write_url=write_url,
             public_blog_url=settings.tistory_blog_url,
@@ -44234,6 +44665,8 @@ class KeywordApp(ctk.CTk):
                         self._handle_publish_pipeline_success(payload)
                 elif event_type == "publish_pipeline_error":
                     self._stop_writing_auto_progress()
+                    if hasattr(self, "blogspot_auto_publish_var"):
+                        self._on_blogspot_auto_publish_changed(save=False)
                     if self.active_automation_upload_item_id:
                         self._handle_automation_publish_error(payload)
                     else:
@@ -44255,6 +44688,49 @@ class KeywordApp(ctk.CTk):
                         self.automation_status_label.configure(text=message, text_color="#6dadff")
                     else:
                         self._set_writing_progress(4, message, progress)
+                elif event_type == "manual_publish_waiting":
+                    manual_payload = payload if isinstance(payload, dict) else {}
+                    platform = str(manual_payload.get("platform") or "")
+                    message = str(manual_payload.get("message") or "")
+                    button = getattr(
+                        self, f"{platform}_manual_complete_button", None
+                    )
+                    if button is not None:
+                        button.configure(
+                            state="normal",
+                            text="수동으로 완료하기 (직접 발행 후)",
+                        )
+                    status_label = getattr(
+                        self, f"{platform}_status_label", None
+                    )
+                    if status_label is not None:
+                        status_label.configure(
+                            text="● 직접 발행 후 수동 완료 버튼을 눌러 주세요.",
+                            text_color="#f59e0b",
+                        )
+                    if hasattr(self, "publish_status_label"):
+                        self.publish_status_label.configure(
+                            text=message,
+                            text_color="#f59e0b",
+                        )
+                    if (
+                        self.active_automation_upload_item_id
+                        and hasattr(self, "automation_status_label")
+                    ):
+                        self.automation_status_label.configure(
+                            text=message,
+                            text_color="#f59e0b",
+                        )
+                    else:
+                        self._set_writing_progress(4, message, 0.99)
+                elif event_type == "manual_publish_confirmed":
+                    manual_payload = payload if isinstance(payload, dict) else {}
+                    platform = str(manual_payload.get("platform") or "")
+                    button = getattr(
+                        self, f"{platform}_manual_complete_button", None
+                    )
+                    if button is not None:
+                        button.configure(state="disabled", text="완료 처리 중...")
                 elif event_type == "blogspot_profile_progress":
                     if hasattr(self, "blogspot_status_label"):
                         self.blogspot_status_label.configure(text=f"● {payload}", text_color="#6dadff")
@@ -44382,10 +44858,16 @@ class KeywordApp(ctk.CTk):
                         tistory_save_mode = normalize_tistory_save_mode(
                             str(payload.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
                         )
+                        tistory_manual_completed = bool(
+                            payload.get("manual_completed", False)
+                        )
                     else:
                         tistory_message = str(payload or "티스토리 자동화를 완료했습니다.")
                         tistory_published_url = ""
                         tistory_save_mode = TISTORY_SAVE_MODE_PUBLISH
+                        tistory_manual_completed = False
+                    if hasattr(self, "tistory_auto_publish_var"):
+                        self._on_tistory_auto_publish_changed(save=False)
                     self._refresh_daily_publish_limit_statuses()
                     if tistory_published_url:
                         self._remember_published_post_url("tistory", tistory_published_url)
@@ -44393,13 +44875,14 @@ class KeywordApp(ctk.CTk):
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(1.0)
-                    completion_label = (
-                        "티스토리 임시저장 완료"
-                        if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT
-                        else "티스토리 공개발행 완료"
-                    )
+                    if tistory_manual_completed:
+                        completion_label = "티스토리 수동발행 완료"
+                    elif tistory_save_mode == TISTORY_SAVE_MODE_DRAFT:
+                        completion_label = "티스토리 임시저장 완료"
+                    else:
+                        completion_label = "티스토리 공개발행 완료"
                     self.publish_status_label.configure(
-                        text=f"티스토리 전용 Chrome 자동입력과 {completion_label}를 완료했습니다.",
+                        text=f"티스토리 글 작업과 {completion_label}를 확인했습니다.",
                         text_color="#48d980",
                     )
                     self.keyword_status_label.configure(text=completion_label)
@@ -44428,6 +44911,8 @@ class KeywordApp(ctk.CTk):
                         self._show_writing_complete_dialog()
                 elif event_type == "tistory_automation_error":
                     self._stop_writing_auto_progress()
+                    if hasattr(self, "tistory_auto_publish_var"):
+                        self._on_tistory_auto_publish_changed(save=False)
                     self.publish_progress_bar.stop()
                     self.publish_progress_bar.configure(mode="determinate")
                     self.publish_progress_bar.set(0)
@@ -44890,6 +45375,8 @@ class KeywordApp(ctk.CTk):
         tistory = payload.get("tistory")
         blogspot = payload.get("blogspot", {})
         threads = payload.get("threads", {})
+        if blogspot and hasattr(self, "blogspot_auto_publish_var"):
+            self._on_blogspot_auto_publish_changed(save=False)
         published_url = ""
         if wordpress:
             published_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
@@ -44929,6 +45416,12 @@ class KeywordApp(ctk.CTk):
                 message.append("네이버·다음·Google 검색엔진 수집 요청 자동화를 시작했습니다.")
         if tistory:
             write_url = tistory.get("write_url")
+            tistory_auto_publish = bool(
+                tistory.get(
+                    "auto_publish",
+                    self.wordpress_settings.tistory_auto_publish,
+                )
+            )
             tistory_save_mode = normalize_tistory_save_mode(
                 tistory.get("save_mode") or self.tistory_save_mode_var.get()
             )
@@ -44942,7 +45435,19 @@ class KeywordApp(ctk.CTk):
                         automation_prompt=self._current_tistory_automation_prompt(),
                         tag_names=list(tistory.get("tag_names") or []),
                         publish_after_input=(
-                            tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                            bool(
+                                tistory.get(
+                                    "auto_publish",
+                                    self.wordpress_settings.tistory_auto_publish,
+                                )
+                            )
+                            and tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                        ),
+                        auto_publish=bool(
+                            tistory.get(
+                                "auto_publish",
+                                self.wordpress_settings.tistory_auto_publish,
+                            )
                         ),
                         save_mode=tistory_save_mode,
                         close_after_publish=False,
@@ -44996,7 +45501,9 @@ class KeywordApp(ctk.CTk):
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
             message.append("티스토리 글쓰기 준비 완료")
-            if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT:
+            if not tistory_auto_publish:
+                message.append("제목/본문/이미지/태그 입력 후 검수용으로 멈춥니다.")
+            elif tistory_save_mode == TISTORY_SAVE_MODE_DRAFT:
                 message.append("제목/본문/태그/첨부 이미지를 입력한 뒤 임시저장합니다.")
             else:
                 message.append("제목/본문/태그/대표이미지/공개발행까지 자동입력을 시도합니다.")
@@ -45031,6 +45538,8 @@ class KeywordApp(ctk.CTk):
         title = str(item.get("title") or "자동화 글") if item else "자동화 글"
         wordpress = payload.get("wordpress") or {}
         blogspot = payload.get("blogspot") or {}
+        if blogspot and hasattr(self, "blogspot_auto_publish_var"):
+            self._on_blogspot_auto_publish_changed(save=False)
         wordpress_url = str(wordpress.get("link") or wordpress.get("post_url") or "").strip()
         blogspot_url = str(blogspot.get("link") or "").strip()
         if item is not None:
@@ -45052,6 +45561,12 @@ class KeywordApp(ctk.CTk):
         tistory = payload.get("tistory") or {}
         if tistory:
             write_url = tistory.get("write_url")
+            tistory_auto_publish = bool(
+                tistory.get(
+                    "auto_publish",
+                    self.wordpress_settings.tistory_auto_publish,
+                )
+            )
             tistory_save_mode = normalize_tistory_save_mode(
                 tistory.get("save_mode") or self.tistory_save_mode_var.get()
             )
@@ -45065,7 +45580,19 @@ class KeywordApp(ctk.CTk):
                         automation_prompt=self._current_tistory_automation_prompt(),
                         tag_names=list(tistory.get("tag_names") or []),
                         publish_after_input=(
-                            tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                            bool(
+                                tistory.get(
+                                    "auto_publish",
+                                    self.wordpress_settings.tistory_auto_publish,
+                                )
+                            )
+                            and tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
+                        ),
+                        auto_publish=bool(
+                            tistory.get(
+                                "auto_publish",
+                                self.wordpress_settings.tistory_auto_publish,
+                            )
                         ),
                         save_mode=tistory_save_mode,
                         close_after_publish=False,
@@ -45126,7 +45653,9 @@ class KeywordApp(ctk.CTk):
             )
             self.automation_status_label.configure(
                 text=(
-                    f"'{title}' 티스토리 자동입력/임시저장 마무리 중입니다. 완료 후 다음 글을 예약합니다."
+                    f"'{title}' 티스토리 검수·수동 발행 완료를 기다리고 있습니다."
+                    if not tistory_auto_publish
+                    else f"'{title}' 티스토리 자동입력/임시저장 마무리 중입니다. 완료 후 다음 글을 예약합니다."
                     if tistory_save_mode == TISTORY_SAVE_MODE_DRAFT
                     else f"'{title}' 티스토리 자동입력/공개발행 마무리 중입니다. 완료 후 다음 글을 예약합니다."
                 ),
