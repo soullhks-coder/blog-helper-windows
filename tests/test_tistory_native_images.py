@@ -1084,6 +1084,73 @@ class TistoryNativeImageTests(unittest.TestCase):
         self.assertEqual(page.tags, ["정치 뉴스", "국회", "정책"])
         self.assertEqual(page.pressed, ["Enter", "Enter", "Enter"])
 
+    def test_tistory_tag_failure_skips_tag_and_keeps_publishing_flow_alive(self) -> None:
+        class EmptyTagsLocator:
+            def count(self) -> int:
+                return 0
+
+            def nth(self, _index: int):
+                raise IndexError
+
+        class FailingInput:
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def scroll_into_view_if_needed(self) -> None:
+                pass
+
+            def click(self) -> None:
+                pass
+
+            def fill(self, _value: str) -> None:
+                pass
+
+            def press(self, _key: str) -> None:
+                raise RuntimeError("티스토리 입력 이벤트 무시")
+
+        class InputLocator:
+            def __init__(self) -> None:
+                self.input_field = FailingInput()
+
+            def count(self) -> int:
+                return 1
+
+            def nth(self, _index: int):
+                return self.input_field
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.input_locator = InputLocator()
+
+            def locator(self, selector: str):
+                if "editor_tag" in selector:
+                    return EmptyTagsLocator()
+                return self.input_locator
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+        events: queue.Queue = queue.Queue()
+        with patch.object(main, "append_runtime_log") as log_mock:
+            inserted = main.enter_tistory_tags_native(
+                FakePage(),
+                ["기자회견주요내용"],
+                events,
+            )
+
+        self.assertEqual(inserted, 0)
+        messages = [events.get_nowait()[1] for _ in range(events.qsize())]
+        self.assertTrue(any("건너뛰고 발행을 계속" in message for message in messages))
+        self.assertTrue(
+            any(
+                "건너뛰고 발행 계속" in str(call.args[1])
+                for call in log_mock.call_args_list
+            )
+        )
+
     def test_draft_save_click_uses_bottom_button_and_waits_for_confirmation(self) -> None:
         class FakeMouse:
             def __init__(self) -> None:

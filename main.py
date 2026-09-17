@@ -10903,7 +10903,7 @@ def enter_tistory_tags_native(
     tag_names: list[str] | None,
     result_queue: queue.Queue | None = None,
 ) -> int:
-    """Enter each tag with native Playwright keyboard input and verify its chip."""
+    """Enter tags best-effort; a missing chip must never block publishing."""
     desired_tags = normalize_tistory_tag_names(tag_names)
     if not desired_tags:
         append_runtime_log("TISTORY", "입력할 티스토리 태그가 없어 태그 단계를 건너뜀")
@@ -10929,13 +10929,20 @@ def enter_tistory_tags_native(
             input_field = find_visible_tistory_tag_input(page)
             if input_field is None:
                 break
-            input_field.scroll_into_view_if_needed()
-            input_field.click()
-            input_field.fill("")
-            input_field.fill(tag)
-            # Tistory's React handler ignores a synthetic KeyboardEvent. This
-            # Playwright press is a real browser keyboard event and creates the chip.
-            input_field.press("Enter")
+            try:
+                input_field.scroll_into_view_if_needed()
+                input_field.click()
+                input_field.fill("")
+                input_field.fill(tag)
+                # Tistory's React handler ignores a synthetic KeyboardEvent. This
+                # Playwright press is a real browser keyboard event and creates the chip.
+                input_field.press("Enter")
+            except Exception as exc:
+                append_runtime_log(
+                    "TISTORY",
+                    f"태그 입력 재시도 {attempt + 1}/2: {tag} ({exc})",
+                )
+                continue
 
             for _ in range(16):
                 page.wait_for_timeout(150)
@@ -10954,31 +10961,49 @@ def enter_tistory_tags_native(
             )
 
         if not inserted:
-            raise RuntimeError(
-                f"티스토리 태그 '{tag}'를 입력했지만 등록된 태그로 확인되지 않아 발행을 중단했습니다."
+            append_runtime_log(
+                "TISTORY",
+                f"태그 등록 확인 실패 - 해당 태그만 건너뛰고 발행 계속: {tag}",
             )
+            if result_queue:
+                result_queue.put(
+                    (
+                        "tistory_progress",
+                        f"티스토리 태그 '{tag}'가 등록되지 않아 이 태그만 건너뛰고 발행을 계속합니다.",
+                    )
+                )
 
     registered_keys = {
         value.casefold() for value in read_tistory_registered_tag_names(page)
     }
     missing = [tag for tag in desired_tags if tag.casefold() not in registered_keys]
+    confirmed_count = len(desired_tags) - len(missing)
     if missing:
-        raise RuntimeError(
-            "티스토리 태그 등록 확인에 실패해 발행을 중단했습니다: " + ", ".join(missing)
+        append_runtime_log(
+            "TISTORY",
+            "일부 태그 미등록 - 누락 태그를 제외하고 발행 계속: " + ", ".join(missing),
         )
-
-    append_runtime_log(
-        "TISTORY",
-        f"태그 {len(desired_tags)}개 네이티브 입력·등록 확인 완료: {', '.join(desired_tags)}",
-    )
-    if result_queue:
-        result_queue.put(
-            (
-                "tistory_progress",
-                f"티스토리 태그 {len(desired_tags)}개가 실제 등록된 것을 확인했습니다.",
+        if result_queue:
+            result_queue.put(
+                (
+                    "tistory_progress",
+                    f"티스토리 태그 {confirmed_count}/{len(desired_tags)}개 등록 완료. "
+                    "등록되지 않은 태그는 건너뛰고 발행을 계속합니다.",
+                )
             )
+    else:
+        append_runtime_log(
+            "TISTORY",
+            f"태그 {len(desired_tags)}개 네이티브 입력·등록 확인 완료: {', '.join(desired_tags)}",
         )
-    return len(desired_tags)
+        if result_queue:
+            result_queue.put(
+                (
+                    "tistory_progress",
+                    f"티스토리 태그 {len(desired_tags)}개가 실제 등록된 것을 확인했습니다.",
+                )
+            )
+    return confirmed_count
 
 
 def click_tistory_complete_native(
