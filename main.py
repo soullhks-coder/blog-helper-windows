@@ -26235,7 +26235,9 @@ class KeywordApp(ctk.CTk):
                 uniform="home_publish_summary",
             )
 
+        self.home_publish_logo_labels: dict[str, object] = {}
         self.home_publish_count_labels: dict[str, object] = {}
+        self.home_publish_remaining_labels: dict[str, object] = {}
         for column, (platform, platform_label) in enumerate(
             (
                 ("wordpress", "워드프레스"),
@@ -26245,7 +26247,7 @@ class KeywordApp(ctk.CTk):
         ):
             summary_card = ctk.CTkFrame(
                 publish_summary_frame,
-                height=92,
+                height=112,
                 fg_color=palette["panel"],
                 corner_radius=20,
                 border_width=1,
@@ -26258,18 +26260,57 @@ class KeywordApp(ctk.CTk):
                 sticky="nsew",
             )
             summary_card.grid_propagate(False)
-            summary_card.grid_columnconfigure(0, weight=1)
+            summary_card.grid_columnconfigure(1, weight=1)
             summary_card.grid_rowconfigure(0, weight=1)
-            count_label = ctk.CTkLabel(
+            logo_label = ctk.CTkLabel(
                 summary_card,
-                text=f"{platform_label} 오늘 발행 0건",
+                text="",
                 image=self._home_platform_logo(platform),
-                compound="left",
+                width=42,
+                height=42,
+            )
+            logo_label.grid(
+                row=0,
+                column=0,
+                padx=(20, 16),
+                pady=18,
+                sticky="w",
+            )
+            text_frame = ctk.CTkFrame(summary_card, fg_color="transparent")
+            text_frame.grid(
+                row=0,
+                column=1,
+                padx=(0, 18),
+                pady=(13, 12),
+                sticky="nsew",
+            )
+            text_frame.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                text_frame,
+                text=platform_label,
+                anchor="w",
                 text_color=palette["text"],
                 font=ctk.CTkFont(size=15, weight="bold"),
+            ).grid(row=0, column=0, sticky="ew")
+            count_label = ctk.CTkLabel(
+                text_frame,
+                text="오늘 발행 0건",
+                anchor="w",
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=13, weight="bold"),
             )
-            count_label.grid(row=0, column=0, padx=18, pady=14, sticky="nsew")
+            count_label.grid(row=1, column=0, pady=(3, 0), sticky="ew")
+            remaining_label = ctk.CTkLabel(
+                text_frame,
+                text="남은 발행 가능건수 제한없음",
+                anchor="w",
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            )
+            remaining_label.grid(row=2, column=0, pady=(2, 0), sticky="ew")
+            self.home_publish_logo_labels[platform] = logo_label
             self.home_publish_count_labels[platform] = count_label
+            self.home_publish_remaining_labels[platform] = remaining_label
         self._refresh_home_publish_counts()
 
         self.home_adsense_card = ctk.CTkFrame(
@@ -26402,23 +26443,61 @@ class KeywordApp(ctk.CTk):
         return rendered
 
     def _refresh_home_publish_counts(self) -> None:
-        labels = getattr(self, "home_publish_count_labels", {})
-        if not labels:
+        count_labels = getattr(self, "home_publish_count_labels", {})
+        remaining_labels = getattr(self, "home_publish_remaining_labels", {})
+        if not count_labels:
             return
-        platform_labels = {
-            "wordpress": "워드프레스",
-            "tistory": "티스토리",
-            "blogspot": "블로그스팟",
-        }
-        for platform, platform_label in platform_labels.items():
-            label = labels.get(platform)
-            if label is None:
+        for platform in ("wordpress", "tistory", "blogspot"):
+            count_label = count_labels.get(platform)
+            if count_label is None:
                 continue
             count = DailyPublishLimitStore.count(
                 platform,
                 self._daily_publish_account(platform),
             )
-            label.configure(text=f"{platform_label} 오늘 발행 {count}건")
+            limit = self._home_daily_publish_limit(platform)
+            count_label.configure(text=f"오늘 발행 {count}건")
+            remaining_label = remaining_labels.get(platform)
+            if remaining_label is None:
+                continue
+            if limit:
+                remaining = max(0, limit - count)
+                remaining_label.configure(
+                    text=f"남은 발행 가능건수 {remaining}건",
+                    text_color=(
+                        ("#b94949", "#ffb86b")
+                        if remaining == 0
+                        else ("#315f93", "#6dadff")
+                    ),
+                )
+            else:
+                remaining_label.configure(
+                    text="남은 발행 가능건수 제한없음",
+                    text_color=("#607089", "#9aa7bb"),
+                )
+
+    def _home_daily_publish_limit(self, platform: str) -> int:
+        entry_name = {
+            "wordpress": "wordpress_daily_publish_limit_entry",
+            "tistory": "tistory_daily_publish_limit_entry",
+            "blogspot": "blogspot_daily_publish_limit_entry",
+        }.get(platform, "")
+        entry = getattr(self, entry_name, None) if entry_name else None
+        if entry is not None:
+            try:
+                return normalize_daily_publish_limit(entry.get())
+            except (AttributeError, tk.TclError):
+                pass
+        setting_name = {
+            "wordpress": "wordpress_daily_publish_limit",
+            "tistory": "tistory_daily_publish_limit",
+            "blogspot": "blogspot_daily_publish_limit",
+        }.get(platform, "")
+        return normalize_daily_publish_limit(
+            getattr(self.wordpress_settings, setting_name, 0)
+            if setting_name
+            else 0
+        )
 
     def _render_home_adsense_summary(self) -> None:
         labels = getattr(self, "home_adsense_value_labels", {})

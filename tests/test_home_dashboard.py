@@ -86,13 +86,26 @@ class HomeDashboardTests(unittest.TestCase):
             def configure(self, **kwargs) -> None:
                 self.text = str(kwargs.get("text") or "")
 
-        labels = {
+        count_labels = {
             "wordpress": LabelStub(),
             "tistory": LabelStub(),
             "blogspot": LabelStub(),
         }
-        app = SimpleNamespace(home_publish_count_labels=labels)
+        remaining_labels = {
+            "wordpress": LabelStub(),
+            "tistory": LabelStub(),
+            "blogspot": LabelStub(),
+        }
+        app = SimpleNamespace(
+            home_publish_count_labels=count_labels,
+            home_publish_remaining_labels=remaining_labels,
+        )
         app._daily_publish_account = lambda platform: f"{platform}-active-profile"
+        app._home_daily_publish_limit = lambda platform: {
+            "wordpress": 0,
+            "tistory": 5,
+            "blogspot": 1,
+        }[platform]
 
         with patch.object(
             main.DailyPublishLimitStore,
@@ -105,9 +118,21 @@ class HomeDashboardTests(unittest.TestCase):
         ) as count_mock:
             main.KeywordApp._refresh_home_publish_counts(app)
 
-        self.assertEqual(labels["wordpress"].text, "워드프레스 오늘 발행 3건")
-        self.assertEqual(labels["tistory"].text, "티스토리 오늘 발행 2건")
-        self.assertEqual(labels["blogspot"].text, "블로그스팟 오늘 발행 1건")
+        self.assertEqual(count_labels["wordpress"].text, "오늘 발행 3건")
+        self.assertEqual(count_labels["tistory"].text, "오늘 발행 2건")
+        self.assertEqual(count_labels["blogspot"].text, "오늘 발행 1건")
+        self.assertEqual(
+            remaining_labels["wordpress"].text,
+            "남은 발행 가능건수 제한없음",
+        )
+        self.assertEqual(
+            remaining_labels["tistory"].text,
+            "남은 발행 가능건수 3건",
+        )
+        self.assertEqual(
+            remaining_labels["blogspot"].text,
+            "남은 발행 가능건수 0건",
+        )
         self.assertEqual(
             [call.args for call in count_mock.call_args_list],
             [
