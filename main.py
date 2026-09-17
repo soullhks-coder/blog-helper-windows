@@ -92,6 +92,7 @@ ctk.set_window_scaling(0.82)
 
 
 TEXT_EDITING_SHORTCUT_BINDTAG = "BlogHelperTextEditingShortcuts"
+MOUSE_WHEEL_ROUTER_BINDTAG = "BlogHelperMouseWheelRouter"
 _WINDOWS_TEXT_EDITING_KEYCODES = {
     65: "select_all",
     67: "copy",
@@ -24219,6 +24220,7 @@ class KeywordApp(ctk.CTk):
         self._scroll_exclusion_bindings: list[tuple[ctk.CTkScrollableFrame, ctk.CTkScrollableFrame]] = []
 
         self._build_layout()
+        self._install_mousewheel_router()
         self._populate_wordpress_fields()
         self._apply_app_theme(self.wordpress_settings.app_theme, save=False)
         self.bind("<Configure>", self._on_window_configure)
@@ -29357,6 +29359,186 @@ class KeywordApp(ctk.CTk):
                 return True
             widget = getattr(widget, "master", None)
         return False
+
+    @staticmethod
+    def _mousewheel_units(event) -> int:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            if sys.platform == "darwin":
+                return -delta
+            if sys.platform.startswith("win"):
+                magnitude = max(1, round(abs(delta) / 120 * 3))
+                return -magnitude if delta > 0 else magnitude
+            return -1 if delta > 0 else 1
+        button = int(getattr(event, "num", 0) or 0)
+        if button == 4:
+            return -1
+        if button == 5:
+            return 1
+        return 0
+
+    @staticmethod
+    def _vertical_view_can_move(widget, units: int) -> bool:
+        try:
+            start, end = widget.yview()
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return False
+        if units < 0:
+            return float(start) > 0.00001
+        if units > 0:
+            return float(end) < 0.99999
+        return False
+
+    @staticmethod
+    def _widget_distance_to_scroll_frame(widget, scroll_frame: ctk.CTkScrollableFrame) -> int | None:
+        canvas = getattr(scroll_frame, "_parent_canvas", None)
+        current = widget
+        distance = 0
+        while current is not None:
+            if current is scroll_frame or current is canvas:
+                return distance
+            current = getattr(current, "master", None)
+            distance += 1
+        return None
+
+    @staticmethod
+    def _widget_is_descendant_of(widget, ancestor) -> bool:
+        current = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _add_mousewheel_router_bindtag(self, widget) -> None:
+        try:
+            bindtags = list(widget.bindtags())
+            if MOUSE_WHEEL_ROUTER_BINDTAG not in bindtags:
+                insert_at = 1 if bindtags and bindtags[0] == TEXT_EDITING_SHORTCUT_BINDTAG else 0
+                bindtags.insert(insert_at, MOUSE_WHEEL_ROUTER_BINDTAG)
+                widget.bindtags(tuple(bindtags))
+        except (AttributeError, tk.TclError):
+            return
+
+    def _tag_mousewheel_descendants(self, parent) -> None:
+        pending = [parent]
+        while pending:
+            widget = pending.pop()
+            self._add_mousewheel_router_bindtag(widget)
+            if isinstance(widget, ctk.CTkScrollableFrame):
+                self._mousewheel_scroll_frames.add(widget)
+            try:
+                pending.extend(widget.winfo_children())
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _on_mousewheel_widget_enter(self, event=None) -> None:
+        widget = getattr(event, "widget", None)
+        self._add_mousewheel_router_bindtag(widget)
+        current = widget
+        while current is not None:
+            if isinstance(current, ctk.CTkScrollableFrame):
+                self._mousewheel_scroll_frames.add(current)
+            current = getattr(current, "master", None)
+
+    def _install_mousewheel_router(self) -> None:
+        self._mousewheel_scroll_frames = weakref.WeakSet()
+        self.bind_class(
+            MOUSE_WHEEL_ROUTER_BINDTAG,
+            "<MouseWheel>",
+            self._route_mousewheel,
+        )
+        self.bind_class(
+            MOUSE_WHEEL_ROUTER_BINDTAG,
+            "<Button-4>",
+            self._route_mousewheel,
+        )
+        self.bind_class(
+            MOUSE_WHEEL_ROUTER_BINDTAG,
+            "<Button-5>",
+            self._route_mousewheel,
+        )
+        self.bind_all("<Enter>", self._on_mousewheel_widget_enter, add="+")
+        self._tag_mousewheel_descendants(self)
+
+    def _current_primary_scroll_frame(self):
+        scroll_names_by_page = {
+            "home": ("home_scroll",),
+            "writing": ("writing_scroll",),
+            "automation": ("automation_list",),
+            "naver_blog": ("naver_blog_scroll",),
+            "naver_kin": ("naver_kin_scroll",),
+            "public_data": ("public_data_scroll",),
+            "prompts": ("prompts_scroll",),
+            "settings": ("settings_scroll", "basic_scroll", "theme_scroll"),
+        }
+        for name in scroll_names_by_page.get(getattr(self, "current_page", "home"), ()):
+            scroll_frame = getattr(self, name, None)
+            parent_frame = getattr(scroll_frame, "_parent_frame", None)
+            try:
+                if scroll_frame is not None and parent_frame.winfo_ismapped():
+                    return scroll_frame
+            except (AttributeError, tk.TclError):
+                continue
+        return None
+
+    def _route_mousewheel(self, event=None):
+        widget = getattr(event, "widget", None)
+        units = self._mousewheel_units(event)
+        if widget is None or units == 0:
+            return None
+
+        # Text editors get first chance to scroll.  Once they reach an edge,
+        # the wheel continues into the enclosing page instead of becoming
+        # trapped over the editor.
+        current = widget
+        while current is not None:
+            if isinstance(current, tk.Text):
+                if self._vertical_view_can_move(current, units):
+                    try:
+                        current.yview_scroll(units, "units")
+                    except tk.TclError:
+                        pass
+                    return "break"
+                break
+            current = getattr(current, "master", None)
+
+        candidates = []
+        for scroll_frame in tuple(self._mousewheel_scroll_frames):
+            try:
+                distance = self._widget_distance_to_scroll_frame(widget, scroll_frame)
+                if distance is None or not scroll_frame._parent_frame.winfo_ismapped():
+                    continue
+            except (AttributeError, tk.TclError):
+                continue
+            candidates.append((distance, scroll_frame))
+        candidates.sort(key=lambda item: item[0])
+
+        for _, scroll_frame in candidates:
+            canvas = getattr(scroll_frame, "_parent_canvas", None)
+            if canvas is not None and self._vertical_view_can_move(canvas, units):
+                try:
+                    canvas.yview_scroll(units, "units")
+                except tk.TclError:
+                    pass
+                return "break"
+
+        # Fixed headers/status panels live outside the scrollable frame.  When
+        # the pointer is over them, route the wheel to the visible page scroll.
+        page = self._page_frame_map().get(getattr(self, "current_page", "home"))
+        primary = self._current_primary_scroll_frame()
+        if page is not None and self._widget_is_descendant_of(widget, page):
+            canvas = getattr(primary, "_parent_canvas", None)
+            if canvas is not None and self._vertical_view_can_move(canvas, units):
+                try:
+                    canvas.yview_scroll(units, "units")
+                except tk.TclError:
+                    pass
+            return "break"
+
+        if candidates:
+            return "break"
+        return None
 
     def _is_scroll_content_taller_than_view(self, scroll_frame: ctk.CTkScrollableFrame) -> bool:
         canvas = getattr(scroll_frame, "_parent_canvas", None)

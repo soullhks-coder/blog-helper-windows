@@ -141,6 +141,23 @@ def main() -> None:
             assert app.home_publish_summary_frame.winfo_rooty() == fixed_summary_y
             app.home_scroll._parent_canvas.yview_moveto(0)
             settle()
+            fixed_wheel_widget = app.home_publish_count_labels["wordpress"]
+            assert app_module.MOUSE_WHEEL_ROUTER_BINDTAG in fixed_wheel_widget.bindtags()
+            home_canvas = app.home_scroll._parent_canvas
+            home_canvas.yview_moveto(1)
+            settle()
+            home_before_wheel = home_canvas.yview()[0]
+            if home_before_wheel > 0:
+                wheel_event = type(
+                    "WheelEvent",
+                    (),
+                    {"widget": fixed_wheel_widget, "delta": 4, "num": 0},
+                )()
+                assert app._route_mousewheel(wheel_event) == "break"
+                settle()
+                assert home_canvas.yview()[0] < home_before_wheel
+            home_canvas.yview_moveto(0)
+            settle()
             assert app.home_refresh_button.master is app.home_control_card
             assert int(app.home_refresh_button.grid_info()["row"]) == 1
             assert int(app.home_refresh_button.grid_info()["column"]) == 2
@@ -270,6 +287,26 @@ def main() -> None:
             assert "✓" in app.writing_section_title_labels["keyword"].cget("text")
             app._set_writing_progress(3, "글 확인 중", 0.5)
             assert app.writing_fixed_progress_bar.get() == 0.625
+
+            # A textbox at its own upper edge must hand an upward wheel gesture
+            # to the enclosing page instead of swallowing it intermittently.
+            app._open_writing_section("publish")
+            settle()
+            writing_canvas = app.writing_scroll._parent_canvas
+            wheel_textbox = app.thumbnail_prompt_preview._textbox
+            assert app_module.MOUSE_WHEEL_ROUTER_BINDTAG in wheel_textbox.bindtags()
+            wheel_textbox.yview_moveto(0)
+            writing_canvas.yview_moveto(1)
+            settle()
+            writing_before_wheel = writing_canvas.yview()[0]
+            wheel_event = type(
+                "WheelEvent",
+                (),
+                {"widget": wheel_textbox, "delta": 4, "num": 0},
+            )()
+            assert app._route_mousewheel(wheel_event) == "break"
+            settle()
+            assert writing_canvas.yview()[0] < writing_before_wheel
 
             palette = app._theme_palette()
             app._finish_theme_paint(force=True)
