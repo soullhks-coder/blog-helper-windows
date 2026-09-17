@@ -2365,7 +2365,9 @@ def _normalize_naver_blog_ai_tag(value: str) -> str:
     tag = re.sub(r"^\s*(?:[-–—*•·]+|\d+[.)]\s*)", "", tag)
     tag = re.sub(r"^[#＃]+", "", tag)
     tag = re.sub(r"[^0-9A-Za-z가-힣&+._·\-\s]", " ", tag)
-    return re.sub(r"\s+", " ", tag).strip(" ._-·")
+    # Naver treats whitespace inside one tag inconsistently and can split it
+    # into duplicate chips. Always store and type the compact form.
+    return re.sub(r"\s+", "", tag).strip("._-·")
 
 
 def _naver_blog_ai_tag_is_grounded(tag: str, source_text: str) -> bool:
@@ -2518,8 +2520,9 @@ def generate_naver_blog_tags_with_ai(
         "3. 가격, 후기, 추천, 효능, 구매, 신청방법 같은 단어는 그 내용이 원고의 핵심으로 실제 등장할 때만 사용합니다.\n"
         "4. 뉴스·정치·정보·최신·정리처럼 너무 넓은 단어만 단독 태그로 쓰지 않습니다.\n"
         "5. 각 태그는 2~30자, 중복 없이 작성하고 # 기호를 붙이지 않습니다.\n"
-        "6. 설명이나 마크다운 없이 JSON 문자열 배열 하나만 반환합니다.\n"
-        "반환 예시: [\"인물명\", \"정당명\", \"정책명\", \"핵심 사건\"]\n\n"
+        "6. 태그 안에는 띄어쓰기를 절대 넣지 말고 모든 단어를 붙여서 작성합니다.\n"
+        "7. 설명이나 마크다운 없이 JSON 문자열 배열 하나만 반환합니다.\n"
+        "반환 예시: [\"인물명\", \"정당명\", \"민생지원정책\", \"핵심사건\"]\n\n"
         f"카테고리: {category}\n"
         f"입력 주제: {topic}\n"
         f"최종 제목: {title}\n\n"
@@ -12537,12 +12540,11 @@ def fill_naver_blog_publish_tags(
     normalized_tags: list[str] = []
     seen: set[str] = set()
     for tag_name in tag_names or []:
-        tag = re.sub(r"^[#＃]+", "", str(tag_name or "")).strip()
-        tag = re.sub(r"[\r\n,]+", " ", tag)
-        tag = re.sub(r"\s+", " ", tag).strip()
-        if not tag or tag in seen or len(tag) > 30:
+        tag = _normalize_naver_blog_ai_tag(str(tag_name or ""))
+        tag_key = tag.casefold()
+        if not tag or tag_key in seen or len(tag) > 30:
             continue
-        seen.add(tag)
+        seen.add(tag_key)
         normalized_tags.append(tag)
         if len(normalized_tags) >= 10:
             break

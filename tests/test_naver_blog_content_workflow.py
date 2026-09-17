@@ -1,4 +1,5 @@
 import ast
+import queue
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -64,7 +65,7 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
         prompt = generate.call_args.args[1]
         self.assertIn("최종 본문", prompt)
         self.assertIn(body, prompt)
-        self.assertEqual(tags, ["이재명", "더불어민주당", "민생지원 정책"])
+        self.assertEqual(tags, ["이재명", "더불어민주당", "민생지원정책"])
         self.assertNotIn("후기", " ".join(tags))
         self.assertNotIn("가격", " ".join(tags))
 
@@ -76,7 +77,36 @@ class NaverBlogContentWorkflowTests(unittest.TestCase):
             "국회 본회의를 앞두고 여야 협상이 이어졌습니다.",
         )
 
-        self.assertEqual(tags, ["국회 본회의", "여야 협상"])
+        self.assertEqual(tags, ["국회본회의", "여야협상"])
+
+    def test_naver_tags_always_remove_internal_whitespace_before_input(self) -> None:
+        self.assertEqual(main._normalize_naver_blog_ai_tag("  #구르미 그린 달빛  "), "구르미그린달빛")
+        self.assertEqual(main._normalize_naver_blog_ai_tag("박 보 검"), "박보검")
+
+        tag_source = self._method_source("fill_naver_blog_publish_tags")
+        self.assertIn("_normalize_naver_blog_ai_tag", tag_source)
+        self.assertIn("tag.casefold()", tag_source)
+
+        entered: list[str] = []
+        input_locator = object()
+        with (
+            patch.object(main, "_open_naver_blog_publish_panel", return_value=input_locator),
+            patch.object(main, "_wait_for_naver_blog_tag_input", return_value=input_locator),
+            patch.object(
+                main,
+                "_enter_naver_blog_tag",
+                side_effect=lambda _locator, tag: entered.append(tag) or True,
+            ),
+            patch.object(main.time, "sleep"),
+        ):
+            count = main.fill_naver_blog_publish_tags(
+                object(),
+                ["구르미 그린 달빛", "구르미그린달빛", "박 보 검"],
+                queue.Queue(),
+            )
+
+        self.assertEqual(count, 2)
+        self.assertEqual(entered, ["구르미그린달빛", "박보검"])
 
     def test_fallback_tags_only_use_finished_article_words(self) -> None:
         tags = main.build_naver_blog_grounded_fallback_tags(
