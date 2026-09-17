@@ -28,6 +28,9 @@ naver-*-profile*/
 tistory-*-profile*/
 tistory-automation*.js
 *.png
+!assets/wordpress-logo.png
+!assets/tistory-logo.png
+!assets/blogspot-logo.png
 *.jpg
 *.jpeg
 *.webp

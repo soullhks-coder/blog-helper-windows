@@ -258,6 +258,11 @@ _install_windows_dark_ctk_button_release_fix()
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 APP_ICON_PATH = RESOURCE_DIR / "assets" / "blog_helper_icon.png"
+HOME_PLATFORM_LOGO_PATHS = {
+    "wordpress": RESOURCE_DIR / "assets" / "wordpress-logo.png",
+    "tistory": RESOURCE_DIR / "assets" / "tistory-logo.png",
+    "blogspot": RESOURCE_DIR / "assets" / "blogspot-logo.png",
+}
 if os.name == "nt":
     DEFAULT_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Blog Helper"
 else:
@@ -24166,6 +24171,7 @@ class KeywordApp(ctk.CTk):
         self._app_title_save_job = None
         self._sidebar_menu_label_save_job = None
         self._sidebar_icon_image_cache: dict[tuple[str, str, int], ctk.CTkImage] = {}
+        self._home_platform_logo_cache: dict[str, ctk.CTkImage] = {}
         self._bootstrap_icon_font = None
         self._last_text_input_at = 0.0
         self._theme_paint_defer_job = None
@@ -26257,10 +26263,12 @@ class KeywordApp(ctk.CTk):
             count_label = ctk.CTkLabel(
                 summary_card,
                 text=f"{platform_label} 오늘 발행 0건",
+                image=self._home_platform_logo(platform),
+                compound="left",
                 text_color=palette["text"],
                 font=ctk.CTkFont(size=15, weight="bold"),
             )
-            count_label.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+            count_label.grid(row=0, column=0, padx=18, pady=14, sticky="nsew")
             self.home_publish_count_labels[platform] = count_label
         self._refresh_home_publish_counts()
 
@@ -26370,6 +26378,28 @@ class KeywordApp(ctk.CTk):
             sticky="ew",
         )
         self._render_home_adsense_summary()
+
+    def _home_platform_logo(self, platform: str) -> ctk.CTkImage | None:
+        cached = self._home_platform_logo_cache.get(platform)
+        if cached is not None:
+            return cached
+        image_path = HOME_PLATFORM_LOGO_PATHS.get(platform)
+        if Image is None or image_path is None or not image_path.exists():
+            return None
+        try:
+            with Image.open(image_path) as opened:
+                logo = opened.convert("RGBA").copy()
+            resampling = getattr(Image, "Resampling", Image).LANCZOS
+            logo.thumbnail((128, 128), resampling)
+            rendered = ctk.CTkImage(
+                light_image=logo,
+                dark_image=logo,
+                size=(42, 42),
+            )
+        except Exception:
+            return None
+        self._home_platform_logo_cache[platform] = rendered
+        return rendered
 
     def _refresh_home_publish_counts(self) -> None:
         labels = getattr(self, "home_publish_count_labels", {})

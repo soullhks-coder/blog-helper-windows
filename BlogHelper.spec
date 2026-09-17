@@ -9,6 +9,9 @@ hiddenimports = []
 datas += [
     ("version.json", "."),
     ("assets/blog_helper_icon.png", "assets"),
+    ("assets/wordpress-logo.png", "assets"),
+    ("assets/tistory-logo.png", "assets"),
+    ("assets/blogspot-logo.png", "assets"),
     ("assets/bootstrap-icons.woff", "assets"),
     ("assets/bootstrap-icons.css", "assets"),
     ("assets/bootstrap-icons-LICENSE.txt", "assets"),

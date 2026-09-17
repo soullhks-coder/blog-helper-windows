@@ -120,6 +120,12 @@ def main() -> None:
             app.update()
             settle(900)
             screenshot("home")
+            assert tuple(app._home_platform_logo_cache) == (
+                "wordpress", "tistory", "blogspot",
+            )
+            for platform, count_label in app.home_publish_count_labels.items():
+                assert count_label.cget("image") is app._home_platform_logo_cache[platform]
+                assert app._home_platform_logo_cache[platform].cget("size") == (42, 42)
             assert app.home_adsense_card.winfo_ismapped()
             assert resolved_color(app.home_adsense_title_label, "text_color") == "#ffffff"
             assert tuple(app.home_adsense_value_labels) == (
