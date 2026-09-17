@@ -20,6 +20,45 @@ def _insight(keyword: str, source: str) -> main.KeywordInsight:
 
 
 class HomeDashboardTests(unittest.TestCase):
+    def test_home_publish_counts_use_the_active_platform_accounts(self) -> None:
+        class LabelStub:
+            def __init__(self) -> None:
+                self.text = ""
+
+            def configure(self, **kwargs) -> None:
+                self.text = str(kwargs.get("text") or "")
+
+        labels = {
+            "wordpress": LabelStub(),
+            "tistory": LabelStub(),
+            "blogspot": LabelStub(),
+        }
+        app = SimpleNamespace(home_publish_count_labels=labels)
+        app._daily_publish_account = lambda platform: f"{platform}-active-profile"
+
+        with patch.object(
+            main.DailyPublishLimitStore,
+            "count",
+            side_effect=lambda platform, _account: {
+                "wordpress": 3,
+                "tistory": 2,
+                "blogspot": 1,
+            }[platform],
+        ) as count_mock:
+            main.KeywordApp._refresh_home_publish_counts(app)
+
+        self.assertEqual(labels["wordpress"].text, "워드프레스 오늘 발행 3건")
+        self.assertEqual(labels["tistory"].text, "티스토리 오늘 발행 2건")
+        self.assertEqual(labels["blogspot"].text, "블로그스팟 오늘 발행 1건")
+        self.assertEqual(
+            [call.args for call in count_mock.call_args_list],
+            [
+                ("wordpress", "wordpress-active-profile"),
+                ("tistory", "tistory-active-profile"),
+                ("blogspot", "blogspot-active-profile"),
+            ],
+        )
+
     def test_home_preferences_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "app_state.json"

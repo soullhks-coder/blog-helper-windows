@@ -26003,6 +26003,72 @@ class KeywordApp(ctk.CTk):
             if cached:
                 self._render_home_keyword_source(source)
 
+        publish_summary_frame = ctk.CTkFrame(
+            self.home_scroll,
+            fg_color="transparent",
+        )
+        publish_summary_frame.grid(row=2, column=0, pady=(12, 0), sticky="ew")
+        for column in range(3):
+            publish_summary_frame.grid_columnconfigure(
+                column,
+                weight=1,
+                uniform="home_publish_summary",
+            )
+
+        self.home_publish_count_labels: dict[str, object] = {}
+        for column, (platform, platform_label) in enumerate(
+            (
+                ("wordpress", "워드프레스"),
+                ("tistory", "티스토리"),
+                ("blogspot", "블로그스팟"),
+            )
+        ):
+            summary_card = ctk.CTkFrame(
+                publish_summary_frame,
+                height=92,
+                fg_color=palette["panel"],
+                corner_radius=20,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            summary_card.grid(
+                row=0,
+                column=column,
+                padx=(0, 8) if column < 2 else 0,
+                sticky="nsew",
+            )
+            summary_card.grid_propagate(False)
+            summary_card.grid_columnconfigure(0, weight=1)
+            summary_card.grid_rowconfigure(0, weight=1)
+            count_label = ctk.CTkLabel(
+                summary_card,
+                text=f"{platform_label} 오늘 발행 0건",
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=15, weight="bold"),
+            )
+            count_label.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+            self.home_publish_count_labels[platform] = count_label
+        self._refresh_home_publish_counts()
+
+    def _refresh_home_publish_counts(self) -> None:
+        labels = getattr(self, "home_publish_count_labels", {})
+        if not labels:
+            return
+        platform_labels = {
+            "wordpress": "워드프레스",
+            "tistory": "티스토리",
+            "blogspot": "블로그스팟",
+        }
+        for platform, platform_label in platform_labels.items():
+            label = labels.get(platform)
+            if label is None:
+                continue
+            count = DailyPublishLimitStore.count(
+                platform,
+                self._daily_publish_account(platform),
+            )
+            label.configure(text=f"{platform_label} 오늘 발행 {count}건")
+
     def _refresh_home_prompt_menu(self) -> None:
         if not hasattr(self, "home_prompt_menu"):
             return
@@ -36002,6 +36068,7 @@ class KeywordApp(ctk.CTk):
                     text=format_daily_publish_usage(count, limit),
                     text_color=("#607089", "#9aa7bb"),
                 )
+        self._refresh_home_publish_counts()
 
     def _build_wordpress_card(self) -> None:
         title = ctk.CTkLabel(
@@ -41436,6 +41503,7 @@ class KeywordApp(ctk.CTk):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)
         if page_name == "home":
+            self._refresh_home_publish_counts()
             self.after(80, self._load_home_dashboard_keywords)
         if page_name == "automation":
             if self._is_windows_dark_theme():
