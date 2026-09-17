@@ -133,7 +133,14 @@ def main() -> None:
             assert int(app.home_adsense_card.grid_info()["row"]) == 0
             assert int(app.home_control_card.grid_info()["row"]) == 1
             assert int(app.home_keyword_cards_frame.grid_info()["row"]) == 2
-            assert int(app.home_publish_summary_frame.grid_info()["row"]) == 3
+            assert app.home_publish_summary_frame.master is app.home_page
+            assert int(app.home_publish_summary_frame.grid_info()["row"]) == 2
+            fixed_summary_y = app.home_publish_summary_frame.winfo_rooty()
+            app.home_scroll._parent_canvas.yview_moveto(1)
+            settle()
+            assert app.home_publish_summary_frame.winfo_rooty() == fixed_summary_y
+            app.home_scroll._parent_canvas.yview_moveto(0)
+            settle()
             assert app.home_refresh_button.master is app.home_control_card
             assert int(app.home_refresh_button.grid_info()["row"]) == 1
             assert int(app.home_refresh_button.grid_info()["column"]) == 2

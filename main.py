@@ -26077,7 +26077,7 @@ class KeywordApp(ctk.CTk):
             self.home_page,
             fg_color="transparent",
         )
-        self.home_scroll.grid(row=1, column=0, padx=28, pady=(0, 20), sticky="nsew")
+        self.home_scroll.grid(row=1, column=0, padx=28, pady=(0, 10), sticky="nsew")
         self.home_scroll.grid_columnconfigure(0, weight=1)
 
         control_card = ctk.CTkFrame(
@@ -26258,11 +26258,17 @@ class KeywordApp(ctk.CTk):
                 self._render_home_keyword_source(source)
 
         publish_summary_frame = ctk.CTkFrame(
-            self.home_scroll,
+            self.home_page,
             fg_color="transparent",
         )
         self.home_publish_summary_frame = publish_summary_frame
-        publish_summary_frame.grid(row=3, column=0, pady=(12, 0), sticky="ew")
+        publish_summary_frame.grid(
+            row=2,
+            column=0,
+            padx=28,
+            pady=(0, 18),
+            sticky="ew",
+        )
         for column in range(3):
             publish_summary_frame.grid_columnconfigure(
                 column,
