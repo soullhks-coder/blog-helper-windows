@@ -580,6 +580,13 @@ NAVER_BLOG_MANUAL_IMAGE_SUFFIXES = {
     ".webp",
     ".bmp",
 }
+INLINE_IMAGES_PROVIDER_MANUAL = "이미지 직접 첨부"
+INLINE_IMAGES_PROVIDERS = (
+    "Imagen API",
+    "Codex CLI + Imagen",
+    "카드뉴스 생성",
+    INLINE_IMAGES_PROVIDER_MANUAL,
+)
 SIDEBAR_MENU_DEFAULT_LABELS = {
     "writing": "블로그글쓰기",
     "automation": "블로그자동화",
@@ -3135,6 +3142,7 @@ class WordPressSettings:
     inline_images_enabled: bool = False
     inline_images_count: int = 2
     inline_images_provider: str = "Imagen API"
+    inline_images_manual_paths: list[str] = field(default_factory=list)
     preferred_ai_provider: str = WRITING_MODEL_CODEX
     blogspot_profiles: list[dict] = field(default_factory=list)
     blogspot_active_profile: str = "블로그스팟 1"
@@ -3763,6 +3771,9 @@ class AppStateStore:
         naver_manual_image_paths = payload.get("naver_blog_manual_image_paths", [])
         if not isinstance(naver_manual_image_paths, list):
             naver_manual_image_paths = []
+        inline_manual_image_paths = payload.get("inline_images_manual_paths", [])
+        if not isinstance(inline_manual_image_paths, list):
+            inline_manual_image_paths = []
         settings = WordPressSettings(
             blog_url=payload.get("blog_url", ""),
             username=username,
@@ -3806,6 +3817,11 @@ class AppStateStore:
             inline_images_enabled=payload.get("inline_images_enabled", False),
             inline_images_count=payload.get("inline_images_count", 2),
             inline_images_provider=payload.get("inline_images_provider", "Imagen API"),
+            inline_images_manual_paths=[
+                str(path)
+                for path in inline_manual_image_paths
+                if str(path or "").strip()
+            ],
             preferred_ai_provider=normalize_writing_model(
                 payload.get("preferred_ai_provider", WRITING_MODEL_CODEX)
             ),
@@ -20593,7 +20609,7 @@ class AutomationKeywordQueueWorker(threading.Thread):
         article_html, provider_name = self._generate_with_provider(article_prompt)
         article_html = normalize_generated_article_html(article_html)
         title = generated_title or extract_title_from_article_html(article_html, keyword)
-        if self.settings.inline_images_enabled and self.settings.imagen_api_key:
+        if self.settings.inline_images_enabled:
             article_html = self._attach_inline_images(title, keyword, article_html)
         writing_links = payload.get("writing_links") or []
         if isinstance(writing_links, list) and writing_links:
@@ -20666,8 +20682,40 @@ class AutomationKeywordQueueWorker(threading.Thread):
     def _attach_inline_images(self, title: str, keyword: str, article_html: str) -> str:
         count = max(1, min(int(self.settings.inline_images_count or 2), 4))
         provider = self.settings.inline_images_provider or "Imagen API"
+        if provider == INLINE_IMAGES_PROVIDER_MANUAL:
+            paths = usable_inline_manual_image_paths(
+                self.settings.inline_images_manual_paths,
+                count,
+            )
+            if not paths:
+                self.result_queue.put(
+                    (
+                        "automation_collect_progress",
+                        "직접 첨부 이미지가 없거나 파일을 찾을 수 없어 본문 이미지 삽입을 건너뜁니다.",
+                    )
+                )
+                return article_html
+            self.result_queue.put(
+                (
+                    "automation_collect_progress",
+                    f"직접 선택한 이미지 {len(paths)}장을 본문 섹션에 배치합니다.",
+                )
+            )
+            figures = [
+                build_inline_image_figure(Path(path), title, index)
+                for index, path in enumerate(paths, start=1)
+            ]
+            return insert_inline_image_figures(article_html, figures)
         if provider == "카드뉴스 생성":
             self.result_queue.put(("automation_collect_progress", "카드뉴스 생성은 썸네일 제작 단계에서 진행하도록 표시만 준비합니다."))
+            return article_html
+        if not self.settings.imagen_api_key:
+            self.result_queue.put(
+                (
+                    "automation_collect_progress",
+                    "Imagen API 키가 없어 본문 이미지 삽입을 건너뜁니다.",
+                )
+            )
             return article_html
         imagen_client = ImagenClient(self.settings.imagen_api_key)
         figures: list[str] = []
@@ -21112,6 +21160,31 @@ def merge_naver_blog_manual_image_paths(
             f"수동 이미지는 설정의 첨부 이미지 수({limit}장)까지만 추가할 수 있습니다."
         )
     return merged
+
+
+def usable_inline_manual_image_paths(
+    image_paths: list[str] | tuple[str, ...] | None,
+    max_count: int,
+) -> list[str]:
+    """Return unique, supported manual images that still exist on disk."""
+    limit = max(1, min(int(max_count or 1), 4))
+    usable: list[str] = []
+    seen: set[str] = set()
+    for raw_path in image_paths or []:
+        path = str(raw_path or "").strip()
+        if not path or Path(path).suffix.lower() not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES:
+            continue
+        expanded = Path(path).expanduser()
+        if not expanded.is_file():
+            continue
+        fingerprint = os.path.normcase(os.path.abspath(str(expanded)))
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        usable.append(str(expanded))
+        if len(usable) >= limit:
+            break
+    return usable
 
 
 def prepare_naver_blog_manual_image_files(
@@ -22514,13 +22587,37 @@ class ArticleGenerationWorker(threading.Thread):
         )
 
     def _attach_inline_images(self, title: str, article_html: str) -> str:
-        if not self.settings.imagen_api_key:
-            self.result_queue.put(("article_progress", (0.86, "Imagen API 키가 없어 본문 이미지 삽입은 건너뜁니다.")))
-            return article_html
         count = max(1, min(int(self.settings.inline_images_count or 2), 4))
         provider = self.settings.inline_images_provider or "Imagen API"
+        if provider == INLINE_IMAGES_PROVIDER_MANUAL:
+            paths = usable_inline_manual_image_paths(
+                self.settings.inline_images_manual_paths,
+                count,
+            )
+            if not paths:
+                self.result_queue.put(
+                    (
+                        "article_progress",
+                        (0.9, "직접 첨부 이미지가 없거나 파일을 찾을 수 없어 이미지 삽입을 건너뜁니다."),
+                    )
+                )
+                return article_html
+            self.result_queue.put(
+                (
+                    "article_progress",
+                    (0.92, f"직접 선택한 이미지 {len(paths)}장을 본문 섹션에 배치하고 있습니다..."),
+                )
+            )
+            figures = [
+                build_inline_image_figure(Path(path), title, index)
+                for index, path in enumerate(paths, start=1)
+            ]
+            return insert_inline_image_figures(article_html, figures)
         if provider == "카드뉴스 생성":
             self.result_queue.put(("article_progress", (0.92, "카드뉴스 생성은 4번 썸네일 제작 단계에서 진행합니다.")))
+            return article_html
+        if not self.settings.imagen_api_key:
+            self.result_queue.put(("article_progress", (0.86, "Imagen API 키가 없어 본문 이미지 삽입은 건너뜁니다.")))
             return article_html
         imagen_client = ImagenClient(self.settings.imagen_api_key)
         figures: list[str] = []
@@ -35406,7 +35503,7 @@ class KeywordApp(ctk.CTk):
             checkbox_height=22,
             corner_radius=6,
             font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._save_ui_state,
+            command=self._on_inline_images_enabled_changed,
         )
         inline_checkbox.grid(row=0, column=0, padx=16, pady=14, sticky="w")
 
@@ -35425,7 +35522,7 @@ class KeywordApp(ctk.CTk):
 
         self.inline_images_provider_menu = ctk.CTkOptionMenu(
             inline_row,
-            values=["Imagen API", "Codex CLI + Imagen", "카드뉴스 생성"],
+            values=list(INLINE_IMAGES_PROVIDERS),
             height=40,
             corner_radius=12,
             fg_color="#3b4658",
@@ -35440,7 +35537,7 @@ class KeywordApp(ctk.CTk):
             self.imagen_card,
             text=(
                 "본문 이미지 기본 삽입을 켜면 글 작성 직후 최대 4장의 이미지를 섹션별로 자동 배치합니다. "
-                "Codex CLI + Imagen은 Codex가 이미지 프롬프트를 설계하고 Imagen이 실제 이미지를 생성합니다."
+                "직접 첨부는 블로그글쓰기 2단계에서 선택한 이미지를 사용합니다."
             ),
             text_color="#c3cfdf",
             justify="left",
@@ -36813,13 +36910,13 @@ class KeywordApp(ctk.CTk):
             checkbox_height=22,
             corner_radius=6,
             font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._save_ui_state,
+            command=self._on_inline_images_enabled_changed,
         )
         self.writing_inline_images_checkbox.grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
 
         ctk.CTkLabel(
             inline_image_card,
-            text="본문 섹션별로 자동 배치할 이미지 개수와 생성 방식을 선택하세요. 최대 4장까지 가능합니다.",
+            text="본문 섹션별로 배치할 이미지 개수와 생성·첨부 방식을 선택하세요. 최대 4장까지 가능합니다.",
             anchor="w",
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=12),
@@ -36840,7 +36937,7 @@ class KeywordApp(ctk.CTk):
 
         self.writing_inline_images_provider_menu = ctk.CTkOptionMenu(
             inline_image_card,
-            values=["Imagen API", "Codex CLI + Imagen", "카드뉴스 생성"],
+            values=list(INLINE_IMAGES_PROVIDERS),
             height=38,
             corner_radius=12,
             fg_color="#3b4658",
@@ -36851,8 +36948,104 @@ class KeywordApp(ctk.CTk):
         )
         self.writing_inline_images_provider_menu.grid(row=0, column=2, padx=(10, 16), pady=(14, 4), sticky="ew")
 
+        self.writing_manual_image_panel = ctk.CTkFrame(
+            inline_image_card,
+            fg_color=self._theme_palette()["card"],
+            corner_radius=14,
+        )
+        self.writing_manual_image_panel.grid(
+            row=2,
+            column=0,
+            columnspan=3,
+            padx=16,
+            pady=(0, 12),
+            sticky="ew",
+        )
+        self.writing_manual_image_panel.grid_columnconfigure(0, weight=1)
+
+        writing_manual_action_row = ctk.CTkFrame(
+            self.writing_manual_image_panel,
+            fg_color="transparent",
+        )
+        writing_manual_action_row.grid(
+            row=0,
+            column=0,
+            padx=12,
+            pady=(12, 6),
+            sticky="ew",
+        )
+        writing_manual_action_row.grid_columnconfigure(0, weight=1)
+        self.writing_manual_image_button = ctk.CTkButton(
+            writing_manual_action_row,
+            text="컴퓨터에서 이미지 선택",
+            height=36,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._choose_writing_manual_images,
+        )
+        self.writing_manual_image_button.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.writing_manual_image_clear_button = ctk.CTkButton(
+            writing_manual_action_row,
+            text="선택 해제",
+            width=92,
+            height=36,
+            corner_radius=12,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._clear_writing_manual_images,
+        )
+        self.writing_manual_image_clear_button.grid(row=0, column=1, sticky="e")
+
+        self.writing_manual_thumbnail_frame = ctk.CTkFrame(
+            self.writing_manual_image_panel,
+            fg_color="transparent",
+        )
+        self.writing_manual_thumbnail_frame.grid(
+            row=1,
+            column=0,
+            padx=12,
+            pady=(2, 4),
+            sticky="ew",
+        )
+        for column in range(4):
+            self.writing_manual_thumbnail_frame.grid_columnconfigure(column, weight=0)
+        self.writing_manual_thumbnail_images: list[ctk.CTkImage] = []
+        self.writing_manual_image_summary_label = ctk.CTkLabel(
+            self.writing_manual_image_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=12),
+        )
+        self.writing_manual_image_summary_label.grid(
+            row=2,
+            column=0,
+            padx=12,
+            pady=(0, 4),
+            sticky="ew",
+        )
+        self.writing_manual_image_limit_label = ctk.CTkLabel(
+            self.writing_manual_image_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.writing_manual_image_limit_label.grid(
+            row=3,
+            column=0,
+            padx=12,
+            pady=(0, 12),
+            sticky="ew",
+        )
+
         provider_quick_row = ctk.CTkFrame(inline_image_card, fg_color="transparent")
-        provider_quick_row.grid(row=2, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="ew")
+        provider_quick_row.grid(row=3, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="ew")
         provider_quick_row.grid_columnconfigure((0, 1, 2), weight=1)
 
         for column, (provider_name, button_text) in enumerate(
@@ -36872,6 +37065,13 @@ class KeywordApp(ctk.CTk):
                 font=ctk.CTkFont(size=12, weight="bold"),
                 command=lambda value=provider_name: self._select_inline_images_provider(value),
             ).grid(row=0, column=column, padx=(0 if column == 0 else 8, 0), sticky="ew")
+
+        self.writing_manual_image_paths = [
+            str(path)
+            for path in self.wordpress_settings.inline_images_manual_paths
+            if str(path or "").strip()
+        ]
+        self._refresh_writing_manual_image_controls()
 
         self.link_card = ctk.CTkFrame(keyword_card, fg_color="transparent")
         self.link_card.grid(row=7, column=0, padx=24, pady=(0, 8), sticky="ew")
@@ -39887,6 +40087,12 @@ class KeywordApp(ctk.CTk):
             self.writing_inline_images_count_menu.set(str(self.wordpress_settings.inline_images_count or 2))
         if hasattr(self, "writing_inline_images_provider_menu"):
             self.writing_inline_images_provider_menu.set(self.wordpress_settings.inline_images_provider or "Imagen API")
+        self.writing_manual_image_paths = [
+            str(path)
+            for path in self.wordpress_settings.inline_images_manual_paths
+            if str(path or "").strip()
+        ]
+        self._refresh_writing_manual_image_controls()
         self.wordpress_settings.tistory_profiles = normalize_tistory_profiles(
             self.wordpress_settings.tistory_profiles,
             legacy={
@@ -40346,15 +40552,272 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "writing_inline_images_count_menu") and self.writing_inline_images_count_menu.get() != normalized:
             self.writing_inline_images_count_menu.set(normalized)
         self.wordpress_settings.inline_images_count = int(normalized)
+        self._refresh_writing_manual_image_controls()
         self._save_ui_state()
 
     def _on_inline_images_provider_changed(self, provider_name: str) -> None:
-        provider = provider_name if provider_name in ("Imagen API", "Codex CLI + Imagen", "카드뉴스 생성") else "Imagen API"
+        provider = provider_name if provider_name in INLINE_IMAGES_PROVIDERS else "Imagen API"
+        if provider == INLINE_IMAGES_PROVIDER_MANUAL and not self.inline_images_enabled_var.get():
+            self.inline_images_enabled_var.set(True)
         if hasattr(self, "inline_images_provider_menu") and self.inline_images_provider_menu.get() != provider:
             self.inline_images_provider_menu.set(provider)
         if hasattr(self, "writing_inline_images_provider_menu") and self.writing_inline_images_provider_menu.get() != provider:
             self.writing_inline_images_provider_menu.set(provider)
         self.wordpress_settings.inline_images_provider = provider
+        self.wordpress_settings.inline_images_enabled = bool(
+            self.inline_images_enabled_var.get()
+        )
+        self._refresh_writing_manual_image_controls()
+        self._save_ui_state()
+
+    def _on_inline_images_enabled_changed(self) -> None:
+        self.wordpress_settings.inline_images_enabled = bool(
+            self.inline_images_enabled_var.get()
+        )
+        self._refresh_writing_manual_image_controls()
+        self._save_ui_state()
+
+    def _writing_manual_image_limit(self) -> int:
+        if hasattr(self, "writing_inline_images_count_menu"):
+            return max(
+                1,
+                min(self._safe_int(self.writing_inline_images_count_menu.get(), 2), 4),
+            )
+        return max(
+            1,
+            min(int(self.wordpress_settings.inline_images_count or 2), 4),
+        )
+
+    def _current_writing_manual_image_paths(self) -> list[str]:
+        raw_paths = (
+            self.writing_manual_image_paths
+            if hasattr(self, "writing_manual_image_paths")
+            else self.wordpress_settings.inline_images_manual_paths
+        )
+        paths: list[str] = []
+        seen: set[str] = set()
+        for raw_path in raw_paths or []:
+            path = str(raw_path or "").strip()
+            if not path:
+                continue
+            fingerprint = os.path.normcase(
+                os.path.abspath(os.path.expanduser(path))
+            )
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            paths.append(path)
+        return paths[: self._writing_manual_image_limit()]
+
+    def _render_writing_manual_image_thumbnails(
+        self,
+        paths: list[str],
+        enabled: bool,
+    ) -> None:
+        if not hasattr(self, "writing_manual_thumbnail_frame"):
+            return
+        frame = self.writing_manual_thumbnail_frame
+        for child in frame.winfo_children():
+            child.destroy()
+        self.writing_manual_thumbnail_images = []
+        if not paths:
+            ctk.CTkLabel(
+                frame,
+                text="이미지를 추가하면 여기에 미리보기가 표시됩니다.",
+                text_color="#77869a",
+                font=ctk.CTkFont(size=12),
+            ).grid(row=0, column=0, columnspan=4, pady=8, sticky="w")
+            return
+
+        palette = self._theme_palette()
+        remove_icon = self._load_naver_blog_remove_icon()
+        for index, path in enumerate(paths):
+            card = ctk.CTkFrame(
+                frame,
+                width=66,
+                height=74,
+                fg_color=palette["input"],
+                corner_radius=12,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            card.grid(
+                row=index // 4,
+                column=index % 4,
+                padx=(0 if index % 4 == 0 else 6, 0),
+                pady=(0, 6),
+                sticky="n",
+            )
+            card.grid_propagate(False)
+            thumbnail = self._create_naver_blog_manual_thumbnail(path)
+            if thumbnail is not None:
+                self.writing_manual_thumbnail_images.append(thumbnail)
+                preview_label = ctk.CTkLabel(
+                    card,
+                    text="",
+                    image=thumbnail,
+                    width=40,
+                    height=40,
+                )
+            else:
+                preview_label = ctk.CTkLabel(
+                    card,
+                    text="미리보기\n불가",
+                    width=40,
+                    height=40,
+                    fg_color=palette["card"],
+                    corner_radius=8,
+                    text_color=palette["subtext"],
+                    font=ctk.CTkFont(size=9, weight="bold"),
+                )
+            preview_label.place(x=13, y=6)
+            filename = Path(path).name
+            display_name = filename if len(filename) <= 10 else f"{filename[:7]}…"
+            ctk.CTkLabel(
+                card,
+                text=display_name,
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=9),
+                width=58,
+                anchor="center",
+            ).place(x=4, y=51)
+            remove_button_kwargs = {
+                "text": "" if remove_icon is not None else "×",
+                "width": 22,
+                "height": 22,
+                "corner_radius": 11,
+                "fg_color": "transparent",
+                "hover_color": palette["hover"],
+                "font": ctk.CTkFont(size=14, weight="bold"),
+                "state": "normal" if enabled else "disabled",
+                "command": lambda selected_path=path: self._remove_writing_manual_image(
+                    selected_path
+                ),
+            }
+            if remove_icon is not None:
+                remove_button_kwargs["image"] = remove_icon
+            ctk.CTkButton(card, **remove_button_kwargs).place(
+                relx=1.0,
+                x=-1,
+                y=1,
+                anchor="ne",
+            )
+
+    def _remove_writing_manual_image(self, image_path: str) -> None:
+        normalized_target = os.path.normcase(
+            os.path.abspath(os.path.expanduser(str(image_path or "")))
+        )
+        self.writing_manual_image_paths = [
+            path
+            for path in self._current_writing_manual_image_paths()
+            if os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+            != normalized_target
+        ]
+        self.wordpress_settings.inline_images_manual_paths = list(
+            self.writing_manual_image_paths
+        )
+        self._refresh_writing_manual_image_controls()
+        self._save_ui_state()
+
+    def _refresh_writing_manual_image_controls(self) -> None:
+        if not hasattr(self, "writing_manual_image_panel"):
+            return
+        provider = (
+            self.writing_inline_images_provider_menu.get()
+            if hasattr(self, "writing_inline_images_provider_menu")
+            else self.wordpress_settings.inline_images_provider
+        )
+        is_manual = provider == INLINE_IMAGES_PROVIDER_MANUAL
+        if is_manual:
+            self.writing_manual_image_panel.grid()
+        else:
+            self.writing_manual_image_panel.grid_remove()
+            return
+
+        enabled = bool(self.inline_images_enabled_var.get())
+        limit = self._writing_manual_image_limit()
+        paths = self._current_writing_manual_image_paths()
+        self.writing_manual_image_paths = paths
+        self.wordpress_settings.inline_images_manual_paths = list(paths)
+        remaining = max(0, limit - len(paths))
+        self.writing_manual_image_button.configure(
+            text=f"컴퓨터에서 이미지 추가 (남은 {remaining}장)",
+            state="normal" if enabled and remaining > 0 else "disabled",
+        )
+        self.writing_manual_image_clear_button.configure(
+            state="normal" if enabled and paths else "disabled"
+        )
+        self._render_writing_manual_image_thumbnails(paths, enabled)
+        missing_count = sum(1 for path in paths if not Path(path).is_file())
+        summary = f"선택 {len(paths)}/{limit}장 · 여러 번 나누어 추가할 수 있습니다."
+        if missing_count:
+            summary += f" · 찾을 수 없는 파일 {missing_count}개"
+        self.writing_manual_image_summary_label.configure(text=summary)
+        self.writing_manual_image_limit_label.configure(
+            text=(
+                f"위 이미지 삽입 개수 기준으로 최대 {limit}장까지 선택할 수 있습니다. "
+                "선택한 장수가 더 적으면 선택한 이미지만 본문에 넣습니다."
+            )
+        )
+
+    def _choose_writing_manual_images(self) -> None:
+        limit = self._writing_manual_image_limit()
+        existing_paths = self._current_writing_manual_image_paths()
+        remaining = max(0, limit - len(existing_paths))
+        if remaining <= 0:
+            messagebox.showinfo(
+                "이미지 추가 완료",
+                f"설정한 최대 이미지 수 {limit}장을 모두 선택했습니다.",
+            )
+            return
+        selected_paths = list(
+            filedialog.askopenfilenames(
+                title=f"본문 이미지 추가 (현재 {len(existing_paths)}장 · 남은 {remaining}장)",
+                filetypes=[
+                    (
+                        "이미지 파일",
+                        "*.png *.jpg *.jpeg *.heic *.HEIC *.gif *.webp *.bmp",
+                    ),
+                    ("모든 파일", "*.*"),
+                ],
+            )
+        )
+        if not selected_paths:
+            return
+        unsupported = [
+            Path(path).name
+            for path in selected_paths
+            if Path(path).suffix.lower() not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES
+        ]
+        if unsupported:
+            messagebox.showwarning(
+                "지원하지 않는 이미지",
+                "PNG, JPG, JPEG, HEIC, GIF, WEBP, BMP 파일만 선택할 수 있습니다.\n\n"
+                + "\n".join(unsupported),
+            )
+            return
+        try:
+            merged_paths = merge_naver_blog_manual_image_paths(
+                existing_paths,
+                selected_paths,
+                limit,
+            )
+        except ValueError:
+            messagebox.showwarning(
+                "이미지 수 초과",
+                f"현재 {len(existing_paths)}장이 선택되어 있어 {remaining}장만 더 추가할 수 있습니다.\n"
+                f"{remaining}장 이하로 다시 선택해 주세요.",
+            )
+            return
+        self.writing_manual_image_paths = merged_paths
+        self.wordpress_settings.inline_images_manual_paths = list(merged_paths)
+        self._refresh_writing_manual_image_controls()
+        self._save_ui_state()
+
+    def _clear_writing_manual_images(self) -> None:
+        self.writing_manual_image_paths = []
+        self.wordpress_settings.inline_images_manual_paths = []
+        self._refresh_writing_manual_image_controls()
         self._save_ui_state()
 
     def _select_inline_images_provider(self, provider_name: str) -> None:
@@ -40931,6 +41394,11 @@ class KeywordApp(ctk.CTk):
                 if hasattr(self, "writing_inline_images_provider_menu")
                 else self.inline_images_provider_menu.get()
             ),
+            inline_images_manual_paths=(
+                self._current_writing_manual_image_paths()
+                if hasattr(self, "writing_manual_image_paths")
+                else list(self.wordpress_settings.inline_images_manual_paths or [])
+            ),
             preferred_ai_provider=normalize_writing_model(
                 self.ai_provider_menu.get()
             ),
@@ -41302,7 +41770,11 @@ class KeywordApp(ctk.CTk):
 
     def _save_imagen_settings(self) -> None:
         settings = self._read_wordpress_settings()
-        needs_imagen_for_inline = settings.inline_images_enabled and settings.inline_images_provider != "카드뉴스 생성"
+        needs_imagen_for_inline = (
+            settings.inline_images_enabled
+            and settings.inline_images_provider
+            not in ("카드뉴스 생성", INLINE_IMAGES_PROVIDER_MANUAL)
+        )
         if (settings.cardnews_enabled or needs_imagen_for_inline) and not settings.imagen_api_key:
             messagebox.showerror("입력 오류", "본문 이미지 자동 생성을 사용하려면 Imagen API 키를 입력해 주세요.")
             return
@@ -42527,6 +42999,9 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.inline_images_enabled = False
         self.wordpress_settings.inline_images_count = 2
         self.wordpress_settings.inline_images_provider = "Imagen API"
+        self.wordpress_settings.inline_images_manual_paths = []
+        self.writing_manual_image_paths = []
+        self._refresh_writing_manual_image_controls()
         AppStateStore.save(self.wordpress_settings)
         KeychainStore.delete_secret(KEYCHAIN_IMAGEN_ACCOUNT)
         self.imagen_status_label.configure(text="● Imagen API 초기화 완료", text_color="#9aa7bb")
@@ -43071,6 +43546,25 @@ class KeywordApp(ctk.CTk):
             return
 
         settings = self._read_wordpress_settings()
+        if (
+            settings.inline_images_enabled
+            and settings.inline_images_provider == INLINE_IMAGES_PROVIDER_MANUAL
+        ):
+            settings.inline_images_manual_paths = usable_inline_manual_image_paths(
+                settings.inline_images_manual_paths,
+                settings.inline_images_count,
+            )
+            if not settings.inline_images_manual_paths:
+                self._stop_writing_auto_progress()
+                messagebox.showwarning(
+                    "이미지 선택 필요",
+                    "이미지 직접 첨부를 선택했습니다. 2단계 이미지 삽입에서 사용할 이미지를 1장 이상 추가해 주세요.",
+                )
+                return
+            self.writing_manual_image_paths = list(
+                settings.inline_images_manual_paths
+            )
+            self._refresh_writing_manual_image_controls()
         self.wordpress_settings = settings
         AppStateStore.save(settings)
 
