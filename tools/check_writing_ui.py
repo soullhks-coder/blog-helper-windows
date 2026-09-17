@@ -120,6 +120,27 @@ def main() -> None:
             app.update()
             settle(900)
             screenshot("home")
+            assert app.home_adsense_card.winfo_ismapped()
+            assert resolved_color(app.home_adsense_title_label, "text_color") == "#ffffff"
+            assert tuple(app.home_adsense_value_labels) == (
+                "today", "yesterday", "last_7_days", "month_to_date", "balance",
+            )
+            for value_label in app.home_adsense_value_labels.values():
+                assert resolved_color(value_label, "text_color") == "#ffffff"
+
+            app._switch_page("settings")
+            app._switch_settings_section("ai")
+            app._switch_settings_tab("adsense")
+            app.update()
+            settle()
+            screenshot("adsense-settings")
+            assert app.adsense_connect_button.cget("text") == "Google 계정 연결 · 로그인"
+            assert tuple(app.adsense_settings_value_labels) == (
+                "today", "yesterday", "last_7_days", "month_to_date", "balance",
+            )
+            for value_label in app.adsense_settings_value_labels.values():
+                assert resolved_color(value_label, "text_color") == "#ffffff"
+
             app._switch_page("writing")
             # Initialize the native window before scheduling the quit timer.
             # CTk's first Windows mainloop can pump events during setup and

@@ -300,6 +300,8 @@ BLOGSPOT_PROFILES_DIR = DATA_DIR / "Blogspot Profiles"
 BLOGSPOT_LOGIN_URL = "https://draft.blogger.com/about/?bpli=1"
 BLOGSPOT_HOME_URL = "https://draft.blogger.com/home"
 BLOGSPOT_IMAGE_SLOT_PREFIX = "BLOG_HELPER_IMAGE_SLOT_"
+ADSENSE_CHROME_PROFILE_DIR = DATA_DIR / "AdSense Chrome Profile"
+ADSENSE_HOME_URL = "https://www.google.com/adsense/new/u/0/"
 THREADS_CHROME_PROFILE_DIR = DATA_DIR / "Threads Chrome Profile"
 THREADS_STORAGE_STATE_FILE = DATA_DIR / "threads-storage-state.json"
 THREADS_HOME_URL = "https://www.threads.com/"
@@ -3233,6 +3235,10 @@ class WordPressSettings:
     threads_username: str = ""
     threads_auto_publish: bool = False
     threads_post_prompt: str = DEFAULT_THREADS_POST_PROMPT
+    adsense_connected: bool = False
+    adsense_account_label: str = ""
+    adsense_dashboard_url: str = ADSENSE_HOME_URL
+    adsense_summary: dict = field(default_factory=dict)
     target_platforms: list[str] = field(default_factory=lambda: ["wordpress"])
     writing_target_prompt_ids: dict[str, str] = field(default_factory=dict)
     writing_prompt_active_target: str = "wordpress"
@@ -3994,6 +4000,17 @@ class AppStateStore:
             threads_username=payload.get("threads_username", ""),
             threads_auto_publish=payload.get("threads_auto_publish", False),
             threads_post_prompt=nonempty_text(payload.get("threads_post_prompt"), DEFAULT_THREADS_POST_PROMPT),
+            adsense_connected=bool(payload.get("adsense_connected", False)),
+            adsense_account_label=str(payload.get("adsense_account_label", "") or "").strip(),
+            adsense_dashboard_url=str(
+                payload.get("adsense_dashboard_url", ADSENSE_HOME_URL)
+                or ADSENSE_HOME_URL
+            ).strip(),
+            adsense_summary=(
+                dict(payload.get("adsense_summary") or {})
+                if isinstance(payload.get("adsense_summary"), dict)
+                else {}
+            ),
             target_platforms=payload.get("target_platforms", ["wordpress"]),
             writing_target_prompt_ids=normalize_writing_target_prompt_ids(
                 payload.get("writing_target_prompt_ids", {}),
@@ -21424,6 +21441,194 @@ class WordPressPublishWorker(threading.Thread):
             self.result_queue.put(("wp_error", str(exc)))
 
 
+ADSENSE_DASHBOARD_VALUE_LABELS = {
+    "today": ("오늘 현재까지", "오늘", "Today so far", "Today"),
+    "yesterday": ("어제", "Yesterday"),
+    "last_7_days": ("지난 7일", "Last 7 days"),
+    "month_to_date": ("이번 달", "This month"),
+    "balance": ("잔고", "Balance"),
+}
+ADSENSE_MONEY_PATTERN = re.compile(
+    r"(?:[-+]\s*)?(?:US\$|CA\$|A\$|NZ\$|HK\$|S\$|NT\$|R\$|₩|₹|€|£|¥|\$)"
+    r"\s*-?[0-9][0-9,.]*(?:\s*[A-Z]{3})?"
+    r"|-?[0-9][0-9,.]*\s*(?:USD|KRW|EUR|GBP|JPY|CAD|AUD)",
+    flags=re.I,
+)
+
+
+def parse_adsense_dashboard_text(text: str) -> dict[str, str]:
+    """Extract the five summary values from the Korean or English AdSense home card."""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    values: dict[str, str] = {}
+    for key, labels in ADSENSE_DASHBOARD_VALUE_LABELS.items():
+        for index, line in enumerate(lines):
+            matched_label = next(
+                (
+                    label
+                    for label in labels
+                    if line.casefold() == label.casefold()
+                    or line.casefold().startswith(f"{label.casefold()} ")
+                ),
+                "",
+            )
+            if not matched_label:
+                continue
+            candidates = [line[len(matched_label):].strip(), *lines[index + 1:index + 5]]
+            for candidate in candidates:
+                match = ADSENSE_MONEY_PATTERN.search(candidate)
+                if match:
+                    values[key] = re.sub(r"\s+", "", match.group(0))
+                    break
+            if key in values:
+                break
+    return values
+
+
+def run_adsense_dashboard_playwright(
+    result_queue: queue.Queue,
+    dashboard_url: str = ADSENSE_HOME_URL,
+    interactive: bool = False,
+) -> dict:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright가 설치되어 있지 않습니다. 프로그램을 다시 설치해 주세요."
+        ) from exc
+
+    ADSENSE_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    timeout_seconds = 300 if interactive else 75
+    with sync_playwright() as playwright:
+        result_queue.put(
+            (
+                "adsense_progress",
+                "애드센스 로그인 창을 열고 있습니다..."
+                if interactive
+                else "애드센스 수익을 새로고침하고 있습니다...",
+            )
+        )
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(ADSENSE_CHROME_PROFILE_DIR),
+                executable_path=str(require_google_chrome_executable()),
+                headless=not interactive,
+                no_viewport=interactive,
+                viewport=None if interactive else {"width": 1440, "height": 1100},
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "애드센스 전용 Chrome을 시작하지 못했습니다. 이미 열린 애드센스 전용 Chrome을 닫고 다시 시도해 주세요."
+            ) from exc
+
+        try:
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.set_default_timeout(8_000)
+            page.set_default_navigation_timeout(60_000)
+            target_url = str(dashboard_url or ADSENSE_HOME_URL).strip()
+            if "adsense" not in target_url.lower():
+                target_url = ADSENSE_HOME_URL
+            page.goto(target_url, wait_until="domcontentloaded")
+            deadline = time.time() + timeout_seconds
+            login_notice_sent = False
+            last_body_text = ""
+            while time.time() < deadline:
+                pages = list(context.pages) or [page]
+                page = pages[-1]
+                current_url = str(page.url or "")
+                lowered_url = current_url.lower()
+                if (
+                    "accounts.google.com" in lowered_url
+                    or "signin" in lowered_url
+                    or "/adsense/start" in lowered_url
+                ):
+                    if not interactive:
+                        raise RuntimeError(
+                            "애드센스 로그인이 만료되었습니다. 환경설정 → 서비스 연동 → 애드센스에서 다시 연결해 주세요."
+                        )
+                    if not login_notice_sent:
+                        result_queue.put(
+                            (
+                                "adsense_progress",
+                                "전용 Chrome에서 애드센스 Google 계정 로그인을 완료해 주세요. 로그인 상태는 다음 실행에도 유지됩니다.",
+                            )
+                        )
+                        login_notice_sent = True
+                body_texts: list[str] = []
+                for frame in page.frames:
+                    try:
+                        frame_text = frame.locator("body").inner_text(timeout=4_000)
+                    except Exception:
+                        continue
+                    if frame_text.strip():
+                        body_texts.append(frame_text)
+                last_body_text = "\n".join(body_texts)
+                summary = parse_adsense_dashboard_text(last_body_text)
+                if len(summary) >= 4 and "balance" in summary:
+                    account_match = re.search(r"/(pub-\d+)(?:/|$)", current_url)
+                    account_label = account_match.group(1) if account_match else "Google AdSense"
+                    summary.update(
+                        {
+                            "updated_at": time.strftime("%Y-%m-%d %H:%M"),
+                            "updated_at_epoch": time.time(),
+                        }
+                    )
+                    return {
+                        "summary": summary,
+                        "account_label": account_label,
+                        "dashboard_url": current_url or ADSENSE_HOME_URL,
+                    }
+                page.wait_for_timeout(1_000)
+            if interactive:
+                raise RuntimeError(
+                    "5분 안에 애드센스 홈 화면을 확인하지 못했습니다. 애드센스 가입 상태와 로그인 계정을 확인해 주세요."
+                )
+            raise RuntimeError(
+                "애드센스 요약 카드에서 수익 정보를 찾지 못했습니다. 환경설정에서 다시 연결해 주세요."
+            )
+        finally:
+            context.close()
+
+
+class AdSenseDashboardWorker(threading.Thread):
+    def __init__(
+        self,
+        result_queue: queue.Queue,
+        dashboard_url: str = ADSENSE_HOME_URL,
+        interactive: bool = False,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+        self.dashboard_url = dashboard_url
+        self.interactive = interactive
+
+    def run(self) -> None:
+        try:
+            result = run_adsense_dashboard_playwright(
+                self.result_queue,
+                self.dashboard_url,
+                interactive=self.interactive,
+            )
+            result["interactive"] = self.interactive
+            self.result_queue.put(("adsense_done", result))
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(
+                (
+                    "adsense_error",
+                    {
+                        "message": str(exc),
+                        "interactive": self.interactive,
+                    },
+                )
+            )
+
+
 class ThreadsProfileWorker(threading.Thread):
     def __init__(
         self,
@@ -23813,6 +24018,8 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_automation_worker: NaverKinAutomationWorker | None = None
         self.naver_kin_profile_worker: NaverKinProfileWorker | None = None
         self.threads_profile_worker: ThreadsProfileWorker | None = None
+        self.adsense_worker: AdSenseDashboardWorker | None = None
+        self.adsense_worker_interactive = False
         self.thumbnail_ai_worker: ThumbnailAIWorker | None = None
         self.daum_worker: DaumRealtimeKeywordWorker | None = None
         self.signal_worker: SignalKeywordWorker | None = None
@@ -25214,6 +25421,13 @@ class KeywordApp(ctk.CTk):
             # theme palette, including preview canvases and semantic buttons.
             if getattr(child, "_uses_writing_design_theme", False):
                 continue
+            # Brand/summary panels sometimes intentionally use white text on
+            # a fixed accent background in both app themes.  Do not let the
+            # light-theme semantic mapper turn that white text black.
+            if getattr(child, "_preserve_theme_colors", False):
+                self._theme_painted_widgets.add(child)
+                self._retint_widget_tree(child, palette)
+                continue
             if isinstance(child, ContrastSegmentedButton):
                 self._apply_segmented_control_theme(child, palette)
                 self._theme_painted_widgets.add(child)
@@ -26050,6 +26264,113 @@ class KeywordApp(ctk.CTk):
             self.home_publish_count_labels[platform] = count_label
         self._refresh_home_publish_counts()
 
+        self.home_adsense_card = ctk.CTkFrame(
+            self.home_scroll,
+            fg_color="#1769c7",
+            corner_radius=22,
+            border_width=1,
+            border_color="#3983da",
+        )
+        self.home_adsense_card.grid(row=3, column=0, pady=(12, 0), sticky="ew")
+        for column in range(5):
+            self.home_adsense_card.grid_columnconfigure(
+                column,
+                weight=1,
+                uniform="home_adsense_metric",
+            )
+        self.home_adsense_title_label = ctk.CTkLabel(
+            self.home_adsense_card,
+            text="Google AdSense 예상 수익",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        self.home_adsense_title_label._preserve_theme_colors = True
+        self.home_adsense_title_label.grid(
+            row=0,
+            column=0,
+            columnspan=3,
+            padx=18,
+            pady=(16, 8),
+            sticky="w",
+        )
+        self.home_adsense_action_button = ctk.CTkButton(
+            self.home_adsense_card,
+            text="연동 설정",
+            width=104,
+            height=34,
+            corner_radius=11,
+            fg_color="#ffffff",
+            hover_color="#e6effb",
+            text_color="#1769c7",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_home_adsense_action,
+        )
+        self.home_adsense_action_button.grid(
+            row=0,
+            column=4,
+            padx=16,
+            pady=(12, 7),
+            sticky="e",
+        )
+
+        self.home_adsense_value_labels: dict[str, object] = {}
+        for column, (key, label_text) in enumerate(
+            (
+                ("today", "오늘 예상수익"),
+                ("yesterday", "어제"),
+                ("last_7_days", "지난 7일"),
+                ("month_to_date", "이번 달"),
+                ("balance", "잔고"),
+            )
+        ):
+            metric = ctk.CTkFrame(
+                self.home_adsense_card,
+                fg_color="#145eb3" if key == "balance" else "transparent",
+                corner_radius=16,
+            )
+            metric.grid(
+                row=1,
+                column=column,
+                padx=(14, 5) if column == 0 else (5, 14) if column == 4 else 5,
+                pady=(2, 8),
+                sticky="nsew",
+            )
+            metric.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                metric,
+                text=label_text,
+                anchor="w",
+                text_color="#dcecff",
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(row=0, column=0, padx=13, pady=(12, 4), sticky="ew")
+            value_label = ctk.CTkLabel(
+                metric,
+                text="연동 필요",
+                anchor="w",
+                text_color="#ffffff",
+                font=ctk.CTkFont(size=20, weight="bold"),
+            )
+            value_label._preserve_theme_colors = True
+            value_label.grid(row=1, column=0, padx=13, pady=(0, 13), sticky="ew")
+            self.home_adsense_value_labels[key] = value_label
+
+        self.home_adsense_status_label = ctk.CTkLabel(
+            self.home_adsense_card,
+            text="환경설정 → 서비스 연동 → 애드센스에서 Google 계정을 연결해 주세요.",
+            anchor="w",
+            text_color="#dcecff",
+            font=ctk.CTkFont(size=11, weight="bold"),
+        )
+        self.home_adsense_status_label.grid(
+            row=2,
+            column=0,
+            columnspan=5,
+            padx=18,
+            pady=(0, 14),
+            sticky="ew",
+        )
+        self._render_home_adsense_summary()
+
     def _refresh_home_publish_counts(self) -> None:
         labels = getattr(self, "home_publish_count_labels", {})
         if not labels:
@@ -26068,6 +26389,208 @@ class KeywordApp(ctk.CTk):
                 self._daily_publish_account(platform),
             )
             label.configure(text=f"{platform_label} 오늘 발행 {count}건")
+
+    def _render_home_adsense_summary(self) -> None:
+        labels = getattr(self, "home_adsense_value_labels", {})
+        if not labels:
+            return
+        connected = bool(self.wordpress_settings.adsense_connected)
+        summary = dict(self.wordpress_settings.adsense_summary or {})
+        for key, label in labels.items():
+            value = str(summary.get(key) or "").strip()
+            label.configure(text=value or ("불러오는 중" if connected else "연동 필요"))
+        action_button = getattr(self, "home_adsense_action_button", None)
+        if action_button is not None:
+            action_button.configure(text="새로고침" if connected else "연동 설정")
+        status_label = getattr(self, "home_adsense_status_label", None)
+        if status_label is not None:
+            if connected:
+                account = self.wordpress_settings.adsense_account_label or "Google AdSense"
+                updated_at = str(summary.get("updated_at") or "").strip()
+                status_label.configure(
+                    text=f"{account} · 최근 갱신 {updated_at or '대기 중'} · 오늘 수익은 잠정 예상액입니다."
+                )
+            else:
+                status_label.configure(
+                    text="환경설정 → 서비스 연동 → 애드센스에서 Google 계정을 연결해 주세요."
+                )
+
+    def _on_home_adsense_action(self) -> None:
+        if self.wordpress_settings.adsense_connected:
+            self._start_adsense_refresh(force=True)
+            return
+        self._switch_page("settings")
+        self._switch_settings_section("ai")
+        self._switch_settings_tab("adsense")
+
+    def _start_adsense_refresh(
+        self,
+        force: bool = False,
+        interactive: bool = False,
+    ) -> None:
+        if self.adsense_worker and self.adsense_worker.is_alive():
+            return
+        if not interactive and not self.wordpress_settings.adsense_connected:
+            self._render_home_adsense_summary()
+            return
+        summary = dict(self.wordpress_settings.adsense_summary or {})
+        try:
+            updated_at_epoch = float(summary.get("updated_at_epoch") or 0)
+        except (TypeError, ValueError):
+            updated_at_epoch = 0.0
+        if not interactive and not force and time.time() - updated_at_epoch < 600:
+            self._render_home_adsense_summary()
+            return
+        self.adsense_worker_interactive = interactive
+        self.adsense_worker = AdSenseDashboardWorker(
+            self.result_queue,
+            dashboard_url=self.wordpress_settings.adsense_dashboard_url,
+            interactive=interactive,
+        )
+        if hasattr(self, "home_adsense_action_button"):
+            self.home_adsense_action_button.configure(
+                state="disabled",
+                text="연결 중..." if interactive else "갱신 중...",
+            )
+        if hasattr(self, "adsense_connect_button"):
+            self.adsense_connect_button.configure(
+                state="disabled",
+                text="로그인 확인 중..." if interactive else "갱신 중...",
+            )
+        if hasattr(self, "adsense_refresh_button"):
+            self.adsense_refresh_button.configure(state="disabled")
+        if hasattr(self, "adsense_status_label"):
+            self.adsense_status_label.configure(
+                text="● 애드센스 연결을 확인하고 있습니다...",
+                text_color="#6dadff",
+            )
+        self.adsense_worker.start()
+
+    def _render_adsense_settings_summary(self) -> None:
+        labels = getattr(self, "adsense_settings_value_labels", {})
+        summary = dict(self.wordpress_settings.adsense_summary or {})
+        for key, label in labels.items():
+            label.configure(text=str(summary.get(key) or "-"))
+        connected = bool(self.wordpress_settings.adsense_connected)
+        if hasattr(self, "adsense_account_value_label"):
+            self.adsense_account_value_label.configure(
+                text=self.wordpress_settings.adsense_account_label or "미연동"
+            )
+        if hasattr(self, "adsense_connect_button"):
+            self.adsense_connect_button.configure(
+                state="normal",
+                text=(
+                    "Google 계정 다시 연결"
+                    if connected
+                    else "Google 계정 연결 · 로그인"
+                ),
+            )
+        if hasattr(self, "adsense_refresh_button"):
+            self.adsense_refresh_button.configure(
+                state="normal" if connected else "disabled"
+            )
+        if hasattr(self, "adsense_disconnect_button"):
+            self.adsense_disconnect_button.configure(
+                state="normal" if connected else "disabled"
+            )
+        if hasattr(self, "adsense_status_label"):
+            if connected:
+                updated_at = str(summary.get("updated_at") or "").strip()
+                self.adsense_status_label.configure(
+                    text=f"● 연동 완료 · 최근 갱신 {updated_at or '대기 중'}",
+                    text_color="#48d980",
+                )
+            else:
+                self.adsense_status_label.configure(
+                    text="● Google 계정 연결 대기 중",
+                    text_color=("#64748b", "#9aa7bb"),
+                )
+
+    def _handle_adsense_done(self, payload: dict) -> None:
+        result = payload if isinstance(payload, dict) else {}
+        self.adsense_worker = None
+        self.adsense_worker_interactive = False
+        self.wordpress_settings.adsense_connected = True
+        self.wordpress_settings.adsense_account_label = str(
+            result.get("account_label") or "Google AdSense"
+        ).strip()
+        self.wordpress_settings.adsense_dashboard_url = str(
+            result.get("dashboard_url") or ADSENSE_HOME_URL
+        ).strip()
+        self.wordpress_settings.adsense_summary = dict(result.get("summary") or {})
+        AppStateStore.update_fields(
+            adsense_connected=True,
+            adsense_account_label=self.wordpress_settings.adsense_account_label,
+            adsense_dashboard_url=self.wordpress_settings.adsense_dashboard_url,
+            adsense_summary=self.wordpress_settings.adsense_summary,
+        )
+        self._render_home_adsense_summary()
+        self._render_adsense_settings_summary()
+        if hasattr(self, "home_adsense_action_button"):
+            self.home_adsense_action_button.configure(state="normal", text="새로고침")
+        self._update_quick_status(
+            "애드센스 연동 완료",
+            f"{self.wordpress_settings.adsense_account_label}\n홈 수익 요약을 갱신했습니다.",
+            "#48d980",
+        )
+
+    def _handle_adsense_error(self, payload: object) -> None:
+        error_payload = payload if isinstance(payload, dict) else {"message": str(payload)}
+        message = str(error_payload.get("message") or "애드센스 연동에 실패했습니다.")
+        interactive = bool(error_payload.get("interactive"))
+        self.adsense_worker = None
+        self.adsense_worker_interactive = False
+        self._render_home_adsense_summary()
+        self._render_adsense_settings_summary()
+        if hasattr(self, "home_adsense_action_button"):
+            self.home_adsense_action_button.configure(state="normal")
+        if hasattr(self, "adsense_status_label"):
+            self.adsense_status_label.configure(
+                text=f"● {message}",
+                text_color="#ff6b6b",
+            )
+        self._update_quick_status("애드센스 연동 확인 필요", message, "#ff6b6b")
+        if interactive:
+            messagebox.showwarning("애드센스 연결 실패", message)
+
+    def _disconnect_adsense(self) -> None:
+        if self.adsense_worker and self.adsense_worker.is_alive():
+            messagebox.showinfo(
+                "진행 중",
+                "애드센스 연결 확인이 진행 중입니다. 완료 후 다시 시도해 주세요.",
+            )
+            return
+        if not messagebox.askyesno(
+            "애드센스 연결 해제",
+            "저장된 애드센스 로그인 정보와 홈 수익 요약을 삭제할까요?",
+        ):
+            return
+        try:
+            if ADSENSE_CHROME_PROFILE_DIR.exists():
+                shutil.rmtree(ADSENSE_CHROME_PROFILE_DIR)
+        except OSError as exc:
+            messagebox.showwarning(
+                "연결 해제 실패",
+                f"애드센스 전용 Chrome을 모두 닫고 다시 시도해 주세요.\n\n{exc}",
+            )
+            return
+        self.wordpress_settings.adsense_connected = False
+        self.wordpress_settings.adsense_account_label = ""
+        self.wordpress_settings.adsense_dashboard_url = ADSENSE_HOME_URL
+        self.wordpress_settings.adsense_summary = {}
+        AppStateStore.update_fields(
+            adsense_connected=False,
+            adsense_account_label="",
+            adsense_dashboard_url=ADSENSE_HOME_URL,
+            adsense_summary={},
+        )
+        self._render_home_adsense_summary()
+        self._render_adsense_settings_summary()
+        self._update_quick_status(
+            "애드센스 연결 해제",
+            "저장된 Google 로그인 프로필과 수익 요약을 삭제했습니다.",
+            "#9aa7bb",
+        )
 
     def _refresh_home_prompt_menu(self) -> None:
         if not hasattr(self, "home_prompt_menu"):
@@ -26553,6 +27076,28 @@ class KeywordApp(ctk.CTk):
         )
         self.codex_top_tab.grid(row=2, column=3, padx=(5, 14), pady=(5, 14), sticky="ew")
 
+        self.adsense_top_tab = ctk.CTkButton(
+            header,
+            text="○ 애드센스",
+            width=0,
+            height=40,
+            corner_radius=12,
+            fg_color="transparent",
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda: self._switch_settings_tab("adsense"),
+        )
+        self.adsense_top_tab.grid(
+            row=3,
+            column=0,
+            padx=(14, 5),
+            pady=(5, 14),
+            sticky="ew",
+        )
+
         self.threads_top_tab = ctk.CTkButton(
             header,
             text="○ Threads",
@@ -26678,6 +27223,17 @@ class KeywordApp(ctk.CTk):
         self.threads_card.grid_columnconfigure(0, weight=1)
         self._build_threads_card()
 
+        self.adsense_card = ctk.CTkFrame(
+            content,
+            fg_color=palette["panel"],
+            corner_radius=24,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        self.adsense_card.grid(row=0, column=0, sticky="nsew")
+        self.adsense_card.grid_columnconfigure(0, weight=1)
+        self._build_adsense_card()
+
         self.settings_status_panel = ctk.CTkFrame(
             content,
             fg_color=palette["panel"],
@@ -26739,7 +27295,7 @@ class KeywordApp(ctk.CTk):
 
         save_info = ctk.CTkLabel(
             status_panel,
-            text="• 워드프레스 연결\n• 티스토리 글쓰기 URL\n• 블로그스팟 정보\n• Threads Playwright\n• 포스팅 방식\n• GPT/Gemini/Imagen API",
+            text="• 워드프레스 연결\n• 티스토리 글쓰기 URL\n• 블로그스팟 정보\n• 애드센스 로그인\n• Threads Playwright\n• 포스팅 방식\n• GPT/Gemini/Imagen API",
             justify="left",
             anchor="nw",
             wraplength=180,
@@ -26765,6 +27321,7 @@ class KeywordApp(ctk.CTk):
             self.imagen_card,
             self.codex_card,
             self.threads_card,
+            self.adsense_card,
         )
         inset_colors = {
             "#111826",
@@ -37719,6 +38276,152 @@ class KeywordApp(ctk.CTk):
         )
         self.threads_status_label.grid(row=7, column=0, padx=24, pady=(18, 22), sticky="w")
 
+    def _build_adsense_card(self) -> None:
+        ctk.CTkLabel(
+            self.adsense_card,
+            text="◉ Google AdSense",
+            text_color="#6dadff",
+            font=ctk.CTkFont(size=28, weight="bold"),
+        ).grid(row=0, column=0, padx=24, pady=(22, 12), sticky="w")
+        ctk.CTkLabel(
+            self.adsense_card,
+            text=(
+                "전용 Chrome에서 Google 계정에 한 번 로그인하면 로그인 상태를 저장하고, "
+                "홈에서 예상 수익과 현재 잔고를 자동으로 새로고침합니다."
+            ),
+            text_color=("#5f6f86", "#9aa7bb"),
+            justify="left",
+            anchor="w",
+            wraplength=860,
+            font=ctk.CTkFont(size=14),
+        ).grid(row=1, column=0, padx=24, pady=(0, 16), sticky="ew")
+
+        account_card = ctk.CTkFrame(
+            self.adsense_card,
+            fg_color=("#e8eff9", "#111b2b"),
+            corner_radius=18,
+            border_width=1,
+            border_color=("#cbd8ea", "#314761"),
+        )
+        account_card.grid(row=2, column=0, padx=24, pady=(0, 14), sticky="ew")
+        account_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            account_card,
+            text="연결된 계정",
+            text_color=("#607089", "#9aa7bb"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        self.adsense_account_value_label = ctk.CTkLabel(
+            account_card,
+            text=self.wordpress_settings.adsense_account_label or "미연동",
+            text_color=("#172033", "#f4f7fb"),
+            font=ctk.CTkFont(size=17, weight="bold"),
+        )
+        self.adsense_account_value_label.grid(
+            row=1,
+            column=0,
+            padx=16,
+            pady=(0, 14),
+            sticky="w",
+        )
+
+        summary_frame = ctk.CTkFrame(
+            self.adsense_card,
+            fg_color="#1769c7",
+            corner_radius=18,
+        )
+        summary_frame.grid(row=3, column=0, padx=24, pady=(0, 16), sticky="ew")
+        for column in range(5):
+            summary_frame.grid_columnconfigure(
+                column,
+                weight=1,
+                uniform="adsense_settings_metric",
+            )
+        self.adsense_settings_value_labels: dict[str, object] = {}
+        for column, (key, label_text) in enumerate(
+            (
+                ("today", "오늘 예상수익"),
+                ("yesterday", "어제"),
+                ("last_7_days", "지난 7일"),
+                ("month_to_date", "이번 달"),
+                ("balance", "잔고"),
+            )
+        ):
+            metric = ctk.CTkFrame(summary_frame, fg_color="transparent")
+            metric.grid(row=0, column=column, padx=5, pady=8, sticky="nsew")
+            ctk.CTkLabel(
+                metric,
+                text=label_text,
+                text_color="#dcecff",
+                font=ctk.CTkFont(size=11, weight="bold"),
+            ).pack(anchor="w", padx=8, pady=(7, 2))
+            value_label = ctk.CTkLabel(
+                metric,
+                text="-",
+                text_color="#ffffff",
+                font=ctk.CTkFont(size=16, weight="bold"),
+            )
+            value_label._preserve_theme_colors = True
+            value_label.pack(anchor="w", padx=8, pady=(0, 7))
+            self.adsense_settings_value_labels[key] = value_label
+
+        button_row = ctk.CTkFrame(self.adsense_card, fg_color="transparent")
+        button_row.grid(row=4, column=0, padx=24, sticky="ew")
+        button_row.grid_columnconfigure(0, weight=1)
+        self.adsense_connect_button = ctk.CTkButton(
+            button_row,
+            text="Google 계정 연결 · 로그인",
+            height=52,
+            corner_radius=16,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=lambda: self._start_adsense_refresh(
+                force=True,
+                interactive=True,
+            ),
+        )
+        self.adsense_connect_button.grid(row=0, column=0, sticky="ew")
+        self.adsense_refresh_button = ctk.CTkButton(
+            button_row,
+            text="수익 새로고침",
+            width=165,
+            height=52,
+            corner_radius=16,
+            fg_color="#1faa4a",
+            hover_color="#16913e",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=lambda: self._start_adsense_refresh(force=True),
+        )
+        self.adsense_refresh_button.grid(row=0, column=1, padx=(12, 0))
+        self.adsense_disconnect_button = ctk.CTkButton(
+            button_row,
+            text="연결 해제",
+            width=125,
+            height=52,
+            corner_radius=16,
+            fg_color="#596579",
+            hover_color="#6a768b",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self._disconnect_adsense,
+        )
+        self.adsense_disconnect_button.grid(row=0, column=2, padx=(12, 0))
+
+        self.adsense_status_label = ctk.CTkLabel(
+            self.adsense_card,
+            text="● Google 계정 연결 대기 중",
+            text_color=("#64748b", "#9aa7bb"),
+            font=ctk.CTkFont(size=15, weight="bold"),
+        )
+        self.adsense_status_label.grid(
+            row=5,
+            column=0,
+            padx=24,
+            pady=(17, 22),
+            sticky="w",
+        )
+        self._render_adsense_settings_summary()
+
     def _build_writing_workflow(self, parent: ctk.CTkFrame) -> None:
         parent.grid_columnconfigure(0, weight=1)
 
@@ -41504,7 +42207,9 @@ class KeywordApp(ctk.CTk):
         self._show_only_page_frame(page_name)
         if page_name == "home":
             self._refresh_home_publish_counts()
+            self._render_home_adsense_summary()
             self.after(80, self._load_home_dashboard_keywords)
+            self.after(650, self._start_adsense_refresh)
         if page_name == "automation":
             if self._is_windows_dark_theme():
                 # Make navigation visible before rebuilding a potentially long
@@ -41616,6 +42321,7 @@ class KeywordApp(ctk.CTk):
             "imagen": self.imagen_card,
             "codex": self.codex_card,
             "threads": self.threads_card,
+            "adsense": self.adsense_card,
         }
         if tab_name in card_map:
             card_map[tab_name].tkraise()
@@ -41625,6 +42331,7 @@ class KeywordApp(ctk.CTk):
             "tistory": (self.tistory_top_tab, "티스토리"),
             "blogspot": (self.blogspot_top_tab, "블로그스팟"),
             "threads": (self.threads_top_tab, "Threads"),
+            "adsense": (self.adsense_top_tab, "애드센스"),
             "gpt": (self.gpt_top_tab, "GPT API"),
             "gemini": (self.gemini_top_tab, "제미나이 API"),
             "imagen": (self.imagen_top_tab, "Imagen API"),
@@ -41662,6 +42369,13 @@ class KeywordApp(ctk.CTk):
             self._update_quick_status(
                 "Threads 설정",
                 "전용 Chrome 로그인과 Playwright 자동 게시 상태를 관리합니다.",
+                palette["accent"],
+            )
+        elif tab_name == "adsense":
+            self._render_adsense_settings_summary()
+            self._update_quick_status(
+                "Google AdSense",
+                "전용 Chrome 로그인 상태와 홈 수익 요약을 관리합니다.",
                 palette["accent"],
             )
         self._finish_theme_paint()
@@ -42760,6 +43474,15 @@ class KeywordApp(ctk.CTk):
             threads_username=self.wordpress_settings.threads_username,
             threads_auto_publish=self.threads_auto_publish_var.get(),
             threads_post_prompt=self.threads_post_prompt_box.get("1.0", "end").strip() or DEFAULT_THREADS_POST_PROMPT,
+            adsense_connected=bool(self.wordpress_settings.adsense_connected),
+            adsense_account_label=str(
+                self.wordpress_settings.adsense_account_label or ""
+            ).strip(),
+            adsense_dashboard_url=str(
+                self.wordpress_settings.adsense_dashboard_url
+                or ADSENSE_HOME_URL
+            ).strip(),
+            adsense_summary=dict(self.wordpress_settings.adsense_summary or {}),
             target_platforms=target_platforms,
             writing_target_prompt_ids=self._current_writing_target_prompt_ids(),
             writing_prompt_active_target=normalize_writing_prompt_active_target(
@@ -46223,6 +46946,19 @@ class KeywordApp(ctk.CTk):
                     self._handle_home_keywords_source_error(payload)
                 elif event_type == "home_keywords_done":
                     self._handle_home_keywords_done(payload)
+                elif event_type == "adsense_progress":
+                    message = str(payload or "애드센스 정보를 불러오는 중...")
+                    if hasattr(self, "home_adsense_status_label"):
+                        self.home_adsense_status_label.configure(text=message)
+                    if hasattr(self, "adsense_status_label"):
+                        self.adsense_status_label.configure(
+                            text=f"● {message}",
+                            text_color="#6dadff",
+                        )
+                elif event_type == "adsense_done":
+                    self._handle_adsense_done(payload)
+                elif event_type == "adsense_error":
+                    self._handle_adsense_error(payload)
                 elif event_type == "daum_progress":
                     self.keyword_status_label.configure(text=payload)
                     self._set_writing_progress(1, payload)

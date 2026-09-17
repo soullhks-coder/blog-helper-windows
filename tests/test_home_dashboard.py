@@ -20,6 +20,64 @@ def _insight(keyword: str, source: str) -> main.KeywordInsight:
 
 
 class HomeDashboardTests(unittest.TestCase):
+    def test_adsense_dashboard_parser_extracts_requested_summary_values(self) -> None:
+        dashboard_text = """
+        예상 수입
+        오늘 현재까지
+        US$1.15
+        어제
+        US$0.91
+        지난 7일
+        US$8.20
+        이번 달
+        US$21.10
+        잔고
+        $136.18
+        최종 지급일
+        $118.29
+        """
+
+        self.assertEqual(
+            main.parse_adsense_dashboard_text(dashboard_text),
+            {
+                "today": "US$1.15",
+                "yesterday": "US$0.91",
+                "last_7_days": "US$8.20",
+                "month_to_date": "US$21.10",
+                "balance": "$136.18",
+            },
+        )
+
+    def test_adsense_connection_and_cached_summary_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            settings = main.WordPressSettings(
+                adsense_connected=True,
+                adsense_account_label="pub-1234567890",
+                adsense_dashboard_url="https://www.google.com/adsense/new/u/0/pub-1234567890/home",
+                adsense_summary={
+                    "today": "US$1.15",
+                    "balance": "$136.18",
+                    "updated_at": "2026-09-17 21:00",
+                },
+            )
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(
+                    main.PromptFileStore,
+                    "load_into",
+                    side_effect=lambda value: value,
+                ),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+
+        self.assertTrue(loaded.adsense_connected)
+        self.assertEqual(loaded.adsense_account_label, "pub-1234567890")
+        self.assertEqual(loaded.adsense_summary["today"], "US$1.15")
+        self.assertEqual(loaded.adsense_summary["balance"], "$136.18")
+
     def test_home_publish_counts_use_the_active_platform_accounts(self) -> None:
         class LabelStub:
             def __init__(self) -> None:
