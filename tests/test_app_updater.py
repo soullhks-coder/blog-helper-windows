@@ -25,7 +25,7 @@ from app_updater import (
     platform_asset_name,
     version_key,
 )
-from tools.build_delta_patch import build_windows_patch
+from tools.build_delta_patch import build_macos_patch, build_windows_patch
 
 import bsdiff4
 
@@ -377,6 +377,59 @@ class AppUpdaterTests(unittest.TestCase):
             rebuilt = bsdiff4.patch(previous.read_bytes(), patch_bytes)
             self.assertEqual(rebuilt, current.read_bytes())
             self.assertLess(output.stat().st_size, current.stat().st_size)
+
+    def test_macos_delta_patch_always_carries_dashboard_logos(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            previous = root / "previous.zip"
+            current = root / "current.zip"
+            output = root / "update.patch.zip"
+            resources = {
+                "BlogHelper.app/Contents/Info.plist": b"plist-v2",
+                "BlogHelper.app/Contents/Resources/version.json": b'{"version":"1.1.158"}',
+                "BlogHelper.app/Contents/Resources/assets/wordpress-logo.png": b"wordpress-png",
+                "BlogHelper.app/Contents/Resources/assets/tistory-logo.png": b"tistory-png",
+                "BlogHelper.app/Contents/Resources/assets/blogspot-logo.png": b"blogspot-png",
+            }
+            for path, executable in (
+                (previous, b"mac-runtime-v1"),
+                (current, b"mac-runtime-v2"),
+            ):
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("BlogHelper.app/Contents/MacOS/BlogHelper", executable)
+                    for resource_name, content in resources.items():
+                        archive.writestr(resource_name, content)
+
+            args = type(
+                "Args",
+                (),
+                {
+                    "previous": str(previous),
+                    "current": str(current),
+                    "from_version": "1.1.157",
+                    "to_version": "1.1.158",
+                    "output": str(output),
+                },
+            )()
+            build_macos_patch(args)
+
+            with zipfile.ZipFile(output) as archive:
+                manifest = json.loads(archive.read("patch-manifest.json"))
+                replacements = {
+                    item["target"]: item["source"]
+                    for item in manifest["replacements"]
+                }
+                for logo_name in (
+                    "wordpress-logo.png",
+                    "tistory-logo.png",
+                    "blogspot-logo.png",
+                ):
+                    target = f"Contents/Resources/assets/{logo_name}"
+                    self.assertIn(target, replacements)
+                    self.assertEqual(
+                        archive.read(replacements[target]),
+                        resources[f"BlogHelper.app/{target}"],
+                    )
 
 
 if __name__ == "__main__":

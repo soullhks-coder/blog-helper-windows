@@ -14,6 +14,18 @@ MAC_EXECUTABLE = "BlogHelper.app/Contents/MacOS/BlogHelper"
 MAC_REPLACEMENTS = (
     ("BlogHelper.app/Contents/Info.plist", "Contents/Info.plist"),
     ("BlogHelper.app/Contents/Resources/version.json", "Contents/Resources/version.json"),
+    (
+        "BlogHelper.app/Contents/Resources/assets/wordpress-logo.png",
+        "Contents/Resources/assets/wordpress-logo.png",
+    ),
+    (
+        "BlogHelper.app/Contents/Resources/assets/tistory-logo.png",
+        "Contents/Resources/assets/tistory-logo.png",
+    ),
+    (
+        "BlogHelper.app/Contents/Resources/assets/blogspot-logo.png",
+        "Contents/Resources/assets/blogspot-logo.png",
+    ),
 )
 
 
@@ -74,7 +86,7 @@ def build_macos_patch(args: argparse.Namespace) -> None:
         replacements = []
         for archive_name, target_name in MAC_REPLACEMENTS:
             content = current_zip.read(archive_name)
-            source_name = f"files/{Path(target_name).name}"
+            source_name = f"files/{target_name}"
             files[source_name] = content
             replacements.append(
                 {
