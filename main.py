@@ -26148,7 +26148,7 @@ class KeywordApp(ctk.CTk):
         )
         self.home_prompt_menu.grid(row=0, column=1, sticky="e")
         self.home_refresh_button = ctk.CTkButton(
-            prompt_frame,
+            control_card,
             text="키워드 새로고침",
             width=215,
             height=36,
@@ -26161,9 +26161,10 @@ class KeywordApp(ctk.CTk):
         )
         self.home_refresh_button.grid(
             row=1,
-            column=1,
-            pady=(8, 0),
-            sticky="ew",
+            column=2,
+            padx=(12, 18),
+            pady=(0, 14),
+            sticky="e",
         )
         self._refresh_home_prompt_menu()
 
@@ -26177,7 +26178,7 @@ class KeywordApp(ctk.CTk):
         self.home_launch_status_label.grid(
             row=1,
             column=0,
-            columnspan=3,
+            columnspan=2,
             padx=18,
             pady=(0, 14),
             sticky="ew",
