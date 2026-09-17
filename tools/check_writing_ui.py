@@ -116,6 +116,10 @@ def main() -> None:
 
         try:
             app.geometry("1500x1000+30+35")
+            app._switch_page("home")
+            app.update()
+            settle(900)
+            screenshot("home")
             app._switch_page("writing")
             # Initialize the native window before scheduling the quit timer.
             # CTk's first Windows mainloop can pump events during setup and
@@ -417,6 +421,7 @@ def main() -> None:
             # otherwise dark buttons have white labels, and segmented controls
             # never reintroduce native outline seams.
             sidebar_button_names = {
+                "home": "home_nav_button",
                 "writing": "writing_nav_button",
                 "automation": "automation_nav_button",
                 "naver_blog": "naver_blog_nav_button",

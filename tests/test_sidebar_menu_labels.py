@@ -16,6 +16,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertEqual(
             main.SIDEBAR_MENU_DEFAULT_LABELS,
             {
+                "home": "홈",
                 "writing": "블로그글쓰기",
                 "automation": "블로그자동화",
                 "naver_blog": "N블로그자동화",
@@ -44,6 +45,10 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertEqual(
             set(main.SIDEBAR_MENU_DEFAULT_ICONS),
             set(main.SIDEBAR_MENU_DEFAULT_LABELS),
+        )
+        self.assertEqual(
+            main.SIDEBAR_MENU_DEFAULT_ICONS["home"],
+            "house",
         )
         self.assertEqual(
             main.SIDEBAR_MENU_DEFAULT_ICONS["writing"],

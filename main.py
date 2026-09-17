@@ -588,6 +588,7 @@ INLINE_IMAGES_PROVIDERS = (
     INLINE_IMAGES_PROVIDER_MANUAL,
 )
 SIDEBAR_MENU_DEFAULT_LABELS = {
+    "home": "홈",
     "writing": "블로그글쓰기",
     "automation": "블로그자동화",
     "naver_blog": "N블로그자동화",
@@ -643,6 +644,7 @@ BOOTSTRAP_ICON_LABELS_BY_NAME = {
     icon_name: label for label, icon_name in BOOTSTRAP_ICON_OPTIONS.items()
 }
 SIDEBAR_MENU_DEFAULT_ICONS = {
+    "home": "house",
     "writing": "pencil-square",
     "automation": "robot",
     "naver_blog": "journal-text",
@@ -3234,6 +3236,8 @@ class WordPressSettings:
     target_platforms: list[str] = field(default_factory=lambda: ["wordpress"])
     writing_target_prompt_ids: dict[str, str] = field(default_factory=dict)
     writing_prompt_active_target: str = "wordpress"
+    home_target_platform: str = "wordpress"
+    home_selected_prompt_id: str = ""
     title_prompt_template: str = DEFAULT_TITLE_PROMPT
     article_prompt_template: str = DEFAULT_ARTICLE_PROMPT
     prompt_sets: list[dict] = field(default_factory=list)
@@ -3650,6 +3654,8 @@ class AppStateStore:
         "blogspot_active_profile",
         "writing_target_prompt_ids",
         "writing_prompt_active_target",
+        "home_target_platform",
+        "home_selected_prompt_id",
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
@@ -3997,6 +4003,12 @@ class AppStateStore:
                 payload.get("writing_prompt_active_target", ""),
                 payload.get("target_platforms", ["wordpress"]),
             ),
+            home_target_platform=normalize_writing_prompt_active_target(
+                payload.get("home_target_platform", "wordpress")
+            ),
+            home_selected_prompt_id=str(
+                payload.get("home_selected_prompt_id", "") or ""
+            ).strip(),
             title_prompt_template=nonempty_text(payload.get("title_prompt_template"), DEFAULT_TITLE_PROMPT),
             article_prompt_template=nonempty_text(payload.get("article_prompt_template"), DEFAULT_ARTICLE_PROMPT),
             prompt_sets=payload.get("prompt_sets", []),
@@ -20033,6 +20045,79 @@ class DaumRealtimeKeywordWorker(threading.Thread):
         return re.sub(r"\s+", " ", value).strip()
 
 
+class HomeDashboardKeywordWorker(threading.Thread):
+    """Load the three home-dashboard feeds without touching writing-page workers."""
+
+    SOURCE_ORDER = ("daum", "signal", "newneek")
+
+    def __init__(self, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        completed = 0
+        for source in self.SOURCE_ORDER:
+            try:
+                self.result_queue.put(
+                    (
+                        "home_keywords_progress",
+                        {"source": source, "message": self._progress_message(source)},
+                    )
+                )
+                insights, reference_map = self._fetch_source(source)
+                if not insights:
+                    raise RuntimeError("표시할 키워드를 찾지 못했습니다.")
+                completed += 1
+                self.result_queue.put(
+                    (
+                        "home_keywords_source_done",
+                        {
+                            "source": source,
+                            "insights": insights[:10],
+                            "reference_map": reference_map,
+                            "updated_at": time.strftime("%H:%M"),
+                        },
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - network/runtime handling
+                self.result_queue.put(
+                    (
+                        "home_keywords_source_error",
+                        {"source": source, "message": str(exc)},
+                    )
+                )
+        self.result_queue.put(
+            (
+                "home_keywords_done",
+                {"completed": completed, "total": len(self.SOURCE_ORDER)},
+            )
+        )
+
+    def _fetch_source(
+        self,
+        source: str,
+    ) -> tuple[list[KeywordInsight], dict[str, str]]:
+        if source == "daum":
+            worker = DaumRealtimeKeywordWorker(queue.Queue())
+            html = worker._fetch_html(worker.DAUM_REALTIME_URL)
+            return worker._build_daum_payload(html)
+        if source == "signal":
+            worker = SignalKeywordWorker(queue.Queue())
+            payload = worker._fetch_json(worker.SIGNAL_API_URL)
+            return worker._build_signal_payload(payload)
+        worker = NewneekKeywordWorker(queue.Queue())
+        payload = worker._fetch_json(worker.CATEGORY_API_URL, worker.CATEGORY_URL)
+        articles = worker._extract_articles(payload)
+        return worker._build_newneek_payload(articles[:10])
+
+    def _progress_message(self, source: str) -> str:
+        return {
+            "daum": "다음 키워드 TOP10을 불러오는 중...",
+            "signal": "시그널 키워드 TOP10을 불러오는 중...",
+            "newneek": "뉴닉 키워드 TOP10을 불러오는 중...",
+        }.get(source, "키워드를 불러오는 중...")
+
+
 class VisitKoreaFestivalListWorker(threading.Thread):
     """Load VisitKorea filters and festival rows with Playwright."""
 
@@ -23732,6 +23817,7 @@ class KeywordApp(ctk.CTk):
         self.daum_worker: DaumRealtimeKeywordWorker | None = None
         self.signal_worker: SignalKeywordWorker | None = None
         self.newneek_worker: NewneekKeywordWorker | None = None
+        self.home_keyword_worker: HomeDashboardKeywordWorker | None = None
         self.naver_creator_worker: NaverCreatorAdvisorKeywordWorker | None = None
         self.public_data_worker: PublicDataEventWorker | None = None
         self.festival_worker: VisitKoreaFestivalListWorker | None = None
@@ -23762,6 +23848,18 @@ class KeywordApp(ctk.CTk):
         self.newneek_reference_map: dict[str, str] = {}
         self.naver_creator_reference_map: dict[str, str] = {}
         self.collected_reference_map: dict[str, str] = {}
+        self.home_keyword_data: dict[str, list[KeywordInsight]] = {
+            "daum": [],
+            "signal": [],
+            "newneek": [],
+        }
+        self.home_keyword_reference_maps: dict[str, dict[str, str]] = {
+            "daum": {},
+            "signal": {},
+            "newneek": {},
+        }
+        self.home_keywords_loaded = False
+        self.home_reference_launch_context: dict | None = None
         self.public_data_events: list[dict] = []
         self.festival_store = FestivalStateStore()
         self.festival_state = self.festival_store.load()
@@ -23821,7 +23919,7 @@ class KeywordApp(ctk.CTk):
         self.writing_completion_platforms: list[str] = []
         self.automation_queue = list(self.wordpress_settings.automation_queue or [])
         self.password_visible = False
-        self.current_page = "writing"
+        self.current_page = "home"
         self.active_platform = "wordpress"
         self.gpt_password_visible = False
         self.gemini_password_visible = False
@@ -25051,6 +25149,7 @@ class KeywordApp(ctk.CTk):
                 widget.configure(corner_radius=22)
                 fg_color = widget.cget("fg_color")
                 sidebar_buttons = {
+                    "home": getattr(self, "home_nav_button", None),
                     "writing": getattr(self, "writing_nav_button", None),
                     "automation": getattr(self, "automation_nav_button", None),
                     "naver_blog": getattr(self, "naver_blog_nav_button", None),
@@ -25060,7 +25159,7 @@ class KeywordApp(ctk.CTk):
                     "settings": getattr(self, "settings_nav_button", None),
                 }
                 active_sidebar_button = sidebar_buttons.get(
-                    getattr(self, "current_page", "writing")
+                    getattr(self, "current_page", "home")
                 )
                 if widget is active_sidebar_button:
                     # 선택된 사이드 메뉴는 아이콘과 동일한 테마 강조색을
@@ -25282,6 +25381,7 @@ class KeywordApp(ctk.CTk):
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
             self.sidebar_version_label.configure(text_color=palette["muted"])
             scroll_names_by_page = {
+                "home": ("home_scroll",),
                 "writing": ("writing_scroll", "keyword_choice_frame"),
                 "automation": ("automation_scroll", "automation_list"),
                 "naver_blog": ("naver_blog_scroll",),
@@ -25294,7 +25394,7 @@ class KeywordApp(ctk.CTk):
                 "prompts": ("prompts_scroll",),
                 "settings": ("settings_scroll", "theme_scroll", "basic_scroll"),
             }
-            for scroll_name in scroll_names_by_page.get(getattr(self, "current_page", "writing"), ()):
+            for scroll_name in scroll_names_by_page.get(getattr(self, "current_page", "home"), ()):
                 scroll_frame = getattr(self, scroll_name, None)
                 if scroll_frame is not None:
                     self._paint_scrollable_background(scroll_frame, palette["shell"])
@@ -25339,6 +25439,7 @@ class KeywordApp(ctk.CTk):
         if not hasattr(self, "writing_page"):
             return {}
         mapping = {
+            "home": self.home_page,
             "writing": self.writing_page,
             "automation": self.automation_page,
             "naver_blog": self.naver_blog_page,
@@ -25351,7 +25452,7 @@ class KeywordApp(ctk.CTk):
         return mapping
 
     def _current_page_frame(self):
-        return self._page_frame_map().get(getattr(self, "current_page", "writing"))
+        return self._page_frame_map().get(getattr(self, "current_page", "home"))
 
     def _show_only_page_frame(self, page_name: str) -> None:
         for name, frame in self._page_frame_map().items():
@@ -25400,7 +25501,7 @@ class KeywordApp(ctk.CTk):
         self.prompt_name_entries = {}
 
     def _rebuild_layout_for_theme(self, theme: str, current_page: str | None = None) -> None:
-        current_page = current_page or getattr(self, "current_page", "writing")
+        current_page = current_page or getattr(self, "current_page", "home")
         try:
             latest_settings = self._read_wordpress_settings(include_prompts=False)
             latest_settings.app_theme = theme
@@ -25417,7 +25518,7 @@ class KeywordApp(ctk.CTk):
         self._populate_wordpress_fields()
         if theme == "화이트테마":
             self._finish_theme_paint()
-        self._switch_page(current_page if current_page in {"writing", "automation", "naver_blog", "naver_kin", "public_data", "prompts", "settings"} else "writing")
+        self._switch_page(current_page if current_page in {"home", "writing", "automation", "naver_blog", "naver_kin", "public_data", "prompts", "settings"} else "home")
 
     def _apply_app_theme(self, theme_name: str, save: bool = False) -> None:
         theme = self._normalize_app_theme(theme_name)
@@ -25429,9 +25530,9 @@ class KeywordApp(ctk.CTk):
             self.theme_menu.set(theme)
         if hasattr(self, "shell_frame"):
             if save and previous_theme != theme:
-                self._rebuild_layout_for_theme(theme, getattr(self, "current_page", "writing"))
+                self._rebuild_layout_for_theme(theme, getattr(self, "current_page", "home"))
             else:
-                self._switch_page(getattr(self, "current_page", "writing"))
+                self._switch_page(getattr(self, "current_page", "home"))
                 if theme == "화이트테마":
                     self._finish_theme_paint()
                 if hasattr(self, "wp_top_tab"):
@@ -25530,6 +25631,20 @@ class KeywordApp(ctk.CTk):
         )
         self.sidebar_title.grid(row=0, column=0, pady=(28, 26), sticky="ew")
 
+        self.home_nav_button = ctk.CTkButton(
+            self.sidebar_frame,
+            text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "home"),
+            anchor="w",
+            height=56,
+            corner_radius=14,
+            fg_color="transparent",
+            hover_color="#111826",
+            text_color="#6dadff",
+            font=ctk.CTkFont(size=19, weight="bold"),
+            command=lambda: self._switch_page("home"),
+        )
+        self.home_nav_button.grid(row=1, column=0, padx=26, pady=(0, 10), sticky="ew")
+
         self.writing_nav_button = ctk.CTkButton(
             self.sidebar_frame,
             text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "writing"),
@@ -25538,11 +25653,11 @@ class KeywordApp(ctk.CTk):
             corner_radius=14,
             fg_color="transparent",
             hover_color="#111826",
-            text_color="#6dadff",
+            text_color="#9aa7bb",
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("writing"),
         )
-        self.writing_nav_button.grid(row=1, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.writing_nav_button.grid(row=2, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.automation_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25556,7 +25671,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("automation"),
         )
-        self.automation_nav_button.grid(row=2, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.automation_nav_button.grid(row=3, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.naver_blog_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25573,7 +25688,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("naver_blog"),
         )
-        self.naver_blog_nav_button.grid(row=3, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.naver_blog_nav_button.grid(row=4, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.naver_kin_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25587,7 +25702,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("naver_kin"),
         )
-        self.naver_kin_nav_button.grid(row=4, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.naver_kin_nav_button.grid(row=5, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.public_data_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25601,7 +25716,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("public_data"),
         )
-        self.public_data_nav_button.grid(row=5, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.public_data_nav_button.grid(row=6, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.prompt_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25615,7 +25730,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("prompts"),
         )
-        self.prompt_nav_button.grid(row=6, column=0, padx=26, sticky="ew")
+        self.prompt_nav_button.grid(row=7, column=0, padx=26, sticky="ew")
 
         self.settings_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -25629,7 +25744,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("settings"),
         )
-        self.settings_nav_button.grid(row=7, column=0, padx=26, pady=(10, 0), sticky="ew")
+        self.settings_nav_button.grid(row=8, column=0, padx=26, pady=(10, 0), sticky="ew")
 
         self.sidebar_version_label = ctk.CTkLabel(
             self.sidebar_frame,
@@ -25647,6 +25762,12 @@ class KeywordApp(ctk.CTk):
         self.main_area.grid(row=0, column=1, sticky="nsew")
         self.main_area.grid_columnconfigure(0, weight=1)
         self.main_area.grid_rowconfigure(0, weight=1)
+
+        self.home_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
+        self.home_page.grid(row=0, column=0, sticky="nsew")
+        self.home_page.grid_columnconfigure(0, weight=1)
+        self.home_page.grid_rowconfigure(1, weight=1)
+        self._build_home_page()
 
         self.settings_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
         self.settings_page.grid(row=0, column=0, sticky="nsew")
@@ -25691,7 +25812,489 @@ class KeywordApp(ctk.CTk):
         self.prompts_page.grid_rowconfigure(1, weight=1)
         self._build_prompts_page()
 
+        self._switch_page("home")
+
+    def _build_home_page(self) -> None:
+        palette = self._theme_palette()
+        header = ctk.CTkFrame(self.home_page, fg_color="transparent")
+        header.grid(row=0, column=0, padx=28, pady=(24, 10), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text="홈",
+            image=self._bootstrap_sidebar_icon_image("house", palette["accent"], 27),
+            compound="left",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=29, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.home_refresh_button = ctk.CTkButton(
+            header,
+            text="키워드 새로고침",
+            width=138,
+            height=38,
+            corner_radius=13,
+            fg_color="#2f6df6",
+            hover_color="#255dcc",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._load_home_dashboard_keywords(force=True),
+        )
+        self.home_refresh_button.grid(row=0, column=1, sticky="e")
+
+        self.home_scroll = ctk.CTkScrollableFrame(
+            self.home_page,
+            fg_color="transparent",
+        )
+        self.home_scroll.grid(row=1, column=0, padx=28, pady=(0, 20), sticky="nsew")
+        self.home_scroll.grid_columnconfigure(0, weight=1)
+
+        control_card = ctk.CTkFrame(
+            self.home_scroll,
+            fg_color=palette["card"],
+            corner_radius=20,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        control_card.grid(row=0, column=0, pady=(0, 12), sticky="ew")
+        control_card.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            control_card,
+            text="글쓰기 선택",
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, padx=(18, 16), pady=(16, 8), sticky="w")
+
+        self.home_target_platform_var = tk.StringVar(
+            value=normalize_writing_prompt_active_target(
+                getattr(self.wordpress_settings, "home_target_platform", "wordpress")
+            )
+        )
+        target_row = ctk.CTkFrame(control_card, fg_color="transparent")
+        target_row.grid(row=0, column=1, pady=(16, 8), sticky="w")
+        for column, (platform, label) in enumerate(
+            (
+                ("wordpress", "워드프레스"),
+                ("tistory", "티스토리"),
+                ("blogspot", "블로그스팟"),
+            )
+        ):
+            ctk.CTkRadioButton(
+                target_row,
+                text=label,
+                variable=self.home_target_platform_var,
+                value=platform,
+                radiobutton_width=21,
+                radiobutton_height=21,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=self._on_home_target_platform_changed,
+            ).grid(row=0, column=column, padx=(0, 18), sticky="w")
+
+        prompt_frame = ctk.CTkFrame(control_card, fg_color="transparent")
+        prompt_frame.grid(row=0, column=2, padx=(12, 18), pady=(12, 8), sticky="e")
+        ctk.CTkLabel(
+            prompt_frame,
+            text="프롬프트",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 8), sticky="e")
+        self.home_prompt_menu = ctk.CTkOptionMenu(
+            prompt_frame,
+            values=self._prompt_set_menu_values(),
+            width=215,
+            height=38,
+            corner_radius=12,
+            fg_color=palette["button"],
+            button_color=palette["button"],
+            button_hover_color=palette["button_hover"],
+            dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["hover"],
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_home_prompt_selected,
+        )
+        self.home_prompt_menu.grid(row=0, column=1, sticky="e")
+        self._refresh_home_prompt_menu()
+
+        self.home_launch_status_label = ctk.CTkLabel(
+            control_card,
+            text="키워드 왼쪽의 선택 버튼을 누르면 참고자료 수집 후 3단계 글 작성을 자동으로 시작합니다.",
+            text_color=palette["muted"],
+            anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.home_launch_status_label.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            padx=18,
+            pady=(0, 14),
+            sticky="ew",
+        )
+
+        cards_frame = ctk.CTkFrame(self.home_scroll, fg_color="transparent")
+        cards_frame.grid(row=1, column=0, sticky="ew")
+        for column in range(3):
+            cards_frame.grid_columnconfigure(column, weight=1, uniform="home_keyword_card")
+
+        self.home_keyword_card_widgets: dict[str, dict[str, object]] = {}
+        self.home_keyword_action_widgets: list[object] = []
+        source_specs = (
+            ("daum", "다음 키워드 TOP10"),
+            ("signal", "시그널 키워드 TOP10"),
+            ("newneek", "뉴닉 키워드 TOP10"),
+        )
+        for column, (source, title) in enumerate(source_specs):
+            card = ctk.CTkFrame(
+                cards_frame,
+                fg_color=palette["panel"],
+                corner_radius=20,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            card.grid(
+                row=0,
+                column=column,
+                padx=(0, 8) if column < 2 else 0,
+                sticky="nsew",
+            )
+            card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                card,
+                text=title,
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=18, weight="bold"),
+            ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
+            progress = ctk.CTkProgressBar(
+                card,
+                mode="indeterminate",
+                height=7,
+                corner_radius=4,
+                progress_color=palette["accent"],
+                fg_color=palette["divider"],
+            )
+            progress.grid(row=1, column=0, padx=16, pady=(0, 7), sticky="ew")
+            status = ctk.CTkLabel(
+                card,
+                text="불러올 준비 중...",
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+            )
+            status.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="w")
+            rows = ctk.CTkFrame(card, fg_color="transparent")
+            rows.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
+            rows.grid_columnconfigure(2, weight=1)
+            updated = ctk.CTkLabel(
+                card,
+                text="",
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=11),
+            )
+            updated.grid(row=4, column=0, padx=16, pady=(0, 13), sticky="e")
+            self.home_keyword_card_widgets[source] = {
+                "progress": progress,
+                "status": status,
+                "rows": rows,
+                "updated": updated,
+            }
+
+        self.home_selected_keyword_var = tk.StringVar(value="")
+        for source in ("daum", "signal", "newneek"):
+            cached = self.home_keyword_data.get(source, [])
+            if cached:
+                self._render_home_keyword_source(source)
+
+    def _refresh_home_prompt_menu(self) -> None:
+        if not hasattr(self, "home_prompt_menu"):
+            return
+        values = self._prompt_set_menu_values()
+        self.home_prompt_menu.configure(values=values)
+        prompt_id = str(
+            getattr(self.wordpress_settings, "home_selected_prompt_id", "")
+            or self.wordpress_settings.selected_prompt_id
+            or ""
+        ).strip()
+        selected = self._prompt_set_by_id(prompt_id) if prompt_id else None
+        label = self._prompt_set_label(selected) if selected else values[0]
+        if label not in values:
+            label = values[0]
+        self.home_prompt_menu.set(label)
+        selected = self._prompt_set_by_label(label)
+        if selected:
+            self.wordpress_settings.home_selected_prompt_id = str(
+                selected.get("id") or ""
+            )
+
+    def _on_home_target_platform_changed(self) -> None:
+        platform = normalize_writing_prompt_active_target(
+            self.home_target_platform_var.get()
+            if hasattr(self, "home_target_platform_var")
+            else "wordpress"
+        )
+        self.wordpress_settings.home_target_platform = platform
+        AppStateStore.update_fields(home_target_platform=platform)
+
+    def _on_home_prompt_selected(self, label: str) -> None:
+        selected = self._prompt_set_by_label(label)
+        if selected is None:
+            return
+        prompt_id = str(selected.get("id") or "")
+        self.wordpress_settings.home_selected_prompt_id = prompt_id
+        AppStateStore.update_fields(home_selected_prompt_id=prompt_id)
+
+    def _load_home_dashboard_keywords(self, force: bool = False) -> None:
+        if self.home_keyword_worker and self.home_keyword_worker.is_alive():
+            return
+        if self.home_keywords_loaded and not force:
+            self.home_keyword_action_widgets = []
+            for source in ("daum", "signal", "newneek"):
+                self._render_home_keyword_source(source)
+            return
+        if not hasattr(self, "home_keyword_card_widgets"):
+            return
+        self.home_keywords_loaded = False
+        self.home_keyword_action_widgets = []
+        self.home_refresh_button.configure(state="disabled", text="불러오는 중...")
+        for source, widgets in self.home_keyword_card_widgets.items():
+            if force:
+                self.home_keyword_data[source] = []
+                self.home_keyword_reference_maps[source] = {}
+                for child in widgets["rows"].winfo_children():
+                    child.destroy()
+            widgets["status"].configure(text="키워드를 불러오는 중...", text_color=self._theme_palette()["muted"])
+            widgets["updated"].configure(text="")
+            widgets["progress"].grid()
+            widgets["progress"].start()
+        self.home_keyword_worker = HomeDashboardKeywordWorker(self.result_queue)
+        self.home_keyword_worker.start()
+
+    def _handle_home_keywords_progress(self, payload: dict) -> None:
+        source = str((payload or {}).get("source") or "")
+        widgets = getattr(self, "home_keyword_card_widgets", {}).get(source)
+        if widgets:
+            widgets["status"].configure(
+                text=str((payload or {}).get("message") or "키워드를 불러오는 중..."),
+                text_color=self._theme_palette()["muted"],
+            )
+
+    def _handle_home_keywords_source_done(self, payload: dict) -> None:
+        source = str((payload or {}).get("source") or "")
+        if source not in self.home_keyword_data:
+            return
+        self.home_keyword_data[source] = list((payload or {}).get("insights") or [])[:10]
+        self.home_keyword_reference_maps[source] = dict(
+            (payload or {}).get("reference_map") or {}
+        )
+        self._render_home_keyword_source(
+            source,
+            updated_at=str((payload or {}).get("updated_at") or ""),
+        )
+
+    def _handle_home_keywords_source_error(self, payload: dict) -> None:
+        source = str((payload or {}).get("source") or "")
+        widgets = getattr(self, "home_keyword_card_widgets", {}).get(source)
+        if widgets is None:
+            return
+        widgets["progress"].stop()
+        widgets["progress"].grid_remove()
+        widgets["status"].configure(
+            text=f"불러오기 실패 · {str((payload or {}).get('message') or '')[:55]}",
+            text_color="#e05252",
+        )
+
+    def _handle_home_keywords_done(self, payload: dict) -> None:
+        self.home_keyword_worker = None
+        completed = int((payload or {}).get("completed", 0) or 0)
+        self.home_keywords_loaded = completed > 0
+        if hasattr(self, "home_refresh_button"):
+            self.home_refresh_button.configure(state="normal", text="키워드 새로고침")
+        if hasattr(self, "home_launch_status_label"):
+            self.home_launch_status_label.configure(
+                text=(
+                    "키워드 왼쪽의 선택 버튼을 누르면 참고자료 수집 후 3단계 글 작성을 자동으로 시작합니다."
+                    if completed
+                    else "키워드를 불러오지 못했습니다. 잠시 후 새로고침해 주세요."
+                ),
+                text_color=(self._theme_palette()["muted"] if completed else "#e05252"),
+            )
+
+    def _render_home_keyword_source(
+        self,
+        source: str,
+        updated_at: str = "",
+    ) -> None:
+        widgets = getattr(self, "home_keyword_card_widgets", {}).get(source)
+        if widgets is None:
+            return
+        palette = self._theme_palette()
+        progress = widgets["progress"]
+        progress.stop()
+        progress.grid_remove()
+        rows = widgets["rows"]
+        for child in rows.winfo_children():
+            child.destroy()
+        insights = list(self.home_keyword_data.get(source, []))[:10]
+        if not insights:
+            widgets["status"].configure(
+                text="표시할 키워드가 없습니다.",
+                text_color=palette["muted"],
+            )
+            return
+        widgets["status"].configure(
+            text=f"{len(insights)}개를 불러왔습니다.",
+            text_color="#1faa55" if self._normalize_app_theme(self.wordpress_settings.app_theme) == "화이트테마" else "#48d980",
+        )
+        action_widgets = getattr(self, "home_keyword_action_widgets", [])
+        for index, insight in enumerate(insights):
+            row = ctk.CTkFrame(rows, fg_color="transparent")
+            row.grid(row=index, column=0, pady=3, sticky="ew")
+            row.grid_columnconfigure(2, weight=1)
+            source_url = self._primary_source_url(insight)
+            view_button = ctk.CTkButton(
+                row,
+                text="보기",
+                width=46,
+                height=28,
+                corner_radius=9,
+                fg_color=palette["button"],
+                hover_color=palette["button_hover"],
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+                state="normal" if source_url else "disabled",
+                command=lambda url=source_url: self._open_source_url(url) if url else None,
+            )
+            view_button.grid(row=0, column=0, padx=(0, 7), sticky="w")
+            token = f"{source}:{index}"
+            select_radio = ctk.CTkRadioButton(
+                row,
+                text="",
+                width=24,
+                variable=self.home_selected_keyword_var,
+                value=token,
+                radiobutton_width=20,
+                radiobutton_height=20,
+                command=lambda current_source=source, current_index=index: self._start_home_keyword_writing(
+                    current_source,
+                    current_index,
+                ),
+            )
+            select_radio.grid(row=0, column=1, padx=(0, 5), sticky="w")
+            label_text = re.sub(r"\s+", " ", insight.keyword).strip()
+            if len(label_text) > 30:
+                label_text = label_text[:29].rstrip() + "…"
+            ctk.CTkLabel(
+                row,
+                text=f"{index + 1}. {label_text}",
+                anchor="w",
+                justify="left",
+                wraplength=155,
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(row=0, column=2, sticky="ew")
+            action_widgets.extend((view_button, select_radio))
+        self.home_keyword_action_widgets = action_widgets
+        widgets["updated"].configure(
+            text=f"업데이트 {updated_at or time.strftime('%H:%M')}"
+        )
+
+    def _set_home_launch_busy(self, busy: bool, message: str = "") -> None:
+        state = "disabled" if busy else "normal"
+        for widget in getattr(self, "home_keyword_action_widgets", []):
+            try:
+                widget.configure(state=state)
+            except (AttributeError, tk.TclError):
+                pass
+        if hasattr(self, "home_refresh_button"):
+            self.home_refresh_button.configure(state=state)
+        if hasattr(self, "home_launch_status_label") and message:
+            self.home_launch_status_label.configure(
+                text=message,
+                text_color=self._theme_palette()["accent"] if busy else self._theme_palette()["muted"],
+            )
+
+    def _start_home_keyword_writing(self, source: str, index: int) -> None:
+        if self.home_reference_launch_context:
+            return
+        if self.reference_collection_worker and self.reference_collection_worker.is_alive():
+            messagebox.showinfo("진행 중", "현재 참고자료 수집이 진행 중입니다.")
+            return
+        insights = list(self.home_keyword_data.get(source, []))
+        if index < 0 or index >= len(insights):
+            return
+        insight = insights[index]
+        keyword = str(insight.keyword or "").strip()
+        if not keyword:
+            return
+        target = normalize_writing_prompt_active_target(
+            self.home_target_platform_var.get()
+        )
+        selected_prompt = self._prompt_set_by_label(self.home_prompt_menu.get())
+        prompt_id = str((selected_prompt or {}).get("id") or "")
+        self.wordpress_settings.home_target_platform = target
+        self.wordpress_settings.home_selected_prompt_id = prompt_id
+        AppStateStore.update_fields(
+            home_target_platform=target,
+            home_selected_prompt_id=prompt_id,
+        )
+
+        for platform, variable in self.target_platform_vars.items():
+            variable.set(platform == target)
+        self.wordpress_settings.target_platforms = [target]
+        self.wordpress_settings.writing_prompt_active_target = target
+        if selected_prompt:
+            self.writing_prompt_menu.set(self._prompt_set_label(selected_prompt))
+            self._on_writing_prompt_selected(self._prompt_set_label(selected_prompt))
+
+        self._stop_writing_auto_progress()
+        self._reset_writing_section_completion()
+        self.writing_auto_progress_var.set(True)
+        self._refresh_writing_auto_progress_ui()
+        self.current_keyword = {
+            "daum": "다음 키워드",
+            "signal": "시그널 키워드",
+            "newneek": "뉴닉 키워드",
+        }.get(source, "홈 키워드")
+        self.current_insights = [insight]
+        self.selected_keyword_var.set(keyword)
+        if hasattr(self, "manual_keyword_entry"):
+            self.manual_keyword_entry.delete(0, "end")
+        if hasattr(self, "topic_entry"):
+            self.topic_entry.delete(0, "end")
+            self.topic_entry.insert(0, self.current_keyword)
+        reference_text = str(
+            self.home_keyword_reference_maps.get(source, {}).get(keyword, "")
+        ).strip()
+        self.reference_textbox.delete("1.0", "end")
+        if reference_text:
+            self.reference_textbox.insert("1.0", reference_text)
+        self._update_reference_count()
+        self.collected_reference_map[keyword] = reference_text
+        self.home_reference_launch_context = {
+            "source": source,
+            "keyword": keyword,
+            "target": target,
+            "prompt_id": prompt_id,
+        }
+        self._arm_writing_auto_progress()
+        self._save_ui_state()
+        self._set_home_launch_busy(
+            True,
+            f"'{keyword}' 사이트 검색 자료를 Playwright로 수집하고 있습니다...",
+        )
+        self._collect_reference_for_selected_keyword(silent=True)
+
+    def _complete_home_reference_handoff(
+        self,
+        keyword: str,
+        message: str,
+    ) -> bool:
+        context = self.home_reference_launch_context
+        if not context or str(context.get("keyword") or "").strip() != str(keyword or "").strip():
+            return False
+        self.home_reference_launch_context = None
+        self._set_home_launch_busy(False, message)
         self._switch_page("writing")
+        self._open_writing_section("article", complete_previous=True)
+        return True
 
     def _build_settings_page(self) -> None:
         self.settings_section = "ai"
@@ -27307,6 +27910,7 @@ class KeywordApp(ctk.CTk):
             else self.wordpress_settings.sidebar_menu_labels
         )
         button_names = {
+            "home": "home_nav_button",
             "writing": "writing_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
@@ -27391,6 +27995,7 @@ class KeywordApp(ctk.CTk):
         )
         palette = self._theme_palette()
         button_names = {
+            "home": "home_nav_button",
             "writing": "writing_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
@@ -27399,7 +28004,7 @@ class KeywordApp(ctk.CTk):
             "prompts": "prompt_nav_button",
             "settings": "settings_nav_button",
         }
-        active_page = getattr(self, "current_page", "writing")
+        active_page = getattr(self, "current_page", "home")
         for page_name, button_name in button_names.items():
             button = getattr(self, button_name, None)
             if button is None:
@@ -35046,6 +35651,7 @@ class KeywordApp(ctk.CTk):
             if active_set:
                 menu.set(self._prompt_set_label(active_set))
         self._refresh_writing_prompt_menu()
+        self._refresh_home_prompt_menu()
         self._refresh_naver_blog_prompt_menu()
         self._refresh_naver_kin_wordpress_prompt_menu()
 
@@ -40800,7 +41406,7 @@ class KeywordApp(ctk.CTk):
 
     def _switch_page(self, page_name: str) -> None:
         if page_name not in self._page_frame_map():
-            page_name = "writing"
+            page_name = "home"
         self.current_page = page_name
         palette = self._theme_palette() if hasattr(self, "_theme_palette") else {
             "accent": "#6dadff",
@@ -40817,6 +41423,9 @@ class KeywordApp(ctk.CTk):
             "prompts": self.prompt_nav_button,
             "settings": self.settings_nav_button,
         }
+        home_nav_button = getattr(self, "home_nav_button", None)
+        if home_nav_button is not None:
+            nav_buttons = {"home": home_nav_button, **nav_buttons}
         for name, button in nav_buttons.items():
             button.configure(
                 text_color=palette["accent"] if name == page_name else palette["muted"],
@@ -40826,6 +41435,8 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "_apply_sidebar_menu_icons"):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)
+        if page_name == "home":
+            self.after(80, self._load_home_dashboard_keywords)
         if page_name == "automation":
             if self._is_windows_dark_theme():
                 # Make navigation visible before rebuilding a potentially long
@@ -42087,6 +42698,21 @@ class KeywordApp(ctk.CTk):
                 self.wordpress_settings.writing_prompt_active_target,
                 target_platforms,
             ),
+            home_target_platform=normalize_writing_prompt_active_target(
+                getattr(
+                    self.wordpress_settings,
+                    "home_target_platform",
+                    "wordpress",
+                )
+            ),
+            home_selected_prompt_id=str(
+                getattr(
+                    self.wordpress_settings,
+                    "home_selected_prompt_id",
+                    "",
+                )
+                or ""
+            ).strip(),
             title_prompt_template=selected_title_prompt,
             article_prompt_template=selected_article_prompt,
             prompt_sets=prompt_sets,
@@ -45521,6 +46147,14 @@ class KeywordApp(ctk.CTk):
                     self._set_trend_keyword_buttons_state("normal")
                     self._set_writing_progress(1, f"키워드 분석에 실패했습니다: {payload}", state="error")
                     messagebox.showerror("분석 실패", payload)
+                elif event_type == "home_keywords_progress":
+                    self._handle_home_keywords_progress(payload)
+                elif event_type == "home_keywords_source_done":
+                    self._handle_home_keywords_source_done(payload)
+                elif event_type == "home_keywords_source_error":
+                    self._handle_home_keywords_source_error(payload)
+                elif event_type == "home_keywords_done":
+                    self._handle_home_keywords_done(payload)
                 elif event_type == "daum_progress":
                     self.keyword_status_label.configure(text=payload)
                     self._set_writing_progress(1, payload)
@@ -45878,6 +46512,8 @@ class KeywordApp(ctk.CTk):
                     self.keyword_status_label.configure(text=payload)
                     self.article_progress_label.configure(text=payload)
                     self._set_writing_progress(2, payload)
+                    if self.home_reference_launch_context:
+                        self._set_home_launch_busy(True, str(payload))
                 elif event_type == "reference_collect_done":
                     keyword = payload.get("keyword", "")
                     reference_text = payload.get("reference_text", "")
@@ -45907,6 +46543,10 @@ class KeywordApp(ctk.CTk):
                         0.0,
                     )
                     self._save_ui_state()
+                    self._complete_home_reference_handoff(
+                        keyword,
+                        f"'{keyword}' 자료 수집 완료 · 블로그글쓰기 3단계로 이동했습니다.",
+                    )
                     self.after(180, self._start_pending_reference_collection)
                     if self.writing_auto_run_active:
                         self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
@@ -45931,6 +46571,10 @@ class KeywordApp(ctk.CTk):
                         "참고내용 수집을 건너뛰고 현재 자료로 글 작성을 준비합니다.",
                         0.0,
                     )
+                    self._complete_home_reference_handoff(
+                        keyword,
+                        f"'{keyword}' 기본 참고자료로 블로그글쓰기 3단계를 시작합니다.",
+                    )
                     self.after(180, self._start_pending_reference_collection)
                     self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                 elif event_type == "reference_collect_error":
@@ -45954,6 +46598,14 @@ class KeywordApp(ctk.CTk):
                         self._set_writing_progress(2, f"참고내용 수집에 실패했습니다: {payload}", state="error")
                         if not self.writing_auto_run_active:
                             messagebox.showerror("참고내용 수집 실패", payload)
+                    home_keyword = str(
+                        (self.home_reference_launch_context or {}).get("keyword")
+                        or self._selected_or_manual_keyword()
+                    )
+                    self._complete_home_reference_handoff(
+                        home_keyword,
+                        f"'{home_keyword}' 기존 참고자료로 블로그글쓰기 3단계를 시작합니다.",
+                    )
                     self.after(180, self._start_pending_reference_collection)
                     self.after(260, self._auto_continue_after_reference)
                 elif event_type == "benchmark_progress":
