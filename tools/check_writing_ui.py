@@ -130,6 +130,13 @@ def main() -> None:
                 "wordpress", "tistory", "blogspot",
             )
             assert app.home_adsense_card.winfo_ismapped()
+            assert int(app.home_adsense_card.grid_info()["row"]) == 0
+            assert int(app.home_control_card.grid_info()["row"]) == 1
+            assert int(app.home_keyword_cards_frame.grid_info()["row"]) == 2
+            assert int(app.home_publish_summary_frame.grid_info()["row"]) == 3
+            assert app.home_refresh_button.master is app.home_prompt_frame
+            assert int(app.home_refresh_button.grid_info()["row"]) == 1
+            assert int(app.home_refresh_button.cget("width")) == 215
             assert resolved_color(app.home_adsense_title_label, "text_color") == "#ffffff"
             assert tuple(app.home_adsense_value_labels) == (
                 "today", "yesterday", "last_7_days", "month_to_date", "balance",

@@ -26072,19 +26072,6 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             font=ctk.CTkFont(size=29, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
-        self.home_refresh_button = ctk.CTkButton(
-            header,
-            text="키워드 새로고침",
-            width=138,
-            height=38,
-            corner_radius=13,
-            fg_color="#2f6df6",
-            hover_color="#255dcc",
-            text_color="#ffffff",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=lambda: self._load_home_dashboard_keywords(force=True),
-        )
-        self.home_refresh_button.grid(row=0, column=1, sticky="e")
 
         self.home_scroll = ctk.CTkScrollableFrame(
             self.home_page,
@@ -26100,7 +26087,8 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color=palette["border"],
         )
-        control_card.grid(row=0, column=0, pady=(0, 12), sticky="ew")
+        self.home_control_card = control_card
+        control_card.grid(row=1, column=0, pady=(0, 12), sticky="ew")
         control_card.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             control_card,
@@ -26135,6 +26123,7 @@ class KeywordApp(ctk.CTk):
             ).grid(row=0, column=column, padx=(0, 18), sticky="w")
 
         prompt_frame = ctk.CTkFrame(control_card, fg_color="transparent")
+        self.home_prompt_frame = prompt_frame
         prompt_frame.grid(row=0, column=2, padx=(12, 18), pady=(12, 8), sticky="e")
         ctk.CTkLabel(
             prompt_frame,
@@ -26158,6 +26147,24 @@ class KeywordApp(ctk.CTk):
             command=self._on_home_prompt_selected,
         )
         self.home_prompt_menu.grid(row=0, column=1, sticky="e")
+        self.home_refresh_button = ctk.CTkButton(
+            prompt_frame,
+            text="키워드 새로고침",
+            width=215,
+            height=36,
+            corner_radius=12,
+            fg_color="#2f6df6",
+            hover_color="#255dcc",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._load_home_dashboard_keywords(force=True),
+        )
+        self.home_refresh_button.grid(
+            row=1,
+            column=1,
+            pady=(8, 0),
+            sticky="ew",
+        )
         self._refresh_home_prompt_menu()
 
         self.home_launch_status_label = ctk.CTkLabel(
@@ -26177,7 +26184,8 @@ class KeywordApp(ctk.CTk):
         )
 
         cards_frame = ctk.CTkFrame(self.home_scroll, fg_color="transparent")
-        cards_frame.grid(row=1, column=0, sticky="ew")
+        self.home_keyword_cards_frame = cards_frame
+        cards_frame.grid(row=2, column=0, sticky="ew")
         for column in range(3):
             cards_frame.grid_columnconfigure(column, weight=1, uniform="home_keyword_card")
 
@@ -26252,7 +26260,8 @@ class KeywordApp(ctk.CTk):
             self.home_scroll,
             fg_color="transparent",
         )
-        publish_summary_frame.grid(row=2, column=0, pady=(12, 0), sticky="ew")
+        self.home_publish_summary_frame = publish_summary_frame
+        publish_summary_frame.grid(row=3, column=0, pady=(12, 0), sticky="ew")
         for column in range(3):
             publish_summary_frame.grid_columnconfigure(
                 column,
@@ -26345,7 +26354,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#3983da",
         )
-        self.home_adsense_card.grid(row=3, column=0, pady=(12, 0), sticky="ew")
+        self.home_adsense_card.grid(row=0, column=0, pady=(0, 12), sticky="ew")
         for column in range(5):
             self.home_adsense_card.grid_columnconfigure(
                 column,
