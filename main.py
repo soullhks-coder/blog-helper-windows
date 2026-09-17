@@ -846,6 +846,13 @@ WEBMASTER_TOOL_LABELS = {
     WEBMASTER_TOOL_GOOGLE: "Google",
 }
 REFERENCE_CHROME_PROFILE_DIR = DATA_DIR / "Reference Chrome Profile"
+NAVER_CREATOR_ADVISOR_URL = (
+    "https://creator-advisor.naver.com/naver_blog/bluecrea/trends"
+    "#main-inflow-trend"
+)
+NAVER_CREATOR_ADVISOR_CHROME_PROFILE_DIR = (
+    DATA_DIR / "Naver Creator Advisor Chrome Profile"
+)
 CARDNEWS_IMAGE_PREFIX = "cardnews-image"
 GOOGLE_IMAGE_COLLAGE_COUNT = 2
 GOOGLE_IMAGE_COLLAGE_ENABLED = True
@@ -19485,6 +19492,431 @@ class NewneekKeywordWorker(threading.Thread):
         return re.sub(r"[ \t\r\f\v]+", " ", value).replace("\n ", "\n").strip()
 
 
+def _clean_creator_advisor_title(value: object) -> str:
+    title = unescape(str(value or ""))
+    title = re.sub(r"<[^>]+>", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    return title[:180]
+
+
+def _normalize_creator_advisor_content_url(value: object) -> str:
+    url = unescape(str(value or "")).strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url.startswith("/"):
+        url = urljoin("https://creator-advisor.naver.com/", url)
+    if not url.lower().startswith(("http://", "https://")):
+        return ""
+    parsed = urlparse(url)
+    for query_key in ("url", "target", "redirect", "link"):
+        query_value = parse_qs(parsed.query).get(query_key, [])
+        if query_value:
+            nested = unquote(str(query_value[0] or "")).strip()
+            if nested.lower().startswith(("http://", "https://")):
+                url = nested
+                break
+    return url
+
+
+def extract_creator_advisor_items_from_payload(payload: object) -> list[dict[str, str]]:
+    """Find ranked Naver content titles and URLs in Creator Advisor JSON."""
+    title_keys = (
+        "contentTitle",
+        "postTitle",
+        "blogTitle",
+        "articleTitle",
+        "subject",
+        "title",
+        "contentName",
+        "postNm",
+        "name",
+    )
+    url_keys = (
+        "contentUrl",
+        "postUrl",
+        "blogUrl",
+        "articleUrl",
+        "linkUrl",
+        "outlinkUrl",
+        "landingUrl",
+        "url",
+        "link",
+    )
+    ranked: list[tuple[int, int, dict[str, str]]] = []
+    visit_order = 0
+
+    def visit(value: object, path: tuple[str, ...] = ()) -> None:
+        nonlocal visit_order
+        if isinstance(value, dict):
+            title = next(
+                (
+                    _clean_creator_advisor_title(value.get(key))
+                    for key in title_keys
+                    if _clean_creator_advisor_title(value.get(key))
+                ),
+                "",
+            )
+            url = next(
+                (
+                    _normalize_creator_advisor_content_url(value.get(key))
+                    for key in url_keys
+                    if _normalize_creator_advisor_content_url(value.get(key))
+                ),
+                "",
+            )
+            if not url:
+                blog_id = str(
+                    value.get("blogId")
+                    or value.get("blog_id")
+                    or value.get("domainId")
+                    or ""
+                ).strip()
+                log_no = str(
+                    value.get("logNo")
+                    or value.get("log_no")
+                    or value.get("postNo")
+                    or ""
+                ).strip()
+                if blog_id and log_no:
+                    url = f"https://blog.naver.com/{blog_id}/{log_no}"
+            if title and url and len(title) >= 3:
+                path_text = " ".join(path).lower()
+                score = 0
+                if "main" in path_text:
+                    score += 6
+                if "inflow" in path_text or "referrer" in path_text:
+                    score += 8
+                if "content" in path_text or "post" in path_text:
+                    score += 4
+                if "blog.naver.com" in url.lower():
+                    score += 4
+                ranked.append((score, visit_order, {"title": title, "url": url}))
+                visit_order += 1
+            for key, child in value.items():
+                visit(child, (*path, str(key)))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, (*path, str(index)))
+
+    visit(payload)
+    if not ranked:
+        return []
+    max_score = max(entry[0] for entry in ranked)
+    preferred = [entry for entry in ranked if entry[0] >= max(8, max_score - 2)]
+    candidates = preferred or ranked
+    candidates.sort(key=lambda entry: entry[1])
+    items: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    for _score, _order, item in candidates:
+        url_key = item["url"].rstrip("/").casefold()
+        title_key = re.sub(r"\s+", "", item["title"]).casefold()
+        if url_key in seen_urls or title_key in seen_titles:
+            continue
+        seen_urls.add(url_key)
+        seen_titles.add(title_key)
+        items.append(item)
+        if len(items) >= 10:
+            break
+    return items
+
+
+class NaverCreatorAdvisorKeywordWorker(threading.Thread):
+    def __init__(self, result_queue: queue.Queue, login_timeout_seconds: int = 300) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+        self.login_timeout_seconds = max(30, int(login_timeout_seconds or 300))
+
+    def _report(self, message: str) -> None:
+        self.result_queue.put(("naver_creator_progress", message))
+        append_runtime_log("NaverCreator", message)
+
+    def run(self) -> None:
+        try:
+            items = self._collect_items()
+            if not items:
+                raise RuntimeError(
+                    "네이버 메인에서 유입된 콘텐츠 목록을 찾지 못했습니다. "
+                    "Creator Advisor에서 해당 통계가 표시되는지 확인한 뒤 다시 눌러 주세요."
+                )
+            insights, reference_map = self._build_payload(items[:10])
+            self.result_queue.put(
+                (
+                    "naver_creator_done",
+                    {"insights": insights, "reference_map": reference_map},
+                )
+            )
+        except Exception as exc:  # pragma: no cover - runtime handling
+            append_runtime_log("NaverCreator", f"수집 실패: {exc}")
+            self.result_queue.put(("naver_creator_error", str(exc)))
+
+    def _collect_items(self) -> list[dict[str, str]]:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "Playwright가 설치되어 있지 않아 네이버 Creator Advisor를 열 수 없습니다."
+            ) from exc
+
+        chrome_path = require_google_chrome_executable()
+        NAVER_CREATOR_ADVISOR_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        captured_payloads: list[object] = []
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(NAVER_CREATOR_ADVISOR_CHROME_PROFILE_DIR),
+                executable_path=str(chrome_path),
+                headless=False,
+                no_viewport=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+            try:
+                page = context.pages[-1] if context.pages else context.new_page()
+                page.set_default_timeout(8_000)
+                page.set_default_navigation_timeout(60_000)
+
+                def capture_response(response) -> None:
+                    try:
+                        content_type = str(response.headers.get("content-type") or "")
+                        if (
+                            "creator-advisor.naver.com" in response.url
+                            and "json" in content_type.lower()
+                        ):
+                            captured_payloads.append(response.json())
+                    except Exception:
+                        return
+
+                context.on("response", capture_response)
+                self._report("네이버 Creator Advisor를 여는 중...")
+                page.goto(NAVER_CREATOR_ADVISOR_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(1800)
+                self._click_login_if_needed(page)
+                page = self._wait_for_login(context, page)
+
+                self._report("로그인 확인 완료. 네이버 메인 유입 콘텐츠를 불러오는 중...")
+                page.goto(NAVER_CREATOR_ADVISOR_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(4500)
+                try:
+                    page.evaluate(
+                        "document.querySelector('#main-inflow-trend')?.scrollIntoView({block:'center'})"
+                    )
+                    page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+
+                items = self._extract_dom_items(page)
+                if len(items) < 10:
+                    try:
+                        next_data = page.locator("script#__NEXT_DATA__").text_content(
+                            timeout=1500
+                        )
+                        if next_data:
+                            captured_payloads.append(json.loads(next_data))
+                    except Exception:
+                        pass
+                    for payload in captured_payloads:
+                        items = self._merge_items(
+                            items,
+                            extract_creator_advisor_items_from_payload(payload),
+                        )
+                        if len(items) >= 10:
+                            break
+                self._report(
+                    f"네이버 메인 유입 콘텐츠 {len(items[:10])}개를 확인했습니다."
+                )
+                return items[:10]
+            finally:
+                context.close()
+
+    def _click_login_if_needed(self, page) -> None:
+        for label in ("로그인하고 서비스 이용하기", "로그인"):
+            for role in ("button", "link"):
+                try:
+                    locator = page.get_by_role(role, name=re.compile(label)).first
+                    if locator.is_visible(timeout=700):
+                        locator.click()
+                        self._report(
+                            "전용 Chrome에서 네이버 로그인을 완료해 주세요. 로그인 상태는 다음에도 유지됩니다."
+                        )
+                        return
+                except Exception:
+                    continue
+
+    def _wait_for_login(self, context, page):
+        deadline = time.time() + self.login_timeout_seconds
+        login_notice_sent = False
+        cookie_navigation_attempted = False
+        while time.time() < deadline:
+            pages = [candidate for candidate in context.pages if not candidate.is_closed()]
+            if pages:
+                page = pages[-1]
+            for candidate in pages or [page]:
+                url = str(candidate.url or "").lower()
+                try:
+                    body_text = candidate.locator("body").inner_text(timeout=1200)
+                except Exception:
+                    body_text = ""
+                ready = (
+                    "creator-advisor.naver.com" in url
+                    and "nid.naver.com" not in url
+                    and (
+                        "네이버 메인에서 유입된 콘텐츠" in body_text
+                        or "메인 유입" in body_text
+                        or "로그아웃" in body_text
+                    )
+                )
+                if ready:
+                    return candidate
+            if not cookie_navigation_attempted:
+                try:
+                    cookie_names = {
+                        str(cookie.get("name") or "")
+                        for cookie in context.cookies(
+                            ["https://www.naver.com", "https://creator-advisor.naver.com"]
+                        )
+                    }
+                    if {"NID_AUT", "NID_SES"} & cookie_names:
+                        creator_pages = [
+                            candidate
+                            for candidate in pages
+                            if "creator-advisor.naver.com" in str(candidate.url or "")
+                        ]
+                        page = creator_pages[-1] if creator_pages else page
+                        page.goto(NAVER_CREATOR_ADVISOR_URL, wait_until="domcontentloaded")
+                        page.wait_for_timeout(1800)
+                        cookie_navigation_attempted = True
+                        return page
+                except Exception:
+                    pass
+            if not login_notice_sent:
+                self._report(
+                    "전용 Chrome에서 네이버 로그인을 완료해 주세요. 최대 5분 동안 기다립니다..."
+                )
+                login_notice_sent = True
+            time.sleep(1)
+        raise RuntimeError(
+            "5분 안에 네이버 로그인이 확인되지 않았습니다. 로그인한 뒤 네이버 버튼을 다시 눌러 주세요."
+        )
+
+    def _extract_dom_items(self, page) -> list[dict[str, str]]:
+        try:
+            raw_items = page.evaluate(
+                """
+                () => {
+                  const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                  const headings = [...document.querySelectorAll('h1,h2,h3,h4,strong,b,dt,p,span,div')];
+                  const heading = headings.find((node) => {
+                    const text = clean(node.textContent);
+                    return text === '네이버 메인에서 유입된 콘텐츠' ||
+                           text.includes('네이버 메인에서 유입된 콘텐츠');
+                  });
+                  const roots = [];
+                  if (heading) {
+                    let node = heading;
+                    for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+                      roots.push(node);
+                    }
+                  }
+                  roots.push(document.querySelector('#main-inflow-trend'));
+                  roots.push(document);
+                  const ignored = /^(확인|더보기|바로가기|NAVER|네이버|이전|다음)$/;
+                  for (const root of roots.filter(Boolean)) {
+                    const found = [];
+                    const nodes = root.querySelectorAll('a[href], [data-url], [data-link], [data-href]');
+                    for (const node of nodes) {
+                      const rawUrl = node.href || node.dataset.url || node.dataset.link || node.dataset.href || '';
+                      let url = '';
+                      try { url = new URL(rawUrl, location.href).href; } catch (_) { continue; }
+                      const title = clean(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent);
+                      if (title.length < 3 || ignored.test(title) || !/^https?:/i.test(url)) continue;
+                      if (url.includes('creator-advisor.naver.com') && !url.includes('redirect')) continue;
+                      found.push({title, url});
+                    }
+                    if (found.length >= 3) return found.slice(0, 20);
+                  }
+                  return [];
+                }
+                """
+            )
+        except Exception:
+            raw_items = []
+        items = [
+            {
+                "title": _clean_creator_advisor_title(item.get("title")),
+                "url": _normalize_creator_advisor_content_url(item.get("url")),
+            }
+            for item in (raw_items or [])
+            if isinstance(item, dict)
+        ]
+        return self._merge_items([], items)
+
+    def _merge_items(
+        self,
+        existing: list[dict[str, str]],
+        added: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        merged: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        seen_titles: set[str] = set()
+        for item in [*existing, *added]:
+            title = _clean_creator_advisor_title(item.get("title"))
+            url = _normalize_creator_advisor_content_url(item.get("url"))
+            title_key = re.sub(r"\s+", "", title).casefold()
+            url_key = url.rstrip("/").casefold()
+            if (
+                len(title) < 3
+                or not url
+                or title_key in seen_titles
+                or url_key in seen_urls
+            ):
+                continue
+            seen_titles.add(title_key)
+            seen_urls.add(url_key)
+            merged.append({"title": title, "url": url})
+            if len(merged) >= 10:
+                break
+        return merged
+
+    def _build_payload(
+        self,
+        items: list[dict[str, str]],
+    ) -> tuple[list[KeywordInsight], dict[str, str]]:
+        insights: list[KeywordInsight] = []
+        reference_map: dict[str, str] = {}
+        for index, item in enumerate(items[:10], start=1):
+            title = _clean_creator_advisor_title(item.get("title"))
+            url = _normalize_creator_advisor_content_url(item.get("url"))
+            if not title or not url:
+                continue
+            reference_map[title] = (
+                f"[네이버 메인 유입 콘텐츠 {index}위]\n"
+                f"제목: {title}\n"
+                f"원문 URL: {url}\n\n"
+                "작성 가이드: 위 제목과 원문 URL을 출발점으로 최신 사실을 추가 확인하고, "
+                "원문 표현을 그대로 복사하지 말고 새로운 블로그 글로 작성하세요."
+            )
+            insights.append(
+                KeywordInsight(
+                    keyword=title,
+                    score=max(60, 100 - ((index - 1) * 4)),
+                    reasons=[
+                        f"네이버 메인 유입 콘텐츠 {index}위",
+                        "Creator Advisor 실제 유입 통계 기준",
+                    ],
+                    sources=["Naver Creator Advisor"],
+                    categories=["네이버 메인 유입"],
+                    source_urls={"Naver Creator Advisor": url},
+                )
+            )
+        return insights, reference_map
+
+
 class DaumRealtimeKeywordWorker(threading.Thread):
     DAUM_REALTIME_URL = (
         "https://m.search.daum.net/search?w=tot"
@@ -23298,6 +23730,7 @@ class KeywordApp(ctk.CTk):
         self.daum_worker: DaumRealtimeKeywordWorker | None = None
         self.signal_worker: SignalKeywordWorker | None = None
         self.newneek_worker: NewneekKeywordWorker | None = None
+        self.naver_creator_worker: NaverCreatorAdvisorKeywordWorker | None = None
         self.public_data_worker: PublicDataEventWorker | None = None
         self.festival_worker: VisitKoreaFestivalListWorker | None = None
         self.festival_detail_worker: VisitKoreaFestivalDetailWorker | None = None
@@ -23325,6 +23758,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map: dict[str, str] = {}
         self.signal_reference_map: dict[str, str] = {}
         self.newneek_reference_map: dict[str, str] = {}
+        self.naver_creator_reference_map: dict[str, str] = {}
         self.collected_reference_map: dict[str, str] = {}
         self.public_data_events: list[dict] = []
         self.festival_store = FestivalStateStore()
@@ -33156,6 +33590,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {title: reference_text}
         self._render_keyword_choices(self.current_insights)
         self._render_results(self.current_insights)
@@ -33770,6 +34205,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {title: reference_text}
         self._render_keyword_choices(self.current_insights)
         self._render_results(self.current_insights)
@@ -34150,6 +34586,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {title: reference_text}
         self._render_keyword_choices(self.current_insights)
         self._render_results(self.current_insights)
@@ -36698,9 +37135,9 @@ class KeywordApp(ctk.CTk):
 
         self.daum_keywords_button = ctk.CTkButton(
             options_row,
-            text="다음 실시간",
+            text="다음",
             height=44,
-            width=135,
+            width=78,
             corner_radius=14,
             fg_color="#2f7de1",
             hover_color="#256bc4",
@@ -36712,9 +37149,9 @@ class KeywordApp(ctk.CTk):
 
         self.signal_keywords_button = ctk.CTkButton(
             options_row,
-            text="시그널 키워드",
+            text="시그널",
             height=44,
-            width=135,
+            width=78,
             corner_radius=14,
             fg_color="#5ccfd2",
             hover_color="#49bcc0",
@@ -36726,9 +37163,9 @@ class KeywordApp(ctk.CTk):
 
         self.newneek_keywords_button = ctk.CTkButton(
             options_row,
-            text="뉴닉 키워드",
+            text="뉴닉",
             height=44,
-            width=135,
+            width=78,
             corner_radius=14,
             fg_color="#ff8a3d",
             hover_color="#ea762c",
@@ -36738,18 +37175,35 @@ class KeywordApp(ctk.CTk):
         )
         self.newneek_keywords_button.grid(row=0, column=3, padx=(0, 10), sticky="e")
 
+        self.naver_creator_keywords_button = ctk.CTkButton(
+            options_row,
+            text="네이버",
+            height=44,
+            width=78,
+            corner_radius=14,
+            fg_color="#03C75A",
+            hover_color="#02B350",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self.load_naver_creator_keywords,
+        )
+        self.naver_creator_keywords_button.grid(row=0, column=4, padx=(0, 10), sticky="e")
+
         self.find_keywords_button = ctk.CTkButton(
             options_row,
-            text="키워드 찾기",
+            text="검색",
             height=44,
-            width=145,
+            width=108,
             corner_radius=14,
             fg_color="#3468e8",
             hover_color="#2d5cd0",
             font=ctk.CTkFont(size=16, weight="bold"),
             command=self.start_analysis,
         )
-        self.find_keywords_button.grid(row=0, column=4, sticky="e")
+        search_icon = self._bootstrap_sidebar_icon_image("search", "#ffffff", 18)
+        if search_icon is not None:
+            self.find_keywords_button.configure(image=search_icon, compound="left")
+        self.find_keywords_button.grid(row=0, column=5, sticky="e")
 
         self.keyword_status_label = ctk.CTkLabel(
             topic_card,
@@ -43189,11 +43643,13 @@ class KeywordApp(ctk.CTk):
 
     def _set_trend_keyword_buttons_state(self, state: str = "normal") -> None:
         if hasattr(self, "daum_keywords_button"):
-            self.daum_keywords_button.configure(state=state, text="다음 실시간")
+            self.daum_keywords_button.configure(state=state, text="다음")
         if hasattr(self, "signal_keywords_button"):
-            self.signal_keywords_button.configure(state=state, text="시그널 키워드")
+            self.signal_keywords_button.configure(state=state, text="시그널")
         if hasattr(self, "newneek_keywords_button"):
-            self.newneek_keywords_button.configure(state=state, text="뉴닉 키워드")
+            self.newneek_keywords_button.configure(state=state, text="뉴닉")
+        if hasattr(self, "naver_creator_keywords_button"):
+            self.naver_creator_keywords_button.configure(state=state, text="네이버")
 
     def start_analysis(self) -> None:
         keyword = self.topic_entry.get().strip()
@@ -43215,6 +43671,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -43259,12 +43716,16 @@ class KeywordApp(ctk.CTk):
         if self.newneek_worker and self.newneek_worker.is_alive():
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
+        if self.naver_creator_worker and self.naver_creator_worker.is_alive():
+            messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
+            return
 
         self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "다음 실시간 검색어"
         self.current_insights = []
@@ -43293,12 +43754,16 @@ class KeywordApp(ctk.CTk):
         if self.newneek_worker and self.newneek_worker.is_alive():
             messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
             return
+        if self.naver_creator_worker and self.naver_creator_worker.is_alive():
+            messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
+            return
 
         self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "시그널 실시간 검색어"
         self.current_insights = []
@@ -43327,12 +43792,16 @@ class KeywordApp(ctk.CTk):
         if self.signal_worker and self.signal_worker.is_alive():
             messagebox.showinfo("진행 중", "시그널 실시간 검색어를 가져오는 중입니다.")
             return
+        if self.naver_creator_worker and self.naver_creator_worker.is_alive():
+            messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
+            return
 
         self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "뉴닉 사회 카테고리"
         self.current_insights = []
@@ -43350,6 +43819,48 @@ class KeywordApp(ctk.CTk):
         self.find_keywords_button.configure(state="disabled")
         self.newneek_worker = NewneekKeywordWorker(self.result_queue)
         self.newneek_worker.start()
+
+    def load_naver_creator_keywords(self) -> None:
+        if self.daum_worker and self.daum_worker.is_alive():
+            messagebox.showinfo("진행 중", "다음 실시간 검색어를 가져오는 중입니다.")
+            return
+        if self.signal_worker and self.signal_worker.is_alive():
+            messagebox.showinfo("진행 중", "시그널 실시간 검색어를 가져오는 중입니다.")
+            return
+        if self.newneek_worker and self.newneek_worker.is_alive():
+            messagebox.showinfo("진행 중", "뉴닉 키워드를 가져오는 중입니다.")
+            return
+        if self.naver_creator_worker and self.naver_creator_worker.is_alive():
+            messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
+            return
+
+        self._stop_writing_auto_progress()
+        self._reset_writing_section_completion()
+        self.daum_reference_map = {}
+        self.signal_reference_map = {}
+        self.newneek_reference_map = {}
+        self.naver_creator_reference_map = {}
+        self.collected_reference_map = {}
+        self.current_keyword = "네이버 메인 유입 콘텐츠"
+        self.current_insights = []
+        self.selected_keyword_var.set("")
+        if hasattr(self, "manual_keyword_entry"):
+            self.manual_keyword_entry.delete(0, "end")
+        self._clear_keyword_choices()
+        self._clear_result_cards()
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
+        self.keyword_status_label.configure(text="네이버 Creator Advisor 로그인 확인 중...")
+        self._set_writing_progress(
+            1,
+            "네이버 메인 유입 콘텐츠를 불러오고 있습니다.",
+            0.05,
+        )
+        self._set_trend_keyword_buttons_state("disabled")
+        self.naver_creator_keywords_button.configure(text="불러오는 중...")
+        self.find_keywords_button.configure(state="disabled")
+        self.naver_creator_worker = NaverCreatorAdvisorKeywordWorker(self.result_queue)
+        self.naver_creator_worker.start()
 
     def start_benchmark_blog(self) -> None:
         if not self.benchmark_mode_var.get():
@@ -43463,6 +43974,12 @@ class KeywordApp(ctk.CTk):
         elif selected_keyword in self.newneek_reference_map:
             self.reference_textbox.delete("1.0", "end")
             self.reference_textbox.insert("1.0", self.newneek_reference_map[selected_keyword])
+            self._update_reference_count()
+        elif selected_keyword in self.naver_creator_reference_map:
+            self.reference_textbox.delete("1.0", "end")
+            self.reference_textbox.insert(
+                "1.0", self.naver_creator_reference_map[selected_keyword]
+            )
             self._update_reference_count()
         self._save_ui_state()
         if selected_keyword:
@@ -44983,7 +45500,7 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "analysis_done":
                     self.progress_bar.set(1.0)
                     self.keyword_status_label.configure(text="분석 완료 - 추천 키워드를 선택해 주세요.")
-                    self.find_keywords_button.configure(state="normal", text="키워드 찾기")
+                    self.find_keywords_button.configure(state="normal", text="검색")
                     self._set_trend_keyword_buttons_state("normal")
                     self.current_insights = payload
                     self._render_keyword_choices(payload)
@@ -44998,7 +45515,7 @@ class KeywordApp(ctk.CTk):
                     self._stop_writing_auto_progress()
                     self.progress_bar.set(0)
                     self.keyword_status_label.configure(text="분석 오류")
-                    self.find_keywords_button.configure(state="normal", text="키워드 찾기")
+                    self.find_keywords_button.configure(state="normal", text="검색")
                     self._set_trend_keyword_buttons_state("normal")
                     self._set_writing_progress(1, f"키워드 분석에 실패했습니다: {payload}", state="error")
                     messagebox.showerror("분석 실패", payload)
@@ -45015,6 +45532,7 @@ class KeywordApp(ctk.CTk):
                     self.daum_reference_map = payload.get("reference_map", {})
                     self.signal_reference_map = {}
                     self.newneek_reference_map = {}
+                    self.naver_creator_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
                     self.selected_keyword_var.set("")
@@ -45055,6 +45573,7 @@ class KeywordApp(ctk.CTk):
                     self.signal_reference_map = payload.get("reference_map", {})
                     self.daum_reference_map = {}
                     self.newneek_reference_map = {}
+                    self.naver_creator_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
                     self.selected_keyword_var.set("")
@@ -45095,6 +45614,7 @@ class KeywordApp(ctk.CTk):
                     self.newneek_reference_map = payload.get("reference_map", {})
                     self.daum_reference_map = {}
                     self.signal_reference_map = {}
+                    self.naver_creator_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
                     self.selected_keyword_var.set("")
@@ -45122,6 +45642,56 @@ class KeywordApp(ctk.CTk):
                     self.keyword_status_label.configure(text="뉴닉 키워드 수집 실패")
                     self._set_writing_progress(1, f"뉴닉 키워드 수집에 실패했습니다: {payload}", state="error")
                     messagebox.showerror("뉴닉 키워드 실패", payload)
+                elif event_type == "naver_creator_progress":
+                    self.keyword_status_label.configure(text=payload)
+                    self._set_writing_progress(1, payload)
+                elif event_type == "naver_creator_done":
+                    self.progress_bar.stop()
+                    self.progress_bar.configure(mode="determinate")
+                    self.progress_bar.set(1.0)
+                    self._set_trend_keyword_buttons_state("normal")
+                    self.find_keywords_button.configure(state="normal")
+                    self.current_insights = payload.get("insights", [])
+                    self.naver_creator_reference_map = payload.get("reference_map", {})
+                    self.daum_reference_map = {}
+                    self.signal_reference_map = {}
+                    self.newneek_reference_map = {}
+                    self._render_keyword_choices(self.current_insights)
+                    self._render_results(self.current_insights)
+                    self.selected_keyword_var.set("")
+                    if hasattr(self, "manual_keyword_entry"):
+                        self.manual_keyword_entry.delete(0, "end")
+                    self.reference_textbox.delete("1.0", "end")
+                    self._update_reference_count()
+                    self.keyword_status_label.configure(
+                        text=(
+                            "네이버 메인 유입 콘텐츠 상위 10개를 불러왔습니다. "
+                            "원하는 제목을 직접 선택해 주세요."
+                        )
+                    )
+                    self._set_writing_progress(
+                        2,
+                        "네이버 메인 유입 콘텐츠를 불러왔습니다. 사용할 제목을 선택해 주세요.",
+                        0.0,
+                    )
+                    self._open_writing_section("keyword", complete_previous=True)
+                    self._save_ui_state()
+                elif event_type == "naver_creator_error":
+                    self._stop_writing_auto_progress()
+                    self.progress_bar.stop()
+                    self.progress_bar.configure(mode="determinate")
+                    self.progress_bar.set(0)
+                    self._set_trend_keyword_buttons_state("normal")
+                    self.find_keywords_button.configure(state="normal")
+                    self.keyword_status_label.configure(
+                        text="네이버 Creator Advisor 콘텐츠 수집 실패"
+                    )
+                    self._set_writing_progress(
+                        1,
+                        f"네이버 메인 유입 콘텐츠 수집에 실패했습니다: {payload}",
+                        state="error",
+                    )
+                    messagebox.showerror("네이버 콘텐츠 수집 실패", payload)
                 elif event_type == "public_data_progress":
                     if hasattr(self, "public_data_status_label"):
                         self.public_data_status_label.configure(text=payload, text_color="#6dadff")
@@ -45319,6 +45889,8 @@ class KeywordApp(ctk.CTk):
                         self.signal_reference_map[keyword] = reference_text
                     if keyword in self.newneek_reference_map:
                         self.newneek_reference_map[keyword] = reference_text
+                    if keyword in self.naver_creator_reference_map:
+                        self.naver_creator_reference_map[keyword] = reference_text
                     if keyword == self._selected_or_manual_keyword():
                         self.reference_textbox.delete("1.0", "end")
                         self.reference_textbox.insert("1.0", reference_text)
