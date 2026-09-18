@@ -20275,7 +20275,7 @@ class GoogleTrendsKeywordWorker(threading.Thread):
 class HomeDashboardKeywordWorker(threading.Thread):
     """Load the three home-dashboard feeds without touching writing-page workers."""
 
-    SOURCE_ORDER = ("daum", "signal", "newneek")
+    SOURCE_ORDER = ("daum", "signal", "google")
 
     def __init__(self, result_queue: queue.Queue) -> None:
         super().__init__(daemon=True)
@@ -20332,16 +20332,17 @@ class HomeDashboardKeywordWorker(threading.Thread):
             worker = SignalKeywordWorker(queue.Queue())
             payload = worker._fetch_json(worker.SIGNAL_API_URL)
             return worker._build_signal_payload(payload)
-        worker = NewneekKeywordWorker(queue.Queue())
-        payload = worker._fetch_json(worker.CATEGORY_API_URL, worker.CATEGORY_URL)
-        articles = worker._extract_articles(payload)
-        return worker._build_newneek_payload(articles[:10])
+        if source == "google":
+            worker = GoogleTrendsKeywordWorker(queue.Queue())
+            html = worker._fetch_html(worker.TRENDS_URL)
+            return worker._build_google_payload(html)
+        raise ValueError(f"지원하지 않는 홈 키워드 소스입니다: {source}")
 
     def _progress_message(self, source: str) -> str:
         return {
             "daum": "다음 키워드 TOP10을 불러오는 중...",
             "signal": "시그널 키워드 TOP10을 불러오는 중...",
-            "newneek": "뉴닉 키워드 TOP10을 불러오는 중...",
+            "google": "Google 실시간 트렌드 최근 4시간 TOP10을 불러오는 중...",
         }.get(source, "키워드를 불러오는 중...")
 
 
@@ -24181,6 +24182,7 @@ class KeywordApp(ctk.CTk):
         self.pending_upload_cleanup_paths: list[str] = []
         self.writing_auto_run_active = False
         self.writing_auto_stage = ""
+        self.accepted_recommended_keyword = ""
         self.writing_progress_stage = 1
         self.writing_progress_fraction = 0.0
         self.writing_progress_message = "작업을 시작하면 단계별 진행 상황이 여기에 표시됩니다."
@@ -24284,12 +24286,12 @@ class KeywordApp(ctk.CTk):
         self.home_keyword_data: dict[str, list[KeywordInsight]] = {
             "daum": [],
             "signal": [],
-            "newneek": [],
+            "google": [],
         }
         self.home_keyword_reference_maps: dict[str, dict[str, str]] = {
             "daum": {},
             "signal": {},
-            "newneek": {},
+            "google": {},
         }
         self.home_keywords_loaded = False
         self.home_reference_launch_context: dict | None = None
@@ -26392,7 +26394,7 @@ class KeywordApp(ctk.CTk):
         source_specs = (
             ("daum", "다음 키워드 TOP10"),
             ("signal", "시그널 키워드 TOP10"),
-            ("newneek", "뉴닉 키워드 TOP10"),
+            ("google", "구글 키워드 TOP10"),
         )
         for column, (source, title) in enumerate(source_specs):
             card = ctk.CTkFrame(
@@ -26449,7 +26451,7 @@ class KeywordApp(ctk.CTk):
             }
 
         self.home_selected_keyword_var = tk.StringVar(value="")
-        for source in ("daum", "signal", "newneek"):
+        for source in ("daum", "signal", "google"):
             cached = self.home_keyword_data.get(source, [])
             if cached:
                 self._render_home_keyword_source(source)
@@ -26982,7 +26984,7 @@ class KeywordApp(ctk.CTk):
             return
         if self.home_keywords_loaded and not force:
             self.home_keyword_action_widgets = []
-            for source in ("daum", "signal", "newneek"):
+            for source in ("daum", "signal", "google"):
                 self._render_home_keyword_source(source)
             return
         if not hasattr(self, "home_keyword_card_widgets"):
@@ -27187,7 +27189,7 @@ class KeywordApp(ctk.CTk):
         self.current_keyword = {
             "daum": "다음 키워드",
             "signal": "시그널 키워드",
-            "newneek": "뉴닉 키워드",
+            "google": "Google 실시간 트렌드 최근 4시간",
         }.get(source, "홈 키워드")
         self.current_insights = [insight]
         self.selected_keyword_var.set(keyword)
@@ -45929,6 +45931,7 @@ class KeywordApp(ctk.CTk):
     def _clear_keyword_choices(self) -> None:
         for widget in self.keyword_choice_frame.winfo_children():
             widget.destroy()
+        self.accepted_recommended_keyword = ""
 
     def _clear_reference_text(self) -> None:
         if not hasattr(self, "reference_textbox"):
@@ -45980,11 +45983,20 @@ class KeywordApp(ctk.CTk):
         return ""
 
     def _on_recommended_keyword_selected(self) -> None:
+        selected_keyword = self.selected_keyword_var.get().strip()
+        if self._writing_keyword_selection_locked():
+            self.selected_keyword_var.set(self.accepted_recommended_keyword)
+            messagebox.showinfo(
+                "글쓰기 진행 중",
+                "현재 키워드의 참고수집·글작성 또는 발행이 진행 중입니다.\n"
+                "완료되거나 취소된 뒤 다른 키워드를 선택해 주세요.",
+            )
+            return
+        self.accepted_recommended_keyword = selected_keyword
         if self.writing_auto_progress_var.get() and not self.writing_auto_run_active:
             self._arm_writing_auto_progress()
         if hasattr(self, "manual_keyword_entry"):
             self.manual_keyword_entry.delete(0, "end")
-        selected_keyword = self.selected_keyword_var.get().strip()
         if selected_keyword in self.collected_reference_map:
             self.reference_textbox.delete("1.0", "end")
             self.reference_textbox.insert("1.0", self.collected_reference_map[selected_keyword])
@@ -46017,6 +46029,20 @@ class KeywordApp(ctk.CTk):
         if selected_keyword:
             self.pending_reference_keyword = selected_keyword
             self.after(120, lambda keyword=selected_keyword: self._auto_collect_reference_for_keyword(keyword))
+
+    def _writing_keyword_selection_locked(self) -> bool:
+        if self.writing_auto_run_active or self.home_reference_launch_context:
+            return True
+        for worker_name in (
+            "reference_collection_worker",
+            "article_worker",
+            "pipeline_worker",
+            "benchmark_worker",
+        ):
+            worker = getattr(self, worker_name, None)
+            if worker is not None and worker.is_alive():
+                return True
+        return False
 
     def _auto_collect_reference_for_keyword(self, keyword: str) -> None:
         if self.selected_keyword_var.get().strip() != keyword:

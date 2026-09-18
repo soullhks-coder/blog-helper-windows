@@ -1,6 +1,8 @@
 import ast
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import main
 
@@ -47,6 +49,54 @@ class WritingAutoProgressTests(unittest.TestCase):
         selection_source = self._method_source("_on_recommended_keyword_selected")
         self.assertIn("self._arm_writing_auto_progress()", selection_source)
         self.assertIn("self._auto_collect_reference_for_keyword", selection_source)
+
+    def test_keyword_selection_is_locked_while_writing_is_active(self) -> None:
+        alive_worker = SimpleNamespace(is_alive=lambda: True)
+        idle_app = SimpleNamespace(
+            writing_auto_run_active=False,
+            home_reference_launch_context=None,
+            reference_collection_worker=None,
+            article_worker=None,
+            pipeline_worker=None,
+            benchmark_worker=None,
+        )
+        self.assertFalse(main.KeywordApp._writing_keyword_selection_locked(idle_app))
+
+        idle_app.article_worker = alive_worker
+        self.assertTrue(main.KeywordApp._writing_keyword_selection_locked(idle_app))
+
+        idle_app.article_worker = None
+        idle_app.writing_auto_run_active = True
+        self.assertTrue(main.KeywordApp._writing_keyword_selection_locked(idle_app))
+
+        selection_source = self._method_source("_on_recommended_keyword_selected")
+        self.assertIn("self.accepted_recommended_keyword", selection_source)
+        self.assertIn("self._writing_keyword_selection_locked()", selection_source)
+
+    def test_locked_keyword_selection_restores_the_active_keyword(self) -> None:
+        class VariableStub:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+            def get(self) -> str:
+                return self.value
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        after_calls = []
+        app = SimpleNamespace(
+            selected_keyword_var=VariableStub("새 키워드"),
+            accepted_recommended_keyword="진행 중 키워드",
+            _writing_keyword_selection_locked=lambda: True,
+            after=lambda *args: after_calls.append(args),
+        )
+        with patch.object(main.messagebox, "showinfo") as showinfo:
+            main.KeywordApp._on_recommended_keyword_selected(app)
+
+        self.assertEqual(app.selected_keyword_var.get(), "진행 중 키워드")
+        self.assertEqual(after_calls, [])
+        showinfo.assert_called_once()
 
     def test_auto_progress_runs_article_and_publish_in_order(self) -> None:
         self.assertIn(

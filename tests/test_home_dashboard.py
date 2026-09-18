@@ -170,7 +170,7 @@ class HomeDashboardTests(unittest.TestCase):
         payloads = {
             "daum": ([_insight("다음 키워드", "Daum")], {"다음 키워드": "참고"}),
             "signal": ([_insight("시그널 키워드", "Signal")], {"시그널 키워드": "참고"}),
-            "newneek": ([_insight("뉴닉 키워드", "Newneek")], {"뉴닉 키워드": "참고"}),
+            "google": ([_insight("구글 키워드", "Google Trends")], {"구글 키워드": "참고"}),
         }
 
         with patch.object(worker, "_fetch_source", side_effect=lambda source: payloads[source]):
@@ -184,7 +184,7 @@ class HomeDashboardTests(unittest.TestCase):
             for event, payload in events
             if event == "home_keywords_source_done"
         ]
-        self.assertEqual(completed_sources, ["daum", "signal", "newneek"])
+        self.assertEqual(completed_sources, ["daum", "signal", "google"])
         self.assertEqual(events[-1][0], "home_keywords_done")
         self.assertEqual(events[-1][1]["completed"], 3)
 
