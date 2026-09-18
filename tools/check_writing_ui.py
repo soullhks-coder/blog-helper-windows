@@ -522,6 +522,18 @@ def main() -> None:
                 selected_nav = getattr(app, sidebar_button_names[page_name])
                 assert resolved_color(selected_nav, "text_color") == app._theme_palette()["accent"]
                 assert_white_button_contrast(page_frame)
+            app._switch_page("automation")
+            settle(220)
+            assert tuple(app.automation_keyword_source_buttons) == (
+                "daum", "signal", "newneek", "google", "naver",
+            )
+            source_button_positions = [
+                button.winfo_rootx()
+                for button in app.automation_keyword_source_buttons.values()
+            ]
+            assert source_button_positions == sorted(source_button_positions)
+            assert all(button.winfo_ismapped() for button in app.automation_keyword_source_buttons.values())
+            screenshot("automation")
             app._switch_page("public_data")
             settle(220)
             assert_segmented_contrast(app.public_data_source_switch)

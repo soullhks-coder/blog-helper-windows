@@ -68,10 +68,13 @@ class NaverCreatorAdvisorKeywordTests(unittest.TestCase):
         self.assertIn('text="시그널"', source)
         self.assertIn('text="뉴닉"', source)
         self.assertIn('text="네이버"', source)
+        self.assertIn('text="구글"', source)
         self.assertIn('fg_color="#03C75A"', source)
+        self.assertIn('fg_color="#4285F4"', source)
         self.assertIn('text="검색"', source)
         self.assertIn('_bootstrap_sidebar_icon_image("search"', source)
         self.assertIn("command=self.load_naver_creator_keywords", source)
+        self.assertIn("command=self.load_google_trends_keywords", source)
 
     def test_creator_advisor_uses_persistent_profile_and_login_flow(self) -> None:
         source = inspect.getsource(main.NaverCreatorAdvisorKeywordWorker)
