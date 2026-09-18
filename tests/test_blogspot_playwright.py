@@ -10,6 +10,62 @@ import main
 
 
 class BlogspotPlaywrightTests(unittest.TestCase):
+    def test_image_button_is_revealed_from_the_responsive_toolbar(self) -> None:
+        class CandidateStub:
+            def __init__(self, page, *, aria_haspopup=None) -> None:
+                self.page = page
+                self.aria_haspopup = aria_haspopup
+                self.clicked = False
+
+            def is_visible(self) -> bool:
+                return True
+
+            def get_attribute(self, name: str):
+                if name == "aria-haspopup":
+                    return self.aria_haspopup
+                if name == "aria-disabled":
+                    return "false"
+                return None
+
+            def click(self, force: bool = False) -> None:
+                self.clicked = True
+                if self.aria_haspopup is None:
+                    self.page.expanded = True
+
+        class LocatorStub:
+            def __init__(self, candidates) -> None:
+                self.candidates = candidates
+
+            def count(self) -> int:
+                return len(self.candidates)
+
+            def nth(self, index: int):
+                return self.candidates[index]
+
+        class PageStub:
+            def __init__(self) -> None:
+                self.expanded = False
+                self.header_more = CandidateStub(self, aria_haspopup="true")
+                self.toolbar_more = CandidateStub(self)
+                self.image_button = CandidateStub(self)
+
+            def get_by_role(self, _role: str, name=None):
+                pattern = getattr(name, "pattern", "")
+                if "Insert image" in pattern:
+                    return LocatorStub([self.image_button] if self.expanded else [])
+                return LocatorStub([self.header_more, self.toolbar_more])
+
+            def wait_for_timeout(self, _timeout: int) -> None:
+                pass
+
+        page = PageStub()
+        with patch.object(main, "append_runtime_log"):
+            button = main.find_blogspot_image_insert_button(page)
+
+        self.assertIs(button, page.image_button)
+        self.assertFalse(page.header_more.clicked)
+        self.assertTrue(page.toolbar_more.clicked)
+
     def test_writing_targets_include_blogspot_after_tistory(self) -> None:
         source = inspect.getsource(main.KeywordApp._build_writing_page)
         wordpress = source.index('("wordpress", "워드프레스")')
@@ -146,6 +202,9 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         view_switch_source = inspect.getsource(main._open_blogspot_view_option)
         html_fill_source = inspect.getsource(main.fill_blogspot_html_editor)
         upload_source = inspect.getsource(main.upload_blogspot_images)
+        image_button_source = inspect.getsource(
+            main.find_blogspot_image_insert_button
+        )
         current_layout_source = inspect.getsource(
             main.configure_blogspot_inserted_image
         )
@@ -172,6 +231,10 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertNotIn("field.fill", label_input_source)
         self.assertNotIn('str(tag or "").strip() for tag in tag_names', source)
         self.assertIn('[role="menuitem"]:visible', upload_source)
+        self.assertIn("find_blogspot_image_insert_button", upload_source)
+        self.assertIn('name=re.compile(r"^(?:옵션 더보기|More options)$"', image_button_source)
+        self.assertIn('candidate.get_attribute("aria-haspopup") == "true"', image_button_source)
+        self.assertIn("candidate.click(force=True)", image_button_source)
         self.assertIn('upload_option.press("Enter")', upload_source)
         self.assertNotIn('get_by_text("컴퓨터에서 업로드"', upload_source)
         self.assertIn('iframe[src*="docs.google.com/picker"]:visible', upload_source)

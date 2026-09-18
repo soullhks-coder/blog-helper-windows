@@ -8870,6 +8870,47 @@ def configure_blogspot_inserted_image(page, image_source: str) -> None:
     page.wait_for_timeout(600)
 
 
+def find_blogspot_image_insert_button(page):
+    """Return Blogger's image button, expanding the responsive toolbar if needed."""
+    button_name = re.compile(r"(?:이미지\s*삽입|Insert image)", re.I)
+    image_button = _first_visible_blogspot_locator(
+        page.get_by_role("button", name=button_name)
+    )
+    if image_button is not None:
+        return image_button
+
+    # On narrower Chrome windows Blogger moves link/image/video controls behind
+    # a second "옵션 더보기" button. The top-right post menu has aria-haspopup,
+    # while the editor toolbar overflow button does not, so skip the former.
+    overflow_buttons = page.get_by_role(
+        "button",
+        name=re.compile(r"^(?:옵션 더보기|More options)$", re.I),
+    )
+    for index in range(overflow_buttons.count()):
+        candidate = overflow_buttons.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+            if candidate.get_attribute("aria-haspopup") == "true":
+                continue
+            if candidate.get_attribute("aria-disabled") == "true":
+                continue
+            candidate.click(force=True)
+            page.wait_for_timeout(350)
+            image_button = _first_visible_blogspot_locator(
+                page.get_by_role("button", name=button_name)
+            )
+            if image_button is not None:
+                append_runtime_log(
+                    "BLOGSPOT",
+                    "반응형 도구막대의 옵션 더보기를 열어 이미지 삽입 버튼을 확인했습니다.",
+                )
+                return image_button
+        except Exception:
+            continue
+    return None
+
+
 def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Queue) -> int:
     valid_paths = [str(Path(path).expanduser().resolve()) for path in image_paths if Path(path).expanduser().is_file()]
     if not valid_paths:
@@ -8880,10 +8921,14 @@ def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Que
     )
     before_image_sources = set(collect_blogspot_compose_image_sources(page))
     result_queue.put(("publish_progress", (0.965, f"블로그스팟에 이미지 {len(valid_paths)}장을 첨부하고 있습니다...")))
-    image_button = page.get_by_role("button", name=re.compile(r"이미지 삽입"))
-    if not image_button.count():
+    image_button = find_blogspot_image_insert_button(page)
+    if image_button is None:
+        append_runtime_log(
+            "BLOGSPOT",
+            f"이미지 삽입 버튼 감지 실패 · {describe_blogspot_upload_state(page)}",
+        )
         raise RuntimeError("블로그스팟의 이미지 삽입 버튼을 찾지 못했습니다.")
-    image_button.first.click()
+    image_button.click(force=True)
     # Blogger renders several hidden copies of this menu item. Selecting by text
     # alone violates Playwright strict mode, and a pointer click on the visible
     # Material menu item is occasionally swallowed. Target the one open menu item
