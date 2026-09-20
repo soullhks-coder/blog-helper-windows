@@ -859,7 +859,10 @@ class TistoryNativeImageTests(unittest.TestCase):
                 destination: Path,
                 crop_bottom_px: int = 0,
             ) -> bool:
-                self.assertEqual(crop_bottom_px, 0)
+                self.assertEqual(
+                    crop_bottom_px,
+                    main.TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX,
+                )
                 destination.write_bytes(b"captured-article-image")
                 return True
 

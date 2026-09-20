@@ -7556,7 +7556,7 @@ def collect_tistory_reference_image_files(
                 destination,
                 crop_bottom_px=(
                     TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX
-                    if not protection_mode and article_sources is None
+                    if not protection_mode
                     else 0
                 ),
             ):
