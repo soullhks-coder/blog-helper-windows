@@ -6389,6 +6389,225 @@ class GoogleImageCollageCollector:
             queries.insert(1, " ".join((*identity_tokens[:3], *event_tokens[:2])))
         return list(dict.fromkeys(query for query in queries if len(query) >= 2))[:5]
 
+    def collect_article_reference_images(
+        self,
+        keyword: str,
+        article_sources: list[dict[str, str]],
+        count: int = 1,
+    ) -> list[dict[str, str]]:
+        """Open collected article URLs and return only their representative images."""
+        normalized_sources = [
+            {
+                "title": str(item.get("title") or "").strip(),
+                "source": str(item.get("source") or "").strip(),
+                "url": str(item.get("url") or item.get("source_url") or "").strip(),
+            }
+            for item in (article_sources or [])
+            if isinstance(item, dict)
+            and is_probable_news_article_url(
+                str(item.get("url") or item.get("source_url") or "")
+            )
+        ]
+        if not normalized_sources:
+            return []
+        target_count = max(1, min(int(count or 1), 2))
+        results: list[dict[str, str]] = []
+        seen_images: set[str] = set()
+        try:
+            from playwright.sync_api import sync_playwright
+
+            chrome_path = require_google_chrome_executable()
+        except Exception:
+            return []
+
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    executable_path=str(chrome_path),
+                    headless=True,
+                    args=[
+                        "--disable-gpu",
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
+                )
+                try:
+                    context = browser.new_context(
+                        viewport={"width": 1440, "height": 1100},
+                        locale="ko-KR",
+                        user_agent=(
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/123.0 Safari/537.36"
+                        ),
+                    )
+                    page = context.new_page()
+                    page.set_default_timeout(12_000)
+                    page.set_default_navigation_timeout(35_000)
+                    for article in normalized_sources:
+                        if len(results) >= target_count:
+                            break
+                        article_url = article["url"]
+                        try:
+                            page.goto(article_url, wait_until="domcontentloaded")
+                            page.wait_for_timeout(900)
+                            metadata = self._extract_article_image_metadata(page)
+                        except Exception:
+                            continue
+                        article_title = str(metadata.get("title") or "").strip()
+                        if not self._article_title_is_relevant(
+                            keyword,
+                            article_title,
+                            article.get("title", ""),
+                        ):
+                            continue
+                        for image in metadata.get("images") or []:
+                            image_url = urljoin(page.url, str(image.get("url") or "").strip())
+                            if (
+                                not image_url.startswith(("http://", "https://"))
+                                or image_url in seen_images
+                                or self._looks_unsafe_article_image(image_url, str(image.get("alt") or ""))
+                            ):
+                                continue
+                            data_url = self._download_article_image_with_browser(
+                                context,
+                                image_url,
+                                page.url,
+                            )
+                            if not data_url:
+                                continue
+                            seen_images.add(image_url)
+                            results.append(
+                                {
+                                    "data_url": data_url,
+                                    "image_url": image_url,
+                                    "source_url": page.url,
+                                    "source": article.get("source") or urlparse(page.url).netloc,
+                                    "license": "저작권 보호 모드 OFF",
+                                    "creator": "",
+                                    "title": article_title or article.get("title") or keyword,
+                                    "article_title": article_title or article.get("title") or keyword,
+                                }
+                            )
+                            break
+                finally:
+                    browser.close()
+        except Exception:
+            return []
+        return results[:target_count]
+
+    def _extract_article_image_metadata(self, page) -> dict:
+        try:
+            payload = page.evaluate(
+                r"""() => {
+                    const absolute = (value) => {
+                        try { return new URL(value || '', document.baseURI).href; }
+                        catch (_) { return ''; }
+                    };
+                    const title = document.querySelector('meta[property="og:title"]')?.content
+                        || document.querySelector('meta[name="twitter:title"]')?.content
+                        || document.querySelector('h1')?.innerText
+                        || document.title || '';
+                    const images = [];
+                    const push = (url, kind, alt = '', width = 0, height = 0) => {
+                        url = absolute(url);
+                        if (!url || images.some(item => item.url === url)) return;
+                        images.push({url, kind, alt, width, height});
+                    };
+                    push(document.querySelector('meta[property="og:image"]')?.content, 'og');
+                    push(document.querySelector('meta[name="twitter:image"]')?.content, 'twitter');
+                    const selectors = [
+                        'article img', '#dic_area img', '#newsct_article img',
+                        '.article_view img', '.news_view img', '.article-body img',
+                        '.article_body img', '.news_end img', 'main figure img'
+                    ];
+                    for (const img of document.querySelectorAll(selectors.join(','))) {
+                        const width = Number(img.naturalWidth || img.width || 0);
+                        const height = Number(img.naturalHeight || img.height || 0);
+                        if (width < 220 || height < 130 || width * height < 45000) continue;
+                        push(img.currentSrc || img.src, 'body', img.alt || '', width, height);
+                    }
+                    images.sort((a, b) => {
+                        const priority = {og: 3, twitter: 2, body: 1};
+                        return (priority[b.kind] - priority[a.kind])
+                            || ((b.width * b.height) - (a.width * a.height));
+                    });
+                    return {title: String(title || '').replace(/\s+/g, ' ').trim(), images};
+                }"""
+            )
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _article_title_is_relevant(
+        self,
+        keyword: str,
+        article_title: str,
+        reference_title: str = "",
+    ) -> bool:
+        article_text = self._normalize_for_match(article_title)
+        if not article_text:
+            return False
+        ignored = {
+            "관련", "기사", "뉴스", "내용", "소식", "이유", "정보", "정리",
+            "최신", "총정리", "핵심", "현황", "분석", "전망", "알아보기",
+        }
+
+        def meaningful_tokens(value: str) -> list[str]:
+            return [
+                token
+                for token in self._keyword_tokens(value)
+                if token not in ignored
+            ]
+
+        def matches(value: str) -> bool:
+            tokens = meaningful_tokens(value)
+            matched = [token for token in tokens if token in article_text]
+            if any(len(token) >= 4 for token in matched):
+                return True
+            return len(matched) >= (2 if len(tokens) >= 2 else 1)
+
+        if reference_title and not matches(reference_title):
+            return False
+        return matches(keyword) or matches(reference_title)
+
+    def _looks_unsafe_article_image(self, image_url: str, alt: str = "") -> bool:
+        haystack = f"{image_url} {alt}".lower()
+        if self._looks_unsafe_url(image_url):
+            return True
+        return any(
+            hint in haystack
+            for hint in (
+                "logo", "favicon", "sprite", "avatar", "profile", "banner-ad",
+                "advert", "icon_", "/icon", "기자 프로필", "언론사 로고",
+            )
+        )
+
+    def _download_article_image_with_browser(
+        self,
+        context,
+        image_url: str,
+        article_url: str,
+    ) -> str:
+        try:
+            response = context.request.get(
+                image_url,
+                headers={"Referer": article_url},
+                timeout=15_000,
+            )
+            if not response.ok:
+                return ""
+            content_type = str(response.headers.get("content-type") or "image/jpeg").split(";", 1)[0]
+            if not content_type.startswith("image/"):
+                return ""
+            image_bytes = response.body()
+            if not 4_000 <= len(image_bytes) <= 8_000_000:
+                return ""
+            return image_bytes_to_data_url(image_bytes, content_type)
+        except Exception:
+            return ""
+
     def _collect_naver_news_images(
         self,
         keyword: str,
@@ -7116,6 +7335,70 @@ def build_tistory_reference_image_query(title: str, tag_names: list[str] | None 
     return " ".join(part for part in (title_text, *meaningful_tags) if part).strip()
 
 
+def is_probable_news_article_url(value: str) -> bool:
+    """Return True only for a concrete article URL, never a search/result page."""
+    url = str(value or "").strip().split("#", 1)[0]
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    host = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.lower().rstrip("/")
+    query = parse_qs(parsed.query)
+    if host.startswith("search.") or ".search." in host:
+        return False
+    if host in {"search.naver.com", "m.search.naver.com"}:
+        return False
+    if host.endswith("google.com") or host.endswith("google.co.kr"):
+        return path not in {"", "/search"}
+    if host in {"bing.com", "www.bing.com"} and path.startswith(("/search", "/images")):
+        return False
+    if "creator-advisor.naver.com" in host or "trends.google." in host:
+        return False
+    if path in {"", "/"} and any(key in query for key in ("q", "query", "keyword")):
+        return False
+    return True
+
+
+def extract_reference_article_sources(
+    reference_text: str,
+    source_urls: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Recover the concrete article titles/URLs recorded during reference collection."""
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    current_title = ""
+
+    def append_source(title: str, source: str, url: str) -> None:
+        normalized_url = str(url or "").strip().rstrip(".,;)]}")
+        normalized_url = normalized_url.split("#", 1)[0]
+        if not is_probable_news_article_url(normalized_url) or normalized_url in seen:
+            return
+        seen.add(normalized_url)
+        sources.append(
+            {
+                "title": re.sub(r"\s+", " ", str(title or "")).strip(),
+                "source": re.sub(r"\s+", " ", str(source or "")).strip(),
+                "url": normalized_url,
+            }
+        )
+
+    for raw_line in str(reference_text or "").splitlines():
+        line = raw_line.strip()
+        title_match = re.match(r"^\d+[.)]\s*(.+)$", line)
+        if title_match:
+            current_title = title_match.group(1).strip()
+            continue
+        if not line.startswith("출처:"):
+            continue
+        for match in re.finditer(r"https?://[^\s<>'\"]+", line):
+            prefix = line[len("출처:") : match.start()].strip(" /·-")
+            append_source(current_title, prefix, unescape(match.group(0)))
+
+    for source, url in (source_urls or {}).items():
+        append_source("", str(source or ""), str(url or ""))
+    return sources[:8]
+
+
 def _decode_image_data_url(data_url: str) -> bytes:
     if not data_url or "," not in data_url:
         return b""
@@ -7231,13 +7514,24 @@ def collect_tistory_reference_image_files(
     tag_names: list[str] | None = None,
     count: int = GOOGLE_IMAGE_COLLAGE_COUNT,
     protection_mode: bool = True,
+    article_sources: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     query = build_tistory_reference_image_query(title, tag_names)
     if not query:
         return []
     collector = GoogleImageCollageCollector()
     image_count = max(1, min(count, 2))
-    if protection_mode:
+    if not protection_mode and article_sources is not None:
+        # Tistory's unprotected mode now uses only the concrete articles gathered
+        # during reference collection. An empty/failed article list deliberately
+        # produces no image instead of falling back to unrelated image search.
+        candidates = collector.collect_article_reference_images(
+            query,
+            article_sources,
+            image_count,
+        )
+        capture_target = 1
+    elif protection_mode:
         candidates = collector.collect_licensed(query, image_count)
         capture_target = image_count
     else:
@@ -7262,7 +7556,7 @@ def collect_tistory_reference_image_files(
                 destination,
                 crop_bottom_px=(
                     TISTORY_UNPROTECTED_IMAGE_BOTTOM_CROP_PX
-                    if not protection_mode
+                    if not protection_mode and article_sources is None
                     else 0
                 ),
             ):
@@ -7274,7 +7568,7 @@ def collect_tistory_reference_image_files(
             captures.append(capture)
 
     capture_candidates(candidates)
-    if not captures and not protection_mode:
+    if not captures and not protection_mode and article_sources is None:
         search_queries = collector._web_search_queries(query)
         fallback_query = search_queries[-1] if search_queries else query
         browser_candidates = collector._collect_browser_image_elements(
@@ -23219,6 +23513,7 @@ class TistoryAutomationWorker(threading.Thread):
         daily_publish_limit: int = 0,
         profile_scope: str = TISTORY_PROFILE_SCOPES[0],
         auto_publish: bool = True,
+        reference_articles: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -23254,6 +23549,11 @@ class TistoryAutomationWorker(threading.Thread):
             daily_publish_limit
         )
         self.profile_scope = profile_scope
+        self.reference_articles = [
+            dict(article)
+            for article in (reference_articles or [])
+            if isinstance(article, dict)
+        ]
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -23294,7 +23594,12 @@ class TistoryAutomationWorker(threading.Thread):
                 mode_message = (
                     "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다..."
                     if self.reference_image_protection_mode
-                    else "저작권 보호 모드 OFF: 뉴스·포털을 포함한 일반 웹 검색에서 관련 이미지를 찾고 있습니다..."
+                    else (
+                        f"저작권 보호 모드 OFF: 참고 수집 기사 {len(self.reference_articles)}건에서 "
+                        "본문 대표 이미지를 확인하고 있습니다..."
+                        if self.reference_articles
+                        else "참고 수집에서 확인된 기사 URL이 없어 참고 이미지 첨부를 생략합니다..."
+                    )
                 )
                 self.result_queue.put(
                     (
@@ -23307,6 +23612,11 @@ class TistoryAutomationWorker(threading.Thread):
                     self.tag_names,
                     GOOGLE_IMAGE_COLLAGE_COUNT,
                     protection_mode=self.reference_image_protection_mode,
+                    article_sources=(
+                        None
+                        if self.reference_image_protection_mode
+                        else self.reference_articles
+                    ),
                 )
                 reference_image_paths = [
                     str(image.get("path") or "").strip()
@@ -23314,6 +23624,16 @@ class TistoryAutomationWorker(threading.Thread):
                     if str(image.get("path") or "").strip()
                 ]
                 if reference_images:
+                    for image in reference_images:
+                        append_runtime_log(
+                            "TISTORY",
+                            (
+                                "참고 기사 대표 이미지 선택: "
+                                f"기사제목={str(image.get('article_title') or image.get('title') or '').strip()} | "
+                                f"기사URL={str(image.get('source_url') or '').strip()} | "
+                                f"이미지URL={str(image.get('image_url') or '').strip()}"
+                            ),
+                        )
                     figures = [
                         build_tistory_reference_image_figure(
                             image,
@@ -23334,8 +23654,16 @@ class TistoryAutomationWorker(threading.Thread):
                     empty_message = (
                         "제목과 직접 관련되고 재사용 조건을 확인할 수 있는 이미지를 찾지 못해 참고 이미지 삽입은 생략합니다."
                         if self.reference_image_protection_mode
-                        else "제목과 직접 관련된 일반 웹 이미지를 찾지 못해 참고 이미지 삽입은 생략합니다."
+                        else "참고 기사에서 제목과 직접 관련된 대표 사진을 확인하지 못해 이미지 첨부를 생략하고 발행을 계속합니다."
                     )
+                    if not self.reference_image_protection_mode:
+                        append_runtime_log(
+                            "TISTORY",
+                            (
+                                "참고 기사 대표 이미지 없음 - 일반 이미지 검색 없이 첨부 생략: "
+                                f"title={self.title[:120]}, article_urls={len(self.reference_articles)}"
+                            ),
+                        )
                     self.result_queue.put(
                         (
                             "tistory_progress",
@@ -23656,6 +23984,7 @@ class PublishPipelineWorker(threading.Thread):
         slug: str,
         meta_description: str,
         result_queue: queue.Queue,
+        reference_articles: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.settings = settings
@@ -23667,6 +23996,11 @@ class PublishPipelineWorker(threading.Thread):
         self.slug = slug
         self.meta_description = meta_description
         self.result_queue = result_queue
+        self.reference_articles = [
+            dict(article)
+            for article in (reference_articles or [])
+            if isinstance(article, dict)
+        ]
 
     def run(self) -> None:
         try:
@@ -23818,6 +24152,7 @@ class PublishPipelineWorker(threading.Thread):
                     "thumbnail_path": self.thumbnail_path,
                     "focus_keyword": self.focus_keyword,
                     "tag_names": self.tag_names,
+                    "reference_articles": self.reference_articles,
                     "wordpress_url": wordpress_url,
                     "profile_scope": str(
                         service_profile_by_name(
@@ -46140,6 +46475,20 @@ class KeywordApp(ctk.CTk):
                     return source_url
         return f"https://www.google.com/search?q={quote_plus(keyword)}"
 
+    def _current_reference_article_sources(self) -> list[dict[str, str]]:
+        reference_text = (
+            self.reference_textbox.get("1.0", "end").strip()
+            if hasattr(self, "reference_textbox")
+            else self.wordpress_settings.writing_reference_text
+        )
+        selected_keyword = self._selected_or_manual_keyword()
+        source_urls: dict[str, str] = {}
+        for insight in self.current_insights:
+            if insight.keyword.strip() == selected_keyword.strip():
+                source_urls = dict(insight.source_urls or {})
+                break
+        return extract_reference_article_sources(reference_text, source_urls)
+
     def _start_pending_reference_collection(self) -> None:
         keyword = self.pending_reference_keyword.strip()
         if not keyword or keyword != self.selected_keyword_var.get().strip():
@@ -47079,6 +47428,10 @@ class KeywordApp(ctk.CTk):
             slug=slug,
             meta_description=meta_description,
             result_queue=self.result_queue,
+            reference_articles=extract_reference_article_sources(
+                str(item.get("reference_text") or ""),
+                item.get("source_urls") if isinstance(item.get("source_urls"), dict) else None,
+            ),
         )
         self.pipeline_worker.start()
         return True
@@ -47262,6 +47615,7 @@ class KeywordApp(ctk.CTk):
             slug=slug,
             meta_description=meta_description,
             result_queue=self.result_queue,
+            reference_articles=self._current_reference_article_sources(),
         )
         self.pipeline_worker.start()
 
@@ -47364,6 +47718,7 @@ class KeywordApp(ctk.CTk):
                 ).get("profile_scope")
                 or TISTORY_PROFILE_SCOPES[0]
             ),
+            reference_articles=self._current_reference_article_sources(),
         )
         self.tistory_automation_worker.start()
 
@@ -49150,6 +49505,7 @@ class KeywordApp(ctk.CTk):
                             tistory.get("profile_scope")
                             or TISTORY_PROFILE_SCOPES[0]
                         ),
+                        reference_articles=list(tistory.get("reference_articles") or []),
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True
@@ -49303,6 +49659,7 @@ class KeywordApp(ctk.CTk):
                             tistory.get("profile_scope")
                             or TISTORY_PROFILE_SCOPES[0]
                         ),
+                        reference_articles=list(tistory.get("reference_articles") or []),
                     )
                     self.active_automation_tistory_pending = True
                     self.tistory_automation_worker.start()

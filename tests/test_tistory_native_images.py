@@ -761,6 +761,132 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertEqual(len(captures), 1)
             self.assertEqual(captures[0]["license"], "저작권 보호 모드 OFF")
 
+    def test_reference_article_sources_are_recovered_and_search_pages_are_excluded(self) -> None:
+        reference_text = """
+        [팩트 기반 참고내용] 개인정보보호법
+        1. 개인정보 보호법 개정안 11일부터 시행
+           핵심 내용: 과징금 기준이 변경됩니다.
+           출처: 연합뉴스 / https://www.yna.co.kr/view/AKR20260917000100001
+
+        2. 검색 결과
+           출처: 네이버 웹 검색 / https://search.naver.com/search.naver?query=개인정보보호법
+
+        3. 다음 검색 결과
+           출처: Daum 검색 / https://m.search.daum.net/search?w=tot&q=개인정보보호법
+        """
+
+        sources = main.extract_reference_article_sources(
+            reference_text,
+            {"Google 검색": "https://www.google.com/search?q=개인정보보호법"},
+        )
+
+        self.assertEqual(
+            sources,
+            [
+                {
+                    "title": "개인정보 보호법 개정안 11일부터 시행",
+                    "source": "연합뉴스",
+                    "url": "https://www.yna.co.kr/view/AKR20260917000100001",
+                }
+            ],
+        )
+
+    def test_article_title_relevance_rejects_unrelated_page(self) -> None:
+        collector = main.GoogleImageCollageCollector()
+
+        self.assertTrue(
+            collector._article_title_is_relevant(
+                "개인정보 보호법 11일부터 시행 과징금 핵심 정리",
+                "개인정보 보호법 개정안 11일부터 시행…과징금 기준 변경",
+                "개인정보 보호법 개정안 시행",
+            )
+        )
+        self.assertFalse(
+            collector._article_title_is_relevant(
+                "개인정보 보호법 11일부터 시행 과징금 핵심 정리",
+                "ULTRA JAPAN 2025 공연 일정과 티켓 예매 안내",
+                "개인정보 보호법 개정안 시행",
+            )
+        )
+
+    def test_tistory_article_only_mode_never_falls_back_to_general_image_search(self) -> None:
+        with (
+            patch.object(
+                main.GoogleImageCollageCollector,
+                "collect_article_reference_images",
+                return_value=[],
+            ) as collect_articles,
+            patch.object(main.GoogleImageCollageCollector, "collect_web") as collect_web,
+            patch.object(
+                main.GoogleImageCollageCollector,
+                "_collect_browser_image_elements",
+            ) as browser_fallback,
+        ):
+            captures = main.collect_tistory_reference_image_files(
+                "개인정보 보호법 개정 핵심 정리",
+                ["개인정보보호법"],
+                1,
+                protection_mode=False,
+                article_sources=[],
+            )
+
+        self.assertEqual(captures, [])
+        collect_articles.assert_called_once()
+        collect_web.assert_not_called()
+        browser_fallback.assert_not_called()
+
+    def test_tistory_article_only_mode_captures_selected_article_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            article_sources = [
+                {
+                    "title": "개인정보 보호법 개정안 시행",
+                    "source": "연합뉴스",
+                    "url": "https://www.yna.co.kr/view/example",
+                }
+            ]
+            candidate = {
+                "data_url": "data:image/png;base64,ARTICLE",
+                "image_url": "https://img.yna.co.kr/photo/example.jpg",
+                "source_url": "https://www.yna.co.kr/view/example",
+                "source": "연합뉴스",
+                "license": "저작권 보호 모드 OFF",
+                "article_title": "개인정보 보호법 개정안 시행",
+            }
+
+            def fake_capture(
+                _data_url: str,
+                destination: Path,
+                crop_bottom_px: int = 0,
+            ) -> bool:
+                self.assertEqual(crop_bottom_px, 0)
+                destination.write_bytes(b"captured-article-image")
+                return True
+
+            with (
+                patch.object(main, "GENERATED_UPLOAD_DIR", output_dir),
+                patch.object(
+                    main.GoogleImageCollageCollector,
+                    "collect_article_reference_images",
+                    return_value=[candidate],
+                ) as collect_articles,
+                patch.object(main.GoogleImageCollageCollector, "collect_web") as collect_web,
+                patch.object(main, "capture_reference_image_region", side_effect=fake_capture),
+            ):
+                captures = main.collect_tistory_reference_image_files(
+                    "개인정보 보호법 개정 핵심 정리",
+                    ["개인정보보호법"],
+                    1,
+                    protection_mode=False,
+                    article_sources=article_sources,
+                )
+
+            self.assertEqual(len(captures), 1)
+            self.assertEqual(captures[0]["source_url"], article_sources[0]["url"])
+            self.assertEqual(captures[0]["image_url"], candidate["image_url"])
+            self.assertEqual(collect_articles.call_args.args[1], article_sources)
+            collect_web.assert_not_called()
+
     def test_unprotected_reference_capture_retries_after_first_candidate_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -886,11 +1012,20 @@ class TistoryNativeImageTests(unittest.TestCase):
             image_path.write_bytes(b"reference-image")
             reference_image = {
                 "path": str(image_path),
-                "source_url": "https://commons.wikimedia.org/wiki/File:Earthquake.jpg",
-                "source": "Wikimedia Commons",
-                "license": "CC BY-SA 4.0",
+                "source_url": "https://news.example.com/earthquake",
+                "image_url": "https://news.example.com/images/earthquake.jpg",
+                "source": "Example News",
+                "license": "저작권 보호 모드 OFF",
                 "creator": "Example Creator",
+                "article_title": "일본 지진 피해 현장",
             }
+            reference_articles = [
+                {
+                    "title": "일본 지진 피해 현장",
+                    "source": "Example News",
+                    "url": "https://news.example.com/earthquake",
+                }
+            ]
             events: queue.Queue = queue.Queue()
 
             with (
@@ -906,6 +1041,7 @@ class TistoryNativeImageTests(unittest.TestCase):
                 ) as run_automation,
                 patch.object(main, "cleanup_generated_upload_images", return_value=1),
                 patch.object(main, "cleanup_tistory_automation_files"),
+                patch.object(main, "append_runtime_log") as runtime_log,
             ):
                 worker = main.TistoryAutomationWorker(
                     "일본 지진 피해 정리",
@@ -917,10 +1053,15 @@ class TistoryNativeImageTests(unittest.TestCase):
                     public_blog_url="https://info.example.com/",
                     reference_image_protection_mode=False,
                     input_mode=main.TEXT_INPUT_MODE_TYPING,
+                    reference_articles=reference_articles,
                 )
                 worker.run()
 
             self.assertFalse(collect_reference_images.call_args.kwargs["protection_mode"])
+            self.assertEqual(
+                collect_reference_images.call_args.kwargs["article_sources"],
+                reference_articles,
+            )
             call = run_automation.call_args
             script = call.args[1]
             native_files = call.kwargs["native_image_files"]
@@ -928,13 +1069,22 @@ class TistoryNativeImageTests(unittest.TestCase):
             self.assertEqual(call.kwargs["public_blog_url"], "https://info.example.com/")
             self.assertEqual(call.kwargs["tag_names"], [])
             self.assertIn(str(image_path), native_files.values())
-            self.assertNotIn("Wikimedia Commons", script)
-            self.assertNotIn("CC BY-SA 4.0", script)
+            self.assertNotIn("Example News", script)
+            self.assertNotIn("저작권 보호 모드 OFF", script)
             self.assertNotIn("출처:", script)
             self.assertIn("const collageImages = []", script)
             self.assertIn('const inputMode = "직접 타이핑"', script)
             self.assertIn(main.TISTORY_ADSENSE_MIDDLE_MARKER, script)
             self.assertIn("ca-pub-7920445775975888", script)
+            self.assertTrue(
+                any(
+                    "참고 기사 대표 이미지 선택" in str(call.args[1])
+                    and "news.example.com/earthquake" in str(call.args[1])
+                    and "images/earthquake.jpg" in str(call.args[1])
+                    for call in runtime_log.call_args_list
+                    if len(call.args) >= 2
+                )
+            )
             event_types = [events.get_nowait()[0] for _ in range(events.qsize())]
             self.assertIn("tistory_automation_done", event_types)
 
