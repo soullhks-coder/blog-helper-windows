@@ -25,6 +25,7 @@ import weakref
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from html import escape
 from html import unescape
 from html.parser import HTMLParser
@@ -19009,18 +19010,25 @@ class ReferenceCollectionWorker(threading.Thread):
                 page = context.pages[-1] if context.pages else context.new_page()
                 page.set_default_timeout(12_000)
                 page.set_default_navigation_timeout(45_000)
-                page.goto(self.source_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(2200)
-
-                page_fact = self._extract_playwright_page_fact(page, helper, "선택한 검색 출처")
-                if page_fact:
-                    facts.append(page_fact)
-
-                ai_summary = self._extract_ai_summary(page, helper)
-                article_links = self._extract_relevant_article_links(page)
+                ai_summary = ""
+                article_links: list[dict] = []
+                source_page_url = self.source_url
+                try:
+                    page.goto(self.source_url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(2200)
+                    source_page_url = page.url
+                    page_fact = self._extract_playwright_page_fact(page, helper, "선택한 검색 출처")
+                    if page_fact:
+                        facts.append(page_fact)
+                    ai_summary = self._extract_ai_summary(page, helper)
+                    article_links = self._extract_relevant_article_links(page)
+                except Exception:
+                    # A temporary Google/navigation failure must not prevent
+                    # the second, independent Naver search from running.
+                    pass
 
                 search_url = f"https://search.naver.com/search.naver?query={quote_plus(self.keyword)}"
-                if "search.naver.com" not in page.url:
+                if "search.naver.com" not in source_page_url:
                     search_page = context.new_page()
                     try:
                         search_page.set_default_timeout(12_000)
@@ -19040,7 +19048,7 @@ class ReferenceCollectionWorker(threading.Thread):
                         {
                             "title": f"{self.keyword} AI 요약",
                             "desc": ai_summary,
-                            "link": page.url,
+                            "link": source_page_url,
                             "source": "검색 상단 AI 요약",
                             "type": "content",
                             "score": 30,
@@ -20614,7 +20622,9 @@ class GoogleTrendsKeywordWorker(threading.Thread):
 class HomeDashboardKeywordWorker(threading.Thread):
     """Load the three home-dashboard feeds without touching writing-page workers."""
 
-    SOURCE_ORDER = ("daum", "signal", "google")
+    SOURCE_ORDER = ("daum", "signal", "loword")
+    LOWORD_TRENDS_URL = "https://loword.co.kr/keywordTrend"
+    LOWORD_TRENDS_API_URL = "https://loword.co.kr/api/v1/keyword/trend/getList"
 
     def __init__(self, result_queue: queue.Queue) -> None:
         super().__init__(daemon=True)
@@ -20671,17 +20681,89 @@ class HomeDashboardKeywordWorker(threading.Thread):
             worker = SignalKeywordWorker(queue.Queue())
             payload = worker._fetch_json(worker.SIGNAL_API_URL)
             return worker._build_signal_payload(payload)
-        if source == "google":
-            worker = GoogleTrendsKeywordWorker(queue.Queue())
-            html = worker._fetch_html(worker.TRENDS_URL)
-            return worker._build_google_payload(html)
+        if source == "loword":
+            return self._fetch_loword_keywords()
         raise ValueError(f"지원하지 않는 홈 키워드 소스입니다: {source}")
+
+    def _fetch_loword_keywords(self) -> tuple[list[KeywordInsight], dict[str, str]]:
+        # The public page loads this feed through a JSON request; no browser or
+        # account session is needed for the home-dashboard ranking itself.
+        selected_hour = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:00")
+        request = Request(
+            self.LOWORD_TRENDS_API_URL,
+            data=json.dumps({"date": selected_hour}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Referer": self.LOWORD_TRENDS_URL,
+                "User-Agent": "Mozilla/5.0 BlogHelper/1.0",
+            },
+            method="POST",
+        )
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        with urlopen(request, timeout=15, context=ssl_context) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return self._build_loword_payload(payload)
+
+    def _build_loword_payload(
+        self,
+        payload: dict,
+    ) -> tuple[list[KeywordInsight], dict[str, str]]:
+        if not isinstance(payload, dict) or str(payload.get("rsltCd")) != "00":
+            raise RuntimeError("로워드 검색어 응답을 확인할 수 없습니다.")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        trends = data.get("keywordTrend") if isinstance(data.get("keywordTrend"), dict) else {}
+        naver_rows = trends.get("naver") or []
+        if not isinstance(naver_rows, list):
+            raise RuntimeError("로워드 네이버 검색어 형식이 변경되었습니다.")
+        observed_at = str(data.get("regDtm") or "").strip()
+        insights: list[KeywordInsight] = []
+        reference_map: dict[str, str] = {}
+        seen: set[str] = set()
+        for row in naver_rows:
+            if not isinstance(row, dict):
+                continue
+            keyword = re.sub(r"\s+", " ", str(row.get("keyword") or "")).strip()
+            identity = keyword.casefold()
+            if not keyword or identity in seen:
+                continue
+            seen.add(identity)
+            rank = len(insights) + 1
+            google_url = f"https://www.google.com/search?q={quote_plus(keyword)}"
+            naver_url = f"https://search.naver.com/search.naver?query={quote_plus(keyword)}"
+            reference_map[keyword] = "\n".join(
+                [
+                    f"[로워드 네이버 검색어 {rank}위] {keyword}",
+                    f"조회 시간: {observed_at}" if observed_at else "",
+                    f"순위 출처: {self.LOWORD_TRENDS_URL}",
+                    f"Google 검색: {google_url}",
+                    f"네이버 검색: {naver_url}",
+                    "작성 가이드: 순위만으로 사실을 단정하지 말고 Google·네이버 검색 결과와 실제 기사를 확인하세요.",
+                ]
+            ).replace("\n\n", "\n")
+            insights.append(
+                KeywordInsight(
+                    keyword=keyword,
+                    score=max(60, 100 - ((rank - 1) * 4)),
+                    reasons=[f"로워드 네이버 실시간 검색어 {rank}위"],
+                    sources=["Google 검색"],
+                    categories=["로워드 실시간 검색어"],
+                    source_urls={
+                        "Google 검색": google_url,
+                        "네이버 검색": naver_url,
+                        "로워드": self.LOWORD_TRENDS_URL,
+                    },
+                )
+            )
+            if len(insights) >= 10:
+                break
+        return insights, reference_map
 
     def _progress_message(self, source: str) -> str:
         return {
             "daum": "다음 키워드 TOP10을 불러오는 중...",
             "signal": "시그널 키워드 TOP10을 불러오는 중...",
-            "google": "Google 실시간 트렌드 최근 4시간 TOP10을 불러오는 중...",
+            "loword": "로워드 네이버 검색어 TOP10을 불러오는 중...",
         }.get(source, "키워드를 불러오는 중...")
 
 
@@ -24666,12 +24748,12 @@ class KeywordApp(ctk.CTk):
         self.home_keyword_data: dict[str, list[KeywordInsight]] = {
             "daum": [],
             "signal": [],
-            "google": [],
+            "loword": [],
         }
         self.home_keyword_reference_maps: dict[str, dict[str, str]] = {
             "daum": {},
             "signal": {},
-            "google": {},
+            "loword": {},
         }
         self.home_keywords_loaded = False
         self.home_reference_launch_context: dict | None = None
@@ -26774,7 +26856,7 @@ class KeywordApp(ctk.CTk):
         source_specs = (
             ("daum", "다음 키워드 TOP10"),
             ("signal", "시그널 키워드 TOP10"),
-            ("google", "구글 키워드 TOP10"),
+            ("loword", "로워드 키워드 TOP10"),
         )
         for column, (source, title) in enumerate(source_specs):
             card = ctk.CTkFrame(
@@ -26831,7 +26913,7 @@ class KeywordApp(ctk.CTk):
             }
 
         self.home_selected_keyword_var = tk.StringVar(value="")
-        for source in ("daum", "signal", "google"):
+        for source in ("daum", "signal", "loword"):
             cached = self.home_keyword_data.get(source, [])
             if cached:
                 self._render_home_keyword_source(source)
@@ -27364,7 +27446,7 @@ class KeywordApp(ctk.CTk):
             return
         if self.home_keywords_loaded and not force:
             self.home_keyword_action_widgets = []
-            for source in ("daum", "signal", "google"):
+            for source in ("daum", "signal", "loword"):
                 self._render_home_keyword_source(source)
             return
         if not hasattr(self, "home_keyword_card_widgets"):
@@ -27569,7 +27651,7 @@ class KeywordApp(ctk.CTk):
         self.current_keyword = {
             "daum": "다음 키워드",
             "signal": "시그널 키워드",
-            "google": "Google 실시간 트렌드 최근 4시간",
+            "loword": "로워드 네이버 실시간 검색어",
         }.get(source, "홈 키워드")
         self.current_insights = [insight]
         self.selected_keyword_var.set(keyword)
