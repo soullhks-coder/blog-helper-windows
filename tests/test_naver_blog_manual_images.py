@@ -238,6 +238,7 @@ class NaverBlogManualImageTests(unittest.TestCase):
         self.assertIn('values=["이미지 자동", "이미지 수동"]', build_source)
         self.assertIn("naver_blog_manual_thumbnail_frame", build_source)
         self.assertIn("naver_blog_manual_image_button", build_source)
+        self.assertIn('text="전체삭제"', build_source)
         self.assertIn("askopenfilenames", picker_source)
         self.assertIn("*.heic", picker_source)
         self.assertIn("*.HEIC", picker_source)

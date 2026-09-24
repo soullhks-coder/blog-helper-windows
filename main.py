@@ -31224,7 +31224,7 @@ class KeywordApp(ctk.CTk):
         )
         self.naver_blog_manual_image_clear_button = ctk.CTkButton(
             image_panel,
-            text="선택 해제",
+            text="전체삭제",
             width=100,
             height=36,
             fg_color="#596579",
