@@ -20767,6 +20767,34 @@ class HomeDashboardKeywordWorker(threading.Thread):
         }.get(source, "키워드를 불러오는 중...")
 
 
+class LowordKeywordWorker(threading.Thread):
+    """Load Loword's Naver realtime TOP10 for the writing workflow."""
+
+    def __init__(self, result_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.result_queue = result_queue
+
+    def run(self) -> None:
+        try:
+            self.result_queue.put(
+                ("loword_progress", "로워드 네이버 실시간 검색어 TOP10을 가져오는 중...")
+            )
+            insights, reference_map = self._fetch_loword_keywords()
+            if not insights:
+                raise RuntimeError("로워드 네이버 실시간 검색어를 찾지 못했습니다.")
+            self.result_queue.put(
+                (
+                    "loword_done",
+                    {"insights": insights[:10], "reference_map": reference_map},
+                )
+            )
+        except Exception as exc:  # pragma: no cover - runtime handling
+            self.result_queue.put(("loword_error", str(exc)))
+
+    def _fetch_loword_keywords(self) -> tuple[list[KeywordInsight], dict[str, str]]:
+        return HomeDashboardKeywordWorker(queue.Queue())._fetch_loword_keywords()
+
+
 class VisitKoreaFestivalListWorker(threading.Thread):
     """Load VisitKorea filters and festival rows with Playwright."""
 
@@ -21721,12 +21749,11 @@ class AutomationKeywordQueueWorker(threading.Thread):
             insights, reference_map = newneek_worker._build_newneek_payload(articles[:10])
             payloads.extend(self._build_queue_payloads("뉴닉", insights[:10], reference_map))
 
-        if "google" in self.sources:
-            self.result_queue.put(("automation_collect_progress", "Google 실시간 트렌드 최근 4시간 TOP10을 가져오는 중..."))
-            google_worker = GoogleTrendsKeywordWorker(queue.Queue())
-            html = google_worker._fetch_html(google_worker.TRENDS_URL)
-            insights, reference_map = google_worker._build_google_payload(html)
-            payloads.extend(self._build_queue_payloads("Google 트렌드", insights[:10], reference_map))
+        if "loword" in self.sources:
+            self.result_queue.put(("automation_collect_progress", "로워드 네이버 실시간 검색어 TOP10을 가져오는 중..."))
+            loword_worker = LowordKeywordWorker(queue.Queue())
+            insights, reference_map = loword_worker._fetch_loword_keywords()
+            payloads.extend(self._build_queue_payloads("로워드", insights[:10], reference_map))
 
         if "naver" in self.sources:
             self.result_queue.put(("automation_collect_progress", "네이버 메인 유입 콘텐츠 TOP10을 가져오는 중..."))
@@ -24712,7 +24739,7 @@ class KeywordApp(ctk.CTk):
         self.daum_worker: DaumRealtimeKeywordWorker | None = None
         self.signal_worker: SignalKeywordWorker | None = None
         self.newneek_worker: NewneekKeywordWorker | None = None
-        self.google_trends_worker: GoogleTrendsKeywordWorker | None = None
+        self.loword_keyword_worker: LowordKeywordWorker | None = None
         self.home_keyword_worker: HomeDashboardKeywordWorker | None = None
         self.naver_creator_worker: NaverCreatorAdvisorKeywordWorker | None = None
         self.public_data_worker: PublicDataEventWorker | None = None
@@ -24742,7 +24769,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map: dict[str, str] = {}
         self.signal_reference_map: dict[str, str] = {}
         self.newneek_reference_map: dict[str, str] = {}
-        self.google_trends_reference_map: dict[str, str] = {}
+        self.loword_reference_map: dict[str, str] = {}
         self.naver_creator_reference_map: dict[str, str] = {}
         self.collected_reference_map: dict[str, str] = {}
         self.home_keyword_data: dict[str, list[KeywordInsight]] = {
@@ -34594,7 +34621,7 @@ class KeywordApp(ctk.CTk):
             ("daum", "다음", "#3468e8", "#2d5cd0"),
             ("signal", "시그널", "#45bfc8", "#36a9b1"),
             ("newneek", "뉴닉", "#ff8538", "#e8742d"),
-            ("google", "구글", "#4285F4", "#3367D6"),
+            ("loword", "로워드", "#6C5CE7", "#5949D6"),
             ("naver", "네이버", "#03C75A", "#02B350"),
         )
         for column, (source_key, label, color, hover_color) in enumerate(source_button_specs, start=1):
@@ -35813,7 +35840,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {title: reference_text}
         self._render_keyword_choices(self.current_insights)
@@ -36429,7 +36456,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {title: reference_text}
         self._render_keyword_choices(self.current_insights)
@@ -36811,7 +36838,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {title: reference_text}
         self._render_keyword_choices(self.current_insights)
@@ -39563,19 +39590,19 @@ class KeywordApp(ctk.CTk):
         )
         self.naver_creator_keywords_button.grid(row=0, column=4, padx=(0, 10), sticky="e")
 
-        self.google_trends_keywords_button = ctk.CTkButton(
+        self.loword_keywords_button = ctk.CTkButton(
             options_row,
-            text="구글",
+            text="로워드",
             height=44,
             width=78,
             corner_radius=14,
-            fg_color="#4285F4",
-            hover_color="#3367D6",
+            fg_color="#6C5CE7",
+            hover_color="#5949D6",
             text_color="#ffffff",
             font=ctk.CTkFont(size=15, weight="bold"),
-            command=self.load_google_trends_keywords,
+            command=self.load_loword_keywords,
         )
-        self.google_trends_keywords_button.grid(row=0, column=5, padx=(0, 10), sticky="e")
+        self.loword_keywords_button.grid(row=0, column=5, padx=(0, 10), sticky="e")
 
         self.find_keywords_button = ctk.CTkButton(
             options_row,
@@ -46077,8 +46104,8 @@ class KeywordApp(ctk.CTk):
             self.signal_keywords_button.configure(state=state, text="시그널")
         if hasattr(self, "newneek_keywords_button"):
             self.newneek_keywords_button.configure(state=state, text="뉴닉")
-        if hasattr(self, "google_trends_keywords_button"):
-            self.google_trends_keywords_button.configure(state=state, text="구글")
+        if hasattr(self, "loword_keywords_button"):
+            self.loword_keywords_button.configure(state=state, text="로워드")
         if hasattr(self, "naver_creator_keywords_button"):
             self.naver_creator_keywords_button.configure(state=state, text="네이버")
 
@@ -46102,7 +46129,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.selected_keyword_var.set("")
@@ -46151,8 +46178,8 @@ class KeywordApp(ctk.CTk):
         if self.naver_creator_worker and self.naver_creator_worker.is_alive():
             messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
             return
-        if self.google_trends_worker and self.google_trends_worker.is_alive():
-            messagebox.showinfo("진행 중", "Google 실시간 트렌드를 가져오는 중입니다.")
+        if self.loword_keyword_worker and self.loword_keyword_worker.is_alive():
+            messagebox.showinfo("진행 중", "로워드 네이버 실시간 검색어를 가져오는 중입니다.")
             return
 
         self._stop_writing_auto_progress()
@@ -46160,7 +46187,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "다음 실시간 검색어"
@@ -46193,8 +46220,8 @@ class KeywordApp(ctk.CTk):
         if self.naver_creator_worker and self.naver_creator_worker.is_alive():
             messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
             return
-        if self.google_trends_worker and self.google_trends_worker.is_alive():
-            messagebox.showinfo("진행 중", "Google 실시간 트렌드를 가져오는 중입니다.")
+        if self.loword_keyword_worker and self.loword_keyword_worker.is_alive():
+            messagebox.showinfo("진행 중", "로워드 네이버 실시간 검색어를 가져오는 중입니다.")
             return
 
         self._stop_writing_auto_progress()
@@ -46202,7 +46229,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "시그널 실시간 검색어"
@@ -46235,8 +46262,8 @@ class KeywordApp(ctk.CTk):
         if self.naver_creator_worker and self.naver_creator_worker.is_alive():
             messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
             return
-        if self.google_trends_worker and self.google_trends_worker.is_alive():
-            messagebox.showinfo("진행 중", "Google 실시간 트렌드를 가져오는 중입니다.")
+        if self.loword_keyword_worker and self.loword_keyword_worker.is_alive():
+            messagebox.showinfo("진행 중", "로워드 네이버 실시간 검색어를 가져오는 중입니다.")
             return
 
         self._stop_writing_auto_progress()
@@ -46244,7 +46271,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "뉴닉 사회 카테고리"
@@ -46277,8 +46304,8 @@ class KeywordApp(ctk.CTk):
         if self.naver_creator_worker and self.naver_creator_worker.is_alive():
             messagebox.showinfo("진행 중", "네이버 Creator Advisor 콘텐츠를 가져오는 중입니다.")
             return
-        if self.google_trends_worker and self.google_trends_worker.is_alive():
-            messagebox.showinfo("진행 중", "Google 실시간 트렌드를 가져오는 중입니다.")
+        if self.loword_keyword_worker and self.loword_keyword_worker.is_alive():
+            messagebox.showinfo("진행 중", "로워드 네이버 실시간 검색어를 가져오는 중입니다.")
             return
 
         self._stop_writing_auto_progress()
@@ -46286,7 +46313,7 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "네이버 메인 유입 콘텐츠"
@@ -46310,12 +46337,12 @@ class KeywordApp(ctk.CTk):
         self.naver_creator_worker = NaverCreatorAdvisorKeywordWorker(self.result_queue)
         self.naver_creator_worker.start()
 
-    def load_google_trends_keywords(self) -> None:
+    def load_loword_keywords(self) -> None:
         active_workers = (
             (self.daum_worker, "다음 실시간 검색어"),
             (self.signal_worker, "시그널 실시간 검색어"),
             (self.newneek_worker, "뉴닉 키워드"),
-            (self.google_trends_worker, "Google 실시간 트렌드"),
+            (self.loword_keyword_worker, "로워드 네이버 실시간 검색어"),
             (self.naver_creator_worker, "네이버 Creator Advisor 콘텐츠"),
         )
         for worker, label in active_workers:
@@ -46328,10 +46355,10 @@ class KeywordApp(ctk.CTk):
         self.daum_reference_map = {}
         self.signal_reference_map = {}
         self.newneek_reference_map = {}
-        self.google_trends_reference_map = {}
+        self.loword_reference_map = {}
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
-        self.current_keyword = "Google 실시간 트렌드 최근 4시간"
+        self.current_keyword = "로워드 네이버 실시간 검색어"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -46340,17 +46367,17 @@ class KeywordApp(ctk.CTk):
         self._clear_result_cards()
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start()
-        self.keyword_status_label.configure(text="Google 실시간 트렌드 최근 4시간 TOP10 수집 중...")
+        self.keyword_status_label.configure(text="로워드 네이버 실시간 검색어 TOP10 수집 중...")
         self._set_writing_progress(
             1,
-            "Google 실시간 트렌드 최근 4시간 TOP10을 불러오고 있습니다.",
+            "로워드 네이버 실시간 검색어 TOP10을 불러오고 있습니다.",
             0.05,
         )
         self._set_trend_keyword_buttons_state("disabled")
-        self.google_trends_keywords_button.configure(text="불러오는 중...")
+        self.loword_keywords_button.configure(text="불러오는 중...")
         self.find_keywords_button.configure(state="disabled")
-        self.google_trends_worker = GoogleTrendsKeywordWorker(self.result_queue)
-        self.google_trends_worker.start()
+        self.loword_keyword_worker = LowordKeywordWorker(self.result_queue)
+        self.loword_keyword_worker.start()
 
     def start_benchmark_blog(self) -> None:
         if not self.benchmark_mode_var.get():
@@ -46475,10 +46502,10 @@ class KeywordApp(ctk.CTk):
             self.reference_textbox.delete("1.0", "end")
             self.reference_textbox.insert("1.0", self.newneek_reference_map[selected_keyword])
             self._update_reference_count()
-        elif selected_keyword in self.google_trends_reference_map:
+        elif selected_keyword in self.loword_reference_map:
             self.reference_textbox.delete("1.0", "end")
             self.reference_textbox.insert(
-                "1.0", self.google_trends_reference_map[selected_keyword]
+                "1.0", self.loword_reference_map[selected_keyword]
             )
             self._update_reference_count()
         elif selected_keyword in self.naver_creator_reference_map:
@@ -46843,7 +46870,7 @@ class KeywordApp(ctk.CTk):
             "daum": "다음 실시간",
             "signal": "시그널 키워드",
             "newneek": "뉴닉 키워드",
-            "google": "Google 실시간 트렌드",
+            "loword": "로워드 네이버 실시간 검색어",
             "naver": "네이버 메인 유입 콘텐츠",
         }
         if source not in source_labels:
@@ -46872,7 +46899,7 @@ class KeywordApp(ctk.CTk):
         if not candidates:
             ctk.CTkLabel(
                 frame,
-                text="위의 다음, 시그널, 뉴닉, 구글, 네이버 버튼을 눌러 추천 목록을 불러오세요.",
+                text="위의 다음, 시그널, 뉴닉, 로워드, 네이버 버튼을 눌러 추천 목록을 불러오세요.",
                 text_color="#8f9db2",
                 font=ctk.CTkFont(size=13),
                 anchor="w",
@@ -46955,7 +46982,7 @@ class KeywordApp(ctk.CTk):
             "daum": "다음",
             "signal": "시그널",
             "newneek": "뉴닉",
-            "google": "Google 트렌드",
+            "loword": "로워드",
             "naver": "네이버",
         }
         source_label = source_labels.get(str(payload.get("source") or ""), "추천") if isinstance(payload, dict) else "추천"
@@ -46987,7 +47014,7 @@ class KeywordApp(ctk.CTk):
             if not self.automation_keyword_candidates:
                 messagebox.showwarning(
                     "추천 키워드 필요",
-                    "먼저 다음, 시그널, 뉴닉, 구글, 네이버 버튼 중 하나를 눌러 목록을 불러와 주세요.",
+                    "먼저 다음, 시그널, 뉴닉, 로워드, 네이버 버튼 중 하나를 눌러 목록을 불러와 주세요.",
                 )
                 return
             if not selected_payloads:
@@ -48101,7 +48128,7 @@ class KeywordApp(ctk.CTk):
                     self.daum_reference_map = payload.get("reference_map", {})
                     self.signal_reference_map = {}
                     self.newneek_reference_map = {}
-                    self.google_trends_reference_map = {}
+                    self.loword_reference_map = {}
                     self.naver_creator_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
@@ -48143,7 +48170,7 @@ class KeywordApp(ctk.CTk):
                     self.signal_reference_map = payload.get("reference_map", {})
                     self.daum_reference_map = {}
                     self.newneek_reference_map = {}
-                    self.google_trends_reference_map = {}
+                    self.loword_reference_map = {}
                     self.naver_creator_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
@@ -48185,7 +48212,7 @@ class KeywordApp(ctk.CTk):
                     self.newneek_reference_map = payload.get("reference_map", {})
                     self.daum_reference_map = {}
                     self.signal_reference_map = {}
-                    self.google_trends_reference_map = {}
+                    self.loword_reference_map = {}
                     self.naver_creator_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
@@ -48214,17 +48241,17 @@ class KeywordApp(ctk.CTk):
                     self.keyword_status_label.configure(text="뉴닉 키워드 수집 실패")
                     self._set_writing_progress(1, f"뉴닉 키워드 수집에 실패했습니다: {payload}", state="error")
                     messagebox.showerror("뉴닉 키워드 실패", payload)
-                elif event_type == "google_trends_progress":
+                elif event_type == "loword_progress":
                     self.keyword_status_label.configure(text=payload)
                     self._set_writing_progress(1, payload)
-                elif event_type == "google_trends_done":
+                elif event_type == "loword_done":
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(1.0)
                     self._set_trend_keyword_buttons_state("normal")
                     self.find_keywords_button.configure(state="normal")
                     self.current_insights = payload.get("insights", [])
-                    self.google_trends_reference_map = payload.get("reference_map", {})
+                    self.loword_reference_map = payload.get("reference_map", {})
                     self.daum_reference_map = {}
                     self.signal_reference_map = {}
                     self.newneek_reference_map = {}
@@ -48237,29 +48264,29 @@ class KeywordApp(ctk.CTk):
                     self.reference_textbox.delete("1.0", "end")
                     self._update_reference_count()
                     self.keyword_status_label.configure(
-                        text="Google 실시간 트렌드 최근 4시간 TOP10을 불러왔습니다. 원하는 키워드를 직접 선택해 주세요."
+                        text="로워드 네이버 실시간 검색어 TOP10을 불러왔습니다. 원하는 키워드를 직접 선택해 주세요."
                     )
                     self._set_writing_progress(
                         2,
-                        "Google 실시간 트렌드를 불러왔습니다. 사용할 키워드를 선택해 주세요.",
+                        "로워드 네이버 실시간 검색어를 불러왔습니다. 사용할 키워드를 선택해 주세요.",
                         0.0,
                     )
                     self._open_writing_section("keyword", complete_previous=True)
                     self._save_ui_state()
-                elif event_type == "google_trends_error":
+                elif event_type == "loword_error":
                     self._stop_writing_auto_progress()
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
                     self.progress_bar.set(0)
                     self._set_trend_keyword_buttons_state("normal")
                     self.find_keywords_button.configure(state="normal")
-                    self.keyword_status_label.configure(text="Google 실시간 트렌드 수집 실패")
+                    self.keyword_status_label.configure(text="로워드 실시간 검색어 수집 실패")
                     self._set_writing_progress(
                         1,
-                        f"Google 실시간 트렌드 수집에 실패했습니다: {payload}",
+                        f"로워드 실시간 검색어 수집에 실패했습니다: {payload}",
                         state="error",
                     )
-                    messagebox.showerror("Google 트렌드 수집 실패", payload)
+                    messagebox.showerror("로워드 검색어 수집 실패", payload)
                 elif event_type == "naver_creator_progress":
                     self.keyword_status_label.configure(text=payload)
                     self._set_writing_progress(1, payload)
@@ -48274,7 +48301,7 @@ class KeywordApp(ctk.CTk):
                     self.daum_reference_map = {}
                     self.signal_reference_map = {}
                     self.newneek_reference_map = {}
-                    self.google_trends_reference_map = {}
+                    self.loword_reference_map = {}
                     self._render_keyword_choices(self.current_insights)
                     self._render_results(self.current_insights)
                     self.selected_keyword_var.set("")
@@ -48510,8 +48537,8 @@ class KeywordApp(ctk.CTk):
                         self.signal_reference_map[keyword] = reference_text
                     if keyword in self.newneek_reference_map:
                         self.newneek_reference_map[keyword] = reference_text
-                    if keyword in self.google_trends_reference_map:
-                        self.google_trends_reference_map[keyword] = reference_text
+                    if keyword in self.loword_reference_map:
+                        self.loword_reference_map[keyword] = reference_text
                     if keyword in self.naver_creator_reference_map:
                         self.naver_creator_reference_map[keyword] = reference_text
                     if keyword == self._selected_or_manual_keyword():

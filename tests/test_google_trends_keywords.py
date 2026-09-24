@@ -49,32 +49,33 @@ class GoogleTrendsKeywordTests(unittest.TestCase):
         )
         self.assertIn("검색 1백+회", reference_map["키워드 1"])
 
-    def test_automation_recommendation_ui_has_all_five_sources_in_order(self) -> None:
+    def test_automation_recommendation_ui_uses_loword_instead_of_google(self) -> None:
         source = inspect.getsource(main.KeywordApp._build_automation_page)
 
         expected = (
             '("daum", "다음"',
             '("signal", "시그널"',
             '("newneek", "뉴닉"',
-            '("google", "구글"',
+            '("loword", "로워드"',
             '("naver", "네이버"',
         )
         positions = [source.index(token) for token in expected]
         self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('("google", "구글"', source)
 
-    def test_automation_fetch_supports_google_and_naver_candidates(self) -> None:
+    def test_automation_fetch_supports_loword_and_naver_candidates(self) -> None:
         worker = main.AutomationKeywordQueueWorker(
             main.WordPressSettings(),
-            ["google", "naver"],
+            ["loword", "naver"],
             queue.Queue(),
         )
-        google_insight = main.KeywordInsight(
-            keyword="구글 키워드",
+        loword_insight = main.KeywordInsight(
+            keyword="로워드 키워드",
             score=90,
-            reasons=["최근 4시간"],
-            sources=["Google Trends"],
-            categories=["Google"],
-            source_urls={"Google Trends": main.GoogleTrendsKeywordWorker.TRENDS_URL},
+            reasons=["실시간 검색어"],
+            sources=["로워드"],
+            categories=["로워드"],
+            source_urls={"로워드": main.HomeDashboardKeywordWorker.LOWORD_TRENDS_URL},
         )
         naver_insight = main.KeywordInsight(
             keyword="네이버 제목",
@@ -86,11 +87,10 @@ class GoogleTrendsKeywordTests(unittest.TestCase):
         )
 
         with (
-            patch.object(main.GoogleTrendsKeywordWorker, "_fetch_html", return_value="html"),
             patch.object(
-                main.GoogleTrendsKeywordWorker,
-                "_build_google_payload",
-                return_value=([google_insight], {"구글 키워드": "구글 참고"}),
+                main.LowordKeywordWorker,
+                "_fetch_loword_keywords",
+                return_value=([loword_insight], {"로워드 키워드": "로워드 참고"}),
             ),
             patch.object(
                 main.NaverCreatorAdvisorKeywordWorker,
@@ -105,8 +105,33 @@ class GoogleTrendsKeywordTests(unittest.TestCase):
         ):
             payloads = worker._fetch_keyword_payloads()
 
-        self.assertEqual([item["keyword"] for item in payloads], ["구글 키워드", "네이버 제목"])
-        self.assertEqual([item["source_name"] for item in payloads], ["Google 트렌드", "네이버"])
+        self.assertEqual([item["keyword"] for item in payloads], ["로워드 키워드", "네이버 제목"])
+        self.assertEqual([item["source_name"] for item in payloads], ["로워드", "네이버"])
+
+    def test_loword_worker_emits_writing_events(self) -> None:
+        result_queue: queue.Queue = queue.Queue()
+        insight = main.KeywordInsight(
+            keyword="로워드 검색어",
+            score=100,
+            reasons=["1위"],
+            sources=["로워드"],
+            categories=["실시간"],
+            source_urls={"로워드": main.HomeDashboardKeywordWorker.LOWORD_TRENDS_URL},
+        )
+        worker = main.LowordKeywordWorker(result_queue)
+
+        with patch.object(
+            worker,
+            "_fetch_loword_keywords",
+            return_value=([insight], {"로워드 검색어": "참고"}),
+        ):
+            worker.run()
+
+        progress = result_queue.get_nowait()
+        done = result_queue.get_nowait()
+        self.assertEqual(progress[0], "loword_progress")
+        self.assertEqual(done[0], "loword_done")
+        self.assertEqual(done[1]["insights"][0].keyword, "로워드 검색어")
 
 
 if __name__ == "__main__":

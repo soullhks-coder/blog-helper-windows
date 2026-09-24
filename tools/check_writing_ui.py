@@ -525,7 +525,7 @@ def main() -> None:
             app._switch_page("automation")
             settle(220)
             assert tuple(app.automation_keyword_source_buttons) == (
-                "daum", "signal", "newneek", "google", "naver",
+                "daum", "signal", "newneek", "loword", "naver",
             )
             source_button_positions = [
                 button.winfo_rootx()
