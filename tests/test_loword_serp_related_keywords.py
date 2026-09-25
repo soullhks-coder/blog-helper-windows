@@ -37,6 +37,11 @@ class LowordSerpRelatedKeywordTests(unittest.TestCase):
         self.assertEqual(len(insights), 6)
         self.assertEqual([item.keyword for item in insights], [f"추석 연관어 {index}" for index in range(1, 7)])
         self.assertIn("월간 검색량 1,000", insights[0].reasons)
+        self.assertEqual(insights[0].monthly_search_volume, "1,000")
+        self.assertEqual(
+            main.keyword_insight_choice_text(insights[0], 1),
+            "1. 추석 연관어 1 • 1,000",
+        )
         self.assertEqual(progress[-1], (1.0, "로워드 SERP 연관 검색어 6개를 불러왔습니다."))
 
     def test_build_insights_deduplicates_and_limits_results_to_ten(self) -> None:
@@ -69,6 +74,25 @@ class LowordSerpRelatedKeywordTests(unittest.TestCase):
         self.assertEqual(extracted, rows)
         insights = main.LowordSerpRelatedKeywordClient._build_insights(extracted)
         self.assertIn("검색량 없음", insights[1].reasons)
+        self.assertEqual(
+            main.keyword_insight_choice_text(insights[1], 2),
+            "2. 추석대체공휴일 • 검색량 없음",
+        )
+
+    def test_non_loword_keyword_keeps_the_existing_plain_list_label(self) -> None:
+        insight = main.KeywordInsight(
+            keyword="일반 추천 키워드",
+            score=90,
+            reasons=["추천"],
+            sources=["Naver"],
+            categories=["일반"],
+            source_urls={"Naver": "https://search.naver.com/"},
+        )
+
+        self.assertEqual(
+            main.keyword_insight_choice_text(insight, 3),
+            "3. 일반 추천 키워드",
+        )
 
     def test_missing_payload_reports_a_clear_format_change_error(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "사이트 형식이 변경"):
@@ -103,6 +127,8 @@ class LowordSerpRelatedKeywordTests(unittest.TestCase):
         self.assertIn("로워드 SERP(네이버 기준)", build_source)
         self.assertNotIn("최소 1개의 분석 소스", start_source)
         self.assertIn("AnalysisWorker(keyword, self.result_queue)", start_source)
+        render_source = inspect.getsource(main.KeywordApp._render_keyword_choices)
+        self.assertIn("keyword_insight_choice_text(insight, index)", render_source)
 
 
 if __name__ == "__main__":

@@ -3127,6 +3127,13 @@ class KeywordInsight:
     sources: list[str]
     categories: list[str]
     source_urls: dict[str, str]
+    monthly_search_volume: str = ""
+
+
+def keyword_insight_choice_text(insight: KeywordInsight, rank: int) -> str:
+    label = f"{rank}. {str(insight.keyword or '').strip()}"
+    volume = str(insight.monthly_search_volume or "").strip()
+    return f"{label} • {volume}" if volume else label
 
 
 @dataclass
@@ -18729,6 +18736,7 @@ class LowordSerpRelatedKeywordClient:
                             f"{urlencode({'query': keyword})}"
                         )
                     },
+                    monthly_search_volume=volume,
                 )
             )
             if len(insights) >= cls.MAX_RESULTS:
@@ -47010,7 +47018,7 @@ class KeywordApp(ctk.CTk):
             confirm_button.grid(row=0, column=0, padx=(0, 10), sticky="w")
             radio = ctk.CTkRadioButton(
                 row,
-                text=f"{index}. {insight.keyword}",
+                text=keyword_insight_choice_text(insight, index),
                 variable=self.selected_keyword_var,
                 value=insight.keyword,
                 font=ctk.CTkFont(size=15, weight="bold"),
