@@ -171,6 +171,32 @@ def main() -> None:
             for value_label in app.home_adsense_value_labels.values():
                 assert resolved_color(value_label, "text_color") == "#ffffff"
 
+            class RunningWorker:
+                @staticmethod
+                def is_alive():
+                    return True
+
+            app.article_worker = RunningWorker()
+            app.naver_blog_worker = RunningWorker()
+            app.naver_kin_automation_worker = RunningWorker()
+            settle(320)
+            for page_name in ("writing", "naver_blog", "naver_kin"):
+                assert app._sidebar_activity_states[page_name]
+                assert app._sidebar_activity_bars[page_name].winfo_ismapped()
+            assert "진행 중" in app.writing_nav_button.cget("text")
+            assert "진행 중" in app.naver_blog_nav_button.cget("text")
+            assert "진행 중" in app.naver_kin_nav_button.cget("text")
+            screenshot("concurrent-activity-shimmers")
+            app.article_worker = None
+            app.naver_blog_worker = None
+            app.naver_kin_automation_worker = None
+            settle(320)
+            assert not any(app._sidebar_activity_states.values())
+            assert all(
+                not bar.winfo_ismapped()
+                for bar in app._sidebar_activity_bars.values()
+            )
+
             app._switch_page("settings")
             app._switch_settings_section("ai")
             app._switch_settings_tab("adsense")

@@ -48,7 +48,7 @@ class HistoryDataTests(unittest.TestCase):
         self.assertIn(category, history_categories())
         combined = search_history("히스토리", "2026-09-25", category)
         self.assertEqual(len(combined), 1)
-        self.assertEqual(combined[0]["version"], "v1.1.173")
+        self.assertEqual(combined[0]["version"], "v1.1.173–v1.1.174")
         self.assertEqual(search_history("없는 검색어", "2026-09-25", category), [])
 
 

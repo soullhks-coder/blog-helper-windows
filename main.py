@@ -24889,6 +24889,9 @@ class KeywordApp(ctk.CTk):
         self._app_title_save_job = None
         self._sidebar_menu_label_save_job = None
         self._sidebar_icon_image_cache: dict[tuple[str, str, int], ctk.CTkImage] = {}
+        self._sidebar_activity_job = None
+        self._sidebar_activity_states: dict[str, bool] = {}
+        self._sidebar_activity_bars: dict[str, ctk.CTkProgressBar] = {}
         self._home_platform_logo_cache: dict[str, ctk.CTkImage] = {}
         self._bootstrap_icon_font = None
         self._last_text_input_at = 0.0
@@ -25869,6 +25872,7 @@ class KeywordApp(ctk.CTk):
             "_theme_paint_refresh_job",
             "_automation_queue_refresh_job",
             "_naver_kin_clipboard_job",
+            "_sidebar_activity_job",
         ):
             job_id = getattr(self, job_attr, None)
             if job_id is not None:
@@ -26402,6 +26406,15 @@ class KeywordApp(ctk.CTk):
                 frame.grid_remove()
 
     def _reset_widget_state_for_rebuild(self) -> None:
+        sidebar_activity_job = getattr(self, "_sidebar_activity_job", None)
+        if sidebar_activity_job is not None:
+            try:
+                self.after_cancel(sidebar_activity_job)
+            except Exception:
+                pass
+        self._sidebar_activity_job = None
+        self._sidebar_activity_states = {}
+        self._sidebar_activity_bars = {}
         refresh_job = getattr(self, "_automation_queue_refresh_job", None)
         if refresh_job is not None:
             try:
@@ -26684,6 +26697,8 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._switch_page("settings"),
         )
         self.settings_nav_button.grid(row=8, column=0, padx=26, pady=(10, 0), sticky="ew")
+
+        self._build_sidebar_activity_shimmers()
 
         self.sidebar_version_label = ctk.CTkLabel(
             self.sidebar_frame,
@@ -29667,7 +29682,121 @@ class KeywordApp(ctk.CTk):
         for page_name, button_name in button_names.items():
             button = getattr(self, button_name, None)
             if button is not None:
-                button.configure(text=normalized[page_name])
+                active = self._sidebar_activity_states.get(page_name, False)
+                suffix = "\n진행 중" if active else ""
+                button.configure(
+                    text=f"{normalized[page_name]}{suffix}",
+                    font=ctk.CTkFont(size=16 if active else 19, weight="bold"),
+                )
+
+    @staticmethod
+    def _worker_is_running(worker) -> bool:
+        if worker is None:
+            return False
+        try:
+            return bool(worker.is_alive())
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _sidebar_activity_map(self) -> dict[str, bool]:
+        """Return independent live states for the three concurrently runnable menus."""
+
+        writing_worker_names = (
+            "remote_keyword_worker",
+            "analysis_worker",
+            "daum_worker",
+            "signal_worker",
+            "newneek_worker",
+            "loword_keyword_worker",
+            "naver_creator_worker",
+            "reference_collection_worker",
+            "article_worker",
+            "benchmark_worker",
+            "thumbnail_ai_worker",
+            "wp_publish_worker",
+        )
+        writing_running = bool(getattr(self, "writing_auto_run_active", False)) or any(
+            self._worker_is_running(getattr(self, name, None))
+            for name in writing_worker_names
+        )
+        if not str(getattr(self, "active_automation_upload_item_id", "") or "").strip():
+            writing_running = writing_running or any(
+                self._worker_is_running(getattr(self, name, None))
+                for name in ("pipeline_worker", "tistory_automation_worker")
+            )
+
+        naver_kin_running = bool(getattr(self, "naver_kin_direct_mode", False)) or any(
+            self._worker_is_running(getattr(self, name, None))
+            for name in (
+                "naver_kin_worker",
+                "naver_kin_direct_worker",
+                "naver_kin_automation_worker",
+                "naver_kin_profile_worker",
+            )
+        )
+        return {
+            "writing": writing_running,
+            "naver_blog": self._worker_is_running(
+                getattr(self, "naver_blog_worker", None)
+            ),
+            "naver_kin": naver_kin_running,
+        }
+
+    def _build_sidebar_activity_shimmers(self) -> None:
+        palette = self._theme_palette()
+        button_map = {
+            "writing": self.writing_nav_button,
+            "naver_blog": self.naver_blog_nav_button,
+            "naver_kin": self.naver_kin_nav_button,
+        }
+        self._sidebar_activity_states = {name: False for name in button_map}
+        self._sidebar_activity_bars = {}
+        for page_name, button in button_map.items():
+            shimmer = ctk.CTkProgressBar(
+                button,
+                height=4,
+                corner_radius=4,
+                mode="indeterminate",
+                indeterminate_speed=0.65,
+                fg_color=palette["divider"],
+                progress_color=palette["accent"],
+            )
+            shimmer.place_forget()
+            self._sidebar_activity_bars[page_name] = shimmer
+        self._refresh_sidebar_activity_shimmers()
+
+    def _refresh_sidebar_activity_shimmers(self) -> None:
+        self._sidebar_activity_job = None
+        if getattr(self, "_app_closing", False):
+            return
+        states = self._sidebar_activity_map()
+        changed = states != getattr(self, "_sidebar_activity_states", {})
+        palette = self._theme_palette()
+        previous_states = dict(getattr(self, "_sidebar_activity_states", {}))
+        for page_name, shimmer in getattr(self, "_sidebar_activity_bars", {}).items():
+            active = bool(states.get(page_name, False))
+            shimmer.configure(
+                fg_color=palette["divider"],
+                progress_color=palette["accent"],
+            )
+            if active and not previous_states.get(page_name, False):
+                shimmer.place(
+                    relx=0.08,
+                    rely=0.91,
+                    relwidth=0.84,
+                    anchor="w",
+                )
+                shimmer.start()
+            elif not active and previous_states.get(page_name, False):
+                shimmer.stop()
+                shimmer.place_forget()
+        self._sidebar_activity_states = states
+        if changed:
+            self._apply_sidebar_menu_labels()
+        self._sidebar_activity_job = self.after(
+            220,
+            self._refresh_sidebar_activity_shimmers,
+        )
 
     def _current_sidebar_menu_icons(self) -> dict[str, str]:
         if not hasattr(self, "sidebar_menu_icon_vars"):
