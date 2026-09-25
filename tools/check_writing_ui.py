@@ -243,6 +243,28 @@ def main() -> None:
                 assert app._bootstrap_sidebar_icon_image(f"{step}-circle", "#2563eb") is not None
                 assert app._bootstrap_sidebar_icon_image(f"{step}-circle-fill", "#2563eb") is not None
 
+            app._render_keyword_choices([
+                app_module.KeywordInsight(
+                    keyword=f"추천 키워드 {index}",
+                    score=100 - index,
+                    reasons=["화면 표시 확인"],
+                    sources=["naver"],
+                    categories=["테스트"],
+                    source_urls={"naver": f"https://example.com/{index}"},
+                )
+                for index in range(1, 11)
+            ])
+            app._open_writing_section("keyword")
+            settle()
+            keyword_rows = app.keyword_choice_frame.winfo_children()
+            assert len(keyword_rows) == 10
+            keyword_viewport = app.keyword_choice_frame._parent_canvas
+            assert (
+                keyword_rows[-1].winfo_rooty() + keyword_rows[-1].winfo_height()
+                <= keyword_viewport.winfo_rooty() + keyword_viewport.winfo_height() + 2
+            )
+            screenshot("ten-recommended-keywords")
+
             # Native switch/checkbox callbacks still use the original variables.
             app.writing_auto_progress_switch.toggle()
             assert app.writing_auto_progress_var.get()

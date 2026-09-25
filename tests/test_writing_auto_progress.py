@@ -50,6 +50,15 @@ class WritingAutoProgressTests(unittest.TestCase):
         self.assertIn("self._arm_writing_auto_progress()", selection_source)
         self.assertIn("self._auto_collect_reference_for_keyword", selection_source)
 
+    def test_all_ten_recommended_keywords_are_visible_without_inner_scrolling(self) -> None:
+        workflow_source = self._method_source("_build_writing_workflow")
+        render_source = self._method_source("_render_keyword_choices")
+
+        self.assertEqual(main.WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT, 10)
+        self.assertGreaterEqual(main.WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT, 440)
+        self.assertIn("height=WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT", workflow_source)
+        self.assertIn("insights[:WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT]", render_source)
+
     def test_keyword_selection_is_locked_while_writing_is_active(self) -> None:
         alive_worker = SimpleNamespace(is_alive=lambda: True)
         idle_app = SimpleNamespace(

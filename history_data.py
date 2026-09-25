@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-09-25",
-        "version": "v1.1.173–v1.1.175",
+        "version": "v1.1.173–v1.1.176",
         "category": "프로그램 관리",
         "title": "작업 히스토리와 동시 실행 상태 표시",
         "request": "환경설정에서 전체 수정 이력을 검색하고, 동시에 실행되는 글쓰기·N블로그·N지식인 작업 상태를 메뉴에서 바로 확인하게 해달라는 요청",
@@ -22,6 +22,7 @@ BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
             "블로그글쓰기·N블로그자동화·N지식인자동화 메뉴에 독립적인 Shimmer Loading Effect 추가",
             "여러 작업을 동시에 실행하면 해당 메뉴들의 Shimmer 바를 동시에 표시",
             "메뉴명은 변경하지 않고 움직이는 Shimmer 바만 작업 상태로 표시",
+            "블로그글쓰기 추천 키워드 목록 높이를 넓혀 10개를 내부 스크롤 없이 기본 표시",
         ),
     },
     {

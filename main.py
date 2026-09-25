@@ -342,6 +342,8 @@ WRITING_MODEL_CODEX = "codex"
 WRITING_MODEL_GPT = "gpt"
 WRITING_MODEL_GEMINI = "gemini"
 WRITING_MODEL_OPTIONS = ("CLI", "GPT API", "제미나이 API")
+WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT = 10
+WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT = 440
 WRITING_MODEL_LABELS = {
     WRITING_MODEL_CODEX: "CLI",
     WRITING_MODEL_GPT: "GPT API",
@@ -40072,7 +40074,12 @@ class KeywordApp(ctk.CTk):
             opened=False,
         )
 
-        self.keyword_choice_frame = ctk.CTkScrollableFrame(keyword_card, fg_color="#111826", corner_radius=18, height=180)
+        self.keyword_choice_frame = ctk.CTkScrollableFrame(
+            keyword_card,
+            fg_color="#111826",
+            corner_radius=18,
+            height=WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT,
+        )
         self.keyword_choice_frame.grid(row=0, column=0, padx=24, pady=(18, 16), sticky="ew")
         self.keyword_choice_frame.grid_columnconfigure(0, weight=1)
         self._contain_child_scroll(self.writing_scroll, self.keyword_choice_frame)
@@ -46849,7 +46856,10 @@ class KeywordApp(ctk.CTk):
 
     def _render_keyword_choices(self, insights: list[KeywordInsight]) -> None:
         self._clear_keyword_choices()
-        for index, insight in enumerate(insights[:10], start=1):
+        for index, insight in enumerate(
+            insights[:WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT],
+            start=1,
+        ):
             row = ctk.CTkFrame(self.keyword_choice_frame, fg_color="transparent")
             row.grid(row=index - 1, column=0, padx=10, pady=6, sticky="ew")
             row.grid_columnconfigure(1, weight=1)
