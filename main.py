@@ -29682,11 +29682,9 @@ class KeywordApp(ctk.CTk):
         for page_name, button_name in button_names.items():
             button = getattr(self, button_name, None)
             if button is not None:
-                active = self._sidebar_activity_states.get(page_name, False)
-                suffix = "\n진행 중" if active else ""
                 button.configure(
-                    text=f"{normalized[page_name]}{suffix}",
-                    font=ctk.CTkFont(size=16 if active else 19, weight="bold"),
+                    text=normalized[page_name],
+                    font=ctk.CTkFont(size=19, weight="bold"),
                 )
 
     @staticmethod

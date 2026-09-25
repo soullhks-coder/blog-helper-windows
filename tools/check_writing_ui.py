@@ -183,9 +183,9 @@ def main() -> None:
             for page_name in ("writing", "naver_blog", "naver_kin"):
                 assert app._sidebar_activity_states[page_name]
                 assert app._sidebar_activity_bars[page_name].winfo_ismapped()
-            assert "진행 중" in app.writing_nav_button.cget("text")
-            assert "진행 중" in app.naver_blog_nav_button.cget("text")
-            assert "진행 중" in app.naver_kin_nav_button.cget("text")
+            assert app.writing_nav_button.cget("text") == "블로그글쓰기"
+            assert app.naver_blog_nav_button.cget("text") == "N블로그자동화"
+            assert app.naver_kin_nav_button.cget("text") == "N지식인자동화"
             screenshot("concurrent-activity-shimmers")
             app.article_worker = None
             app.naver_blog_worker = None

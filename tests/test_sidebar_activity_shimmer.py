@@ -62,7 +62,7 @@ class SidebarActivityShimmerTests(unittest.TestCase):
 
         self.assertTrue(main.KeywordApp._sidebar_activity_map(app)["naver_kin"])
 
-    def test_shimmer_uses_indeterminate_progress_and_working_label(self) -> None:
+    def test_shimmer_uses_indeterminate_progress_without_changing_menu_text(self) -> None:
         build_source = inspect.getsource(main.KeywordApp._build_sidebar_activity_shimmers)
         refresh_source = inspect.getsource(main.KeywordApp._refresh_sidebar_activity_shimmers)
         labels_source = inspect.getsource(main.KeywordApp._apply_sidebar_menu_labels)
@@ -70,7 +70,8 @@ class SidebarActivityShimmerTests(unittest.TestCase):
         self.assertIn('mode="indeterminate"', build_source)
         self.assertIn("shimmer.start()", refresh_source)
         self.assertIn("shimmer.stop()", refresh_source)
-        self.assertIn("진행 중", labels_source)
+        self.assertNotIn("진행 중", labels_source)
+        self.assertIn("text=normalized[page_name]", labels_source)
 
 
 if __name__ == "__main__":
