@@ -18599,17 +18599,163 @@ class KeywordAnalyzer:
         return " ".join(dict.fromkeys(base_parts)).strip()
 
 
+class LowordSerpRelatedKeywordClient:
+    """Read Naver SERP related keywords from Loword without a browser."""
+
+    KEYWORD_URL = "https://loword.co.kr/keyword"
+    MAX_RESULTS = WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT
+    FLIGHT_CHUNK_PATTERN = re.compile(
+        r'self\.__next_f\.push\(\[1,"((?:\\.|[^"\\])*)"\]\)</script>',
+        flags=re.S,
+    )
+
+    def __init__(self) -> None:
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    def fetch(
+        self,
+        seed_keyword: str,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> list[KeywordInsight]:
+        seed_keyword = str(seed_keyword or "").strip()
+        if not seed_keyword:
+            raise ValueError("연관 검색어를 확인할 주제를 입력해 주세요.")
+
+        source_url = self._keyword_url(seed_keyword)
+        if progress_callback:
+            progress_callback(
+                0.12,
+                f"로워드에서 '{seed_keyword}' SERP 연관 검색어를 확인하고 있습니다...",
+            )
+        html = self._fetch_html(source_url)
+        if progress_callback:
+            progress_callback(0.72, "로워드 연관 검색어 응답을 정리하고 있습니다...")
+        rows = self._extract_serp_related_rows(html)
+        insights = self._build_insights(rows)
+        if not insights:
+            raise RuntimeError(
+                "로워드에서 이 주제의 SERP 연관 검색어를 찾지 못했습니다. 다른 주제로 다시 검색해 주세요."
+            )
+        if progress_callback:
+            progress_callback(
+                1.0,
+                f"로워드 SERP 연관 검색어 {len(insights)}개를 불러왔습니다.",
+            )
+        return insights
+
+    def _keyword_url(self, keyword: str) -> str:
+        return f"{self.KEYWORD_URL}?{urlencode({'engine': 'naver', 'query': keyword})}"
+
+    def _fetch_html(self, url: str) -> str:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+                "Referer": "https://loword.co.kr/",
+            },
+        )
+        try:
+            with urlopen(request, timeout=18, context=self.ssl_context) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="ignore")
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"로워드 연관 검색어를 불러오지 못했습니다: {exc}") from exc
+
+    @classmethod
+    def _extract_serp_related_rows(cls, html: str) -> list[dict]:
+        flight_chunks: list[str] = []
+        for match in cls.FLIGHT_CHUNK_PATTERN.finditer(str(html or "")):
+            try:
+                flight_chunks.append(json.loads(f'"{match.group(1)}"'))
+            except json.JSONDecodeError:
+                continue
+
+        flight_payload = "".join(flight_chunks)
+        marker = '"serpRelatedData":'
+        marker_position = flight_payload.find(marker)
+        if marker_position < 0:
+            raise RuntimeError(
+                "로워드 응답에서 SERP 연관 검색어 데이터를 찾지 못했습니다. 사이트 형식이 변경되었을 수 있습니다."
+            )
+        try:
+            rows, _ = json.JSONDecoder().raw_decode(
+                flight_payload[marker_position + len(marker):].lstrip()
+            )
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError("로워드 SERP 연관 검색어 응답을 해석하지 못했습니다.") from exc
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    @classmethod
+    def _build_insights(cls, rows: Iterable[dict]) -> list[KeywordInsight]:
+        insights: list[KeywordInsight] = []
+        seen_keywords: set[str] = set()
+        for row in rows:
+            keyword = unescape(str(row.get("relKeyword") or row.get("query") or ""))
+            keyword = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", keyword)).strip()
+            normalized_keyword = keyword.casefold()
+            if not keyword or normalized_keyword in seen_keywords:
+                continue
+            seen_keywords.add(normalized_keyword)
+
+            rank = len(insights) + 1
+            volume = cls._format_metric(row.get("monthlySearchVolume"))
+            relativeness = str(row.get("relativeness") or "").strip()
+            competition = str(row.get("compIdx") or "").strip()
+            reasons = [f"로워드 SERP 연관 검색어 {rank}위"]
+            if volume:
+                reasons.append(
+                    volume if volume.startswith("검색량 ") else f"월간 검색량 {volume}"
+                )
+            if relativeness:
+                reasons.append(f"연관도 {relativeness}")
+            if competition:
+                reasons.append(f"광고 경쟁도 {competition}")
+
+            insights.append(
+                KeywordInsight(
+                    keyword=keyword,
+                    score=max(60, 100 - ((rank - 1) * 4)),
+                    reasons=reasons,
+                    sources=["Naver"],
+                    categories=["네이버 SERP 연관 검색어"],
+                    source_urls={
+                        "Naver": (
+                            "https://search.naver.com/search.naver?"
+                            f"{urlencode({'query': keyword})}"
+                        )
+                    },
+                )
+            )
+            if len(insights) >= cls.MAX_RESULTS:
+                break
+        return insights
+
+    @staticmethod
+    def _format_metric(value: object) -> str:
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, int):
+            return f"{value:,}"
+        if isinstance(value, float):
+            return f"{value:,.0f}" if value.is_integer() else f"{value:,.1f}"
+        return str(value or "").strip()
+
+
 class AnalysisWorker(threading.Thread):
-    def __init__(self, keyword: str, enabled_sources: list[str], result_queue: queue.Queue) -> None:
+    def __init__(self, keyword: str, result_queue: queue.Queue) -> None:
         super().__init__(daemon=True)
         self.keyword = keyword
-        self.enabled_sources = enabled_sources
         self.result_queue = result_queue
-        self.analyzer = KeywordAnalyzer()
+        self.client = LowordSerpRelatedKeywordClient()
 
     def run(self) -> None:
         try:
-            results = self.analyzer.analyze(self.keyword, self.enabled_sources, self._report_progress)
+            results = self.client.fetch(self.keyword, self._report_progress)
             self.result_queue.put(("analysis_done", results))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("analysis_error", str(exc)))
@@ -40046,25 +40192,14 @@ class KeywordApp(ctk.CTk):
         self.progress_bar.grid(row=5, column=0, padx=24, pady=(0, 18), sticky="ew")
         self.progress_bar.set(0)
 
-        source_row = ctk.CTkFrame(topic_card, fg_color="transparent")
-        source_row.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="w")
-
-        for index, (source_key, label) in enumerate([("youtube", "YouTube"), ("google", "Google"), ("naver", "Naver")]):
-            variable = ctk.BooleanVar(value=True)
-            self.source_vars[source_key] = variable
-            checkbox = ctk.CTkCheckBox(
-                source_row,
-                text=label,
-                variable=variable,
-                onvalue=True,
-                offvalue=False,
-                checkbox_width=22,
-                checkbox_height=22,
-                corner_radius=6,
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=self._save_ui_state,
-            )
-            checkbox.grid(row=0, column=index, padx=(0, 16), sticky="w")
+        source_note = ctk.CTkLabel(
+            topic_card,
+            text="로워드 SERP(네이버 기준) 연관 검색어를 브라우저 없이 최대 10개까지 불러옵니다.",
+            anchor="w",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        source_note.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="w")
 
         keyword_card = self._create_writing_section(
             parent=parent,
@@ -46534,12 +46669,8 @@ class KeywordApp(ctk.CTk):
 
     def start_analysis(self) -> None:
         keyword = self.topic_entry.get().strip()
-        enabled_sources = [source for source, var in self.source_vars.items() if var.get()]
         if not keyword:
             messagebox.showwarning("입력 필요", "먼저 쓰고 싶은 주제를 입력해 주세요.")
-            return
-        if not enabled_sources:
-            messagebox.showwarning("소스 선택 필요", "최소 1개의 분석 소스를 선택해 주세요.")
             return
         if self.analysis_worker and self.analysis_worker.is_alive():
             messagebox.showinfo("진행 중", "현재 키워드 분석이 진행 중입니다.")
@@ -46579,13 +46710,13 @@ class KeywordApp(ctk.CTk):
         self._open_writing_section("topic")
         self.progress_bar.configure(mode="determinate")
         self.progress_bar.set(0.03)
-        self.keyword_status_label.configure(text="키워드 분석 스레드 시작 중...")
-        self._set_writing_progress(1, f"'{keyword}' 추천 키워드를 분석하고 있습니다.", 0.03)
-        self.find_keywords_button.configure(state="disabled", text="분석 중...")
+        self.keyword_status_label.configure(text="로워드 SERP 연관 검색어 요청을 준비하고 있습니다...")
+        self._set_writing_progress(1, f"'{keyword}' 로워드 연관 검색어를 불러오고 있습니다.", 0.03)
+        self.find_keywords_button.configure(state="disabled", text="검색 중...")
         self._set_trend_keyword_buttons_state("disabled")
         self._save_ui_state()
 
-        self.analysis_worker = AnalysisWorker(keyword, enabled_sources, self.result_queue)
+        self.analysis_worker = AnalysisWorker(keyword, self.result_queue)
         self.analysis_worker.start()
 
     def load_daum_keywords(self) -> None:
@@ -48500,7 +48631,9 @@ class KeywordApp(ctk.CTk):
                     self._set_writing_progress(1, message, progress)
                 elif event_type == "analysis_done":
                     self.progress_bar.set(1.0)
-                    self.keyword_status_label.configure(text="분석 완료 - 추천 키워드를 선택해 주세요.")
+                    self.keyword_status_label.configure(
+                        text=f"로워드 SERP 연관 검색어 {len(payload)}개를 불러왔습니다."
+                    )
                     self.find_keywords_button.configure(state="normal", text="검색")
                     self._set_trend_keyword_buttons_state("normal")
                     self.current_insights = payload
@@ -48508,7 +48641,7 @@ class KeywordApp(ctk.CTk):
                     self._render_results(payload)
                     self._set_writing_progress(
                         2,
-                        "추천 키워드가 준비되었습니다. 사용할 키워드를 선택해 주세요.",
+                        f"연관 검색어 {len(payload)}개가 준비되었습니다. 사용할 키워드를 선택해 주세요.",
                         0.0,
                     )
                     self._open_writing_section("keyword", complete_previous=True)
