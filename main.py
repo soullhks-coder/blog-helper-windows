@@ -84,6 +84,12 @@ from remote_control import (
     RemoteAgentConfigStore,
     RemoteControlAgent,
 )
+from history_data import (
+    BLOG_HELPER_HISTORY,
+    history_categories,
+    history_dates,
+    search_history,
+)
 
 
 ctk.set_appearance_mode("dark")
@@ -26325,7 +26331,7 @@ class KeywordApp(ctk.CTk):
                     "festival_result_frame",
                 ),
                 "prompts": ("prompts_scroll",),
-                "settings": ("settings_scroll", "theme_scroll", "basic_scroll"),
+                "settings": ("settings_scroll", "theme_scroll", "basic_scroll", "history_scroll"),
             }
             for scroll_name in scroll_names_by_page.get(getattr(self, "current_page", "home"), ()):
                 scroll_frame = getattr(self, scroll_name, None)
@@ -27737,6 +27743,7 @@ class KeywordApp(ctk.CTk):
         section_header.grid_columnconfigure(0, weight=1, uniform="settings_sections")
         section_header.grid_columnconfigure(1, weight=1, uniform="settings_sections")
         section_header.grid_columnconfigure(2, weight=1, uniform="settings_sections")
+        section_header.grid_columnconfigure(3, weight=1, uniform="settings_sections")
 
         self.settings_basic_section_button = ctk.CTkButton(
             section_header,
@@ -27776,6 +27783,19 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._switch_settings_section("ai"),
         )
         self.settings_ai_section_button.grid(row=0, column=2, padx=(4, 6), pady=6, sticky="ew")
+
+        self.settings_history_section_button = ctk.CTkButton(
+            section_header,
+            text="히스토리",
+            height=42,
+            corner_radius=13,
+            fg_color="transparent",
+            hover_color=palette["hover"],
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=lambda: self._switch_settings_section("history"),
+        )
+        self.settings_history_section_button.grid(row=0, column=3, padx=(4, 6), pady=6, sticky="ew")
 
         header = ctk.CTkFrame(
             self.settings_page,
@@ -27967,6 +27987,11 @@ class KeywordApp(ctk.CTk):
         self.theme_scroll.grid_columnconfigure(0, weight=1)
         self._build_theme_settings_card()
 
+        self.history_scroll = ctk.CTkScrollableFrame(self.settings_page, fg_color="transparent")
+        self.history_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
+        self.history_scroll.grid_columnconfigure(0, weight=1)
+        self._build_history_settings_page()
+
         content = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         content.grid(row=0, column=0, sticky="ew")
         content.grid_columnconfigure(0, weight=1)
@@ -28146,6 +28171,265 @@ class KeywordApp(ctk.CTk):
 
         self._switch_settings_tab("wordpress")
         self._switch_settings_section("ai")
+
+    def _build_history_settings_page(self) -> None:
+        palette = self._theme_palette()
+        self.history_rendered = False
+        self._history_render_job = None
+
+        hero = ctk.CTkFrame(
+            self.history_scroll,
+            fg_color=palette["panel"],
+            corner_radius=22,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        hero.grid(row=0, column=0, pady=(0, 12), sticky="ew")
+        hero.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            hero,
+            text="Blog Helper 작업 히스토리",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=25, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=22, pady=(20, 4), sticky="ew")
+        ctk.CTkLabel(
+            hero,
+            text=(
+                "2026년 7월 19일 첫 작업부터 현재까지 요청한 수정사항과 실제 반영 결과를 "
+                "날짜·버전별로 정리했습니다."
+            ),
+            text_color=palette["subtext"],
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+            justify="left",
+            wraplength=920,
+        ).grid(row=1, column=0, padx=22, pady=(0, 14), sticky="ew")
+
+        total_changes = sum(len(tuple(entry.get("changes", ()))) for entry in BLOG_HELPER_HISTORY)
+        self.history_summary_label = ctk.CTkLabel(
+            hero,
+            text=f"기록 {len(BLOG_HELPER_HISTORY)}일 · 주요 변경 {total_changes}건 · 최신 v{APP_VERSION}",
+            fg_color=palette["selected"],
+            corner_radius=11,
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.history_summary_label.grid(row=2, column=0, padx=22, pady=(0, 20), sticky="ew")
+
+        filters = ctk.CTkFrame(
+            self.history_scroll,
+            fg_color=palette["panel"],
+            corner_radius=18,
+            border_width=1,
+            border_color=palette["border"],
+        )
+        filters.grid(row=1, column=0, pady=(0, 10), sticky="ew")
+        filters.grid_columnconfigure(0, weight=1)
+
+        self.history_search_entry = ctk.CTkEntry(
+            filters,
+            height=44,
+            corner_radius=13,
+            fg_color=palette["input"],
+            border_width=1,
+            border_color=palette["border"],
+            placeholder_text="기능, 오류, 서비스, 버전으로 검색",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.history_search_entry.grid(row=0, column=0, padx=(16, 8), pady=16, sticky="ew")
+        self.history_search_entry.bind("<KeyRelease>", self._schedule_history_render)
+
+        self.history_date_menu = ctk.CTkOptionMenu(
+            filters,
+            values=["전체 날짜", *history_dates()],
+            width=150,
+            height=44,
+            corner_radius=13,
+            fg_color=palette["input"],
+            button_color=palette["selected"],
+            button_hover_color=palette["hover"],
+            dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda _value: self._render_history_cards(),
+        )
+        self.history_date_menu.grid(row=0, column=1, padx=8, pady=16, sticky="e")
+        self.history_date_menu.set("전체 날짜")
+
+        self.history_category_menu = ctk.CTkOptionMenu(
+            filters,
+            values=["전체 분류", *history_categories()],
+            width=176,
+            height=44,
+            corner_radius=13,
+            fg_color=palette["input"],
+            button_color=palette["selected"],
+            button_hover_color=palette["hover"],
+            dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda _value: self._render_history_cards(),
+        )
+        self.history_category_menu.grid(row=0, column=2, padx=8, pady=16, sticky="e")
+        self.history_category_menu.set("전체 분류")
+
+        self.history_clear_button = ctk.CTkButton(
+            filters,
+            text="초기화",
+            width=84,
+            height=44,
+            corner_radius=13,
+            fg_color=palette["selected"],
+            hover_color=palette["hover"],
+            border_width=1,
+            border_color=palette["border"],
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._clear_history_filters,
+        )
+        self.history_clear_button.grid(row=0, column=3, padx=(8, 16), pady=16, sticky="e")
+
+        self.history_result_label = ctk.CTkLabel(
+            self.history_scroll,
+            text="히스토리를 열면 전체 기록을 표시합니다.",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.history_result_label.grid(row=2, column=0, padx=4, pady=(2, 9), sticky="ew")
+
+        self.history_cards_frame = ctk.CTkFrame(self.history_scroll, fg_color="transparent")
+        self.history_cards_frame.grid(row=3, column=0, sticky="ew")
+        self.history_cards_frame.grid_columnconfigure(0, weight=1)
+
+    def _schedule_history_render(self, _event=None) -> None:
+        if self._history_render_job is not None:
+            try:
+                self.after_cancel(self._history_render_job)
+            except (tk.TclError, ValueError):
+                pass
+        self._history_render_job = self.after(180, self._render_history_cards)
+
+    def _clear_history_filters(self) -> None:
+        self.history_search_entry.delete(0, "end")
+        self.history_date_menu.set("전체 날짜")
+        self.history_category_menu.set("전체 분류")
+        self._render_history_cards()
+
+    def _render_history_cards(self) -> None:
+        self._history_render_job = None
+        if not hasattr(self, "history_cards_frame"):
+            return
+        query = self.history_search_entry.get().strip()
+        selected_date = self.history_date_menu.get()
+        selected_category = self.history_category_menu.get()
+        entries = search_history(query, selected_date, selected_category)
+        palette = self._theme_palette()
+
+        for child in self.history_cards_frame.winfo_children():
+            child.destroy()
+
+        active_filters = []
+        if query:
+            active_filters.append(f"검색: {query}")
+        if selected_date != "전체 날짜":
+            active_filters.append(selected_date)
+        if selected_category != "전체 분류":
+            active_filters.append(selected_category)
+        filter_text = f" · {' · '.join(active_filters)}" if active_filters else ""
+        self.history_result_label.configure(
+            text=f"검색 결과 {len(entries)}개{filter_text}",
+            text_color=palette["accent"] if entries else "#ff6b6b",
+        )
+
+        if not entries:
+            empty = ctk.CTkFrame(
+                self.history_cards_frame,
+                fg_color=palette["panel"],
+                corner_radius=18,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            empty.grid(row=0, column=0, pady=(0, 10), sticky="ew")
+            ctk.CTkLabel(
+                empty,
+                text="조건에 맞는 히스토리가 없습니다. 검색어나 필터를 바꿔 주세요.",
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).grid(row=0, column=0, padx=22, pady=28, sticky="w")
+            self.history_rendered = True
+            return
+
+        for row, entry in enumerate(entries):
+            card = ctk.CTkFrame(
+                self.history_cards_frame,
+                fg_color=palette["panel"],
+                corner_radius=19,
+                border_width=1,
+                border_color=palette["border"],
+            )
+            card.grid(row=row, column=0, pady=(0, 10), sticky="ew")
+            card.grid_columnconfigure(0, weight=1)
+
+            meta = ctk.CTkFrame(card, fg_color="transparent")
+            meta.grid(row=0, column=0, padx=18, pady=(16, 6), sticky="ew")
+            meta.grid_columnconfigure(3, weight=1)
+            ctk.CTkLabel(
+                meta,
+                text=str(entry["date"]),
+                fg_color=palette["selected"],
+                corner_radius=9,
+                text_color=palette["accent"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(row=0, column=0, padx=(0, 7), ipadx=8, ipady=3, sticky="w")
+            ctk.CTkLabel(
+                meta,
+                text=str(entry["version"]),
+                text_color=palette["muted"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(row=0, column=1, padx=(0, 10), sticky="w")
+            ctk.CTkLabel(
+                meta,
+                text=str(entry["category"]),
+                text_color=palette["accent"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).grid(row=0, column=2, sticky="w")
+
+            ctk.CTkLabel(
+                card,
+                text=str(entry["title"]),
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=18, weight="bold"),
+                anchor="w",
+                justify="left",
+            ).grid(row=1, column=0, padx=20, pady=(0, 8), sticky="ew")
+            ctk.CTkLabel(
+                card,
+                text=f"요청 요약  ·  {entry['request']}",
+                text_color=palette["subtext"],
+                font=ctk.CTkFont(size=13),
+                anchor="w",
+                justify="left",
+                wraplength=900,
+            ).grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+            changes_text = "\n".join(f"• {item}" for item in entry.get("changes", ()))
+            ctk.CTkLabel(
+                card,
+                text=f"주요 반영 사항\n{changes_text}",
+                fg_color=palette["input"],
+                corner_radius=13,
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=13),
+                anchor="w",
+                justify="left",
+                wraplength=880,
+            ).grid(row=3, column=0, padx=18, pady=(0, 17), ipadx=12, ipady=10, sticky="ew")
+
+        self.history_rendered = True
+        self._tag_mousewheel_descendants(self.history_scroll)
 
     def _style_ai_settings_cards(self) -> None:
         """Apply one calm, theme-aware visual system without replacing functional widgets."""
@@ -30156,7 +30440,7 @@ class KeywordApp(ctk.CTk):
             "naver_kin": ("naver_kin_scroll",),
             "public_data": ("public_data_scroll",),
             "prompts": ("prompts_scroll",),
-            "settings": ("settings_scroll", "basic_scroll", "theme_scroll"),
+            "settings": ("settings_scroll", "basic_scroll", "theme_scroll", "history_scroll"),
         }
         for name in scroll_names_by_page.get(getattr(self, "current_page", "home"), ()):
             scroll_frame = getattr(self, name, None)
@@ -43312,13 +43596,14 @@ class KeywordApp(ctk.CTk):
         self._refresh_automation_queue()
 
     def _switch_settings_section(self, section_name: str) -> None:
-        self.settings_section = section_name if section_name in {"basic", "theme", "ai"} else "ai"
+        self.settings_section = section_name if section_name in {"basic", "theme", "ai", "history"} else "ai"
         palette = self._theme_palette()
         if hasattr(self, "settings_theme_section_button"):
             for key, button in {
                 "basic": self.settings_basic_section_button,
                 "theme": self.settings_theme_section_button,
                 "ai": self.settings_ai_section_button,
+                "history": self.settings_history_section_button,
             }.items():
                 button.configure(
                     fg_color=palette["selected"] if self.settings_section == key else "transparent",
@@ -43330,7 +43615,8 @@ class KeywordApp(ctk.CTk):
         self.basic_scroll.grid_remove()
         self.theme_scroll.grid_remove()
         self.settings_scroll.grid_remove()
-        if self.settings_section in {"basic", "theme"}:
+        self.history_scroll.grid_remove()
+        if self.settings_section in {"basic", "theme", "history"}:
             self.settings_ai_tabs_header.grid_remove()
         else:
             self.settings_ai_tabs_header.grid()
@@ -43342,6 +43628,9 @@ class KeywordApp(ctk.CTk):
         elif self.settings_section == "theme":
             self.theme_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
             self._update_quick_status("테마 설정", "블랙/화이트 테마를 선택하고 자동 저장합니다.", palette["accent"])
+        elif self.settings_section == "history":
+            self.history_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
+            self._render_history_cards()
         else:
             self.settings_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
         self._finish_theme_paint()

@@ -184,6 +184,27 @@ def main() -> None:
             for value_label in app.adsense_settings_value_labels.values():
                 assert resolved_color(value_label, "text_color") == "#ffffff"
 
+            app._switch_settings_section("history")
+            settle(900)
+            screenshot("settings-history")
+            assert app.settings_history_section_button.cget("text") == "히스토리"
+            assert app.history_scroll.winfo_ismapped()
+            assert not app.settings_ai_tabs_header.winfo_ismapped()
+            assert app.history_rendered
+            assert len(app.history_cards_frame.winfo_children()) == len(
+                app_module.BLOG_HELPER_HISTORY
+            )
+            app.history_search_entry.insert(0, "60px")
+            app._render_history_cards()
+            settle(120)
+            assert len(app.history_cards_frame.winfo_children()) == 1
+            assert "검색 결과 1개" in app.history_result_label.cget("text")
+            app._clear_history_filters()
+            settle(120)
+            assert len(app.history_cards_frame.winfo_children()) == len(
+                app_module.BLOG_HELPER_HISTORY
+            )
+
             app._switch_page("writing")
             # Initialize the native window before scheduling the quit timer.
             # CTk's first Windows mainloop can pump events during setup and
