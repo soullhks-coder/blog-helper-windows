@@ -26,7 +26,7 @@ def main() -> None:
         return
 
     with tempfile.TemporaryDirectory(prefix="blog-helper-writing-ui-") as directory, ExitStack() as stack:
-        faulthandler.dump_traceback_later(45, repeat=True)
+        faulthandler.dump_traceback_later(90, repeat=True)
         os.environ["BLOG_HELPER_DATA_DIR"] = directory
         os.environ["BLOG_HELPER_DISABLE_UPDATES"] = "1"
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -264,6 +264,8 @@ def main() -> None:
                 <= keyword_viewport.winfo_rooty() + keyword_viewport.winfo_height() + 2
             )
             screenshot("ten-recommended-keywords")
+            app._clear_keyword_choices()
+            settle()
 
             # Native switch/checkbox callbacks still use the original variables.
             app.writing_auto_progress_switch.toggle()
