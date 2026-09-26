@@ -13,7 +13,7 @@ from history_data import (
 class HistoryDataTests(unittest.TestCase):
     def test_history_covers_the_project_from_first_release_to_current_work(self) -> None:
         self.assertGreaterEqual(len(BLOG_HELPER_HISTORY), 40)
-        self.assertEqual(BLOG_HELPER_HISTORY[0]["date"], "2026-09-25")
+        self.assertEqual(BLOG_HELPER_HISTORY[0]["date"], "2026-09-26")
         self.assertEqual(BLOG_HELPER_HISTORY[-1]["date"], "2026-07-19")
         self.assertEqual(history_dates(), tuple(sorted(history_dates(), reverse=True)))
         self.assertEqual(len(history_dates()), len(set(history_dates())))
@@ -38,6 +38,12 @@ class HistoryDataTests(unittest.TestCase):
 
         version_results = search_history("v1.1.170")
         self.assertEqual([entry["date"] for entry in version_results], ["2026-09-22"])
+
+        previous_post_results = search_history("이전 발행글")
+        self.assertEqual(
+            [entry["date"] for entry in previous_post_results],
+            ["2026-09-26"],
+        )
 
     def test_date_and_category_filters_can_be_combined(self) -> None:
         date_results = search_history(selected_date="2026-09-17")

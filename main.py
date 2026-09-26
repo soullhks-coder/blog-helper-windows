@@ -10046,6 +10046,68 @@ def naver_blog_profile_scope(
     return NAVER_PLAYWRIGHT_PROFILE_BLOG
 
 
+def normalize_naver_blog_post_url(
+    value: object,
+    blog_id: object = "",
+) -> str:
+    """Return one canonical Naver post URL, excluding editor and blog-main URLs."""
+    raw_url = str(value or "").strip()
+    if not raw_url:
+        return ""
+    if not raw_url.startswith(("http://", "https://")):
+        raw_url = f"https://{raw_url}"
+    try:
+        parsed = urlparse(raw_url)
+    except ValueError:
+        return ""
+    hostname = str(parsed.hostname or "").lower()
+    if hostname not in {"blog.naver.com", "m.blog.naver.com"}:
+        return ""
+
+    query = parse_qs(parsed.query)
+    detected_blog_id = str((query.get("blogId") or query.get("blogid") or [""])[0]).strip()
+    log_number = str((query.get("logNo") or query.get("logno") or [""])[0]).strip()
+    path_parts = [unquote(part).strip() for part in parsed.path.split("/") if part.strip()]
+    pretty_post_path = len(path_parts) >= 2 and path_parts[1].isdigit()
+    if pretty_post_path:
+        detected_blog_id = detected_blog_id or path_parts[0]
+        log_number = path_parts[1]
+    elif log_number:
+        # A SmartEditor draft URL can also contain blogId/logNo. Only the
+        # public PostView endpoint is a confirmed published URL.
+        endpoint = path_parts[-1].casefold() if path_parts else ""
+        if endpoint != "postview.naver":
+            return ""
+
+    expected_blog_id = normalize_naver_blog_id(str(blog_id or ""))
+    detected_blog_id = normalize_naver_blog_id(detected_blog_id)
+    if not detected_blog_id or not log_number.isdigit():
+        return ""
+    if expected_blog_id and detected_blog_id.casefold() != expected_blog_id.casefold():
+        return ""
+    return f"https://blog.naver.com/{detected_blog_id}/{log_number}"
+
+
+def normalize_naver_blog_recent_post_urls(
+    values: object,
+    blog_id: object = "",
+) -> list[str]:
+    """Keep at most two unique post URLs in newest-to-oldest order."""
+    candidates = values if isinstance(values, (list, tuple)) else []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        post_url = normalize_naver_blog_post_url(value, blog_id=blog_id)
+        key = post_url.casefold()
+        if not post_url or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(post_url)
+        if len(normalized) >= 2:
+            break
+    return normalized
+
+
 def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
     raw_profiles = profiles if isinstance(profiles, list) else []
     normalized_profiles: list[dict] = []
@@ -10059,6 +10121,10 @@ def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
                 "blog_id": str(profile.get("blog_id") or ""),
                 "nickname": str(profile.get("nickname") or ""),
                 "write_url": str(profile.get("write_url") or ""),
+                "recent_post_urls": normalize_naver_blog_recent_post_urls(
+                    profile.get("recent_post_urls"),
+                    blog_id=profile.get("blog_id"),
+                ),
                 "profile_scope": scope,
                 "profile_path": str(profile_dir),
             }
@@ -13135,6 +13201,236 @@ def _focus_naver_blog_editor_end(editor_page, timeout_seconds: int = 20):
     return locator
 
 
+def _naver_blog_editor_targets(editor_page) -> list:
+    targets = [editor_page]
+    try:
+        targets.extend(
+            frame
+            for frame in editor_page.frames
+            if frame is not editor_page.main_frame
+        )
+    except Exception:
+        pass
+    return targets
+
+
+def _insert_one_naver_blog_previous_post_link(
+    editor_page,
+    post_url: str,
+) -> bool:
+    """Insert one SmartEditor OG-link card at the current bottom caret."""
+    link_button_selectors = (
+        "button.se-oglink-toolbar-button",
+        ".se-toolbar-item-oglink button",
+        ".se-document-toolbar button:has-text('링크')",
+        "button:has-text('링크 링크 추가')",
+        "button[aria-label*='링크']",
+        "button[title*='링크']",
+    )
+    popup_input_selectors = (
+        "input[placeholder='URL을 입력하세요.']",
+        "input.se-popup-oglink-input",
+        "input[type='url'][placeholder*='URL']",
+    )
+    confirm_selectors = (
+        "button.se-popup-button-confirm",
+        ".se-popup-oglink button:has-text('확인')",
+        "[class*='oglink'][class*='popup'] button:has-text('확인')",
+        "button:has-text('확인')",
+    )
+
+    _focus_naver_blog_editor_end(editor_page)
+    targets = _naver_blog_editor_targets(editor_page)
+    toolbar_clicked = False
+    for target in targets:
+        for selector in link_button_selectors:
+            try:
+                buttons = target.locator(selector)
+                for index in range(min(buttons.count(), 8)):
+                    button = buttons.nth(index)
+                    if not button.is_visible(timeout=400) or not button.is_enabled(timeout=400):
+                        continue
+                    button.click(timeout=2_500)
+                    editor_page.wait_for_timeout(500)
+                    toolbar_clicked = True
+                    break
+            except Exception:
+                continue
+            if toolbar_clicked:
+                break
+        if toolbar_clicked:
+            break
+    if not toolbar_clicked:
+        return False
+
+    deadline = time.time() + 8
+    popup_input = None
+    popup_target = None
+    while time.time() < deadline and popup_input is None:
+        for target in _naver_blog_editor_targets(editor_page):
+            for selector in popup_input_selectors:
+                try:
+                    inputs = target.locator(selector)
+                    for index in range(min(inputs.count(), 6)):
+                        candidate = inputs.nth(index)
+                        if not candidate.is_visible(timeout=350):
+                            continue
+                        popup_input = candidate
+                        popup_target = target
+                        break
+                except Exception:
+                    continue
+                if popup_input is not None:
+                    break
+            if popup_input is not None:
+                break
+        if popup_input is None:
+            editor_page.wait_for_timeout(150)
+    if popup_input is None or popup_target is None:
+        return False
+
+    try:
+        popup_input.fill(post_url)
+        popup_input.press("Tab")
+    except Exception:
+        return False
+
+    # Mark the popup containing the exact URL field. This prevents a broad
+    # "확인" fallback from clicking an unrelated editor dialog.
+    popup_marker = f"blog-helper-oglink-popup-{time.time_ns()}"
+    try:
+        popup_input.evaluate(
+            """(node, marker) => {
+                const popup = node.closest(
+                    '.se-popup, .se-layer, [role="dialog"], ' +
+                    '[class*="oglink"][class*="popup"], [class*="popup"]'
+                ) || node.parentElement;
+                if (popup) popup.setAttribute('data-blog-helper-oglink-popup', marker);
+            }""",
+            popup_marker,
+        )
+    except Exception:
+        pass
+
+    popup_scope = popup_target.locator(
+        f'[data-blog-helper-oglink-popup="{popup_marker}"]'
+    )
+    for selector in confirm_selectors:
+        try:
+            candidates = (
+                popup_scope.locator(selector)
+                if popup_scope.count() > 0
+                else popup_target.locator(selector)
+            )
+            for index in range(min(candidates.count(), 8)):
+                confirm = candidates.nth(index)
+                if not confirm.is_visible(timeout=500):
+                    continue
+                # SmartEditor disables this button while it fetches the OG card.
+                confirm.click(timeout=20_000)
+                editor_page.wait_for_timeout(1_400)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def insert_naver_blog_previous_post_links(
+    editor_page,
+    previous_post_urls: object,
+    result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
+    blog_id: str = "",
+) -> int:
+    """Append newest and then second-newest profile links before tag input."""
+    post_urls = normalize_naver_blog_recent_post_urls(
+        previous_post_urls,
+        blog_id=blog_id,
+    )
+    if not post_urls:
+        append_runtime_log("NBlog", "저장된 이전 발행글 URL이 없어 본문 링크 삽입을 건너뜁니다.")
+        return 0
+
+    inserted_count = 0
+    for index, post_url in enumerate(post_urls, start=1):
+        _raise_if_naver_blog_cancelled(cancel_event)
+        result_queue.put(
+            (
+                "naver_blog_progress",
+                f"본문 맨 아래에 이전 발행글 링크를 넣는 중... {index}/{len(post_urls)}",
+            )
+        )
+        try:
+            inserted = _insert_one_naver_blog_previous_post_link(
+                editor_page,
+                post_url,
+            )
+        except Exception as exc:
+            inserted = False
+            append_runtime_log(
+                "NBlog",
+                f"이전 발행글 링크 삽입 예외(작업 계속): url={post_url}, error={exc}",
+            )
+        if inserted:
+            inserted_count += 1
+            append_runtime_log(
+                "NBlog",
+                f"이전 발행글 링크 {index}/{len(post_urls)} 삽입 완료: {post_url}",
+            )
+            continue
+        warning = (
+            f"이전 발행글 링크 {index}/{len(post_urls)}를 자동 삽입하지 못해 "
+            "해당 링크만 건너뛰고 태그 입력을 계속합니다."
+        )
+        result_queue.put(("naver_blog_progress", warning))
+        append_runtime_log("NBlog", f"{warning} URL={post_url}")
+    return inserted_count
+
+
+def detect_naver_blog_published_url(
+    pages: Iterable,
+    blog_id: str = "",
+    excluded_urls: object = None,
+) -> str:
+    """Detect the newly published post from a redirected or newly opened page."""
+    excluded = {
+        url.casefold()
+        for url in normalize_naver_blog_recent_post_urls(
+            excluded_urls,
+            blog_id=blog_id,
+        )
+    }
+    candidates: list[str] = []
+    for page in pages:
+        try:
+            if page.is_closed():
+                continue
+        except Exception:
+            continue
+        try:
+            candidates.append(str(page.url or ""))
+        except Exception:
+            pass
+        for selector, attribute in (
+            ("meta[property='og:url']", "content"),
+            ("link[rel='canonical']", "href"),
+        ):
+            try:
+                locator = page.locator(selector).first
+                if locator.count() > 0:
+                    candidates.append(
+                        str(locator.get_attribute(attribute, timeout=350) or "")
+                    )
+            except Exception:
+                continue
+
+    for candidate in candidates:
+        post_url = normalize_naver_blog_post_url(candidate, blog_id=blog_id)
+        if post_url and post_url.casefold() not in excluded:
+            return post_url
+    return ""
+
+
 def _type_naver_blog_text(
     editor_page,
     text: str,
@@ -14010,6 +14306,7 @@ def run_naver_blog_playwright_bootstrap(
     automation_mode: str = NAVER_BLOG_AUTOMATION_MODE_FULL,
     profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
     quote_click_distance_px: int = NAVER_BLOG_QUOTE_CLICK_DISTANCE_DEFAULT,
+    previous_post_urls: object = None,
 ) -> tuple[bool, dict]:
     def report(message: str) -> None:
         result_queue.put(("naver_blog_progress", message))
@@ -14019,6 +14316,10 @@ def run_naver_blog_playwright_bootstrap(
     automation_mode = normalize_naver_blog_automation_mode(automation_mode)
     quote_click_distance_px = normalize_naver_blog_quote_click_distance(
         quote_click_distance_px
+    )
+    previous_post_urls = normalize_naver_blog_recent_post_urls(
+        previous_post_urls,
+        blog_id=blog_id,
     )
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -14152,6 +14453,19 @@ def run_naver_blog_playwright_bootstrap(
                     "네이버 블로그 제목과 본문을 입력하고 "
                     f"이미지 {int(editor_result.get('image_count') or 0)}개를 첨부했습니다."
                 )
+                previous_link_count = insert_naver_blog_previous_post_links(
+                    editor_page,
+                    previous_post_urls,
+                    result_queue,
+                    cancel_event=cancel_event,
+                    blog_id=blog_id,
+                )
+                editor_result["previous_link_count"] = previous_link_count
+                if previous_post_urls:
+                    report(
+                        "본문 맨 아래에 최근 발행글 링크 "
+                        f"{previous_link_count}/{len(previous_post_urls)}개를 삽입했습니다."
+                    )
                 tag_count = fill_naver_blog_publish_tags(
                     editor_page,
                     list(article_payload.get("tag_names") or []),
@@ -14177,6 +14491,11 @@ def run_naver_blog_playwright_bootstrap(
                 "title": str((article_payload or {}).get("title") or ""),
                 "image_count": int(editor_result.get("image_count") or 0),
                 "tag_count": int(editor_result.get("tag_count") or 0),
+                "previous_link_count": int(
+                    editor_result.get("previous_link_count") or 0
+                ),
+                "previous_post_urls": list(previous_post_urls),
+                "published_url": "",
                 "tag_names": list((article_payload or {}).get("tag_names") or []),
                 "work_dir": str((article_payload or {}).get("work_dir") or ""),
                 "provider": str((article_payload or {}).get("provider") or ""),
@@ -14195,8 +14514,37 @@ def run_naver_blog_playwright_bootstrap(
             )
 
             # 1차 기반에서는 사용자가 화면을 확인할 수 있도록 에디터 탭을 유지합니다.
+            existing_page_ids = {
+                id(candidate)
+                for candidate in context.pages
+                if candidate is not editor_page
+            }
+            published_url = ""
             while True:
                 _raise_if_naver_blog_cancelled(cancel_event)
+                monitored_pages = [editor_page]
+                monitored_pages.extend(
+                    candidate
+                    for candidate in context.pages
+                    if id(candidate) not in existing_page_ids
+                    and candidate is not editor_page
+                )
+                detected_url = detect_naver_blog_published_url(
+                    monitored_pages,
+                    blog_id=blog_id,
+                    excluded_urls=previous_post_urls,
+                )
+                if detected_url and detected_url != published_url:
+                    published_url = detected_url
+                    payload["published_url"] = published_url
+                    published_payload = dict(payload)
+                    published_payload["message"] = (
+                        "새로 발행된 네이버 블로그 글 주소를 확인했습니다."
+                    )
+                    result_queue.put(
+                        ("naver_blog_published_url", published_payload)
+                    )
+                    report(f"새 발행글 URL을 프로필에 저장합니다: {published_url}")
                 try:
                     if editor_page.is_closed():
                         break
@@ -14206,6 +14554,7 @@ def run_naver_blog_playwright_bootstrap(
                     cancel_event.wait(0.5)
                 else:
                     time.sleep(0.5)
+            payload["published_url"] = published_url
             return True, payload
         except PlaywrightTimeoutError as exc:
             append_runtime_log("NBlog", f"화면 응답 시간 초과: {exc}\n{traceback.format_exc()}")
@@ -22966,6 +23315,7 @@ class NaverBlogBootstrapWorker(threading.Thread):
         profile_scope: str = NAVER_PLAYWRIGHT_PROFILE_BLOG,
         image_mode: str = NAVER_BLOG_IMAGE_MODE_AUTO,
         manual_image_paths: list[str] | tuple[str, ...] | None = None,
+        previous_post_urls: object = None,
     ) -> None:
         super().__init__(daemon=True)
         self.write_url = write_url
@@ -22990,6 +23340,10 @@ class NaverBlogBootstrapWorker(threading.Thread):
             for path in (manual_image_paths or [])
             if str(path or "").strip()
         ]
+        self.previous_post_urls = normalize_naver_blog_recent_post_urls(
+            previous_post_urls,
+            blog_id=self.blog_id,
+        )
         self.cancel_event = threading.Event()
         self.article_payload: dict | None = None
 
@@ -23029,6 +23383,7 @@ class NaverBlogBootstrapWorker(threading.Thread):
                 quote_click_distance_px=self.quote_click_distance_px,
                 cancel_event=self.cancel_event,
                 profile_scope=self.profile_scope,
+                previous_post_urls=self.previous_post_urls,
             )
             if success:
                 append_runtime_log("NBlog", "자동화 작업 완료")
@@ -32879,6 +33234,7 @@ class KeywordApp(ctk.CTk):
                 "blog_id": "",
                 "nickname": "",
                 "write_url": "",
+                "recent_post_urls": [],
                 "profile_scope": profile_scope,
                 "profile_path": str(profile_dir),
             }
@@ -33534,6 +33890,7 @@ class KeywordApp(ctk.CTk):
             profile_scope=profile_scope,
             image_mode=image_mode,
             manual_image_paths=manual_image_paths,
+            previous_post_urls=profile.get("recent_post_urls", []),
         )
         self.naver_blog_worker.start()
 
@@ -33542,12 +33899,17 @@ class KeywordApp(ctk.CTk):
         write_url = ""
         nickname = ""
         blog_id = ""
+        published_url = ""
         payload_profile_scope = ""
         if isinstance(payload, dict):
             message = str(payload.get("message") or "네이버 블로그 로그인 상태를 저장했습니다.")
             write_url = str(payload.get("write_url") or "").strip()
             nickname = str(payload.get("nickname") or "").strip()
             blog_id = self._normalize_naver_blog_id(str(payload.get("blog_id") or ""))
+            published_url = normalize_naver_blog_post_url(
+                payload.get("published_url"),
+                blog_id=blog_id,
+            )
             requested_scope = str(payload.get("profile_scope") or "").strip().lower()
             if requested_scope in NAVER_BLOG_PROFILE_SCOPES:
                 payload_profile_scope = requested_scope
@@ -33588,6 +33950,20 @@ class KeywordApp(ctk.CTk):
             target_profile["write_url"] = write_url
             if nickname:
                 target_profile["nickname"] = nickname
+            published_url = normalize_naver_blog_post_url(
+                published_url,
+                blog_id=target_profile.get("blog_id") or blog_id,
+            )
+            if published_url:
+                target_profile["recent_post_urls"] = (
+                    normalize_naver_blog_recent_post_urls(
+                        [
+                            published_url,
+                            *list(target_profile.get("recent_post_urls") or []),
+                        ],
+                        blog_id=target_profile.get("blog_id") or blog_id,
+                    )
+                )
             blog_id_var = getattr(self, "naver_blog_profile_vars", {}).get(
                 f"{target_index}:blog_id"
             )
@@ -33617,6 +33993,8 @@ class KeywordApp(ctk.CTk):
                 f"{message} {target_name} 전용 프로필과 글쓰기 URL을 저장했습니다."
                 f"{nickname_text}"
             )
+            if published_url:
+                message += " 새 발행글 URL을 이 프로필의 최근 글로 저장했습니다."
         return message
 
     def _format_naver_kin_interval_label(self, minutes: int | str | None) -> str:
@@ -49644,6 +50022,23 @@ class KeywordApp(ctk.CTk):
                     self._update_quick_status(
                         "네이버 블로그 작성·사진 첨부 완료" if article_ready else "네이버 블로그 에디터 준비",
                         message,
+                        "#48d980",
+                    )
+                elif event_type == "naver_blog_published_url":
+                    message = self._apply_naver_blog_bootstrap_result(payload)
+                    published_url = (
+                        str(payload.get("published_url") or "")
+                        if isinstance(payload, dict)
+                        else ""
+                    )
+                    if hasattr(self, "naver_blog_status_label"):
+                        self.naver_blog_status_label.configure(
+                            text="현재 상태: 새 발행글 URL을 선택한 블로그 프로필에 저장했습니다.",
+                            text_color="#48d980",
+                        )
+                    self._update_quick_status(
+                        "N블로그 발행 URL 저장",
+                        published_url or message,
                         "#48d980",
                     )
                 elif event_type == "naver_blog_done":
