@@ -13226,6 +13226,107 @@ def _naver_blog_oglink_component_count(editor_page) -> int:
     return total
 
 
+def _click_naver_blog_link_search(
+    editor_page,
+    popup_target,
+    popup_input,
+    post_url: str,
+    timeout_seconds: int = 8,
+) -> bool:
+    """Click the magnifying-glass search button beside the exact URL field."""
+    marker = f"blog-helper-oglink-search-{time.time_ns()}"
+    find_search_script = """options => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2;
+        };
+        const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
+        const inputs = Array.from(document.querySelectorAll(
+            'input[placeholder="URL을 입력하세요."], input.se-popup-oglink-input, ' +
+            'input[type="url"][placeholder*="URL"]'
+        )).filter(visible);
+        const input = inputs.find(node => normalize(node.value) === options.url) ||
+            inputs[inputs.length - 1];
+        if (!input) return null;
+        const inputRect = input.getBoundingClientRect();
+        const popupSelector = [
+            '.se-popup', '.se-layer', '[role="dialog"]',
+            '[class*="oglink"][class*="popup"]', '[class*="popup"]'
+        ].join(',');
+        const inputPopup = input.closest(popupSelector);
+        const candidates = Array.from(document.querySelectorAll(
+            'button, [role="button"], a'
+        )).filter(node => {
+            if (!visible(node) || node.disabled || node.getAttribute('aria-disabled') === 'true') {
+                return false;
+            }
+            const label = normalize(
+                node.innerText || node.textContent || node.getAttribute('aria-label') ||
+                node.getAttribute('title')
+            );
+            return label === '검색' || label === '링크 검색';
+        });
+        let best = null;
+        let bestScore = -Infinity;
+        for (const candidate of candidates) {
+            const rect = candidate.getBoundingClientRect();
+            const dx = (rect.left + rect.width / 2) - (inputRect.right);
+            const dy = (rect.top + rect.height / 2) - (inputRect.top + inputRect.height / 2);
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            const candidatePopup = candidate.closest(popupSelector);
+            let score = -distance;
+            if (inputPopup && candidatePopup === inputPopup) score += 10000;
+            if (inputPopup && inputPopup.contains(candidate)) score += 5000;
+            if (/search/i.test(String(candidate.className || ''))) score += 2500;
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        if (!best) return null;
+        best.setAttribute('data-blog-helper-oglink-search', options.marker);
+        return {
+            text: normalize(best.innerText || best.textContent),
+            className: String(best.className || ''),
+            score: bestScore
+        };
+    }"""
+
+    deadline = time.time() + max(3, int(timeout_seconds or 8))
+    targets = [popup_target]
+    targets.extend(
+        target
+        for target in _naver_blog_editor_targets(editor_page)
+        if target is not popup_target
+    )
+    while time.time() < deadline:
+        for target in targets:
+            try:
+                candidate_info = target.evaluate(
+                    find_search_script,
+                    {"marker": marker, "url": post_url},
+                )
+                if not candidate_info:
+                    continue
+                search_button = target.locator(
+                    f'[data-blog-helper-oglink-search="{marker}"]'
+                ).first
+                search_button.click(timeout=2_500)
+                append_runtime_log(
+                    "NBlog",
+                    "이전 발행글 링크 팝업 돋보기 [검색] 버튼 클릭: "
+                    f"url={post_url}, class={candidate_info.get('className')!r}",
+                )
+                return True
+            except Exception:
+                continue
+        editor_page.wait_for_timeout(150)
+    return False
+
+
 def _click_naver_blog_link_confirm(
     editor_page,
     popup_target,
@@ -13425,8 +13526,16 @@ def _insert_one_naver_blog_previous_post_link(
 
     try:
         popup_input.fill(post_url)
-        popup_input.press("Tab")
     except Exception:
+        return False
+
+    if not _click_naver_blog_link_search(
+        editor_page,
+        popup_target,
+        popup_input,
+        post_url,
+        timeout_seconds=8,
+    ):
         return False
 
     return _click_naver_blog_link_confirm(

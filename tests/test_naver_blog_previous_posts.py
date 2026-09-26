@@ -72,13 +72,18 @@ class _DetachedConfirmLocator(_ConfirmLocator):
 class _ConfirmTarget:
     def __init__(self, confirm=None) -> None:
         self.confirm = confirm or _ConfirmLocator()
+        self.search = _ConfirmLocator()
         self.last_options = {}
+        self.option_history = []
 
     def evaluate(self, _script, options):
         self.last_options = dict(options)
+        self.option_history.append(dict(options))
         return {"text": "확인", "className": "se-popup-button-confirm", "score": 10000}
 
-    def locator(self, _selector):
+    def locator(self, selector):
+        if "oglink-search" in selector:
+            return self.search
         return self.confirm
 
 
@@ -298,6 +303,22 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertEqual(target.last_options["url"], requested_url)
         self.assertEqual(target.confirm.clicked, 1)
 
+    def test_exact_requested_url_clicks_search_before_confirm(self):
+        requested_url = "https://blog.naver.com/soullhk/224395703881"
+        target = _ConfirmTarget()
+        searched = main._click_naver_blog_link_search(
+            _EditorPage(),
+            target,
+            _PopupInput(),
+            requested_url,
+            timeout_seconds=3,
+        )
+
+        self.assertTrue(searched)
+        self.assertEqual(target.last_options["url"], requested_url)
+        self.assertEqual(target.search.clicked, 1)
+        self.assertEqual(target.confirm.clicked, 0)
+
     def test_detached_confirm_after_click_counts_inserted_card_as_success(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
         target = _ConfirmTarget(_DetachedConfirmLocator())
@@ -352,6 +373,23 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         ) or ""
         self.assertIn("해당 링크만 건너뛰고 태그 입력을 계속합니다", helper_source)
         self.assertIn("for index, post_url in enumerate(post_urls, start=1)", helper_source)
+
+    def test_single_link_flow_searches_after_fill_and_before_confirm(self):
+        source = MAIN_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_insert_one_naver_blog_previous_post_link"
+        )
+        function_source = ast.get_source_segment(source, function) or ""
+        fill_position = function_source.index("popup_input.fill(post_url)")
+        search_position = function_source.index("_click_naver_blog_link_search(")
+        confirm_position = function_source.index("_click_naver_blog_link_confirm(")
+        self.assertLess(fill_position, search_position)
+        self.assertLess(search_position, confirm_position)
+        self.assertNotIn('popup_input.press("Tab")', function_source)
 
 
 if __name__ == "__main__":
