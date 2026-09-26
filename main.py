@@ -13234,6 +13234,29 @@ def _click_naver_blog_link_search(
     timeout_seconds: int = 8,
 ) -> bool:
     """Click the magnifying-glass search button beside the exact URL field."""
+    def confirm_is_enabled(target) -> bool:
+        """Return True only when the link preview enabled the popup confirm."""
+        try:
+            buttons = target.get_by_role("button", name="확인", exact=True)
+            for index in range(min(buttons.count(), 8)):
+                button = buttons.nth(index)
+                if button.is_visible(timeout=250) and button.is_enabled(timeout=250):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def wait_for_search_result(target, wait_seconds: float = 7.0) -> bool:
+        deadline = time.time() + max(1.0, float(wait_seconds or 7.0))
+        while time.time() < deadline:
+            if confirm_is_enabled(target):
+                return True
+            try:
+                editor_page.wait_for_timeout(150)
+            except Exception:
+                time.sleep(0.15)
+        return False
+
     marker = f"blog-helper-oglink-search-{time.time_ns()}"
     find_search_script = """options => {
         const visible = node => {
@@ -13342,6 +13365,79 @@ def _click_naver_blog_link_search(
         for target in _naver_blog_editor_targets(editor_page)
         if target is not popup_target
     )
+
+    if confirm_is_enabled(popup_target):
+        append_runtime_log(
+            "NBlog",
+            "이전 발행글 링크 검색 완료 상태를 확인했습니다. "
+            f"URL={post_url}",
+        )
+        return True
+
+    # SmartEditor exposes the magnifying glass as an accessibility button
+    # named exactly "검색" even when the rendered icon has no dependable
+    # text/class.  Prefer that real semantic contract first.  The URL field's
+    # sibling/parent candidates keep the click scoped to this link popup when
+    # another search control exists elsewhere in the editor.
+    accessible_candidates = []
+    try:
+        accessible_candidates.append(
+            (
+                "URL 입력란의 바로 오른쪽 형제 버튼",
+                popup_input.locator("xpath=following-sibling::button[1]"),
+            )
+        )
+        accessible_candidates.append(
+            (
+                "URL 입력란 컨테이너의 검색 버튼",
+                popup_input.locator("xpath=..").get_by_role(
+                    "button", name="검색", exact=True
+                ),
+            )
+        )
+    except Exception:
+        pass
+    try:
+        accessible_candidates.append(
+            (
+                "팝업 접근성 검색 버튼",
+                popup_target.get_by_role("button", name="검색", exact=True),
+            )
+        )
+    except Exception:
+        pass
+
+    for source, candidates in accessible_candidates:
+        try:
+            for index in range(min(candidates.count(), 8)):
+                candidate = candidates.nth(index)
+                if (
+                    not candidate.is_visible(timeout=350)
+                    or not candidate.is_enabled(timeout=350)
+                ):
+                    continue
+                candidate.click(timeout=2_500)
+                append_runtime_log(
+                    "NBlog",
+                    "이전 발행글 링크 팝업 돋보기 [검색] 버튼 클릭: "
+                    f"url={post_url}, 방식={source}",
+                )
+                if wait_for_search_result(popup_target):
+                    append_runtime_log(
+                        "NBlog",
+                        "이전 발행글 링크 검색 결과와 활성화된 [확인] 버튼을 검증했습니다. "
+                        f"URL={post_url}",
+                    )
+                    return True
+                append_runtime_log(
+                    "NBlog",
+                    "돋보기 [검색] 버튼은 클릭했지만 링크 미리보기 또는 활성화된 "
+                    f"[확인] 버튼이 나타나지 않았습니다. URL={post_url}",
+                )
+                return False
+        except Exception:
+            continue
+
     while time.time() < deadline:
         for target in targets:
             try:
@@ -13365,9 +13461,17 @@ def _click_naver_blog_link_search(
                 append_runtime_log(
                     "NBlog",
                     "이전 발행글 링크 팝업 돋보기 [검색] 버튼 클릭: "
-                    f"url={post_url}, class={candidate_info.get('className')!r}",
+                    f"url={post_url}, 방식=DOM 위치 탐색, "
+                    f"class={candidate_info.get('className')!r}",
                 )
-                return True
+                if wait_for_search_result(target):
+                    append_runtime_log(
+                        "NBlog",
+                        "이전 발행글 링크 검색 결과와 활성화된 [확인] 버튼을 검증했습니다. "
+                        f"URL={post_url}",
+                    )
+                    return True
+                return False
             except Exception:
                 continue
         editor_page.wait_for_timeout(150)

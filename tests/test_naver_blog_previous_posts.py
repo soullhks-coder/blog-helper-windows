@@ -52,15 +52,31 @@ class _PageStub:
 
 
 class _ConfirmLocator:
-    def __init__(self) -> None:
+    def __init__(self, enabled=True, on_click=None) -> None:
         self.clicked = 0
+        self.enabled = enabled
+        self.on_click = on_click
 
     @property
     def first(self):
         return self
 
+    def count(self) -> int:
+        return 1
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self, timeout=None) -> bool:
+        return True
+
+    def is_enabled(self, timeout=None) -> bool:
+        return self.enabled
+
     def click(self, timeout=None) -> None:
         self.clicked += 1
+        if self.on_click:
+            self.on_click()
 
 
 class _DetachedConfirmLocator(_ConfirmLocator):
@@ -71,10 +87,20 @@ class _DetachedConfirmLocator(_ConfirmLocator):
 
 class _ConfirmTarget:
     def __init__(self, confirm=None) -> None:
-        self.confirm = confirm or _ConfirmLocator()
-        self.search = _ConfirmLocator()
+        self.confirm = confirm or _ConfirmLocator(enabled=False)
+        self.search = _ConfirmLocator(on_click=self._enable_confirm)
         self.last_options = {}
         self.option_history = []
+
+    def _enable_confirm(self) -> None:
+        self.confirm.enabled = True
+
+    def get_by_role(self, role, name=None, exact=None):
+        if role == "button" and name == "검색":
+            return self.search
+        if role == "button" and name == "확인":
+            return self.confirm
+        return _EmptyLocator()
 
     def evaluate(self, _script, options):
         self.last_options = dict(options)
@@ -88,6 +114,10 @@ class _ConfirmTarget:
 
 
 class _AlreadySearchedTarget(_ConfirmTarget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.confirm.enabled = True
+
     def evaluate(self, _script, options):
         self.last_options = dict(options)
         return {
@@ -326,9 +356,10 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         )
 
         self.assertTrue(searched)
-        self.assertEqual(target.last_options["url"], requested_url)
         self.assertEqual(target.search.clicked, 1)
         self.assertEqual(target.confirm.clicked, 0)
+        self.assertEqual(target.option_history, [])
+        self.assertTrue(target.confirm.enabled)
 
     def test_manual_search_completion_is_detected_without_a_second_click(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
@@ -342,9 +373,9 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         )
 
         self.assertTrue(searched)
-        self.assertEqual(target.last_options["url"], requested_url)
         self.assertEqual(target.search.clicked, 0)
         self.assertEqual(target.confirm.clicked, 0)
+        self.assertEqual(target.option_history, [])
 
     def test_detached_confirm_after_click_counts_inserted_card_as_success(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
