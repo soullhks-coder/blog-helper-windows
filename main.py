@@ -13257,17 +13257,55 @@ def _click_naver_blog_link_search(
             '[class*="oglink"][class*="popup"]', '[class*="popup"]'
         ].join(',');
         const inputPopup = input.closest(popupSelector);
-        const candidates = Array.from(document.querySelectorAll(
-            'button, [role="button"], a'
-        )).filter(node => {
+        const labelParts = node => [
+            node.innerText,
+            node.textContent,
+            node.getAttribute('aria-label'),
+            node.getAttribute('title')
+        ].map(normalize).filter(Boolean);
+        const allButtons = Array.from(document.querySelectorAll(
+            'button, [role="button"]'
+        ));
+        const readyConfirm = allButtons.find(node => {
             if (!visible(node) || node.disabled || node.getAttribute('aria-disabled') === 'true') {
                 return false;
             }
-            const label = normalize(
-                node.innerText || node.textContent || node.getAttribute('aria-label') ||
-                node.getAttribute('title')
+            if (!labelParts(node).some(label => label === '확인')) return false;
+            const rect = node.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            return centerX >= inputRect.left - 50 &&
+                centerX <= inputRect.right + 50 &&
+                centerY >= inputRect.bottom &&
+                centerY <= inputRect.bottom + 300;
+        });
+        if (readyConfirm) {
+            return {
+                alreadySearched: true,
+                text: labelParts(readyConfirm).join(' | '),
+                className: String(readyConfirm.className || ''),
+                score: 0
+            };
+        }
+        const candidates = allButtons.filter(node => {
+            if (!visible(node) || node.disabled || node.getAttribute('aria-disabled') === 'true') {
+                return false;
+            }
+            const rect = node.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            const labels = labelParts(node);
+            const isConfirm = labels.some(label => label === '확인');
+            const isClose = labels.some(label => label === '닫기' || label === '팝업 닫기');
+            const hasSearchLabel = labels.some(
+                label => label === '검색' || label === '링크 검색'
             );
-            return label === '검색' || label === '링크 검색';
+            const isRightEdgeButton =
+                centerX >= inputRect.left + inputRect.width * 0.72 &&
+                centerX <= inputRect.right + Math.max(80, inputRect.height * 2) &&
+                centerY >= inputRect.top - 12 &&
+                centerY <= inputRect.bottom + 12;
+            return !isConfirm && !isClose && (hasSearchLabel || isRightEdgeButton);
         });
         let best = null;
         let bestScore = -Infinity;
@@ -13277,9 +13315,11 @@ def _click_naver_blog_link_search(
             const dy = (rect.top + rect.height / 2) - (inputRect.top + inputRect.height / 2);
             const distance = Math.sqrt(dx * dx + dy * dy);
             const candidatePopup = candidate.closest(popupSelector);
+            const labels = labelParts(candidate);
             let score = -distance;
             if (inputPopup && candidatePopup === inputPopup) score += 10000;
             if (inputPopup && inputPopup.contains(candidate)) score += 5000;
+            if (labels.some(label => label === '검색' || label === '링크 검색')) score += 5000;
             if (/search/i.test(String(candidate.className || ''))) score += 2500;
             if (score > bestScore) {
                 best = candidate;
@@ -13289,7 +13329,7 @@ def _click_naver_blog_link_search(
         if (!best) return null;
         best.setAttribute('data-blog-helper-oglink-search', options.marker);
         return {
-            text: normalize(best.innerText || best.textContent),
+            text: labelParts(best).join(' | '),
             className: String(best.className || ''),
             score: bestScore
         };
@@ -13311,6 +13351,13 @@ def _click_naver_blog_link_search(
                 )
                 if not candidate_info:
                     continue
+                if candidate_info.get("alreadySearched"):
+                    append_runtime_log(
+                        "NBlog",
+                        "이전 발행글 링크 검색 완료 상태를 확인했습니다. "
+                        f"URL={post_url}",
+                    )
+                    return True
                 search_button = target.locator(
                     f'[data-blog-helper-oglink-search="{marker}"]'
                 ).first
@@ -13324,6 +13371,11 @@ def _click_naver_blog_link_search(
             except Exception:
                 continue
         editor_page.wait_for_timeout(150)
+    append_runtime_log(
+        "NBlog",
+        "이전 발행글 링크 팝업의 오른쪽 돋보기 [검색] 버튼을 찾지 못했습니다. "
+        f"URL={post_url}",
+    )
     return False
 
 

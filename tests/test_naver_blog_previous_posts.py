@@ -87,6 +87,17 @@ class _ConfirmTarget:
         return self.confirm
 
 
+class _AlreadySearchedTarget(_ConfirmTarget):
+    def evaluate(self, _script, options):
+        self.last_options = dict(options)
+        return {
+            "alreadySearched": True,
+            "text": "확인",
+            "className": "se-popup-button-confirm",
+            "score": 0,
+        }
+
+
 class _PopupInput:
     def is_visible(self, timeout=None) -> bool:
         return True
@@ -319,6 +330,22 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertEqual(target.search.clicked, 1)
         self.assertEqual(target.confirm.clicked, 0)
 
+    def test_manual_search_completion_is_detected_without_a_second_click(self):
+        requested_url = "https://blog.naver.com/soullhk/224395703881"
+        target = _AlreadySearchedTarget()
+        searched = main._click_naver_blog_link_search(
+            _EditorPage(),
+            target,
+            _PopupInput(),
+            requested_url,
+            timeout_seconds=3,
+        )
+
+        self.assertTrue(searched)
+        self.assertEqual(target.last_options["url"], requested_url)
+        self.assertEqual(target.search.clicked, 0)
+        self.assertEqual(target.confirm.clicked, 0)
+
     def test_detached_confirm_after_click_counts_inserted_card_as_success(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
         target = _ConfirmTarget(_DetachedConfirmLocator())
@@ -390,6 +417,21 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertLess(fill_position, search_position)
         self.assertLess(search_position, confirm_position)
         self.assertNotIn('popup_input.press("Tab")', function_source)
+
+    def test_search_helper_supports_icon_only_right_edge_button(self):
+        source = MAIN_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_click_naver_blog_link_search"
+        )
+        function_source = ast.get_source_segment(source, function) or ""
+        self.assertIn("node.textContent", function_source)
+        self.assertIn("isRightEdgeButton", function_source)
+        self.assertIn("!isConfirm && !isClose", function_source)
+        self.assertIn("inputRect.width * 0.72", function_source)
 
 
 if __name__ == "__main__":
