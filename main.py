@@ -13214,6 +13214,146 @@ def _naver_blog_editor_targets(editor_page) -> list:
     return targets
 
 
+def _naver_blog_oglink_component_count(editor_page) -> int:
+    total = 0
+    for target in _naver_blog_editor_targets(editor_page):
+        try:
+            total += target.locator(
+                ".se-component.se-oglink, .se-component[class*='oglink']"
+            ).count()
+        except Exception:
+            continue
+    return total
+
+
+def _click_naver_blog_link_confirm(
+    editor_page,
+    popup_target,
+    popup_input,
+    post_url: str,
+    previous_component_count: int,
+    timeout_seconds: int = 25,
+) -> bool:
+    """Click the exact confirm button nearest the visible SmartEditor URL field."""
+    marker = f"blog-helper-oglink-confirm-{time.time_ns()}"
+    find_confirm_script = """options => {
+        const visible = node => {
+            if (!node || !node.isConnected) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                rect.width > 2 && rect.height > 2;
+        };
+        const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim();
+        const inputs = Array.from(document.querySelectorAll(
+            'input[placeholder="URL을 입력하세요."], input.se-popup-oglink-input, ' +
+            'input[type="url"][placeholder*="URL"]'
+        )).filter(visible);
+        const input = inputs.find(node => normalize(node.value) === options.url) ||
+            inputs[inputs.length - 1];
+        if (!input) return null;
+        const inputRect = input.getBoundingClientRect();
+        const popupSelector = [
+            '.se-popup', '.se-layer', '[role="dialog"]',
+            '[class*="oglink"][class*="popup"]', '[class*="popup"]'
+        ].join(',');
+        const inputPopup = input.closest(popupSelector);
+        const candidates = Array.from(document.querySelectorAll(
+            'button, [role="button"], a'
+        )).filter(node => {
+            if (!visible(node) || node.disabled || node.getAttribute('aria-disabled') === 'true') {
+                return false;
+            }
+            const label = normalize(
+                node.innerText || node.textContent || node.getAttribute('aria-label') ||
+                node.getAttribute('title')
+            );
+            return label === '확인';
+        });
+        let best = null;
+        let bestScore = -Infinity;
+        for (const candidate of candidates) {
+            const rect = candidate.getBoundingClientRect();
+            const dx = (rect.left + rect.width / 2) - (inputRect.left + inputRect.width / 2);
+            const dy = (rect.top + rect.height / 2) - (inputRect.top + inputRect.height / 2);
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            const candidatePopup = candidate.closest(popupSelector);
+            let score = -distance;
+            if (inputPopup && candidatePopup === inputPopup) score += 10000;
+            if (inputPopup && inputPopup.contains(candidate)) score += 5000;
+            if (/se-popup-button-confirm/.test(String(candidate.className || ''))) score += 2500;
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        if (!best) return null;
+        best.setAttribute('data-blog-helper-oglink-confirm', options.marker);
+        return {
+            text: normalize(best.innerText || best.textContent),
+            className: String(best.className || ''),
+            score: bestScore
+        };
+    }"""
+
+    deadline = time.time() + max(5, int(timeout_seconds or 25))
+    targets = [popup_target]
+    targets.extend(
+        target
+        for target in _naver_blog_editor_targets(editor_page)
+        if target is not popup_target
+    )
+    while time.time() < deadline:
+        for target in targets:
+            try:
+                candidate_info = target.evaluate(
+                    find_confirm_script,
+                    {"marker": marker, "url": post_url},
+                )
+                if not candidate_info:
+                    continue
+                confirm = target.locator(
+                    f'[data-blog-helper-oglink-confirm="{marker}"]'
+                ).first
+                confirm.click(timeout=2_500)
+                append_runtime_log(
+                    "NBlog",
+                    "이전 발행글 링크 팝업 [확인] 버튼 클릭: "
+                    f"url={post_url}, class={candidate_info.get('className')!r}",
+                )
+                verify_deadline = time.time() + 4
+                while time.time() < verify_deadline:
+                    editor_page.wait_for_timeout(150)
+                    if _naver_blog_oglink_component_count(editor_page) > previous_component_count:
+                        return True
+                    try:
+                        if not popup_input.is_visible(timeout=250):
+                            return True
+                    except Exception:
+                        return True
+                # The button remained on screen. Re-resolve and retry while
+                # the URL popup is still visible instead of moving to tags.
+            except Exception:
+                # SmartEditor replaces the popup node immediately after a
+                # successful click. Playwright can therefore report a
+                # detached-element error even though the link card was
+                # already inserted. Treat the resulting card/popup closure as
+                # success instead of reopening the dialog and failing later.
+                try:
+                    if _naver_blog_oglink_component_count(editor_page) > previous_component_count:
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if not popup_input.is_visible(timeout=250):
+                        return True
+                except Exception:
+                    return True
+                continue
+        editor_page.wait_for_timeout(180)
+    return False
+
+
 def _insert_one_naver_blog_previous_post_link(
     editor_page,
     post_url: str,
@@ -13232,13 +13372,7 @@ def _insert_one_naver_blog_previous_post_link(
         "input.se-popup-oglink-input",
         "input[type='url'][placeholder*='URL']",
     )
-    confirm_selectors = (
-        "button.se-popup-button-confirm",
-        ".se-popup-oglink button:has-text('확인')",
-        "[class*='oglink'][class*='popup'] button:has-text('확인')",
-        "button:has-text('확인')",
-    )
-
+    previous_component_count = _naver_blog_oglink_component_count(editor_page)
     _focus_naver_blog_editor_end(editor_page)
     targets = _naver_blog_editor_targets(editor_page)
     toolbar_clicked = False
@@ -13295,44 +13429,14 @@ def _insert_one_naver_blog_previous_post_link(
     except Exception:
         return False
 
-    # Mark the popup containing the exact URL field. This prevents a broad
-    # "확인" fallback from clicking an unrelated editor dialog.
-    popup_marker = f"blog-helper-oglink-popup-{time.time_ns()}"
-    try:
-        popup_input.evaluate(
-            """(node, marker) => {
-                const popup = node.closest(
-                    '.se-popup, .se-layer, [role="dialog"], ' +
-                    '[class*="oglink"][class*="popup"], [class*="popup"]'
-                ) || node.parentElement;
-                if (popup) popup.setAttribute('data-blog-helper-oglink-popup', marker);
-            }""",
-            popup_marker,
-        )
-    except Exception:
-        pass
-
-    popup_scope = popup_target.locator(
-        f'[data-blog-helper-oglink-popup="{popup_marker}"]'
+    return _click_naver_blog_link_confirm(
+        editor_page,
+        popup_target,
+        popup_input,
+        post_url,
+        previous_component_count,
+        timeout_seconds=25,
     )
-    for selector in confirm_selectors:
-        try:
-            candidates = (
-                popup_scope.locator(selector)
-                if popup_scope.count() > 0
-                else popup_target.locator(selector)
-            )
-            for index in range(min(candidates.count(), 8)):
-                confirm = candidates.nth(index)
-                if not confirm.is_visible(timeout=500):
-                    continue
-                # SmartEditor disables this button while it fetches the OG card.
-                confirm.click(timeout=20_000)
-                editor_page.wait_for_timeout(1_400)
-                return True
-        except Exception:
-            continue
-    return False
 
 
 def insert_naver_blog_previous_post_links(
@@ -13384,6 +13488,14 @@ def insert_naver_blog_previous_post_links(
         )
         result_queue.put(("naver_blog_progress", warning))
         append_runtime_log("NBlog", f"{warning} URL={post_url}")
+        try:
+            # Never leave the link popup over the editor. An open popup blocks
+            # the following publish-panel/tag step and turns one skipped link
+            # into a full automation failure.
+            editor_page.keyboard.press("Escape")
+            editor_page.wait_for_timeout(350)
+        except Exception:
+            pass
     return inserted_count
 
 

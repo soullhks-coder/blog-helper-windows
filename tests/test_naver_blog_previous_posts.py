@@ -51,6 +51,47 @@ class _PageStub:
         return _EmptyLocator()
 
 
+class _ConfirmLocator:
+    def __init__(self) -> None:
+        self.clicked = 0
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, timeout=None) -> None:
+        self.clicked += 1
+
+
+class _DetachedConfirmLocator(_ConfirmLocator):
+    def click(self, timeout=None) -> None:
+        self.clicked += 1
+        raise RuntimeError("Node is detached from document")
+
+
+class _ConfirmTarget:
+    def __init__(self, confirm=None) -> None:
+        self.confirm = confirm or _ConfirmLocator()
+        self.last_options = {}
+
+    def evaluate(self, _script, options):
+        self.last_options = dict(options)
+        return {"text": "확인", "className": "se-popup-button-confirm", "score": 10000}
+
+    def locator(self, _selector):
+        return self.confirm
+
+
+class _PopupInput:
+    def is_visible(self, timeout=None) -> bool:
+        return True
+
+
+class _EditorPage:
+    def wait_for_timeout(self, _milliseconds) -> None:
+        return None
+
+
 class NaverBlogPreviousPostTests(unittest.TestCase):
     def _app_stub(self, profiles, active="블로그 1"):
         profile_vars = {}
@@ -231,6 +272,55 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         while not events.empty():
             event_messages.append(events.get_nowait()[1])
         self.assertTrue(any("해당 링크만 건너뛰고" in item for item in event_messages))
+
+    def test_exact_requested_url_clicks_the_link_popup_confirm_button(self):
+        requested_url = "https://blog.naver.com/soullhk/224395703881"
+        target = _ConfirmTarget()
+        with patch.object(
+            main,
+            "_naver_blog_editor_targets",
+            return_value=[target],
+        ), patch.object(
+            main,
+            "_naver_blog_oglink_component_count",
+            return_value=1,
+        ):
+            clicked = main._click_naver_blog_link_confirm(
+                _EditorPage(),
+                target,
+                _PopupInput(),
+                requested_url,
+                previous_component_count=0,
+                timeout_seconds=5,
+            )
+
+        self.assertTrue(clicked)
+        self.assertEqual(target.last_options["url"], requested_url)
+        self.assertEqual(target.confirm.clicked, 1)
+
+    def test_detached_confirm_after_click_counts_inserted_card_as_success(self):
+        requested_url = "https://blog.naver.com/soullhk/224395703881"
+        target = _ConfirmTarget(_DetachedConfirmLocator())
+        with patch.object(
+            main,
+            "_naver_blog_editor_targets",
+            return_value=[target],
+        ), patch.object(
+            main,
+            "_naver_blog_oglink_component_count",
+            return_value=1,
+        ):
+            clicked = main._click_naver_blog_link_confirm(
+                _EditorPage(),
+                target,
+                _PopupInput(),
+                requested_url,
+                previous_component_count=0,
+                timeout_seconds=5,
+            )
+
+        self.assertTrue(clicked)
+        self.assertEqual(target.confirm.clicked, 1)
 
     def test_body_links_run_after_body_and_before_tags(self):
         source = MAIN_PATH.read_text(encoding="utf-8")
