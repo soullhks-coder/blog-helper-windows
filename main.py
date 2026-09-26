@@ -10108,6 +10108,86 @@ def normalize_naver_blog_recent_post_urls(
     return normalized
 
 
+def parse_naver_blog_recent_post_urls_from_rss(
+    rss_xml: object,
+    blog_id: object = "",
+    limit: int = 2,
+) -> list[str]:
+    """Read public Naver RSS items in their authoritative newest-first order."""
+    try:
+        root = ET.fromstring(str(rss_xml or ""))
+    except (ET.ParseError, TypeError, ValueError):
+        return []
+
+    expected_blog_id = normalize_naver_blog_id(str(blog_id or ""))
+    result: list[str] = []
+    seen: set[str] = set()
+    item_limit = max(0, int(limit or 0))
+    if item_limit <= 0:
+        return result
+
+    for item in root.findall(".//item"):
+        candidates: list[str] = []
+        for preferred_name in ("guid", "link"):
+            for child in list(item):
+                local_name = str(child.tag or "").rsplit("}", 1)[-1].casefold()
+                if local_name == preferred_name:
+                    candidates.append(str(child.text or "").strip())
+        post_url = next(
+            (
+                normalized
+                for candidate in candidates
+                if (
+                    normalized := normalize_naver_blog_post_url(
+                        candidate,
+                        blog_id=expected_blog_id,
+                    )
+                )
+            ),
+            "",
+        )
+        key = post_url.casefold()
+        if not post_url or key in seen:
+            continue
+        seen.add(key)
+        result.append(post_url)
+        if len(result) >= item_limit:
+            break
+    return result
+
+
+def fetch_naver_blog_recent_post_urls_from_rss(
+    blog_id: object,
+    limit: int = 2,
+    timeout_seconds: float = 10.0,
+) -> list[str]:
+    """Fetch the actual latest published posts without relying on cached app state."""
+    normalized_blog_id = normalize_naver_blog_id(str(blog_id or ""))
+    if not normalized_blog_id:
+        return []
+    rss_url = f"https://rss.blog.naver.com/{quote(normalized_blog_id, safe='')}.xml"
+    request = Request(
+        rss_url,
+        headers={
+            "User-Agent": f"BlogHelper/{APP_VERSION}",
+            "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+            "Cache-Control": "no-cache",
+        },
+    )
+    context = ssl.create_default_context(cafile=certifi.where())
+    with urlopen(
+        request,
+        timeout=max(1.0, float(timeout_seconds or 10.0)),
+        context=context,
+    ) as response:
+        rss_xml = response.read().decode("utf-8", errors="replace")
+    return parse_naver_blog_recent_post_urls_from_rss(
+        rss_xml,
+        blog_id=normalized_blog_id,
+        limit=limit,
+    )
+
+
 def normalize_naver_blog_profiles(profiles: object) -> list[dict]:
     raw_profiles = profiles if isinstance(profiles, list) else []
     normalized_profiles: list[dict] = []
@@ -13233,7 +13313,7 @@ def _click_naver_blog_link_search(
     post_url: str,
     timeout_seconds: int = 8,
 ) -> bool:
-    """Click the magnifying-glass search button beside the exact URL field."""
+    """Reset stale preview state, then search the exact URL with the magnifier."""
     def confirm_is_enabled(target) -> bool:
         """Return True only when the link preview enabled the popup confirm."""
         try:
@@ -13289,27 +13369,6 @@ def _click_naver_blog_link_search(
         const allButtons = Array.from(document.querySelectorAll(
             'button, [role="button"]'
         ));
-        const readyConfirm = allButtons.find(node => {
-            if (!visible(node) || node.disabled || node.getAttribute('aria-disabled') === 'true') {
-                return false;
-            }
-            if (!labelParts(node).some(label => label === '확인')) return false;
-            const rect = node.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-            const centerY = rect.top + rect.height / 2;
-            return centerX >= inputRect.left - 50 &&
-                centerX <= inputRect.right + 50 &&
-                centerY >= inputRect.bottom &&
-                centerY <= inputRect.bottom + 300;
-        });
-        if (readyConfirm) {
-            return {
-                alreadySearched: true,
-                text: labelParts(readyConfirm).join(' | '),
-                className: String(readyConfirm.className || ''),
-                score: 0
-            };
-        }
         const candidates = allButtons.filter(node => {
             if (!visible(node) || node.disabled || node.getAttribute('aria-disabled') === 'true') {
                 return false;
@@ -13366,13 +13425,56 @@ def _click_naver_blog_link_search(
         if target is not popup_target
     )
 
+    # SmartEditor can leave the previous link card preview and an enabled
+    # Confirm button behind. Never accept that stale state for a new URL.
     if confirm_is_enabled(popup_target):
+        try:
+            popup_input.fill("")
+        except Exception as exc:
+            append_runtime_log(
+                "NBlog",
+                "이전 링크 미리보기를 초기화하지 못해 잘못된 링크 삽입을 차단했습니다. "
+                f"URL={post_url}, error={exc}",
+            )
+            return False
+        reset_deadline = time.time() + 2.0
+        while time.time() < reset_deadline and confirm_is_enabled(popup_target):
+            try:
+                editor_page.wait_for_timeout(100)
+            except Exception:
+                time.sleep(0.1)
+        if confirm_is_enabled(popup_target):
+            append_runtime_log(
+                "NBlog",
+                "기존 링크 미리보기의 [확인] 버튼이 비활성화되지 않아 "
+                f"해당 링크 삽입을 건너뜁니다. URL={post_url}",
+            )
+            return False
         append_runtime_log(
             "NBlog",
-            "이전 발행글 링크 검색 완료 상태를 확인했습니다. "
-            f"URL={post_url}",
+            "기존 링크 미리보기 상태를 해제했습니다. "
+            f"새로 검색할 URL={post_url}",
         )
-        return True
+
+    try:
+        popup_input.fill(post_url)
+        try:
+            actual_value = str(popup_input.input_value(timeout=500) or "").strip()
+        except Exception:
+            actual_value = post_url
+        if actual_value != post_url:
+            append_runtime_log(
+                "NBlog",
+                "링크 입력란의 실제 값이 요청 URL과 달라 검색을 중단했습니다. "
+                f"요청={post_url}, 실제={actual_value}",
+            )
+            return False
+    except Exception as exc:
+        append_runtime_log(
+            "NBlog",
+            f"이전 발행글 URL 입력 실패: URL={post_url}, error={exc}",
+        )
+        return False
 
     # SmartEditor exposes the magnifying glass as an accessibility button
     # named exactly "검색" even when the rendered icon has no dependable
@@ -13447,13 +13549,6 @@ def _click_naver_blog_link_search(
                 )
                 if not candidate_info:
                     continue
-                if candidate_info.get("alreadySearched"):
-                    append_runtime_log(
-                        "NBlog",
-                        "이전 발행글 링크 검색 완료 상태를 확인했습니다. "
-                        f"URL={post_url}",
-                    )
-                    return True
                 search_button = target.locator(
                     f'[data-blog-helper-oglink-search="{marker}"]'
                 ).first
@@ -13788,18 +13883,6 @@ def detect_naver_blog_published_url(
             candidates.append(str(page.url or ""))
         except Exception:
             pass
-        for selector, attribute in (
-            ("meta[property='og:url']", "content"),
-            ("link[rel='canonical']", "href"),
-        ):
-            try:
-                locator = page.locator(selector).first
-                if locator.count() > 0:
-                    candidates.append(
-                        str(locator.get_attribute(attribute, timeout=350) or "")
-                    )
-            except Exception:
-                continue
 
     for candidate in candidates:
         post_url = normalize_naver_blog_post_url(candidate, blog_id=blog_id)
@@ -14782,6 +14865,27 @@ def run_naver_blog_playwright_bootstrap(
                     nickname = extract_naver_blog_nickname(page)
                 except Exception:
                     nickname = ""
+                try:
+                    rss_previous_post_urls = fetch_naver_blog_recent_post_urls_from_rss(
+                        blog_id,
+                        limit=2,
+                    )
+                    if rss_previous_post_urls:
+                        previous_post_urls = rss_previous_post_urls
+                        report(
+                            "N블로그 RSS에서 실제 최근 발행글을 최신순으로 확인했습니다: "
+                            + ", ".join(previous_post_urls)
+                        )
+                    else:
+                        report(
+                            "N블로그 RSS에 공개된 최근 글이 없어 저장된 이전 글 목록을 사용합니다."
+                        )
+                except Exception as exc:
+                    append_runtime_log(
+                        "NBlog",
+                        "N블로그 RSS 최신 글 확인 실패. 저장된 프로필 목록으로 계속합니다. "
+                        f"blog_id={blog_id}, error={exc}",
+                    )
 
             report("네이버 블로그 글쓰기 화면으로 이동하는 중...")
             _raise_if_naver_blog_cancelled(cancel_event)
@@ -14897,6 +15001,7 @@ def run_naver_blog_playwright_bootstrap(
                 if candidate is not editor_page
             }
             published_url = ""
+            last_rss_publish_check = 0.0
             while True:
                 _raise_if_naver_blog_cancelled(cancel_event)
                 monitored_pages = [editor_page]
@@ -14911,6 +15016,31 @@ def run_naver_blog_playwright_bootstrap(
                     blog_id=blog_id,
                     excluded_urls=previous_post_urls,
                 )
+                if (
+                    not detected_url
+                    and blog_id
+                    and time.time() - last_rss_publish_check >= 4.0
+                ):
+                    last_rss_publish_check = time.time()
+                    try:
+                        rss_candidates = fetch_naver_blog_recent_post_urls_from_rss(
+                            blog_id,
+                            limit=3,
+                            timeout_seconds=5,
+                        )
+                        excluded_keys = {
+                            url.casefold() for url in previous_post_urls
+                        }
+                        detected_url = next(
+                            (
+                                url
+                                for url in rss_candidates
+                                if url.casefold() not in excluded_keys
+                            ),
+                            "",
+                        )
+                    except Exception:
+                        detected_url = ""
                 if detected_url and detected_url != published_url:
                     published_url = detected_url
                     payload["published_url"] = published_url
@@ -34277,6 +34407,7 @@ class KeywordApp(ctk.CTk):
         nickname = ""
         blog_id = ""
         published_url = ""
+        payload_previous_post_urls: list[str] = []
         payload_profile_scope = ""
         if isinstance(payload, dict):
             message = str(payload.get("message") or "네이버 블로그 로그인 상태를 저장했습니다.")
@@ -34285,6 +34416,10 @@ class KeywordApp(ctk.CTk):
             blog_id = self._normalize_naver_blog_id(str(payload.get("blog_id") or ""))
             published_url = normalize_naver_blog_post_url(
                 payload.get("published_url"),
+                blog_id=blog_id,
+            )
+            payload_previous_post_urls = normalize_naver_blog_recent_post_urls(
+                payload.get("previous_post_urls"),
                 blog_id=blog_id,
             )
             requested_scope = str(payload.get("profile_scope") or "").strip().lower()
@@ -34331,16 +34466,25 @@ class KeywordApp(ctk.CTk):
                 published_url,
                 blog_id=target_profile.get("blog_id") or blog_id,
             )
+            payload_previous_post_urls = normalize_naver_blog_recent_post_urls(
+                payload_previous_post_urls,
+                blog_id=target_profile.get("blog_id") or blog_id,
+            )
             if published_url:
                 target_profile["recent_post_urls"] = (
                     normalize_naver_blog_recent_post_urls(
                         [
                             published_url,
-                            *list(target_profile.get("recent_post_urls") or []),
+                            *(
+                                payload_previous_post_urls
+                                or list(target_profile.get("recent_post_urls") or [])
+                            ),
                         ],
                         blog_id=target_profile.get("blog_id") or blog_id,
                     )
                 )
+            elif payload_previous_post_urls:
+                target_profile["recent_post_urls"] = payload_previous_post_urls
             blog_id_var = getattr(self, "naver_blog_profile_vars", {}).get(
                 f"{target_index}:blog_id"
             )

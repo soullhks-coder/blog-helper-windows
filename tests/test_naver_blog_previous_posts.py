@@ -113,24 +113,26 @@ class _ConfirmTarget:
         return self.confirm
 
 
-class _AlreadySearchedTarget(_ConfirmTarget):
-    def __init__(self) -> None:
-        super().__init__()
-        self.confirm.enabled = True
-
-    def evaluate(self, _script, options):
-        self.last_options = dict(options)
-        return {
-            "alreadySearched": True,
-            "text": "확인",
-            "className": "se-popup-button-confirm",
-            "score": 0,
-        }
-
-
 class _PopupInput:
+    def __init__(self, target=None, value="") -> None:
+        self.target = target
+        self.value = value
+        self.fill_history = []
+
     def is_visible(self, timeout=None) -> bool:
         return True
+
+    def fill(self, value) -> None:
+        self.value = str(value)
+        self.fill_history.append(self.value)
+        if not self.value and self.target is not None:
+            self.target.confirm.enabled = False
+
+    def input_value(self, timeout=None) -> str:
+        return self.value
+
+    def locator(self, _selector):
+        return _EmptyLocator()
 
 
 class _EditorPage:
@@ -228,6 +230,62 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertEqual(
             profiles[1]["recent_post_urls"],
             ["https://blog.naver.com/second/900"],
+        )
+
+    def test_rss_parser_returns_actual_latest_two_in_feed_order(self):
+        rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss><channel>
+          <item><link>https://blog.naver.com/first/900?fromRss=true</link>
+                <guid>https://blog.naver.com/first/900</guid></item>
+          <item><link>https://blog.naver.com/first/800?fromRss=true</link></item>
+          <item><guid>https://blog.naver.com/first/700</guid></item>
+        </channel></rss>"""
+
+        self.assertEqual(
+            main.parse_naver_blog_recent_post_urls_from_rss(
+                rss_xml,
+                blog_id="first",
+                limit=2,
+            ),
+            [
+                "https://blog.naver.com/first/900",
+                "https://blog.naver.com/first/800",
+            ],
+        )
+
+    def test_editor_ready_payload_replaces_stale_profile_history_with_rss_urls(self):
+        profiles = main.normalize_naver_blog_profiles(
+            [
+                {
+                    "name": "블로그 1",
+                    "blog_id": "first",
+                    "recent_post_urls": ["https://blog.naver.com/first/100"],
+                }
+            ]
+        )
+        app = self._app_stub(profiles, active="블로그 1")
+
+        with patch.object(main.AppStateStore, "save"):
+            main.KeywordApp._apply_naver_blog_bootstrap_result(
+                app,
+                {
+                    "message": "에디터 준비 완료.",
+                    "profile_scope": main.NAVER_PLAYWRIGHT_PROFILE_BLOG,
+                    "blog_id": "first",
+                    "write_url": "https://blog.naver.com/first?Redirect=Write&",
+                    "previous_post_urls": [
+                        "https://blog.naver.com/first/900",
+                        "https://blog.naver.com/first/800",
+                    ],
+                },
+            )
+
+        self.assertEqual(
+            app.wordpress_settings.naver_blog_profiles[0]["recent_post_urls"],
+            [
+                "https://blog.naver.com/first/900",
+                "https://blog.naver.com/first/800",
+            ],
         )
 
     def test_new_published_url_updates_only_matching_profile_scope(self):
@@ -347,10 +405,11 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
     def test_exact_requested_url_clicks_search_before_confirm(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
         target = _ConfirmTarget()
+        popup_input = _PopupInput(target)
         searched = main._click_naver_blog_link_search(
             _EditorPage(),
             target,
-            _PopupInput(),
+            popup_input,
             requested_url,
             timeout_seconds=3,
         )
@@ -360,22 +419,30 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertEqual(target.confirm.clicked, 0)
         self.assertEqual(target.option_history, [])
         self.assertTrue(target.confirm.enabled)
+        self.assertEqual(popup_input.value, requested_url)
 
-    def test_manual_search_completion_is_detected_without_a_second_click(self):
+    def test_stale_confirm_is_reset_and_requested_url_is_searched_again(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
-        target = _AlreadySearchedTarget()
+        target = _ConfirmTarget()
+        target.confirm.enabled = True
+        popup_input = _PopupInput(
+            target,
+            value="https://blog.naver.com/soullhk/224423519503",
+        )
         searched = main._click_naver_blog_link_search(
             _EditorPage(),
             target,
-            _PopupInput(),
+            popup_input,
             requested_url,
             timeout_seconds=3,
         )
 
         self.assertTrue(searched)
-        self.assertEqual(target.search.clicked, 0)
+        self.assertEqual(target.search.clicked, 1)
         self.assertEqual(target.confirm.clicked, 0)
         self.assertEqual(target.option_history, [])
+        self.assertEqual(popup_input.fill_history, ["", requested_url])
+        self.assertEqual(popup_input.value, requested_url)
 
     def test_detached_confirm_after_click_counts_inserted_card_as_success(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
