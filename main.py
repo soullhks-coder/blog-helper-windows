@@ -13306,6 +13306,77 @@ def _naver_blog_oglink_component_count(editor_page) -> int:
     return total
 
 
+def _naver_blog_link_popup_is_visible(editor_page) -> bool:
+    selectors = (
+        "input[placeholder='URL을 입력하세요.']",
+        "input.se-popup-oglink-input",
+        "input[type='url'][placeholder*='URL']",
+    )
+    for target in _naver_blog_editor_targets(editor_page):
+        for selector in selectors:
+            try:
+                inputs = target.locator(selector)
+                for index in range(min(inputs.count(), 6)):
+                    if inputs.nth(index).is_visible(timeout=200):
+                        return True
+            except Exception:
+                continue
+    return False
+
+
+def _dismiss_naver_blog_link_popup(
+    editor_page,
+    timeout_seconds: float = 3.0,
+) -> bool:
+    """Close any previous OG-link popup before another URL is inserted."""
+    if not _naver_blog_link_popup_is_visible(editor_page):
+        return True
+
+    # Give SmartEditor a brief chance to finish its own close animation after
+    # Confirm. If it remains, Escape closes the stale preview without touching
+    # the link card that was already inserted into the document.
+    grace_deadline = time.time() + min(0.8, max(0.2, timeout_seconds / 3))
+    while time.time() < grace_deadline:
+        if not _naver_blog_link_popup_is_visible(editor_page):
+            return True
+        try:
+            editor_page.wait_for_timeout(100)
+        except Exception:
+            time.sleep(0.1)
+
+    try:
+        editor_page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+    if _naver_blog_link_popup_is_visible(editor_page):
+        for target in _naver_blog_editor_targets(editor_page):
+            try:
+                close_buttons = target.locator(
+                    ".se-popup button[aria-label='닫기'], "
+                    ".se-popup [role='button'][aria-label='닫기'], "
+                    "button.se-popup-close-button"
+                )
+                for index in range(min(close_buttons.count(), 6)):
+                    button = close_buttons.nth(index)
+                    if not button.is_visible(timeout=200):
+                        continue
+                    button.click(timeout=1_500)
+                    break
+            except Exception:
+                continue
+
+    deadline = time.time() + max(0.5, float(timeout_seconds or 3.0))
+    while time.time() < deadline:
+        if not _naver_blog_link_popup_is_visible(editor_page):
+            return True
+        try:
+            editor_page.wait_for_timeout(100)
+        except Exception:
+            time.sleep(0.1)
+    return not _naver_blog_link_popup_is_visible(editor_page)
+
+
 def _click_naver_blog_link_search(
     editor_page,
     popup_target,
@@ -13724,6 +13795,14 @@ def _insert_one_naver_blog_previous_post_link(
         "input.se-popup-oglink-input",
         "input[type='url'][placeholder*='URL']",
     )
+    if not _dismiss_naver_blog_link_popup(editor_page, timeout_seconds=2.0):
+        append_runtime_log(
+            "NBlog",
+            "이전 링크 팝업을 완전히 닫지 못해 다음 URL의 잘못된 재사용을 차단했습니다. "
+            f"URL={post_url}",
+        )
+        return False
+
     previous_component_count = _naver_blog_oglink_component_count(editor_page)
     _focus_naver_blog_editor_end(editor_page)
     targets = _naver_blog_editor_targets(editor_page)
@@ -13789,7 +13868,7 @@ def _insert_one_naver_blog_previous_post_link(
     ):
         return False
 
-    return _click_naver_blog_link_confirm(
+    confirmed = _click_naver_blog_link_confirm(
         editor_page,
         popup_target,
         popup_input,
@@ -13797,6 +13876,17 @@ def _insert_one_naver_blog_previous_post_link(
         previous_component_count,
         timeout_seconds=25,
     )
+    if confirmed:
+        popup_closed = _dismiss_naver_blog_link_popup(
+            editor_page,
+            timeout_seconds=3.0,
+        )
+        append_runtime_log(
+            "NBlog",
+            "이전 발행글 링크 삽입 후 팝업 정리 "
+            f"{'완료' if popup_closed else '지연'}: URL={post_url}",
+        )
+    return confirmed
 
 
 def insert_naver_blog_previous_post_links(

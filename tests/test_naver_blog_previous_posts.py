@@ -140,6 +140,151 @@ class _EditorPage:
         return None
 
 
+class _PopupVisibilityLocator:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    def count(self) -> int:
+        return 1
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self, timeout=None) -> bool:
+        return self.page.popup_visible
+
+
+class _DismissPopupKeyboard:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.pressed = []
+
+    def press(self, key) -> None:
+        self.pressed.append(key)
+        if key == "Escape":
+            self.page.popup_visible = False
+
+
+class _DismissPopupPage:
+    def __init__(self) -> None:
+        self.popup_visible = True
+        self.keyboard = _DismissPopupKeyboard(self)
+
+    def locator(self, _selector):
+        return _PopupVisibilityLocator(self)
+
+    def wait_for_timeout(self, _milliseconds) -> None:
+        return None
+
+
+class _SequentialLocator:
+    def __init__(self, page, kind) -> None:
+        self.page = page
+        self.kind = kind
+
+    @property
+    def first(self):
+        return self
+
+    def count(self) -> int:
+        if self.kind == "component":
+            return self.page.component_count
+        if self.kind == "input":
+            return int(self.page.popup_visible)
+        return 1
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self, timeout=None) -> bool:
+        if self.kind in {"input", "confirm", "search"}:
+            return self.page.popup_visible
+        return True
+
+    def is_enabled(self, timeout=None) -> bool:
+        if self.kind == "confirm":
+            return self.page.confirm_enabled
+        return True
+
+    def click(self, timeout=None) -> None:
+        if self.kind == "toolbar":
+            self.page.popup_visible = True
+            self.page.confirm_enabled = False
+            self.page.input_value_text = ""
+        elif self.kind == "search":
+            self.page.searched_urls.append(self.page.input_value_text)
+            self.page.confirm_enabled = True
+        elif self.kind == "confirm":
+            self.page.confirmed_urls.append(self.page.input_value_text)
+            self.page.component_count += 1
+
+    def fill(self, value) -> None:
+        self.page.input_value_text = str(value)
+        if not self.page.input_value_text:
+            self.page.confirm_enabled = False
+
+    def input_value(self, timeout=None) -> str:
+        return self.page.input_value_text
+
+    def locator(self, selector):
+        if selector == "xpath=following-sibling::button[1]":
+            return _SequentialLocator(self.page, "search")
+        if selector == "xpath=..":
+            return self.page
+        return _EmptyLocator()
+
+
+class _SequentialKeyboard:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    def press(self, key) -> None:
+        if key == "Escape":
+            self.page.popup_visible = False
+            self.page.confirm_enabled = False
+
+
+class _SequentialLinkEditor:
+    def __init__(self) -> None:
+        self.popup_visible = False
+        self.confirm_enabled = False
+        self.input_value_text = ""
+        self.component_count = 0
+        self.searched_urls = []
+        self.confirmed_urls = []
+        self.keyboard = _SequentialKeyboard(self)
+
+    def locator(self, selector):
+        if selector.startswith(".se-component.se-oglink"):
+            return _SequentialLocator(self, "component")
+        if "URL을 입력하세요." in selector or "se-popup-oglink-input" in selector:
+            return _SequentialLocator(self, "input")
+        if "oglink-confirm" in selector:
+            return _SequentialLocator(self, "confirm")
+        if "oglink-search" in selector:
+            return _SequentialLocator(self, "search")
+        if "toolbar" in selector or "링크" in selector:
+            return _SequentialLocator(self, "toolbar")
+        return _EmptyLocator()
+
+    def get_by_role(self, role, name=None, exact=None):
+        if role == "button" and name == "검색":
+            return _SequentialLocator(self, "search")
+        if role == "button" and name == "확인":
+            return _SequentialLocator(self, "confirm")
+        return _EmptyLocator()
+
+    def evaluate(self, _script, _options):
+        return {
+            "text": "확인",
+            "className": "se-popup-button-confirm",
+            "score": 10000,
+        }
+
+    def wait_for_timeout(self, _milliseconds) -> None:
+        return None
+
+
 class NaverBlogPreviousPostTests(unittest.TestCase):
     def _app_stub(self, profiles, active="블로그 1"):
         profile_vars = {}
@@ -444,6 +589,44 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertEqual(popup_input.fill_history, ["", requested_url])
         self.assertEqual(popup_input.value, requested_url)
 
+    def test_inserted_link_popup_is_closed_before_the_next_link(self):
+        page = _DismissPopupPage()
+
+        closed = main._dismiss_naver_blog_link_popup(
+            page,
+            timeout_seconds=0.1,
+        )
+
+        self.assertTrue(closed)
+        self.assertFalse(page.popup_visible)
+        self.assertEqual(page.keyboard.pressed, ["Escape"])
+
+    def test_two_different_latest_urls_each_search_confirm_and_close(self):
+        urls = [
+            "https://blog.naver.com/soullhk/224423532872",
+            "https://blog.naver.com/soullhk/224423524771",
+        ]
+        editor = _SequentialLinkEditor()
+        events = queue.Queue()
+
+        with patch.object(
+            main,
+            "_focus_naver_blog_editor_end",
+            return_value=None,
+        ):
+            inserted_count = main.insert_naver_blog_previous_post_links(
+                editor,
+                urls,
+                events,
+                blog_id="soullhk",
+            )
+
+        self.assertEqual(inserted_count, 2)
+        self.assertEqual(editor.searched_urls, urls)
+        self.assertEqual(editor.confirmed_urls, urls)
+        self.assertEqual(editor.component_count, 2)
+        self.assertFalse(editor.popup_visible)
+
     def test_detached_confirm_after_click_counts_inserted_card_as_success(self):
         requested_url = "https://blog.naver.com/soullhk/224395703881"
         target = _ConfirmTarget(_DetachedConfirmLocator())
@@ -515,6 +698,10 @@ class NaverBlogPreviousPostTests(unittest.TestCase):
         self.assertLess(fill_position, search_position)
         self.assertLess(search_position, confirm_position)
         self.assertNotIn('popup_input.press("Tab")', function_source)
+        self.assertGreaterEqual(
+            function_source.count("_dismiss_naver_blog_link_popup("),
+            2,
+        )
 
     def test_search_helper_supports_icon_only_right_edge_button(self):
         source = MAIN_PATH.read_text(encoding="utf-8")
