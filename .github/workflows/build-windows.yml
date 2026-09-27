@@ -68,7 +68,7 @@ jobs:
         run: |
           python -m py_compile main.py
           python -m py_compile app_updater.py
-          python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
+          python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
             "${env:PROGRAMFILES(X86)}\Google\Chrome\Application\chrome.exe",
@@ -148,7 +148,7 @@ jobs:
         run: |
           python -m py_compile main.py
           python -m py_compile app_updater.py
-          python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
+          python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 
       - name: Check writing UI in dark and light themes
         run: python tools/check_writing_ui.py

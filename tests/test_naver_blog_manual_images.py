@@ -222,6 +222,10 @@ class NaverBlogManualImageTests(unittest.TestCase):
             source,
             methods["_choose_naver_blog_manual_images"],
         ) or ""
+        add_source = ast.get_source_segment(
+            source,
+            methods["_add_naver_blog_manual_images"],
+        ) or ""
         thumbnail_source = ast.get_source_segment(
             source,
             methods["_render_naver_blog_manual_image_thumbnails"],
@@ -238,14 +242,17 @@ class NaverBlogManualImageTests(unittest.TestCase):
         self.assertIn('values=["이미지 자동", "이미지 수동"]', build_source)
         self.assertIn("naver_blog_manual_thumbnail_frame", build_source)
         self.assertIn("naver_blog_manual_image_button", build_source)
+        self.assertIn("naver_blog_manual_image_drop_zone", build_source)
+        self.assertIn("_register_image_drop_zone", build_source)
+        self.assertIn("_drop_naver_blog_manual_images", build_source)
         self.assertIn('text="전체삭제"', build_source)
         self.assertIn("askopenfilenames", picker_source)
         self.assertIn("*.heic", picker_source)
         self.assertIn("*.HEIC", picker_source)
         self.assertIn("HEIC", picker_source)
         self.assertIn("_naver_blog_manual_image_limit", picker_source)
-        self.assertIn("merge_naver_blog_manual_image_paths", picker_source)
-        self.assertIn('"이미지 수 초과"', picker_source)
+        self.assertIn("_add_naver_blog_manual_images", picker_source)
+        self.assertIn("_merge_manual_image_selection", add_source)
         self.assertIn("_create_naver_blog_manual_thumbnail", thumbnail_source)
         self.assertIn('size: int = 40', thumbnail_loader_source)
         self.assertIn("remove_button_kwargs", thumbnail_source)

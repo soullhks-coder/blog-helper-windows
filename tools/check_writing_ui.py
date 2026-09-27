@@ -49,6 +49,7 @@ def main() -> None:
         print(f"{sys.platform} {args.theme}: constructing app", flush=True)
         app = app_module.KeywordApp()
         print(f"{sys.platform} {args.theme}: app constructed", flush=True)
+        assert app._file_drop_available
         errors = []
         app.report_callback_exception = lambda *error: errors.append(error)
 
@@ -238,6 +239,14 @@ def main() -> None:
             app.update()
             settle()
             assert app._selected_writing_targets() == ["wordpress", "tistory", "blogspot"]
+            app._on_inline_images_provider_changed(
+                app_module.INLINE_IMAGES_PROVIDER_MANUAL
+            )
+            app._open_writing_section("keyword")
+            settle()
+            assert app.writing_manual_image_drop_zone.winfo_ismapped()
+            assert app.writing_manual_image_drop_zone._blog_helper_drop_enabled
+            assert app.writing_manual_image_drop_zone.dnd_bind("<<Drop>>")
             assert not hasattr(app, "writing_auto_progress_status")
             for step in range(1, 5):
                 assert app._bootstrap_sidebar_icon_image(f"{step}-circle", "#2563eb") is not None
@@ -560,6 +569,12 @@ def main() -> None:
             } == {(1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2)}
             assert_segmented_contrast(app.naver_blog_image_mode_control)
             assert_segmented_contrast(app.naver_blog_automation_mode_control)
+            app.naver_blog_image_mode_var.set("이미지 수동")
+            app._on_naver_blog_image_mode_changed("이미지 수동")
+            settle()
+            assert app.naver_blog_manual_image_drop_zone.grid_info()
+            assert app.naver_blog_manual_image_drop_zone._blog_helper_drop_enabled
+            assert app.naver_blog_manual_image_drop_zone.dnd_bind("<<Drop>>")
             screenshot("naver-blog-writing")
 
             app._switch_naver_blog_tab("settings")

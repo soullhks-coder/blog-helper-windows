@@ -13,6 +13,26 @@ MAIN_PATH = ROOT / "main.py"
 
 
 class WritingManualImageTests(unittest.TestCase):
+    def test_drop_payload_keeps_mac_paths_with_spaces_and_removes_duplicates(self) -> None:
+        paths = main.parse_dropped_file_paths(
+            "{/Users/test/Pictures/첫 번째 사진.png} {/Users/test/Pictures/둘째 사진.jpg} {/Users/test/Pictures/첫 번째 사진.png}",
+        )
+
+        self.assertEqual(
+            paths,
+            [
+                "/Users/test/Pictures/첫 번째 사진.png",
+                "/Users/test/Pictures/둘째 사진.jpg",
+            ],
+        )
+
+    def test_drop_payload_decodes_windows_file_uri(self) -> None:
+        paths = main.parse_dropped_file_paths(
+            "{file:///C:/Users/test/My%20Pictures/photo.png}",
+        )
+
+        self.assertEqual(paths, ["C:/Users/test/My Pictures/photo.png"])
+
     def test_manual_provider_and_paths_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -106,6 +126,10 @@ class WritingManualImageTests(unittest.TestCase):
             source,
             methods["_choose_writing_manual_images"],
         ) or ""
+        add_source = ast.get_source_segment(
+            source,
+            methods["_add_writing_manual_images"],
+        ) or ""
         refresh_source = ast.get_source_segment(
             source,
             methods["_refresh_writing_manual_image_controls"],
@@ -117,10 +141,14 @@ class WritingManualImageTests(unittest.TestCase):
 
         self.assertIn("INLINE_IMAGES_PROVIDERS", build_source)
         self.assertIn("writing_manual_image_panel", build_source)
+        self.assertIn("writing_manual_image_drop_zone", build_source)
+        self.assertIn("_register_image_drop_zone", build_source)
+        self.assertIn("_drop_writing_manual_images", build_source)
         self.assertIn("writing_manual_thumbnail_frame", build_source)
         self.assertIn("askopenfilenames", picker_source)
         self.assertIn("*.heic", picker_source)
-        self.assertIn("merge_naver_blog_manual_image_paths", picker_source)
+        self.assertIn("_add_writing_manual_images", picker_source)
+        self.assertIn("_merge_manual_image_selection", add_source)
         self.assertIn("grid_remove", refresh_source)
         self.assertIn("_remove_writing_manual_image", thumbnail_source)
 

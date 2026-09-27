@@ -17,7 +17,7 @@ datas += [
     ("assets/bootstrap-icons-LICENSE.txt", "assets"),
 ]
 
-for package in ("customtkinter", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):
+for package in ("customtkinter", "tkinterdnd2", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries

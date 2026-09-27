@@ -49,6 +49,19 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog
 
 try:
+    from tkinterdnd2 import (
+        COPY as FILE_DROP_COPY,
+        DND_FILES,
+        REFUSE_DROP as FILE_DROP_REFUSE,
+        TkinterDnD,
+    )
+except ImportError:  # pragma: no cover - 기존 파일 선택 버튼은 계속 사용 가능
+    FILE_DROP_COPY = "copy"
+    FILE_DROP_REFUSE = "refuse_drop"
+    DND_FILES = "DND_Files"
+    TkinterDnD = None
+
+try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 except ImportError:  # pragma: no cover - 기존 Tk 이미지 처리로 대체
     Image = None
@@ -230,6 +243,43 @@ def _pointer_is_inside_widget(widget, event=None) -> bool:
         return left <= pointer_x < left + width and top <= pointer_y < top + height
     except (AttributeError, TypeError, ValueError, tk.TclError):
         return False
+
+
+def parse_dropped_file_paths(
+    raw_data: str,
+    splitlist: Callable[[str], Iterable[str]] | None = None,
+) -> list[str]:
+    """Parse Finder/Explorer DND payloads without breaking paths with spaces."""
+    payload = str(raw_data or "").strip()
+    if not payload:
+        return []
+    try:
+        parser = splitlist or tk.Tcl().splitlist
+        raw_paths = list(parser(payload))
+    except (tk.TclError, TypeError, ValueError):
+        raw_paths = [payload]
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in raw_paths:
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        if path.lower().startswith("file://"):
+            parsed = urlparse(path)
+            decoded_path = unquote(parsed.path or "")
+            if parsed.netloc and parsed.netloc.lower() != "localhost":
+                decoded_path = f"//{parsed.netloc}{decoded_path}"
+            if re.match(r"^/[A-Za-z]:/", decoded_path):
+                decoded_path = decoded_path[1:]
+            path = decoded_path
+        path = os.path.normpath(os.path.expanduser(path))
+        fingerprint = os.path.normcase(os.path.abspath(path))
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        paths.append(path)
+    return paths
 
 
 def _install_windows_dark_ctk_button_release_fix(button_class=None) -> bool:
@@ -25750,6 +25800,15 @@ class KeywordApp(ctk.CTk):
             except (AttributeError, OSError):
                 pass
         super().__init__()
+        self._file_drop_available = False
+        if TkinterDnD is not None:
+            try:
+                TkinterDnD.require(self)
+                self._file_drop_available = True
+            except (RuntimeError, tk.TclError):
+                # The regular file picker remains available if a platform's
+                # native TkDND runtime cannot be loaded for any reason.
+                self._file_drop_available = False
         self.title(f"Blog Helper Pro v{APP_VERSION}")
         self._window_icon_image: tk.PhotoImage | None = None
         try:
@@ -32784,12 +32843,61 @@ class KeywordApp(ctk.CTk):
             pady=(0, 8),
             sticky="w",
         )
+        self.naver_blog_manual_image_drop_zone = ctk.CTkFrame(
+            image_panel,
+            height=70,
+            fg_color=palette["input"],
+            corner_radius=12,
+            border_width=1,
+            border_color=palette["accent"],
+        )
+        self.naver_blog_manual_image_drop_zone.grid(
+            row=3,
+            column=0,
+            columnspan=4,
+            padx=18,
+            pady=(0, 8),
+            sticky="ew",
+        )
+        self.naver_blog_manual_image_drop_zone.grid_propagate(False)
+        self.naver_blog_manual_image_drop_zone.grid_columnconfigure(0, weight=1)
+        self.naver_blog_manual_image_drop_zone.grid_rowconfigure(0, weight=1)
+        self.naver_blog_manual_image_drop_label = ctk.CTkLabel(
+            self.naver_blog_manual_image_drop_zone,
+            text="이미지를 여기로 끌어다 놓으세요\n클릭해서 선택할 수도 있습니다.",
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            justify="center",
+        )
+        self.naver_blog_manual_image_drop_label.grid(
+            row=0,
+            column=0,
+            padx=12,
+            pady=8,
+            sticky="nsew",
+        )
+        for click_target in (
+            self.naver_blog_manual_image_drop_zone,
+            self.naver_blog_manual_image_drop_label,
+        ):
+            click_target.bind(
+                "<Button-1>",
+                lambda _event: self._activate_image_drop_zone(
+                    self.naver_blog_manual_image_drop_zone,
+                    self._choose_naver_blog_manual_images,
+                ),
+                add="+",
+            )
+        self._register_image_drop_zone(
+            self.naver_blog_manual_image_drop_zone,
+            self._drop_naver_blog_manual_images,
+        )
         self.naver_blog_manual_thumbnail_frame = ctk.CTkFrame(
             image_panel,
             fg_color="transparent",
         )
         self.naver_blog_manual_thumbnail_frame.grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=4,
             padx=18,
@@ -32812,7 +32920,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         )
         self.naver_blog_manual_image_summary_label.grid(
-            row=4,
+            row=5,
             column=0,
             columnspan=4,
             padx=18,
@@ -32828,7 +32936,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
         )
         self.naver_blog_manual_image_limit_label.grid(
-            row=5,
+            row=6,
             column=0,
             columnspan=4,
             padx=18,
@@ -33879,6 +33987,174 @@ class KeywordApp(ctk.CTk):
         )
         return next((profile for profile in profiles if str(profile.get("name") or "") == active_name), profiles[0])
 
+    def _set_image_drop_zone_highlight(self, zone, active: bool) -> None:
+        if not getattr(zone, "_blog_helper_drop_enabled", False):
+            return
+        try:
+            zone.configure(
+                fg_color=(
+                    self._theme_palette()["selected"]
+                    if active
+                    else zone._blog_helper_drop_default_fg
+                ),
+                border_color=(
+                    self._theme_palette()["accent"]
+                    if active
+                    else zone._blog_helper_drop_default_border
+                ),
+                border_width=2 if active else 1,
+            )
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _register_image_drop_zone(self, zone, callback: Callable[[list[str]], bool]) -> bool:
+        """Register one CTk card and all of its inner Tk widgets as DND targets."""
+        if not self._file_drop_available:
+            return False
+
+        def on_enter(_event):
+            self._set_image_drop_zone_highlight(zone, True)
+            return (
+                FILE_DROP_COPY
+                if getattr(zone, "_blog_helper_drop_enabled", False)
+                else FILE_DROP_REFUSE
+            )
+
+        def on_leave(_event):
+            self._set_image_drop_zone_highlight(zone, False)
+            return FILE_DROP_COPY
+
+        def on_drop(event):
+            self._set_image_drop_zone_highlight(zone, False)
+            if not getattr(zone, "_blog_helper_drop_enabled", False):
+                return FILE_DROP_REFUSE
+            paths = parse_dropped_file_paths(
+                getattr(event, "data", ""),
+                splitlist=self.tk.splitlist,
+            )
+            return FILE_DROP_COPY if paths and callback(paths) else FILE_DROP_REFUSE
+
+        targets = []
+        pending = [zone]
+        seen: set[str] = set()
+        while pending:
+            target = pending.pop()
+            widget_name = str(target)
+            if widget_name in seen:
+                continue
+            seen.add(widget_name)
+            targets.append(target)
+            try:
+                pending.extend(target.winfo_children())
+            except (AttributeError, tk.TclError):
+                pass
+
+        registered = False
+        for target in targets:
+            try:
+                target.drop_target_register(DND_FILES)
+                target.dnd_bind("<<DropEnter>>", on_enter)
+                target.dnd_bind("<<DropPosition>>", on_enter)
+                target.dnd_bind("<<DropLeave>>", on_leave)
+                target.dnd_bind("<<Drop>>", on_drop)
+                registered = True
+            except (AttributeError, RuntimeError, tk.TclError):
+                continue
+        return registered
+
+    def _configure_image_drop_zone(
+        self,
+        zone,
+        label,
+        *,
+        enabled: bool,
+        remaining: int,
+        disabled_text: str = "이미지 직접 첨부를 선택하면 드래그앤드롭을 사용할 수 있습니다.",
+    ) -> None:
+        palette = self._theme_palette()
+        accepts_drop = bool(enabled and remaining > 0)
+        zone._blog_helper_drop_enabled = accepts_drop
+        zone._blog_helper_drop_default_fg = palette["input"]
+        zone._blog_helper_drop_default_border = (
+            palette["accent"] if accepts_drop else palette["border"]
+        )
+        if accepts_drop:
+            text = (
+                f"이미지를 여기로 끌어다 놓으세요 · 남은 {remaining}장\n"
+                "클릭해서 선택할 수도 있습니다."
+            )
+        elif enabled:
+            text = "설정한 이미지 수를 모두 추가했습니다."
+        else:
+            text = disabled_text
+        try:
+            zone.configure(
+                fg_color=palette["input"],
+                border_color=zone._blog_helper_drop_default_border,
+                border_width=1,
+            )
+            label.configure(
+                text=text,
+                text_color=palette["accent"] if accepts_drop else palette["muted"],
+                cursor="hand2" if accepts_drop else "arrow",
+            )
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _activate_image_drop_zone(self, zone, picker: Callable[[], None]) -> str:
+        if getattr(zone, "_blog_helper_drop_enabled", False):
+            picker()
+        return "break"
+
+    def _merge_manual_image_selection(
+        self,
+        existing_paths: list[str],
+        selected_paths: Iterable[str],
+        limit: int,
+    ) -> list[str] | None:
+        selected = [str(path or "").strip() for path in selected_paths]
+        selected = [path for path in selected if path]
+        if not selected:
+            return None
+        invalid = [
+            Path(path).name or path
+            for path in selected
+            if not Path(path).is_file()
+        ]
+        if invalid:
+            messagebox.showwarning(
+                "이미지 파일을 찾을 수 없음",
+                "폴더나 존재하지 않는 파일은 추가할 수 없습니다.\n\n"
+                + "\n".join(invalid),
+            )
+            return None
+        unsupported = [
+            Path(path).name
+            for path in selected
+            if Path(path).suffix.lower() not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES
+        ]
+        if unsupported:
+            messagebox.showwarning(
+                "지원하지 않는 이미지",
+                "PNG, JPG, JPEG, HEIC, GIF, WEBP, BMP 파일만 추가할 수 있습니다.\n\n"
+                + "\n".join(unsupported),
+            )
+            return None
+        try:
+            return merge_naver_blog_manual_image_paths(
+                existing_paths,
+                selected,
+                limit,
+            )
+        except ValueError:
+            remaining = max(0, limit - len(existing_paths))
+            messagebox.showwarning(
+                "이미지 수 초과",
+                f"현재 {len(existing_paths)}장이 선택되어 있어 {remaining}장만 더 추가할 수 있습니다.\n"
+                f"{remaining}장 이하로 다시 추가해 주세요.",
+            )
+            return None
+
     def _naver_blog_manual_image_limit(self) -> int:
         if hasattr(self, "naver_blog_image_count_menu"):
             return max(
@@ -34091,6 +34367,14 @@ class KeywordApp(ctk.CTk):
             self.naver_blog_manual_image_clear_button.configure(
                 state="normal" if manual_enabled and paths else "disabled"
             )
+        if hasattr(self, "naver_blog_manual_image_drop_zone"):
+            self._configure_image_drop_zone(
+                self.naver_blog_manual_image_drop_zone,
+                self.naver_blog_manual_image_drop_label,
+                enabled=manual_enabled,
+                remaining=remaining,
+                disabled_text="이미지 수동을 선택하면 드래그앤드롭을 사용할 수 있습니다.",
+            )
         self._render_naver_blog_manual_image_thumbnails(paths, manual_enabled)
         if hasattr(self, "naver_blog_manual_image_summary_label"):
             missing_count = sum(1 for path in paths if not Path(path).is_file())
@@ -34150,37 +34434,35 @@ class KeywordApp(ctk.CTk):
         )
         if not selected_paths:
             return
-        unsupported = [
-            Path(path).name
-            for path in selected_paths
-            if Path(path).suffix.lower() not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES
-        ]
-        if unsupported:
-            messagebox.showwarning(
-                "지원하지 않는 이미지",
-                "PNG, JPG, JPEG, HEIC, GIF, WEBP, BMP 파일만 선택할 수 있습니다.\n\n"
-                + "\n".join(unsupported),
-            )
-            return
-        try:
-            merged_paths = merge_naver_blog_manual_image_paths(
-                existing_paths,
-                selected_paths,
-                limit,
-            )
-        except ValueError:
-            messagebox.showwarning(
-                "이미지 수 초과",
-                f"현재 {len(existing_paths)}장이 선택되어 있어 {remaining}장만 더 추가할 수 있습니다.\n"
-                f"{remaining}장 이하로 다시 선택해 주세요.",
-            )
-            return
+        self._add_naver_blog_manual_images(selected_paths)
+
+    def _add_naver_blog_manual_images(self, selected_paths: Iterable[str]) -> bool:
+        limit = self._naver_blog_manual_image_limit()
+        existing_paths = self._current_naver_blog_manual_image_paths()
+        merged_paths = self._merge_manual_image_selection(
+            existing_paths,
+            selected_paths,
+            limit,
+        )
+        if merged_paths is None:
+            return False
         self.naver_blog_manual_image_paths = merged_paths
         self.wordpress_settings.naver_blog_manual_image_paths = list(
             self.naver_blog_manual_image_paths
         )
         self._refresh_naver_blog_manual_image_controls()
         self._save_naver_blog_settings(silent=True)
+        return True
+
+    def _drop_naver_blog_manual_images(self, selected_paths: list[str]) -> bool:
+        image_mode = normalize_naver_blog_image_mode(
+            self.naver_blog_image_mode_var.get()
+            if hasattr(self, "naver_blog_image_mode_var")
+            else self.wordpress_settings.naver_blog_image_mode
+        )
+        if image_mode != NAVER_BLOG_IMAGE_MODE_MANUAL:
+            return False
+        return self._add_naver_blog_manual_images(selected_paths)
 
     def _clear_naver_blog_manual_images(self) -> None:
         self.naver_blog_manual_image_paths = []
@@ -41418,12 +41700,62 @@ class KeywordApp(ctk.CTk):
         )
         self.writing_manual_image_clear_button.grid(row=0, column=1, sticky="e")
 
+        palette = self._theme_palette()
+        self.writing_manual_image_drop_zone = ctk.CTkFrame(
+            self.writing_manual_image_panel,
+            height=70,
+            fg_color=palette["input"],
+            corner_radius=12,
+            border_width=1,
+            border_color=palette["accent"],
+        )
+        self.writing_manual_image_drop_zone.grid(
+            row=1,
+            column=0,
+            padx=12,
+            pady=(0, 8),
+            sticky="ew",
+        )
+        self.writing_manual_image_drop_zone.grid_propagate(False)
+        self.writing_manual_image_drop_zone.grid_columnconfigure(0, weight=1)
+        self.writing_manual_image_drop_zone.grid_rowconfigure(0, weight=1)
+        self.writing_manual_image_drop_label = ctk.CTkLabel(
+            self.writing_manual_image_drop_zone,
+            text="이미지를 여기로 끌어다 놓으세요\n클릭해서 선택할 수도 있습니다.",
+            text_color=palette["accent"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            justify="center",
+        )
+        self.writing_manual_image_drop_label.grid(
+            row=0,
+            column=0,
+            padx=12,
+            pady=8,
+            sticky="nsew",
+        )
+        for click_target in (
+            self.writing_manual_image_drop_zone,
+            self.writing_manual_image_drop_label,
+        ):
+            click_target.bind(
+                "<Button-1>",
+                lambda _event: self._activate_image_drop_zone(
+                    self.writing_manual_image_drop_zone,
+                    self._choose_writing_manual_images,
+                ),
+                add="+",
+            )
+        self._register_image_drop_zone(
+            self.writing_manual_image_drop_zone,
+            self._drop_writing_manual_images,
+        )
+
         self.writing_manual_thumbnail_frame = ctk.CTkFrame(
             self.writing_manual_image_panel,
             fg_color="transparent",
         )
         self.writing_manual_thumbnail_frame.grid(
-            row=1,
+            row=2,
             column=0,
             padx=12,
             pady=(2, 4),
@@ -41441,7 +41773,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         )
         self.writing_manual_image_summary_label.grid(
-            row=2,
+            row=3,
             column=0,
             padx=12,
             pady=(0, 4),
@@ -41456,7 +41788,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
         )
         self.writing_manual_image_limit_label.grid(
-            row=3,
+            row=4,
             column=0,
             padx=12,
             pady=(0, 12),
@@ -45188,6 +45520,13 @@ class KeywordApp(ctk.CTk):
         self.writing_manual_image_clear_button.configure(
             state="normal" if enabled and paths else "disabled"
         )
+        if hasattr(self, "writing_manual_image_drop_zone"):
+            self._configure_image_drop_zone(
+                self.writing_manual_image_drop_zone,
+                self.writing_manual_image_drop_label,
+                enabled=enabled,
+                remaining=remaining,
+            )
         self._render_writing_manual_image_thumbnails(paths, enabled)
         missing_count = sum(1 for path in paths if not Path(path).is_file())
         summary = f"선택 {len(paths)}/{limit}장 · 여러 번 나누어 추가할 수 있습니다."
@@ -45225,35 +45564,36 @@ class KeywordApp(ctk.CTk):
         )
         if not selected_paths:
             return
-        unsupported = [
-            Path(path).name
-            for path in selected_paths
-            if Path(path).suffix.lower() not in NAVER_BLOG_MANUAL_IMAGE_SUFFIXES
-        ]
-        if unsupported:
-            messagebox.showwarning(
-                "지원하지 않는 이미지",
-                "PNG, JPG, JPEG, HEIC, GIF, WEBP, BMP 파일만 선택할 수 있습니다.\n\n"
-                + "\n".join(unsupported),
-            )
-            return
-        try:
-            merged_paths = merge_naver_blog_manual_image_paths(
-                existing_paths,
-                selected_paths,
-                limit,
-            )
-        except ValueError:
-            messagebox.showwarning(
-                "이미지 수 초과",
-                f"현재 {len(existing_paths)}장이 선택되어 있어 {remaining}장만 더 추가할 수 있습니다.\n"
-                f"{remaining}장 이하로 다시 선택해 주세요.",
-            )
-            return
+        self._add_writing_manual_images(selected_paths)
+
+    def _add_writing_manual_images(self, selected_paths: Iterable[str]) -> bool:
+        limit = self._writing_manual_image_limit()
+        existing_paths = self._current_writing_manual_image_paths()
+        merged_paths = self._merge_manual_image_selection(
+            existing_paths,
+            selected_paths,
+            limit,
+        )
+        if merged_paths is None:
+            return False
         self.writing_manual_image_paths = merged_paths
         self.wordpress_settings.inline_images_manual_paths = list(merged_paths)
         self._refresh_writing_manual_image_controls()
         self._save_ui_state()
+        return True
+
+    def _drop_writing_manual_images(self, selected_paths: list[str]) -> bool:
+        provider = (
+            self.writing_inline_images_provider_menu.get()
+            if hasattr(self, "writing_inline_images_provider_menu")
+            else self.wordpress_settings.inline_images_provider
+        )
+        if (
+            provider != INLINE_IMAGES_PROVIDER_MANUAL
+            or not bool(self.inline_images_enabled_var.get())
+        ):
+            return False
+        return self._add_writing_manual_images(selected_paths)
 
     def _clear_writing_manual_images(self) -> None:
         self.writing_manual_image_paths = []

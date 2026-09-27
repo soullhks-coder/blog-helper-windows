@@ -11,6 +11,20 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-09-27",
+        "version": "v1.1.186",
+        "category": "글쓰기 · N블로그",
+        "title": "이미지 드래그앤드롭 첨부",
+        "request": "블로그글쓰기의 이미지 직접 첨부와 N블로그 자동화의 수동 이미지 첨부를 Windows와 macOS 모두에서 드래그앤드롭으로 사용하게 해달라는 요청",
+        "changes": (
+            "두 이미지 첨부 화면에 파일을 끌어놓을 수 있는 전용 드롭 영역 추가",
+            "Windows 탐색기와 macOS Finder의 다중 파일 및 공백·한글 파일명 드롭 지원",
+            "드롭 이미지에도 기존 파일 선택과 동일한 확장자·중복·최대 장수 검증 적용",
+            "드래그 진입 시 테두리와 배경을 강조하고 첨부 불가 상태에서는 드롭을 거부하도록 처리",
+            "네이티브 TkDND 런타임을 Windows·macOS 설치 파일에 함께 패키징하고 기존 파일 선택 버튼은 그대로 유지",
+        ),
+    },
+    {
+        "date": "2026-09-27",
         "version": "v1.1.181–v1.1.185",
         "category": "N블로그",
         "title": "이전 글 링크 검색·확인 순서 보강",
