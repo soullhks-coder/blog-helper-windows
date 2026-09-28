@@ -12,18 +12,28 @@ class ThumbnailPresetTests(unittest.TestCase):
             "thumbnail_text": "기존 썸네일",
             "thumbnail_border_color": "파란색",
             "thumbnail_width": 640,
+            "cardnews_border_color": "민트색",
+            "cardnews_signature": "기존 카드",
+            "cardnews_slide_styles": [{"border_color": "민트색"}],
         }
 
         presets = main.normalize_thumbnail_presets(None, legacy=legacy)
 
         self.assertEqual(len(presets), 3)
-        self.assertEqual(presets[0]["name"], "썸네일1")
+        self.assertEqual(presets[0]["name"], "썸네일·카드1")
         self.assertEqual(presets[0]["text"], "기존 썸네일")
         self.assertEqual(presets[0]["border_color"], "파란색")
         self.assertEqual(presets[0]["width"], 640)
-        self.assertEqual(presets[1]["name"], "썸네일2")
+        self.assertEqual(presets[0]["cardnews_style"]["border_color"], "민트색")
+        self.assertEqual(presets[0]["cardnews_style"]["signature"], "기존 카드")
+        self.assertEqual(presets[0]["cardnews_slide_styles"][0]["border_color"], "민트색")
+        self.assertEqual(presets[1]["name"], "썸네일·카드2")
         self.assertEqual(presets[1]["text"], "")
-        self.assertEqual(presets[2]["name"], "썸네일3")
+        self.assertEqual(presets[1]["cardnews_style"]["border_color"], "민트색")
+        self.assertEqual(presets[2]["name"], "썸네일·카드3")
+
+        presets[0]["cardnews_style"]["border_color"] = "초록색"
+        self.assertEqual(presets[1]["cardnews_style"]["border_color"], "민트색")
 
     def test_preset_indexes_are_clamped(self):
         self.assertEqual(main.normalize_thumbnail_preset_index(-10), 0)
@@ -39,7 +49,13 @@ class ThumbnailPresetTests(unittest.TestCase):
             managed = root / "managed"
             payload = {
                 "thumbnail_presets": [
-                    {"background_image_path": str(source)},
+                    {
+                        "background_image_path": str(source),
+                        "cardnews_style": {"background_image_path": str(source)},
+                        "cardnews_slide_styles": [
+                            {"background_image_path": str(source)}
+                        ],
+                    },
                     {},
                     {},
                 ]
@@ -53,6 +69,14 @@ class ThumbnailPresetTests(unittest.TestCase):
             self.assertTrue(migrated.exists())
             self.assertEqual(migrated.parent, managed.resolve())
             self.assertTrue(migrated.name.startswith("thumbnail-preset-1-"))
+            cardnews_migrated = Path(
+                payload["thumbnail_presets"][0]["cardnews_style"]["background_image_path"]
+            )
+            slide_migrated = Path(
+                payload["thumbnail_presets"][0]["cardnews_slide_styles"][0]["background_image_path"]
+            )
+            self.assertTrue(cardnews_migrated.name.startswith("thumbnail-card-set-1-cardnews-"))
+            self.assertTrue(slide_migrated.name.startswith("thumbnail-card-set-1-slide-1-"))
 
     def test_settings_expose_three_preset_state_fields(self):
         settings = main.WordPressSettings()

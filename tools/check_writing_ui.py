@@ -327,27 +327,36 @@ def main() -> None:
             app.thumbnail_auto_title_var.set(False)
             app.thumbnail_prompt_preview.delete("1.0", "end")
             app.thumbnail_prompt_preview.insert("1.0", "오늘의 여행\n소중한 순간")
+            app.cardnews_border_color_menu.set("빨간색")
             app._save_active_thumbnail_preset()
             assert len(app.thumbnail_preset_buttons) == 3
             assert app.default_thumbnail_preset_index == 0
+            assert int(app.thumbnail_card_set_selector_host.grid_info()["row"]) == 0
+            assert int(app.writing_section_content_title_labels["publish"].grid_info()["row"]) == 1
+            assert app.thumbnail_preset_buttons[0].cget("text").startswith("썸네일·카드1")
             app._switch_thumbnail_preset(1)
             app.thumbnail_auto_title_var.set(False)
             app.thumbnail_prompt_preview.delete("1.0", "end")
             app.thumbnail_prompt_preview.insert("1.0", "두 번째 블로그 전용")
             app.thumbnail_border_color_menu.set("파란색")
+            app.cardnews_border_color_menu.set("민트색")
             app._on_thumbnail_control_changed()
+            app._on_cardnews_control_changed()
             app._set_default_thumbnail_preset()
             assert app.default_thumbnail_preset_index == 1
             assert app.set_default_thumbnail_button.cget("state") == "disabled"
             app._switch_thumbnail_preset(0)
             assert app.thumbnail_prompt_preview.get("1.0", "end").strip() == "오늘의 여행\n소중한 순간"
             assert app.thumbnail_border_color_menu.get() != "파란색"
+            assert app.cardnews_border_color_menu.get() == "빨간색"
             preset_settings = app._read_wordpress_settings(include_prompts=False)
             assert preset_settings.thumbnail_default_preset == 1
             assert preset_settings.thumbnail_active_preset == 0
             assert len(preset_settings.thumbnail_presets) == 3
             assert preset_settings.thumbnail_text == "두 번째 블로그 전용"
             assert preset_settings.thumbnail_border_color == "파란색"
+            assert preset_settings.cardnews_border_color == "민트색"
+            assert preset_settings.thumbnail_presets[1]["cardnews_style"]["border_color"] == "민트색"
             exported_default = {}
 
             def capture_default_thumbnail(destination):
@@ -364,6 +373,40 @@ def main() -> None:
             }
             assert app.active_thumbnail_preset_index == 0
             assert app.thumbnail_prompt_preview.get("1.0", "end").strip() == "오늘의 여행\n소중한 순간"
+            assert app.cardnews_border_color_menu.get() == "빨간색"
+            app._activate_default_thumbnail_card_set_for_publish()
+            assert app.active_thumbnail_preset_index == 1
+            assert app.thumbnail_prompt_preview.get("1.0", "end").strip() == "두 번째 블로그 전용"
+            assert app.cardnews_border_color_menu.get() == "민트색"
+            app._switch_thumbnail_preset(0)
+            automation_card_set = {}
+
+            def capture_automation_cardnews(destination, **_kwargs):
+                automation_card_set["border"] = app.cardnews_border_color_menu.get()
+                return destination
+
+            automation_item = {
+                "id": "card-set-check",
+                "title": "세트 자동화 확인",
+                "article_html": "<h2>핵심 정보</h2><p>카드뉴스 세트를 확인하는 본문입니다.</p>",
+            }
+            automation_settings = app_module.WordPressSettings(
+                inline_images_enabled=True,
+                inline_images_provider="카드뉴스 생성",
+                inline_images_count=1,
+            )
+            with patch.object(
+                app,
+                "_export_body_cardnews_png",
+                side_effect=capture_automation_cardnews,
+            ):
+                assert app._apply_cardnews_to_automation_queue_item(
+                    automation_item,
+                    automation_settings,
+                )
+            assert automation_card_set["border"] == "민트색"
+            assert app.active_thumbnail_preset_index == 0
+            assert app.cardnews_border_color_menu.get() == "빨간색"
             app.cardnews_specs = [
                 {"heading": "가볍게 떠나는 여행", "summary": "나를 위한 하루를 기록해 보세요."},
                 {"heading": "천천히 즐기는 풍경", "summary": "작은 순간에서 새로운 영감을 만나요."},
@@ -454,6 +497,12 @@ def main() -> None:
                 app.geometry(geometry)
                 settle()
                 assert app.writing_step_rail.winfo_width() <= app.writing_page.winfo_width()
+                selector_width = (
+                    app.thumbnail_card_set_selector_host.winfo_width()
+                    / app.thumbnail_card_set_selector_host._get_widget_scaling()
+                )
+                expected_default_row = 1 if selector_width < 760 else 0
+                assert int(app.set_default_thumbnail_button.grid_info()["row"]) == expected_default_row
                 app.writing_scroll._parent_canvas.yview_moveto(0)
                 settle()
                 canvas = app.writing_scroll._parent_canvas

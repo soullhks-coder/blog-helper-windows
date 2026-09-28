@@ -425,9 +425,52 @@ def writing_model_label(value: object) -> str:
     return WRITING_MODEL_LABELS[normalize_writing_model(value)]
 
 
+def legacy_cardnews_preset_style(source: object | None = None) -> dict:
+    def value(name: str, default):
+        if source is None:
+            return default
+        if isinstance(source, dict):
+            return source.get(name, default)
+        return getattr(source, name, default)
+
+    return {
+        "width": value("cardnews_width", 1024),
+        "height": value("cardnews_height", 1024),
+        "ratio": str(value("cardnews_ratio", "1:1") or "1:1"),
+        "background_mode": str(
+            value("cardnews_background_mode", "단색 배경") or "단색 배경"
+        ),
+        "background_image_path": str(
+            value("cardnews_background_image_path", "") or ""
+        ),
+        "image_position": str(
+            value("cardnews_image_position", "가운데") or "가운데"
+        ),
+        "image_scale": value("cardnews_image_scale", 100),
+        "image_opacity": value("cardnews_image_opacity", 35),
+        "image_grayscale": bool(value("cardnews_image_grayscale", False)),
+        "bg_color": str(value("cardnews_bg_color", "흰색") or "흰색"),
+        "border_color": str(
+            value("cardnews_border_color", "파란색") or "파란색"
+        ),
+        "text_color": str(
+            value("cardnews_text_color", "검정색") or "검정색"
+        ),
+        "text_stroke_color": str(
+            value("cardnews_text_stroke_color", "없음") or "없음"
+        ),
+        "font_size": value("cardnews_font_size", 78),
+        "shadow": str(value("cardnews_shadow", "없음") or "없음"),
+        "signature": str(
+            value("cardnews_signature", "BLOG HELPER CARD NEWS")
+            or "BLOG HELPER CARD NEWS"
+        ),
+    }
+
+
 def default_thumbnail_preset(index: int = 0) -> dict:
     return {
-        "name": f"썸네일{max(0, min(int(index), THUMBNAIL_PRESET_COUNT - 1)) + 1}",
+        "name": f"썸네일·카드{max(0, min(int(index), THUMBNAIL_PRESET_COUNT - 1)) + 1}",
         "text": "",
         "auto_title": True,
         "width": 400,
@@ -446,6 +489,8 @@ def default_thumbnail_preset(index: int = 0) -> dict:
         "font_size": 56,
         "shadow": "강한 그림자",
         "saved_path": "",
+        "cardnews_style": legacy_cardnews_preset_style(),
+        "cardnews_slide_styles": [],
     }
 
 
@@ -507,11 +552,21 @@ def normalize_thumbnail_presets(value: object, legacy: object | None = None) -> 
     normalized: list[dict] = []
     for index in range(THUMBNAIL_PRESET_COUNT):
         base = legacy_thumbnail_preset(legacy) if index == 0 and legacy is not None else default_thumbnail_preset(index)
+        if legacy is not None:
+            base["cardnews_style"] = legacy_cardnews_preset_style(legacy)
+            legacy_slide_styles = (
+                legacy.get("cardnews_slide_styles", [])
+                if isinstance(legacy, dict)
+                else getattr(legacy, "cardnews_slide_styles", [])
+            )
+            base["cardnews_slide_styles"] = [
+                dict(style) for style in legacy_slide_styles if isinstance(style, dict)
+            ]
         raw = raw_presets[index] if index < len(raw_presets) and isinstance(raw_presets[index], dict) else {}
         for key in tuple(base):
             if key in raw:
                 base[key] = raw[key]
-        base["name"] = f"썸네일{index + 1}"
+        base["name"] = f"썸네일·카드{index + 1}"
         for key, fallback in (
             ("width", 400), ("height", 400), ("image_scale", 100),
             ("image_opacity", 100), ("font_size", 56),
@@ -522,6 +577,26 @@ def normalize_thumbnail_presets(value: object, legacy: object | None = None) -> 
                 base[key] = fallback
         base["auto_title"] = bool(base.get("auto_title", True))
         base["image_grayscale"] = bool(base.get("image_grayscale", False))
+        cardnews_style = legacy_cardnews_preset_style(legacy)
+        if isinstance(base.get("cardnews_style"), dict):
+            cardnews_style.update(base["cardnews_style"])
+        for key, fallback in (
+            ("width", 1024), ("height", 1024), ("image_scale", 100),
+            ("image_opacity", 35), ("font_size", 78),
+        ):
+            try:
+                cardnews_style[key] = int(cardnews_style.get(key, fallback))
+            except (TypeError, ValueError):
+                cardnews_style[key] = fallback
+        cardnews_style["image_grayscale"] = bool(
+            cardnews_style.get("image_grayscale", False)
+        )
+        base["cardnews_style"] = cardnews_style
+        base["cardnews_slide_styles"] = [
+            dict(style)
+            for style in base.get("cardnews_slide_styles", [])
+            if isinstance(style, dict)
+        ][:4]
         normalized.append(base)
     return normalized
 
@@ -595,6 +670,28 @@ def migrate_design_assets_payload(payload: dict) -> bool:
             if new_path != old_path:
                 preset["background_image_path"] = new_path
                 changed = True
+            cardnews_style = preset.get("cardnews_style")
+            if isinstance(cardnews_style, dict):
+                old_path = str(cardnews_style.get("background_image_path") or "")
+                new_path = persist_design_asset(
+                    old_path, f"thumbnail-card-set-{index + 1}-cardnews"
+                )
+                if new_path != old_path:
+                    cardnews_style["background_image_path"] = new_path
+                    changed = True
+            cardnews_slide_styles = preset.get("cardnews_slide_styles")
+            if isinstance(cardnews_slide_styles, list):
+                for slide_index, style in enumerate(cardnews_slide_styles[:4]):
+                    if not isinstance(style, dict):
+                        continue
+                    old_path = str(style.get("background_image_path") or "")
+                    new_path = persist_design_asset(
+                        old_path,
+                        f"thumbnail-card-set-{index + 1}-slide-{slide_index + 1}",
+                    )
+                    if new_path != old_path:
+                        style["background_image_path"] = new_path
+                        changed = True
     return changed
 TISTORY_MANUAL_PUBLISH_WAIT_SECONDS = 30 * 60
 TISTORY_AD_POSITION_ABOVE = "이미지 위"
@@ -26150,6 +26247,7 @@ class KeywordApp(ctk.CTk):
         self.writing_section_bodies: dict[str, ctk.CTkFrame] = {}
         self.writing_section_toggle_buttons: dict[str, ctk.CTkButton] = {}
         self.writing_section_title_labels: dict[str, ctk.CTkLabel] = {}
+        self.writing_section_content_title_labels: dict[str, ctk.CTkLabel] = {}
         self.writing_section_titles: dict[str, str] = {}
         self.writing_completed_sections: set[str] = set()
         self.active_writing_section = "topic"
@@ -27741,6 +27839,7 @@ class KeywordApp(ctk.CTk):
         self.writing_section_bodies = {}
         self.writing_section_toggle_buttons = {}
         self.writing_section_title_labels = {}
+        self.writing_section_content_title_labels = {}
         self.writing_section_titles = {}
         self.writing_fixed_stage_labels = {}
         self.category_vars = {}
@@ -42118,6 +42217,53 @@ class KeywordApp(ctk.CTk):
             opened=False,
         )
 
+        thumbnail_preset_row = self.thumbnail_card_set_selector_host
+        for column in range(4):
+            thumbnail_preset_row.grid_columnconfigure(
+                column,
+                weight=1 if column < THUMBNAIL_PRESET_COUNT else 0,
+            )
+        for index in range(THUMBNAIL_PRESET_COUNT):
+            button = ctk.CTkButton(
+                thumbnail_preset_row,
+                text=f"썸네일·카드{index + 1}",
+                height=46,
+                corner_radius=14,
+                fg_color="#273142",
+                hover_color="#3468e8",
+                text_color="#c4cede",
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=lambda selected=index: self._switch_thumbnail_preset(selected),
+            )
+            button.grid(
+                row=0,
+                column=index,
+                padx=(0, 8 if index < THUMBNAIL_PRESET_COUNT - 1 else 12),
+                sticky="ew",
+            )
+            self.thumbnail_preset_buttons[index] = button
+        self.set_default_thumbnail_button = ctk.CTkButton(
+            thumbnail_preset_row,
+            text="기본 세트 지정",
+            width=154,
+            height=46,
+            corner_radius=14,
+            fg_color="#18a957",
+            hover_color="#138f49",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._set_default_thumbnail_preset,
+        )
+        self.set_default_thumbnail_button.grid(row=0, column=3, sticky="e")
+        self._thumbnail_card_set_layout_signature = None
+        thumbnail_preset_row.bind(
+            "<Configure>",
+            self._layout_thumbnail_card_set_selector,
+            add="+",
+        )
+        self._layout_thumbnail_card_set_selector()
+        self._refresh_thumbnail_preset_buttons()
+
         (thumbnail_workspace, thumbnail_header, preview_panel, editor_panel,
          self.thumbnail_preview_canvas) = self._create_writing_design_workspace(
             publish_card, 0, "썸네일 제작", "미리보기에서 문구와 배경을 확인하고 디자인을 조정하세요."
@@ -42137,44 +42283,6 @@ class KeywordApp(ctk.CTk):
             command=self._save_thumbnail_image,
         )
         self.save_thumbnail_button.grid(row=0, column=1, padx=(12, 0), sticky="e")
-
-        thumbnail_preset_row = ctk.CTkFrame(thumbnail_header, fg_color="transparent")
-        thumbnail_preset_row.grid(row=1, column=0, columnspan=2, pady=(14, 0), sticky="ew")
-        for column in range(4):
-            thumbnail_preset_row.grid_columnconfigure(column, weight=1 if column < 3 else 0)
-        for index in range(THUMBNAIL_PRESET_COUNT):
-            button = ctk.CTkButton(
-                thumbnail_preset_row,
-                text=f"썸네일{index + 1}",
-                height=42,
-                corner_radius=13,
-                fg_color="#273142",
-                hover_color="#3468e8",
-                text_color="#c4cede",
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=lambda selected=index: self._switch_thumbnail_preset(selected),
-            )
-            button.grid(
-                row=0,
-                column=index,
-                padx=(0, 8 if index < THUMBNAIL_PRESET_COUNT - 1 else 12),
-                sticky="ew",
-            )
-            self.thumbnail_preset_buttons[index] = button
-        self.set_default_thumbnail_button = ctk.CTkButton(
-            thumbnail_preset_row,
-            text="기본 썸네일 지정",
-            width=160,
-            height=42,
-            corner_radius=13,
-            fg_color="#18a957",
-            hover_color="#138f49",
-            text_color="#ffffff",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._set_default_thumbnail_preset,
-        )
-        self.set_default_thumbnail_button.grid(row=0, column=3, sticky="e")
-        self._refresh_thumbnail_preset_buttons()
 
         thumbnail_intro = ctk.CTkLabel(
             editor_panel,
@@ -42955,20 +43063,43 @@ class KeywordApp(ctk.CTk):
         )
         toggle_button.grid(row=0, column=2, padx=(6, 10), pady=10, sticky="e")
 
-        ctk.CTkLabel(
+        content_title_row = 0
+        if section_key == "publish":
+            self.thumbnail_card_set_selector_host = ctk.CTkFrame(
+                card,
+                fg_color="transparent",
+            )
+            self.thumbnail_card_set_selector_host.grid(
+                row=0,
+                column=0,
+                padx=24,
+                pady=(18, 8),
+                sticky="ew",
+            )
+            content_title_row = 1
+
+        content_title_label = ctk.CTkLabel(
             card, text=title, text_color=palette["text"],
             image=self._bootstrap_sidebar_icon_image(f"{row + 1}-circle", palette["accent"], 24),
             compound="left", font=ctk.CTkFont(size=20, weight="bold"),
-        ).grid(row=0, column=0, padx=24, pady=(18, 8), sticky="w")
+        )
+        content_title_label.grid(
+            row=content_title_row,
+            column=0,
+            padx=24,
+            pady=((8, 8) if section_key == "publish" else (18, 8)),
+            sticky="w",
+        )
 
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="ew")
+        body.grid(row=content_title_row + 1, column=0, sticky="ew")
         body.grid_columnconfigure(0, weight=1)
 
         self.writing_section_cards[section_key] = card
         self.writing_section_bodies[section_key] = body
         self.writing_section_toggle_buttons[section_key] = toggle_button
         self.writing_section_title_labels[section_key] = title_label
+        self.writing_section_content_title_labels[section_key] = content_title_label
         self.writing_section_titles[section_key] = title
         self._refresh_writing_section_completion_styles()
 
@@ -43357,6 +43488,20 @@ class KeywordApp(ctk.CTk):
         )
         return f"thumbnail-preset-{preset_index + 1}"
 
+    def _cardnews_preset_asset_role(
+        self,
+        preset_index: int | None = None,
+        slide_index: int | None = None,
+    ) -> str:
+        selected_preset = normalize_thumbnail_preset_index(
+            self.active_thumbnail_preset_index
+            if preset_index is None
+            else preset_index
+        )
+        if slide_index is None:
+            return f"thumbnail-card-set-{selected_preset + 1}-cardnews"
+        return f"thumbnail-card-set-{selected_preset + 1}-slide-{slide_index + 1}"
+
     def _refresh_thumbnail_preset_buttons(self) -> None:
         active = normalize_thumbnail_preset_index(
             getattr(self, "active_thumbnail_preset_index", 0)
@@ -43370,7 +43515,7 @@ class KeywordApp(ctk.CTk):
         for index, button in getattr(self, "thumbnail_preset_buttons", {}).items():
             selected = index == active
             button.configure(
-                text=f"썸네일{index + 1}{' · 기본' if index == default else ''}",
+                text=f"썸네일·카드{index + 1}{' · 기본' if index == default else ''}",
                 fg_color="#3468e8" if selected else palette["button"],
                 hover_color="#2d5cd0" if selected else palette["button_hover"],
                 text_color="#ffffff" if selected else palette["text"],
@@ -43379,8 +43524,54 @@ class KeywordApp(ctk.CTk):
         if default_button is not None:
             is_default = active == default
             default_button.configure(
-                text="기본 썸네일 지정됨" if is_default else "기본 썸네일 지정",
+                text="기본 세트 지정됨" if is_default else "기본 세트 지정",
                 state="disabled" if is_default else "normal",
+            )
+
+    def _layout_thumbnail_card_set_selector(self, _event=None) -> None:
+        host = getattr(self, "thumbnail_card_set_selector_host", None)
+        default_button = getattr(self, "set_default_thumbnail_button", None)
+        buttons = getattr(self, "thumbnail_preset_buttons", {})
+        if host is None or default_button is None or len(buttons) != THUMBNAIL_PRESET_COUNT:
+            return
+        available_width = host.winfo_width() / max(host._get_widget_scaling(), 0.1)
+        compact = available_width < 760
+        signature = (compact, id(host))
+        if getattr(self, "_thumbnail_card_set_layout_signature", None) == signature:
+            return
+        self._thumbnail_card_set_layout_signature = signature
+        for column in range(4):
+            host.grid_columnconfigure(
+                column,
+                weight=1 if column < THUMBNAIL_PRESET_COUNT else 0,
+                uniform="thumbnail_card_set" if column < 3 else "",
+            )
+        for index, button in buttons.items():
+            button.grid_configure(
+                row=0,
+                column=index,
+                columnspan=1,
+                padx=(0, 8 if index < THUMBNAIL_PRESET_COUNT - 1 else (0 if compact else 12)),
+                pady=(0, 0),
+                sticky="ew",
+            )
+        if compact:
+            default_button.grid_configure(
+                row=1,
+                column=0,
+                columnspan=3,
+                padx=(0, 0),
+                pady=(10, 0),
+                sticky="ew",
+            )
+        else:
+            default_button.grid_configure(
+                row=0,
+                column=3,
+                columnspan=1,
+                padx=(0, 0),
+                pady=(0, 0),
+                sticky="e",
             )
 
     def _capture_thumbnail_preset_from_ui(self, index: int | None = None) -> dict:
@@ -43397,9 +43588,31 @@ class KeywordApp(ctk.CTk):
             self._thumbnail_preset_asset_role(preset_index),
         )
         self.thumbnail_background_image_path = background_path
+        cardnews_style = dict(current.get("cardnews_style") or {})
+        cardnews_slide_styles = [
+            dict(style)
+            for style in current.get("cardnews_slide_styles", [])
+            if isinstance(style, dict)
+        ][:4]
+        if hasattr(self, "cardnews_width_entry"):
+            self._save_active_cardnews_slide()
+            cardnews_style = self._current_cardnews_style()
+            cardnews_style["background_image_path"] = persist_design_asset(
+                cardnews_style.get("background_image_path", ""),
+                self._cardnews_preset_asset_role(preset_index),
+            )
+            cardnews_slide_styles = self._current_cardnews_slide_styles()
+            for slide_index, style in enumerate(cardnews_slide_styles):
+                style["background_image_path"] = persist_design_asset(
+                    style.get("background_image_path", ""),
+                    self._cardnews_preset_asset_role(preset_index, slide_index),
+                )
+            self.cardnews_background_image_path = str(
+                cardnews_style.get("background_image_path") or ""
+            )
         current.update(
             {
-                "name": f"썸네일{preset_index + 1}",
+                "name": f"썸네일·카드{preset_index + 1}",
                 "text": self.thumbnail_prompt_preview.get("1.0", "end").strip(),
                 "auto_title": bool(self.thumbnail_auto_title_var.get()),
                 "width": self._safe_int(self.thumbnail_width_entry.get(), 400),
@@ -43418,6 +43631,8 @@ class KeywordApp(ctk.CTk):
                 "font_size": self._safe_int(self.thumbnail_font_size_entry.get(), 56),
                 "shadow": self.thumbnail_shadow_menu.get(),
                 "saved_path": str(getattr(self, "thumbnail_saved_path", "") or ""),
+                "cardnews_style": cardnews_style,
+                "cardnews_slide_styles": cardnews_slide_styles,
             }
         )
         return current
@@ -43434,7 +43649,13 @@ class KeywordApp(ctk.CTk):
         )
         self.thumbnail_presets[index] = self._capture_thumbnail_preset_from_ui(index)
 
-    def _apply_thumbnail_preset_to_ui(self, preset: dict, refresh_preview: bool = True) -> None:
+    def _apply_thumbnail_preset_to_ui(
+        self,
+        preset: dict,
+        refresh_preview: bool = True,
+        apply_cardnews: bool = True,
+        invalidate_cardnews: bool = False,
+    ) -> None:
         if not hasattr(self, "thumbnail_prompt_preview"):
             return
         normalized = default_thumbnail_preset(
@@ -43500,6 +43721,59 @@ class KeywordApp(ctk.CTk):
             self._loading_thumbnail_preset = False
         if refresh_preview:
             self._generate_thumbnail_preview()
+        if apply_cardnews:
+            self._apply_cardnews_set_to_ui(
+                normalized,
+                refresh_preview=refresh_preview,
+                invalidate_generated=invalidate_cardnews,
+            )
+
+    def _apply_cardnews_set_to_ui(
+        self,
+        preset: dict,
+        refresh_preview: bool = True,
+        invalidate_generated: bool = False,
+    ) -> None:
+        if not hasattr(self, "cardnews_width_entry"):
+            return
+        base_style = legacy_cardnews_preset_style(self.wordpress_settings)
+        if isinstance(preset.get("cardnews_style"), dict):
+            base_style.update(preset["cardnews_style"])
+        saved_styles = [
+            dict(style)
+            for style in preset.get("cardnews_slide_styles", [])
+            if isinstance(style, dict)
+        ][:4]
+
+        if self.cardnews_specs:
+            self._loading_cardnews_slide_style = True
+            try:
+                for index, spec in enumerate(self.cardnews_specs):
+                    spec["style"] = dict(
+                        saved_styles[index] if index < len(saved_styles) else base_style
+                    )
+            finally:
+                self._loading_cardnews_slide_style = False
+            self.active_cardnews_slide_index = max(
+                0,
+                min(self.active_cardnews_slide_index, len(self.cardnews_specs) - 1),
+            )
+            self._render_active_cardnews_slide()
+        else:
+            self._apply_cardnews_style(base_style, refresh_preview=refresh_preview)
+
+        if invalidate_generated:
+            self.cardnews_image_paths = []
+            if hasattr(self, "cardnews_list_label"):
+                self.cardnews_list_label.configure(
+                    text="생성된 카드뉴스 없음",
+                    text_color="#6dadff",
+                )
+            if hasattr(self, "cardnews_status_label"):
+                self.cardnews_status_label.configure(
+                    text="세트가 바뀌어 카드뉴스 PNG를 다시 생성해야 합니다.",
+                    text_color="#ffcc66",
+                )
 
     def _switch_thumbnail_preset(self, index: int, save: bool = True) -> None:
         selected = normalize_thumbnail_preset_index(index)
@@ -43509,7 +43783,10 @@ class KeywordApp(ctk.CTk):
         if selected != current:
             self._save_active_thumbnail_preset()
             self.active_thumbnail_preset_index = selected
-            self._apply_thumbnail_preset_to_ui(self.thumbnail_presets[selected])
+            self._apply_thumbnail_preset_to_ui(
+                self.thumbnail_presets[selected],
+                invalidate_cardnews=True,
+            )
         self._refresh_thumbnail_preset_buttons()
         if save:
             self._save_ui_state()
@@ -43522,10 +43799,30 @@ class KeywordApp(ctk.CTk):
         self._refresh_thumbnail_preset_buttons()
         if hasattr(self, "publish_status_label"):
             self.publish_status_label.configure(
-                text=f"썸네일{self.default_thumbnail_preset_index + 1}을 발행 기본 썸네일로 지정했습니다.",
+                text=f"썸네일·카드{self.default_thumbnail_preset_index + 1} 세트를 발행 기본 세트로 지정했습니다.",
                 text_color="#48d980",
             )
         self._save_ui_state()
+
+    def _activate_default_thumbnail_card_set_for_publish(self) -> int:
+        """발행 직전에 기본 지정된 썸네일·카드 세트를 적용한다."""
+        self._save_active_thumbnail_preset()
+        default_index = normalize_thumbnail_preset_index(
+            getattr(self, "default_thumbnail_preset_index", 0)
+        )
+        active_index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        if active_index != default_index:
+            self.active_thumbnail_preset_index = default_index
+            self._apply_thumbnail_preset_to_ui(
+                self.thumbnail_presets[default_index],
+                refresh_preview=True,
+                apply_cardnews=True,
+                invalidate_cardnews=True,
+            )
+        self._refresh_thumbnail_preset_buttons()
+        return default_index
 
     def _fill_thumbnail_text_from_article_title(self) -> None:
         title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
@@ -43628,6 +43925,14 @@ class KeywordApp(ctk.CTk):
         if getattr(self, "_loading_cardnews_slide_style", False):
             return
         self._save_active_cardnews_slide()
+        self._save_active_thumbnail_preset()
+        if self.cardnews_image_paths:
+            self.cardnews_image_paths = []
+            if hasattr(self, "cardnews_list_label"):
+                self.cardnews_list_label.configure(
+                    text="생성된 카드뉴스 없음",
+                    text_color="#6dadff",
+                )
         self._show_cardnews_preview()
         self._save_ui_state()
 
@@ -43701,7 +44006,9 @@ class KeywordApp(ctk.CTk):
         )
         if not file_path:
             return
-        slide_role = f"cardnews-slide-{getattr(self, 'active_cardnews_slide_index', 0) + 1}"
+        slide_role = self._cardnews_preset_asset_role(
+            slide_index=getattr(self, "active_cardnews_slide_index", 0)
+        )
         self.cardnews_background_image_path = persist_design_asset(file_path, slide_role)
         self.cardnews_selected_image_label_text.set(Path(file_path).name)
         self.cardnews_background_mode_menu.set("선택 이미지 사용")
@@ -44535,7 +44842,11 @@ class KeywordApp(ctk.CTk):
             )
         try:
             self.active_thumbnail_preset_index = default_index
-            self._apply_thumbnail_preset_to_ui(export_preset, refresh_preview=False)
+            self._apply_thumbnail_preset_to_ui(
+                export_preset,
+                refresh_preview=False,
+                apply_cardnews=False,
+            )
             return self._export_thumbnail_png(destination)
         finally:
             self.thumbnail_presets = original_presets
@@ -44543,6 +44854,7 @@ class KeywordApp(ctk.CTk):
             self._apply_thumbnail_preset_to_ui(
                 self.thumbnail_presets[original_index],
                 refresh_preview=True,
+                apply_cardnews=False,
             )
             self._refresh_thumbnail_preset_buttons()
 
@@ -44644,24 +44956,16 @@ class KeywordApp(ctk.CTk):
         self._show_cardnews_preview()
 
     def _default_cardnews_style(self) -> dict:
-        return {
-            "width": self.wordpress_settings.cardnews_width,
-            "height": self.wordpress_settings.cardnews_height,
-            "ratio": self.wordpress_settings.cardnews_ratio,
-            "background_mode": self.wordpress_settings.cardnews_background_mode,
-            "background_image_path": self.wordpress_settings.cardnews_background_image_path,
-            "image_position": self.wordpress_settings.cardnews_image_position,
-            "image_scale": self.wordpress_settings.cardnews_image_scale,
-            "image_opacity": self.wordpress_settings.cardnews_image_opacity,
-            "image_grayscale": self.wordpress_settings.cardnews_image_grayscale,
-            "bg_color": self.wordpress_settings.cardnews_bg_color,
-            "border_color": self.wordpress_settings.cardnews_border_color,
-            "text_color": self.wordpress_settings.cardnews_text_color,
-            "text_stroke_color": self.wordpress_settings.cardnews_text_stroke_color,
-            "font_size": self.wordpress_settings.cardnews_font_size,
-            "shadow": self.wordpress_settings.cardnews_shadow,
-            "signature": self.wordpress_settings.cardnews_signature,
-        }
+        style = legacy_cardnews_preset_style(self.wordpress_settings)
+        presets = getattr(self, "thumbnail_presets", [])
+        index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        if index < len(presets) and isinstance(presets[index], dict):
+            saved_style = presets[index].get("cardnews_style")
+            if isinstance(saved_style, dict):
+                style.update(saved_style)
+        return style
 
     def _current_cardnews_style(self) -> dict:
         if not hasattr(self, "cardnews_width_entry"):
@@ -44733,18 +45037,42 @@ class KeywordApp(ctk.CTk):
                 pass
             styles = [spec.get("style", self._default_cardnews_style()) for spec in self.cardnews_specs[:4]]
             return [style for style in styles if isinstance(style, dict)]
-        return [self._current_cardnews_style()] if hasattr(self, "cardnews_width_entry") else list(self.wordpress_settings.cardnews_slide_styles or [])
+        if hasattr(self, "cardnews_width_entry"):
+            return [self._current_cardnews_style()]
+        presets = getattr(self, "thumbnail_presets", [])
+        index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        if index < len(presets) and isinstance(presets[index], dict):
+            return [
+                dict(style)
+                for style in presets[index].get("cardnews_slide_styles", [])
+                if isinstance(style, dict)
+            ]
+        return list(self.wordpress_settings.cardnews_slide_styles or [])
 
     def _merge_saved_cardnews_styles(self) -> None:
-        saved_styles = list(self.wordpress_settings.cardnews_slide_styles or [])
+        presets = getattr(self, "thumbnail_presets", [])
+        preset_index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        selected_preset = (
+            presets[preset_index]
+            if preset_index < len(presets) and isinstance(presets[preset_index], dict)
+            else {}
+        )
+        saved_styles = [
+            dict(style)
+            for style in selected_preset.get("cardnews_slide_styles", [])
+            if isinstance(style, dict)
+        ]
+        base_style = self._default_cardnews_style()
         for index, spec in enumerate(self.cardnews_specs):
             generated_style = spec.get("style") if isinstance(spec.get("style"), dict) else {}
             if index < len(saved_styles) and isinstance(saved_styles[index], dict):
-                saved_style = dict(saved_styles[index])
-                # 카드 테두리는 글마다 새 색상을 사용하고, 나머지 슬라이드별 설정은 복원합니다.
-                if generated_style.get("border_color"):
-                    saved_style["border_color"] = generated_style["border_color"]
-                spec["style"] = saved_style
+                spec["style"] = dict(saved_styles[index])
+            elif selected_preset:
+                spec["style"] = dict(base_style)
             elif generated_style:
                 spec["style"] = dict(generated_style)
             else:
@@ -44773,14 +45101,15 @@ class KeywordApp(ctk.CTk):
             return
         self._save_active_cardnews_slide()
         self._show_cardnews_preview()
-        signature = self.cardnews_signature_entry.get().strip()
-        slide_styles = self._current_cardnews_slide_styles()
-        self.wordpress_settings.cardnews_signature = signature
-        self.wordpress_settings.cardnews_slide_styles = slide_styles
-        AppStateStore.update_fields(
-            cardnews_signature=signature,
-            cardnews_slide_styles=slide_styles,
-        )
+        self._save_active_thumbnail_preset()
+        if self.cardnews_image_paths:
+            self.cardnews_image_paths = []
+            if hasattr(self, "cardnews_list_label"):
+                self.cardnews_list_label.configure(
+                    text="생성된 카드뉴스 없음",
+                    text_color="#6dadff",
+                )
+        self._save_ui_state()
 
     def _render_active_cardnews_slide(self) -> None:
         if not hasattr(self, "cardnews_heading_entry"):
@@ -44789,7 +45118,10 @@ class KeywordApp(ctk.CTk):
         self.cardnews_summary_entry.delete(0, "end")
         self.cardnews_signature_entry.delete(0, "end")
         if not self.cardnews_specs:
-            self.cardnews_signature_entry.insert(0, self.wordpress_settings.cardnews_signature)
+            self.cardnews_signature_entry.insert(
+                0,
+                str(self._default_cardnews_style().get("signature") or "BLOG HELPER CARD NEWS"),
+            )
             self.cardnews_slide_label.configure(text="슬라이드 없음")
             self._show_cardnews_preview()
             return
@@ -44825,6 +45157,8 @@ class KeywordApp(ctk.CTk):
         enabled = self.inline_images_enabled_var.get() if hasattr(self, "inline_images_enabled_var") else False
         if not enabled or provider != "카드뉴스 생성":
             return True
+
+        self._activate_default_thumbnail_card_set_for_publish()
 
         article_html = self.article_editor.get("1.0", "end").strip()
         if not article_html or "생성된 글이 여기에 표시됩니다" in article_html:
@@ -45450,35 +45784,9 @@ class KeywordApp(ctk.CTk):
         self._apply_thumbnail_preset_to_ui(
             self.thumbnail_presets[self.active_thumbnail_preset_index],
             refresh_preview=False,
+            apply_cardnews=True,
         )
         self._refresh_thumbnail_preset_buttons()
-        if hasattr(self, "cardnews_width_entry"):
-            self.cardnews_width_entry.delete(0, "end")
-            self.cardnews_width_entry.insert(0, str(self.wordpress_settings.cardnews_width))
-            self.cardnews_height_entry.delete(0, "end")
-            self.cardnews_height_entry.insert(0, str(self.wordpress_settings.cardnews_height))
-            self.cardnews_ratio_menu.set(self.wordpress_settings.cardnews_ratio)
-            self.cardnews_background_mode_menu.set(self.wordpress_settings.cardnews_background_mode)
-            self.cardnews_bg_color_menu.set(self.wordpress_settings.cardnews_bg_color)
-            self.cardnews_border_color_menu.set(self.wordpress_settings.cardnews_border_color)
-            self.cardnews_text_color_menu.set(self.wordpress_settings.cardnews_text_color)
-            self.cardnews_text_stroke_menu.set(self.wordpress_settings.cardnews_text_stroke_color)
-            self.cardnews_font_size_entry.delete(0, "end")
-            self.cardnews_font_size_entry.insert(0, str(self.wordpress_settings.cardnews_font_size))
-            self.cardnews_shadow_menu.set(self.wordpress_settings.cardnews_shadow)
-            self.cardnews_signature_entry.delete(0, "end")
-            self.cardnews_signature_entry.insert(0, self.wordpress_settings.cardnews_signature)
-            self.cardnews_background_image_path = self.wordpress_settings.cardnews_background_image_path
-            self.cardnews_selected_image_label_text.set(
-                Path(self.cardnews_background_image_path).name if self.cardnews_background_image_path else "선택된 파일 없음"
-            )
-            self.cardnews_image_position_menu.set(self.wordpress_settings.cardnews_image_position)
-            self.cardnews_image_scale_var.set(self.wordpress_settings.cardnews_image_scale)
-            self.cardnews_image_opacity_var.set(self.wordpress_settings.cardnews_image_opacity)
-            self.cardnews_image_grayscale_var.set(self.wordpress_settings.cardnews_image_grayscale)
-            self._on_cardnews_image_adjust_changed()
-            if self.wordpress_settings.cardnews_slide_styles:
-                self._apply_cardnews_style(self.wordpress_settings.cardnews_slide_styles[0], refresh_preview=False)
         self._generate_thumbnail_preview()
         self._update_quick_status("워드프레스 연결 전", "검사 버튼으로 실제 연결을 확인해 주세요.", "#9da7ba")
         self.password_entry.focus()
@@ -46496,6 +46804,23 @@ class KeywordApp(ctk.CTk):
                 preset.get("background_image_path", ""),
                 self._thumbnail_preset_asset_role(index),
             )
+            cardnews_style = dict(preset.get("cardnews_style") or {})
+            cardnews_style["background_image_path"] = persist_design_asset(
+                cardnews_style.get("background_image_path", ""),
+                self._cardnews_preset_asset_role(index),
+            )
+            preset["cardnews_style"] = cardnews_style
+            cardnews_slide_styles = [
+                dict(style)
+                for style in preset.get("cardnews_slide_styles", [])
+                if isinstance(style, dict)
+            ][:4]
+            for slide_index, style in enumerate(cardnews_slide_styles):
+                style["background_image_path"] = persist_design_asset(
+                    style.get("background_image_path", ""),
+                    self._cardnews_preset_asset_role(index, slide_index),
+                )
+            preset["cardnews_slide_styles"] = cardnews_slide_styles
         self.thumbnail_presets = thumbnail_presets
         thumbnail_active_preset = normalize_thumbnail_preset_index(
             getattr(self, "active_thumbnail_preset_index", 0)
@@ -46507,22 +46832,17 @@ class KeywordApp(ctk.CTk):
         thumbnail_background_image_path = str(
             default_thumbnail.get("background_image_path") or ""
         )
-        cardnews_background_image_path = persist_design_asset(
-            self.cardnews_background_image_path if hasattr(self, "cardnews_background_image_path") else self.wordpress_settings.cardnews_background_image_path,
-            f"cardnews-slide-{getattr(self, 'active_cardnews_slide_index', 0) + 1}",
+        default_cardnews = legacy_cardnews_preset_style(self.wordpress_settings)
+        if isinstance(default_thumbnail.get("cardnews_style"), dict):
+            default_cardnews.update(default_thumbnail["cardnews_style"])
+        cardnews_background_image_path = str(
+            default_cardnews.get("background_image_path") or ""
         )
-        self.cardnews_background_image_path = cardnews_background_image_path
-        cardnews_slide_styles = (
-            self._current_cardnews_slide_styles()
-            if hasattr(self, "cardnews_width_entry")
-            else list(self.wordpress_settings.cardnews_slide_styles or [])
-        )
-        for index, style in enumerate(cardnews_slide_styles):
-            if isinstance(style, dict):
-                style["background_image_path"] = persist_design_asset(
-                    style.get("background_image_path", ""),
-                    f"cardnews-slide-{index + 1}",
-                )
+        cardnews_slide_styles = [
+            dict(style)
+            for style in default_thumbnail.get("cardnews_slide_styles", [])
+            if isinstance(style, dict)
+        ][:4]
         settings = WordPressSettings(
             blog_url=self.blog_url_entry.get().strip(),
             username=self.username_entry.get().strip(),
@@ -46907,22 +47227,22 @@ class KeywordApp(ctk.CTk):
             thumbnail_presets=thumbnail_presets,
             thumbnail_active_preset=thumbnail_active_preset,
             thumbnail_default_preset=thumbnail_default_preset,
-            cardnews_width=self._safe_int(self.cardnews_width_entry.get(), 1024) if hasattr(self, "cardnews_width_entry") else self.wordpress_settings.cardnews_width,
-            cardnews_height=self._safe_int(self.cardnews_height_entry.get(), 1024) if hasattr(self, "cardnews_height_entry") else self.wordpress_settings.cardnews_height,
-            cardnews_ratio=self.cardnews_ratio_menu.get() if hasattr(self, "cardnews_ratio_menu") else self.wordpress_settings.cardnews_ratio,
-            cardnews_background_mode=self.cardnews_background_mode_menu.get() if hasattr(self, "cardnews_background_mode_menu") else self.wordpress_settings.cardnews_background_mode,
+            cardnews_width=self._safe_int(default_cardnews.get("width"), 1024),
+            cardnews_height=self._safe_int(default_cardnews.get("height"), 1024),
+            cardnews_ratio=str(default_cardnews.get("ratio") or "1:1"),
+            cardnews_background_mode=str(default_cardnews.get("background_mode") or "단색 배경"),
             cardnews_background_image_path=cardnews_background_image_path,
-            cardnews_image_position=self.cardnews_image_position_menu.get() if hasattr(self, "cardnews_image_position_menu") else self.wordpress_settings.cardnews_image_position,
-            cardnews_image_scale=round(float(self.cardnews_image_scale_var.get())) if hasattr(self, "cardnews_image_scale_var") else self.wordpress_settings.cardnews_image_scale,
-            cardnews_image_opacity=round(float(self.cardnews_image_opacity_var.get())) if hasattr(self, "cardnews_image_opacity_var") else self.wordpress_settings.cardnews_image_opacity,
-            cardnews_image_grayscale=self.cardnews_image_grayscale_var.get() if hasattr(self, "cardnews_image_grayscale_var") else self.wordpress_settings.cardnews_image_grayscale,
-            cardnews_bg_color=self.cardnews_bg_color_menu.get() if hasattr(self, "cardnews_bg_color_menu") else self.wordpress_settings.cardnews_bg_color,
-            cardnews_border_color=self.cardnews_border_color_menu.get() if hasattr(self, "cardnews_border_color_menu") else self.wordpress_settings.cardnews_border_color,
-            cardnews_text_color=self.cardnews_text_color_menu.get() if hasattr(self, "cardnews_text_color_menu") else self.wordpress_settings.cardnews_text_color,
-            cardnews_text_stroke_color=self.cardnews_text_stroke_menu.get() if hasattr(self, "cardnews_text_stroke_menu") else self.wordpress_settings.cardnews_text_stroke_color,
-            cardnews_font_size=self._safe_int(self.cardnews_font_size_entry.get(), 78) if hasattr(self, "cardnews_font_size_entry") else self.wordpress_settings.cardnews_font_size,
-            cardnews_shadow=self.cardnews_shadow_menu.get() if hasattr(self, "cardnews_shadow_menu") else self.wordpress_settings.cardnews_shadow,
-            cardnews_signature=self.cardnews_signature_entry.get().strip() if hasattr(self, "cardnews_signature_entry") else self.wordpress_settings.cardnews_signature,
+            cardnews_image_position=str(default_cardnews.get("image_position") or "가운데"),
+            cardnews_image_scale=self._safe_int(default_cardnews.get("image_scale"), 100),
+            cardnews_image_opacity=self._safe_int(default_cardnews.get("image_opacity"), 35),
+            cardnews_image_grayscale=bool(default_cardnews.get("image_grayscale", False)),
+            cardnews_bg_color=str(default_cardnews.get("bg_color") or "흰색"),
+            cardnews_border_color=str(default_cardnews.get("border_color") or "파란색"),
+            cardnews_text_color=str(default_cardnews.get("text_color") or "검정색"),
+            cardnews_text_stroke_color=str(default_cardnews.get("text_stroke_color") or "없음"),
+            cardnews_font_size=self._safe_int(default_cardnews.get("font_size"), 78),
+            cardnews_shadow=str(default_cardnews.get("shadow") or "없음"),
+            cardnews_signature=str(default_cardnews.get("signature") or "BLOG HELPER CARD NEWS"),
             cardnews_slide_styles=cardnews_slide_styles,
             automation_queue=list(self.automation_queue),
             automation_interval_hours=self._automation_interval_hours(),
@@ -49562,9 +49882,24 @@ class KeywordApp(ctk.CTk):
         original_specs = list(getattr(self, "cardnews_specs", []))
         original_paths = list(getattr(self, "cardnews_image_paths", []))
         original_active_index = int(getattr(self, "active_cardnews_slide_index", 0) or 0)
+        original_preset_index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
         original_style = self._current_cardnews_style()
+        self._save_active_thumbnail_preset()
+        default_preset_index = normalize_thumbnail_preset_index(
+            getattr(self, "default_thumbnail_preset_index", 0)
+        )
+        default_preset = self.thumbnail_presets[default_preset_index]
 
         try:
+            # 자동화는 현재 수동 편집 중인 세트 화면을 바꾸지 않고,
+            # 발행 기본 세트의 카드뉴스 스타일만 임시로 적용한다.
+            self.active_thumbnail_preset_index = default_preset_index
+            self._apply_cardnews_style(
+                default_preset.get("cardnews_style"),
+                refresh_preview=False,
+            )
             specs = self._body_cardnews_specs(clean_article_html, title, count)
             self.cardnews_specs = specs
             self._merge_saved_cardnews_styles()
@@ -49602,6 +49937,7 @@ class KeywordApp(ctk.CTk):
                 )
             return False
         finally:
+            self.active_thumbnail_preset_index = original_preset_index
             self.cardnews_specs = original_specs
             self.cardnews_image_paths = original_paths
             self.active_cardnews_slide_index = original_active_index
