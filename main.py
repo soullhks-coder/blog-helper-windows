@@ -394,6 +394,7 @@ WRITING_MODEL_GEMINI = "gemini"
 WRITING_MODEL_OPTIONS = ("CLI", "GPT API", "제미나이 API")
 WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT = 10
 WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT = 440
+THUMBNAIL_PRESET_COUNT = 3
 WRITING_MODEL_LABELS = {
     WRITING_MODEL_CODEX: "CLI",
     WRITING_MODEL_GPT: "GPT API",
@@ -422,6 +423,107 @@ def normalize_writing_model(value: object) -> str:
 
 def writing_model_label(value: object) -> str:
     return WRITING_MODEL_LABELS[normalize_writing_model(value)]
+
+
+def default_thumbnail_preset(index: int = 0) -> dict:
+    return {
+        "name": f"썸네일{max(0, min(int(index), THUMBNAIL_PRESET_COUNT - 1)) + 1}",
+        "text": "",
+        "auto_title": True,
+        "width": 400,
+        "height": 400,
+        "ratio": "1:1",
+        "background_mode": "단색 배경",
+        "background_image_path": "",
+        "image_position": "오른쪽하단",
+        "image_scale": 100,
+        "image_opacity": 100,
+        "image_grayscale": False,
+        "bg_color": "흰색",
+        "border_color": "빨간색",
+        "text_color": "검정색",
+        "text_stroke_color": "없음",
+        "font_size": 56,
+        "shadow": "강한 그림자",
+        "saved_path": "",
+    }
+
+
+def legacy_thumbnail_preset(source: object) -> dict:
+    def value(name: str, default):
+        if isinstance(source, dict):
+            return source.get(name, default)
+        return getattr(source, name, default)
+
+    preset = default_thumbnail_preset(0)
+    preset.update(
+        {
+            "text": str(value("thumbnail_text", "") or ""),
+            "auto_title": bool(value("thumbnail_auto_title", True)),
+            "width": value("thumbnail_width", 400),
+            "height": value("thumbnail_height", 400),
+            "ratio": str(value("thumbnail_ratio", "1:1") or "1:1"),
+            "background_mode": str(
+                value("thumbnail_background_mode", "단색 배경") or "단색 배경"
+            ),
+            "background_image_path": str(
+                value("thumbnail_background_image_path", "") or ""
+            ),
+            "image_position": str(
+                value("thumbnail_image_position", "오른쪽하단") or "오른쪽하단"
+            ),
+            "image_scale": value("thumbnail_image_scale", 100),
+            "image_opacity": value("thumbnail_image_opacity", 100),
+            "image_grayscale": bool(value("thumbnail_image_grayscale", False)),
+            "bg_color": str(value("thumbnail_bg_color", "흰색") or "흰색"),
+            "border_color": str(
+                value("thumbnail_border_color", "빨간색") or "빨간색"
+            ),
+            "text_color": str(
+                value("thumbnail_text_color", "검정색") or "검정색"
+            ),
+            "text_stroke_color": str(
+                value("thumbnail_text_stroke_color", "없음") or "없음"
+            ),
+            "font_size": value("thumbnail_font_size", 56),
+            "shadow": str(
+                value("thumbnail_shadow", "강한 그림자") or "강한 그림자"
+            ),
+        }
+    )
+    return preset
+
+
+def normalize_thumbnail_preset_index(value: object) -> int:
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        index = 0
+    return max(0, min(index, THUMBNAIL_PRESET_COUNT - 1))
+
+
+def normalize_thumbnail_presets(value: object, legacy: object | None = None) -> list[dict]:
+    raw_presets = value if isinstance(value, list) else []
+    normalized: list[dict] = []
+    for index in range(THUMBNAIL_PRESET_COUNT):
+        base = legacy_thumbnail_preset(legacy) if index == 0 and legacy is not None else default_thumbnail_preset(index)
+        raw = raw_presets[index] if index < len(raw_presets) and isinstance(raw_presets[index], dict) else {}
+        for key in tuple(base):
+            if key in raw:
+                base[key] = raw[key]
+        base["name"] = f"썸네일{index + 1}"
+        for key, fallback in (
+            ("width", 400), ("height", 400), ("image_scale", 100),
+            ("image_opacity", 100), ("font_size", 56),
+        ):
+            try:
+                base[key] = int(base.get(key, fallback))
+            except (TypeError, ValueError):
+                base[key] = fallback
+        base["auto_title"] = bool(base.get("auto_title", True))
+        base["image_grayscale"] = bool(base.get("image_grayscale", False))
+        normalized.append(base)
+    return normalized
 
 
 def persist_design_asset(source_path: str | Path, role: str) -> str:
@@ -482,6 +584,16 @@ def migrate_design_assets_payload(payload: dict) -> bool:
             new_path = persist_design_asset(old_path, f"cardnews-slide-{index + 1}")
             if new_path != old_path:
                 style["background_image_path"] = new_path
+                changed = True
+    thumbnail_presets = payload.get("thumbnail_presets")
+    if isinstance(thumbnail_presets, list):
+        for index, preset in enumerate(thumbnail_presets[:THUMBNAIL_PRESET_COUNT]):
+            if not isinstance(preset, dict):
+                continue
+            old_path = str(preset.get("background_image_path") or "")
+            new_path = persist_design_asset(old_path, f"thumbnail-preset-{index + 1}")
+            if new_path != old_path:
+                preset["background_image_path"] = new_path
                 changed = True
     return changed
 TISTORY_MANUAL_PUBLISH_WAIT_SECONDS = 30 * 60
@@ -3354,6 +3466,9 @@ class WordPressSettings:
     thumbnail_text_stroke_color: str = "없음"
     thumbnail_font_size: int = 56
     thumbnail_shadow: str = "강한 그림자"
+    thumbnail_presets: list[dict] = field(default_factory=list)
+    thumbnail_active_preset: int = 0
+    thumbnail_default_preset: int = 0
     cardnews_width: int = 1024
     cardnews_height: int = 1024
     cardnews_ratio: str = "1:1"
@@ -4136,6 +4251,16 @@ class AppStateStore:
             thumbnail_text_stroke_color=payload.get("thumbnail_text_stroke_color", "없음"),
             thumbnail_font_size=payload.get("thumbnail_font_size", 56),
             thumbnail_shadow=payload.get("thumbnail_shadow", "강한 그림자"),
+            thumbnail_presets=normalize_thumbnail_presets(
+                payload.get("thumbnail_presets"),
+                legacy=payload,
+            ),
+            thumbnail_active_preset=normalize_thumbnail_preset_index(
+                payload.get("thumbnail_active_preset", 0)
+            ),
+            thumbnail_default_preset=normalize_thumbnail_preset_index(
+                payload.get("thumbnail_default_preset", 0)
+            ),
             cardnews_width=payload.get("cardnews_width", 1024),
             cardnews_height=payload.get("cardnews_height", 1024),
             cardnews_ratio=payload.get("cardnews_ratio", "1:1"),
@@ -26048,6 +26173,18 @@ class KeywordApp(ctk.CTk):
         self._loading_cardnews_slide_style = False
         self.thumbnail_preview_mode = "thumbnail"
         self.thumbnail_saved_path = ""
+        self.thumbnail_presets = normalize_thumbnail_presets(
+            self.wordpress_settings.thumbnail_presets,
+            legacy=self.wordpress_settings,
+        )
+        self.active_thumbnail_preset_index = normalize_thumbnail_preset_index(
+            self.wordpress_settings.thumbnail_active_preset
+        )
+        self.default_thumbnail_preset_index = normalize_thumbnail_preset_index(
+            self.wordpress_settings.thumbnail_default_preset
+        )
+        self.thumbnail_preset_buttons: dict[int, ctk.CTkButton] = {}
+        self._loading_thumbnail_preset = False
         self.cardnews_image_paths: list[str] = []
         self.cardnews_specs: list[dict[str, str]] = []
         self.active_cardnews_slide_index = 0
@@ -42001,6 +42138,44 @@ class KeywordApp(ctk.CTk):
         )
         self.save_thumbnail_button.grid(row=0, column=1, padx=(12, 0), sticky="e")
 
+        thumbnail_preset_row = ctk.CTkFrame(thumbnail_header, fg_color="transparent")
+        thumbnail_preset_row.grid(row=1, column=0, columnspan=2, pady=(14, 0), sticky="ew")
+        for column in range(4):
+            thumbnail_preset_row.grid_columnconfigure(column, weight=1 if column < 3 else 0)
+        for index in range(THUMBNAIL_PRESET_COUNT):
+            button = ctk.CTkButton(
+                thumbnail_preset_row,
+                text=f"썸네일{index + 1}",
+                height=42,
+                corner_radius=13,
+                fg_color="#273142",
+                hover_color="#3468e8",
+                text_color="#c4cede",
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=lambda selected=index: self._switch_thumbnail_preset(selected),
+            )
+            button.grid(
+                row=0,
+                column=index,
+                padx=(0, 8 if index < THUMBNAIL_PRESET_COUNT - 1 else 12),
+                sticky="ew",
+            )
+            self.thumbnail_preset_buttons[index] = button
+        self.set_default_thumbnail_button = ctk.CTkButton(
+            thumbnail_preset_row,
+            text="기본 썸네일 지정",
+            width=160,
+            height=42,
+            corner_radius=13,
+            fg_color="#18a957",
+            hover_color="#138f49",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._set_default_thumbnail_preset,
+        )
+        self.set_default_thumbnail_button.grid(row=0, column=3, sticky="e")
+        self._refresh_thumbnail_preset_buttons()
+
         thumbnail_intro = ctk.CTkLabel(
             editor_panel,
             text="텍스트 편집",
@@ -43126,6 +43301,8 @@ class KeywordApp(ctk.CTk):
                 style_tree(child)
 
         style_tree(workspace)
+        if workspace is getattr(self, "thumbnail_design_workspace", None):
+            self._refresh_thumbnail_preset_buttons()
 
     def _thumbnail_labeled_menu(
         self,
@@ -43174,6 +43351,182 @@ class KeywordApp(ctk.CTk):
     ) -> ctk.CTkOptionMenu:
         return self._thumbnail_labeled_menu(parent, row, column, title, values, command)
 
+    def _thumbnail_preset_asset_role(self, index: int | None = None) -> str:
+        preset_index = normalize_thumbnail_preset_index(
+            self.active_thumbnail_preset_index if index is None else index
+        )
+        return f"thumbnail-preset-{preset_index + 1}"
+
+    def _refresh_thumbnail_preset_buttons(self) -> None:
+        active = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        default = normalize_thumbnail_preset_index(
+            getattr(self, "default_thumbnail_preset_index", 0)
+        )
+        palette = self._theme_palette() if hasattr(self, "_theme_palette") else {
+            "button": "#273142", "button_hover": "#334155", "text": "#c4cede"
+        }
+        for index, button in getattr(self, "thumbnail_preset_buttons", {}).items():
+            selected = index == active
+            button.configure(
+                text=f"썸네일{index + 1}{' · 기본' if index == default else ''}",
+                fg_color="#3468e8" if selected else palette["button"],
+                hover_color="#2d5cd0" if selected else palette["button_hover"],
+                text_color="#ffffff" if selected else palette["text"],
+            )
+        default_button = getattr(self, "set_default_thumbnail_button", None)
+        if default_button is not None:
+            is_default = active == default
+            default_button.configure(
+                text="기본 썸네일 지정됨" if is_default else "기본 썸네일 지정",
+                state="disabled" if is_default else "normal",
+            )
+
+    def _capture_thumbnail_preset_from_ui(self, index: int | None = None) -> dict:
+        preset_index = normalize_thumbnail_preset_index(
+            self.active_thumbnail_preset_index if index is None else index
+        )
+        current = default_thumbnail_preset(preset_index)
+        if preset_index < len(getattr(self, "thumbnail_presets", [])):
+            current.update(self.thumbnail_presets[preset_index])
+        if not hasattr(self, "thumbnail_prompt_preview"):
+            return current
+        background_path = persist_design_asset(
+            self.thumbnail_background_image_path,
+            self._thumbnail_preset_asset_role(preset_index),
+        )
+        self.thumbnail_background_image_path = background_path
+        current.update(
+            {
+                "name": f"썸네일{preset_index + 1}",
+                "text": self.thumbnail_prompt_preview.get("1.0", "end").strip(),
+                "auto_title": bool(self.thumbnail_auto_title_var.get()),
+                "width": self._safe_int(self.thumbnail_width_entry.get(), 400),
+                "height": self._safe_int(self.thumbnail_height_entry.get(), 400),
+                "ratio": self.thumbnail_ratio_menu.get(),
+                "background_mode": self.thumbnail_background_mode_menu.get(),
+                "background_image_path": background_path,
+                "image_position": self.thumbnail_image_position_menu.get(),
+                "image_scale": round(float(self.thumbnail_image_scale_var.get())),
+                "image_opacity": round(float(self.thumbnail_image_opacity_var.get())),
+                "image_grayscale": bool(self.thumbnail_image_grayscale_var.get()),
+                "bg_color": self.thumbnail_bg_color_menu.get(),
+                "border_color": self.thumbnail_border_color_menu.get(),
+                "text_color": self.thumbnail_text_color_menu.get(),
+                "text_stroke_color": self.thumbnail_text_stroke_menu.get(),
+                "font_size": self._safe_int(self.thumbnail_font_size_entry.get(), 56),
+                "shadow": self.thumbnail_shadow_menu.get(),
+                "saved_path": str(getattr(self, "thumbnail_saved_path", "") or ""),
+            }
+        )
+        return current
+
+    def _save_active_thumbnail_preset(self) -> None:
+        if getattr(self, "_loading_thumbnail_preset", False):
+            return
+        self.thumbnail_presets = normalize_thumbnail_presets(
+            getattr(self, "thumbnail_presets", []),
+            legacy=self.wordpress_settings,
+        )
+        index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        self.thumbnail_presets[index] = self._capture_thumbnail_preset_from_ui(index)
+
+    def _apply_thumbnail_preset_to_ui(self, preset: dict, refresh_preview: bool = True) -> None:
+        if not hasattr(self, "thumbnail_prompt_preview"):
+            return
+        normalized = default_thumbnail_preset(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        if isinstance(preset, dict):
+            normalized.update(preset)
+        self._loading_thumbnail_preset = True
+        try:
+            self.thumbnail_auto_title_var.set(bool(normalized.get("auto_title", True)))
+            self.thumbnail_prompt_preview.delete("1.0", "end")
+            self.thumbnail_prompt_preview.insert("1.0", str(normalized.get("text") or ""))
+            for entry, value in (
+                (self.thumbnail_width_entry, normalized.get("width", 400)),
+                (self.thumbnail_height_entry, normalized.get("height", 400)),
+                (self.thumbnail_font_size_entry, normalized.get("font_size", 56)),
+            ):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            self.thumbnail_ratio_menu.set(str(normalized.get("ratio") or "1:1"))
+            self.thumbnail_background_mode_menu.set(
+                str(normalized.get("background_mode") or "단색 배경")
+            )
+            self.thumbnail_bg_color_menu.set(str(normalized.get("bg_color") or "흰색"))
+            self.thumbnail_border_color_menu.set(
+                str(normalized.get("border_color") or "빨간색")
+            )
+            self.thumbnail_text_color_menu.set(
+                str(normalized.get("text_color") or "검정색")
+            )
+            self.thumbnail_text_stroke_menu.set(
+                str(normalized.get("text_stroke_color") or "없음")
+            )
+            self.thumbnail_shadow_menu.set(
+                str(normalized.get("shadow") or "강한 그림자")
+            )
+            self.thumbnail_background_image_path = str(
+                normalized.get("background_image_path") or ""
+            )
+            self.thumbnail_selected_image_label_text.set(
+                Path(self.thumbnail_background_image_path).name
+                if self.thumbnail_background_image_path
+                else "선택된 파일 없음"
+            )
+            self.thumbnail_image_position_menu.set(
+                str(normalized.get("image_position") or "오른쪽하단")
+            )
+            self.thumbnail_image_scale_var.set(int(normalized.get("image_scale", 100)))
+            self.thumbnail_image_opacity_var.set(int(normalized.get("image_opacity", 100)))
+            self.thumbnail_image_grayscale_var.set(
+                bool(normalized.get("image_grayscale", False))
+            )
+            self.thumbnail_saved_path = str(normalized.get("saved_path") or "")
+            if hasattr(self, "thumbnail_image_scale_value_label"):
+                self.thumbnail_image_scale_value_label.configure(
+                    text=f"{round(float(self.thumbnail_image_scale_var.get()))}%"
+                )
+            if hasattr(self, "thumbnail_image_opacity_value_label"):
+                self.thumbnail_image_opacity_value_label.configure(
+                    text=f"{round(float(self.thumbnail_image_opacity_var.get()))}%"
+                )
+        finally:
+            self._loading_thumbnail_preset = False
+        if refresh_preview:
+            self._generate_thumbnail_preview()
+
+    def _switch_thumbnail_preset(self, index: int, save: bool = True) -> None:
+        selected = normalize_thumbnail_preset_index(index)
+        current = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        if selected != current:
+            self._save_active_thumbnail_preset()
+            self.active_thumbnail_preset_index = selected
+            self._apply_thumbnail_preset_to_ui(self.thumbnail_presets[selected])
+        self._refresh_thumbnail_preset_buttons()
+        if save:
+            self._save_ui_state()
+
+    def _set_default_thumbnail_preset(self) -> None:
+        self._save_active_thumbnail_preset()
+        self.default_thumbnail_preset_index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        self._refresh_thumbnail_preset_buttons()
+        if hasattr(self, "publish_status_label"):
+            self.publish_status_label.configure(
+                text=f"썸네일{self.default_thumbnail_preset_index + 1}을 발행 기본 썸네일로 지정했습니다.",
+                text_color="#48d980",
+            )
+        self._save_ui_state()
+
     def _fill_thumbnail_text_from_article_title(self) -> None:
         title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
         if not title:
@@ -43182,6 +43535,7 @@ class KeywordApp(ctk.CTk):
         self.thumbnail_prompt_preview.delete("1.0", "end")
         self.thumbnail_prompt_preview.insert("1.0", title)
         self._show_thumbnail_preview()
+        self._save_active_thumbnail_preset()
         self._save_ui_state()
 
     def _on_article_title_changed(self, _event=None) -> None:
@@ -43194,18 +43548,23 @@ class KeywordApp(ctk.CTk):
         self._thumbnail_sync_job = None
         if self._defer_while_text_composing("_thumbnail_sync_job", self._sync_thumbnail_text_if_needed, 1.2):
             return
-        if not self.thumbnail_auto_title_var.get():
-            self._save_ui_state()
-            return
+        self._save_active_thumbnail_preset()
         title = self.article_title_entry.get().strip() or self.generated_article_title
         if not title:
+            self._save_ui_state()
             return
-        self.thumbnail_prompt_preview.delete("1.0", "end")
-        self.thumbnail_prompt_preview.insert("1.0", title)
-        self._generate_thumbnail_preview()
+        for preset in self.thumbnail_presets:
+            if bool(preset.get("auto_title", True)):
+                preset["text"] = title
+        current = self.thumbnail_presets[self.active_thumbnail_preset_index]
+        self._apply_thumbnail_preset_to_ui(current, refresh_preview=True)
+        self._save_active_thumbnail_preset()
         self._save_ui_state()
 
     def _on_thumbnail_control_changed(self) -> None:
+        if getattr(self, "_loading_thumbnail_preset", False):
+            return
+        self._save_active_thumbnail_preset()
         self._generate_thumbnail_preview()
         self._save_ui_state()
 
@@ -43323,7 +43682,9 @@ class KeywordApp(ctk.CTk):
         )
         if not file_path:
             return
-        self.thumbnail_background_image_path = persist_design_asset(file_path, "thumbnail-background")
+        self.thumbnail_background_image_path = persist_design_asset(
+            file_path, self._thumbnail_preset_asset_role()
+        )
         self.thumbnail_selected_image_label_text.set(Path(file_path).name)
         self.thumbnail_background_mode_menu.set("선택 이미지 사용")
         self._on_thumbnail_control_changed()
@@ -43366,7 +43727,9 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("클립보드 가져오기 실패", "현재 클립보드에 이미지가 없거나 읽지 못했습니다.")
             return
 
-        self.thumbnail_background_image_path = persist_design_asset(clipboard_path, "thumbnail-background")
+        self.thumbnail_background_image_path = persist_design_asset(
+            clipboard_path, self._thumbnail_preset_asset_role()
+        )
         self.thumbnail_selected_image_label_text.set("clipboard-thumbnail.png")
         self.thumbnail_background_mode_menu.set("선택 이미지 사용")
         self._on_thumbnail_control_changed()
@@ -43404,7 +43767,9 @@ class KeywordApp(ctk.CTk):
         if not image_path:
             messagebox.showerror("AI 썸네일 실패", "생성된 이미지 경로를 찾지 못했습니다.")
             return
-        self.thumbnail_background_image_path = persist_design_asset(image_path, "thumbnail-background")
+        self.thumbnail_background_image_path = persist_design_asset(
+            image_path, self._thumbnail_preset_asset_role()
+        )
         self.thumbnail_selected_image_label_text.set(Path(image_path).name)
         self.thumbnail_background_mode_menu.set("선택 이미지 사용")
         self.thumbnail_image_position_menu.set("가운데")
@@ -44125,6 +44490,7 @@ class KeywordApp(ctk.CTk):
             return
 
         self.thumbnail_saved_path = str(exported_path)
+        self._save_active_thumbnail_preset()
         self._save_ui_state()
         messagebox.showinfo("썸네일 저장 완료", f"썸네일을 PNG로 저장했습니다.\n{exported_path}")
 
@@ -44142,6 +44508,43 @@ class KeywordApp(ctk.CTk):
             max(width, height),
             "썸네일",
         )
+
+    def _export_default_thumbnail_png(
+        self,
+        destination: Path | None = None,
+        title_override: str = "",
+        randomize_border: bool = False,
+    ) -> Path:
+        """발행용으로 지정한 프리셋을 렌더링하고 편집 중이던 탭은 복원한다."""
+        self._save_active_thumbnail_preset()
+        original_index = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        original_presets = [dict(preset) for preset in self.thumbnail_presets]
+        default_index = normalize_thumbnail_preset_index(
+            getattr(self, "default_thumbnail_preset_index", 0)
+        )
+        export_preset = dict(original_presets[default_index])
+        if title_override and bool(export_preset.get("auto_title", True)):
+            export_preset["text"] = title_override
+        if randomize_border:
+            palette = ["빨간색", "파란색", "검정색", "민트색", "노란색", "핑크색"]
+            current = str(export_preset.get("border_color") or "")
+            export_preset["border_color"] = random.choice(
+                [color for color in palette if color != current] or palette
+            )
+        try:
+            self.active_thumbnail_preset_index = default_index
+            self._apply_thumbnail_preset_to_ui(export_preset, refresh_preview=False)
+            return self._export_thumbnail_png(destination)
+        finally:
+            self.thumbnail_presets = original_presets
+            self.active_thumbnail_preset_index = original_index
+            self._apply_thumbnail_preset_to_ui(
+                self.thumbnail_presets[original_index],
+                refresh_preview=True,
+            )
+            self._refresh_thumbnail_preset_buttons()
 
     def _generated_thumbnail_export_path(self, title: str = "") -> Path:
         article_title = title or self.article_title_entry.get().strip() or self.generated_article_title
@@ -45034,34 +45437,21 @@ class KeywordApp(ctk.CTk):
                     text=f"저장된 공공데이터 행사정보 {len(self.wordpress_settings.public_data_events)}개를 복원했습니다.",
                     text_color="#48d980",
                 )
-        self.thumbnail_auto_title_var.set(self.wordpress_settings.thumbnail_auto_title)
-        self.thumbnail_prompt_preview.delete("1.0", "end")
-        self.thumbnail_prompt_preview.insert(
-            "1.0",
-            self.wordpress_settings.thumbnail_text or "썸네일에 들어갈 메인 문구를 직접 입력하거나, 글 제목을 자동으로 가져올 수 있습니다.",
+        self.thumbnail_presets = normalize_thumbnail_presets(
+            self.wordpress_settings.thumbnail_presets,
+            legacy=self.wordpress_settings,
         )
-        self.thumbnail_width_entry.delete(0, "end")
-        self.thumbnail_width_entry.insert(0, str(self.wordpress_settings.thumbnail_width))
-        self.thumbnail_height_entry.delete(0, "end")
-        self.thumbnail_height_entry.insert(0, str(self.wordpress_settings.thumbnail_height))
-        self.thumbnail_ratio_menu.set(self.wordpress_settings.thumbnail_ratio)
-        self.thumbnail_background_mode_menu.set(self.wordpress_settings.thumbnail_background_mode)
-        self.thumbnail_bg_color_menu.set(self.wordpress_settings.thumbnail_bg_color)
-        self.thumbnail_border_color_menu.set(self.wordpress_settings.thumbnail_border_color)
-        self.thumbnail_text_color_menu.set(self.wordpress_settings.thumbnail_text_color)
-        self.thumbnail_text_stroke_menu.set(self.wordpress_settings.thumbnail_text_stroke_color)
-        self.thumbnail_font_size_entry.delete(0, "end")
-        self.thumbnail_font_size_entry.insert(0, str(self.wordpress_settings.thumbnail_font_size))
-        self.thumbnail_shadow_menu.set(self.wordpress_settings.thumbnail_shadow)
-        self.thumbnail_background_image_path = self.wordpress_settings.thumbnail_background_image_path
-        self.thumbnail_selected_image_label_text.set(
-            Path(self.thumbnail_background_image_path).name if self.thumbnail_background_image_path else "선택된 파일 없음"
+        self.active_thumbnail_preset_index = normalize_thumbnail_preset_index(
+            self.wordpress_settings.thumbnail_active_preset
         )
-        self.thumbnail_image_position_menu.set(self.wordpress_settings.thumbnail_image_position)
-        self.thumbnail_image_scale_var.set(self.wordpress_settings.thumbnail_image_scale)
-        self.thumbnail_image_opacity_var.set(self.wordpress_settings.thumbnail_image_opacity)
-        self.thumbnail_image_grayscale_var.set(self.wordpress_settings.thumbnail_image_grayscale)
-        self._on_thumbnail_image_adjust_changed()
+        self.default_thumbnail_preset_index = normalize_thumbnail_preset_index(
+            self.wordpress_settings.thumbnail_default_preset
+        )
+        self._apply_thumbnail_preset_to_ui(
+            self.thumbnail_presets[self.active_thumbnail_preset_index],
+            refresh_preview=False,
+        )
+        self._refresh_thumbnail_preset_buttons()
         if hasattr(self, "cardnews_width_entry"):
             self.cardnews_width_entry.delete(0, "end")
             self.cardnews_width_entry.insert(0, str(self.wordpress_settings.cardnews_width))
@@ -46096,11 +46486,27 @@ class KeywordApp(ctk.CTk):
                 selected_title_prompt = nonempty_text(selected_prompt.get("title_prompt"), selected_title_prompt)
                 selected_article_prompt = nonempty_text(selected_prompt.get("article_prompt"), selected_article_prompt)
         current_writing_links = self._current_writing_links(include_transient=False)
-        thumbnail_background_image_path = persist_design_asset(
-            self.thumbnail_background_image_path,
-            "thumbnail-background",
+        self._save_active_thumbnail_preset()
+        thumbnail_presets = normalize_thumbnail_presets(
+            getattr(self, "thumbnail_presets", []),
+            legacy=self.wordpress_settings,
         )
-        self.thumbnail_background_image_path = thumbnail_background_image_path
+        for index, preset in enumerate(thumbnail_presets):
+            preset["background_image_path"] = persist_design_asset(
+                preset.get("background_image_path", ""),
+                self._thumbnail_preset_asset_role(index),
+            )
+        self.thumbnail_presets = thumbnail_presets
+        thumbnail_active_preset = normalize_thumbnail_preset_index(
+            getattr(self, "active_thumbnail_preset_index", 0)
+        )
+        thumbnail_default_preset = normalize_thumbnail_preset_index(
+            getattr(self, "default_thumbnail_preset_index", 0)
+        )
+        default_thumbnail = thumbnail_presets[thumbnail_default_preset]
+        thumbnail_background_image_path = str(
+            default_thumbnail.get("background_image_path") or ""
+        )
         cardnews_background_image_path = persist_design_asset(
             self.cardnews_background_image_path if hasattr(self, "cardnews_background_image_path") else self.wordpress_settings.cardnews_background_image_path,
             f"cardnews-slide-{getattr(self, 'active_cardnews_slide_index', 0) + 1}",
@@ -46461,23 +46867,46 @@ class KeywordApp(ctk.CTk):
                 if hasattr(self, "writing_auto_progress_var")
                 else self.wordpress_settings.writing_auto_progress
             ),
-            thumbnail_text=self.thumbnail_prompt_preview.get("1.0", "end").strip(),
-            thumbnail_auto_title=self.thumbnail_auto_title_var.get(),
-            thumbnail_width=self._safe_int(self.thumbnail_width_entry.get(), 400),
-            thumbnail_height=self._safe_int(self.thumbnail_height_entry.get(), 400),
-            thumbnail_ratio=self.thumbnail_ratio_menu.get(),
-            thumbnail_background_mode=self.thumbnail_background_mode_menu.get(),
+            thumbnail_text=str(default_thumbnail.get("text") or ""),
+            thumbnail_auto_title=bool(default_thumbnail.get("auto_title", True)),
+            thumbnail_width=self._safe_int(default_thumbnail.get("width"), 400),
+            thumbnail_height=self._safe_int(default_thumbnail.get("height"), 400),
+            thumbnail_ratio=str(default_thumbnail.get("ratio") or "1:1"),
+            thumbnail_background_mode=str(
+                default_thumbnail.get("background_mode") or "단색 배경"
+            ),
             thumbnail_background_image_path=thumbnail_background_image_path,
-            thumbnail_image_position=self.thumbnail_image_position_menu.get(),
-            thumbnail_image_scale=round(float(self.thumbnail_image_scale_var.get())),
-            thumbnail_image_opacity=round(float(self.thumbnail_image_opacity_var.get())),
-            thumbnail_image_grayscale=self.thumbnail_image_grayscale_var.get(),
-            thumbnail_bg_color=self.thumbnail_bg_color_menu.get(),
-            thumbnail_border_color=self.thumbnail_border_color_menu.get(),
-            thumbnail_text_color=self.thumbnail_text_color_menu.get(),
-            thumbnail_text_stroke_color=self.thumbnail_text_stroke_menu.get(),
-            thumbnail_font_size=self._safe_int(self.thumbnail_font_size_entry.get(), 56),
-            thumbnail_shadow=self.thumbnail_shadow_menu.get(),
+            thumbnail_image_position=str(
+                default_thumbnail.get("image_position") or "오른쪽하단"
+            ),
+            thumbnail_image_scale=self._safe_int(
+                default_thumbnail.get("image_scale"), 100
+            ),
+            thumbnail_image_opacity=self._safe_int(
+                default_thumbnail.get("image_opacity"), 100
+            ),
+            thumbnail_image_grayscale=bool(
+                default_thumbnail.get("image_grayscale", False)
+            ),
+            thumbnail_bg_color=str(default_thumbnail.get("bg_color") or "흰색"),
+            thumbnail_border_color=str(
+                default_thumbnail.get("border_color") or "빨간색"
+            ),
+            thumbnail_text_color=str(
+                default_thumbnail.get("text_color") or "검정색"
+            ),
+            thumbnail_text_stroke_color=str(
+                default_thumbnail.get("text_stroke_color") or "없음"
+            ),
+            thumbnail_font_size=self._safe_int(
+                default_thumbnail.get("font_size"), 56
+            ),
+            thumbnail_shadow=str(
+                default_thumbnail.get("shadow") or "강한 그림자"
+            ),
+            thumbnail_presets=thumbnail_presets,
+            thumbnail_active_preset=thumbnail_active_preset,
+            thumbnail_default_preset=thumbnail_default_preset,
             cardnews_width=self._safe_int(self.cardnews_width_entry.get(), 1024) if hasattr(self, "cardnews_width_entry") else self.wordpress_settings.cardnews_width,
             cardnews_height=self._safe_int(self.cardnews_height_entry.get(), 1024) if hasattr(self, "cardnews_height_entry") else self.wordpress_settings.cardnews_height,
             cardnews_ratio=self.cardnews_ratio_menu.get() if hasattr(self, "cardnews_ratio_menu") else self.wordpress_settings.cardnews_ratio,
@@ -48040,10 +48469,16 @@ class KeywordApp(ctk.CTk):
         self.article_title_entry.delete(0, "end")
         self.article_editor.delete("1.0", "end")
         self.article_editor.insert("1.0", "생성된 글이 여기에 표시됩니다. 내용을 직접 수정한 뒤 업로드할 수 있습니다.")
-        self.thumbnail_prompt_preview.delete("1.0", "end")
-        self.thumbnail_prompt_preview.insert("1.0", "썸네일에 들어갈 메인 문구를 직접 입력하거나, 글 제목을 자동으로 가져올 수 있습니다.")
-        self.thumbnail_saved_path = ""
-        self._generate_thumbnail_preview()
+        self._save_active_thumbnail_preset()
+        thumbnail_placeholder = "썸네일에 들어갈 메인 문구를 직접 입력하거나, 글 제목을 자동으로 가져올 수 있습니다."
+        for preset in self.thumbnail_presets:
+            if bool(preset.get("auto_title", True)):
+                preset["text"] = thumbnail_placeholder
+            preset["saved_path"] = ""
+        self._apply_thumbnail_preset_to_ui(
+            self.thumbnail_presets[self.active_thumbnail_preset_index],
+            refresh_preview=True,
+        )
         self._open_writing_section("topic")
         self.progress_bar.configure(mode="determinate")
         self.progress_bar.set(0.03)
@@ -48585,8 +49020,11 @@ class KeywordApp(ctk.CTk):
         try:
             queue_id = str(int(time.time() * 1000))
             thumbnail_path = DATA_DIR / f"automation-thumbnail-{queue_id}.png"
-            self._randomize_thumbnail_border_color(refresh_preview=True)
-            self._export_thumbnail_png(thumbnail_path)
+            self._export_default_thumbnail_png(
+                thumbnail_path,
+                title_override=title,
+                randomize_border=True,
+            )
         except Exception as exc:
             messagebox.showerror("썸네일 준비 실패", str(exc))
             return
@@ -49079,14 +49517,13 @@ class KeywordApp(ctk.CTk):
         self._schedule_next_automation_collection()
 
     def _create_automation_thumbnail(self, title: str, queue_id: str) -> Path | None:
-        original_text = self.thumbnail_prompt_preview.get("1.0", "end").strip()
-        original_border_color = self.thumbnail_border_color_menu.get()
         try:
-            self.thumbnail_prompt_preview.delete("1.0", "end")
-            self.thumbnail_prompt_preview.insert("1.0", title)
-            self._randomize_thumbnail_border_color(refresh_preview=False)
             thumbnail_path = DATA_DIR / f"automation-thumbnail-{queue_id}.png"
-            return self._export_thumbnail_png(thumbnail_path)
+            return self._export_default_thumbnail_png(
+                thumbnail_path,
+                title_override=title,
+                randomize_border=True,
+            )
         except Exception as exc:
             if hasattr(self, "automation_status_label"):
                 self.automation_status_label.configure(
@@ -49094,11 +49531,6 @@ class KeywordApp(ctk.CTk):
                     text_color="#ffcc66",
                 )
             return None
-        finally:
-            self.thumbnail_prompt_preview.delete("1.0", "end")
-            self.thumbnail_prompt_preview.insert("1.0", original_text)
-            self.thumbnail_border_color_menu.set(original_border_color)
-            self._generate_thumbnail_preview()
 
     def _should_apply_automation_cardnews(self, settings: WordPressSettings | None = None) -> bool:
         settings = settings or self.wordpress_settings
@@ -49577,7 +50009,10 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(settings)
         try:
             title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
-            thumbnail_path = self._export_thumbnail_png(self._generated_thumbnail_export_path(title))
+            thumbnail_path = self._export_default_thumbnail_png(
+                self._generated_thumbnail_export_path(title),
+                title_override=title,
+            )
         except Exception as exc:
             messagebox.showerror("썸네일 준비 실패", str(exc))
             return
@@ -49646,7 +50081,10 @@ class KeywordApp(ctk.CTk):
             return
 
         try:
-            thumbnail_path = self._export_thumbnail_png(self._generated_thumbnail_export_path(title))
+            thumbnail_path = self._export_default_thumbnail_png(
+                self._generated_thumbnail_export_path(title),
+                title_override=title,
+            )
         except Exception as exc:
             messagebox.showerror("썸네일 준비 실패", str(exc))
             return

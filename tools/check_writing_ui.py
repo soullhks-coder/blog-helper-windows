@@ -327,6 +327,43 @@ def main() -> None:
             app.thumbnail_auto_title_var.set(False)
             app.thumbnail_prompt_preview.delete("1.0", "end")
             app.thumbnail_prompt_preview.insert("1.0", "오늘의 여행\n소중한 순간")
+            app._save_active_thumbnail_preset()
+            assert len(app.thumbnail_preset_buttons) == 3
+            assert app.default_thumbnail_preset_index == 0
+            app._switch_thumbnail_preset(1)
+            app.thumbnail_auto_title_var.set(False)
+            app.thumbnail_prompt_preview.delete("1.0", "end")
+            app.thumbnail_prompt_preview.insert("1.0", "두 번째 블로그 전용")
+            app.thumbnail_border_color_menu.set("파란색")
+            app._on_thumbnail_control_changed()
+            app._set_default_thumbnail_preset()
+            assert app.default_thumbnail_preset_index == 1
+            assert app.set_default_thumbnail_button.cget("state") == "disabled"
+            app._switch_thumbnail_preset(0)
+            assert app.thumbnail_prompt_preview.get("1.0", "end").strip() == "오늘의 여행\n소중한 순간"
+            assert app.thumbnail_border_color_menu.get() != "파란색"
+            preset_settings = app._read_wordpress_settings(include_prompts=False)
+            assert preset_settings.thumbnail_default_preset == 1
+            assert preset_settings.thumbnail_active_preset == 0
+            assert len(preset_settings.thumbnail_presets) == 3
+            assert preset_settings.thumbnail_text == "두 번째 블로그 전용"
+            assert preset_settings.thumbnail_border_color == "파란색"
+            exported_default = {}
+
+            def capture_default_thumbnail(destination):
+                exported_default["text"] = app.thumbnail_prompt_preview.get("1.0", "end").strip()
+                exported_default["border"] = app.thumbnail_border_color_menu.get()
+                return destination
+
+            with patch.object(app, "_export_thumbnail_png", side_effect=capture_default_thumbnail):
+                expected_path = Path(directory) / "default-thumbnail.png"
+                assert app._export_default_thumbnail_png(expected_path) == expected_path
+            assert exported_default == {
+                "text": "두 번째 블로그 전용",
+                "border": "파란색",
+            }
+            assert app.active_thumbnail_preset_index == 0
+            assert app.thumbnail_prompt_preview.get("1.0", "end").strip() == "오늘의 여행\n소중한 순간"
             app.cardnews_specs = [
                 {"heading": "가볍게 떠나는 여행", "summary": "나를 위한 하루를 기록해 보세요."},
                 {"heading": "천천히 즐기는 풍경", "summary": "작은 순간에서 새로운 영감을 만나요."},
