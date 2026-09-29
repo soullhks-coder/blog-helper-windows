@@ -28101,6 +28101,7 @@ class KeywordApp(ctk.CTk):
         )
         self.settings_nav_button.grid(row=8, column=0, padx=26, pady=(10, 0), sticky="ew")
 
+        self._disable_sidebar_drag_hover()
         self._build_sidebar_activity_shimmers()
 
         self.sidebar_version_label = ctk.CTkLabel(
@@ -31142,6 +31143,33 @@ class KeywordApp(ctk.CTk):
             ),
             "naver_kin": naver_kin_running,
         }
+
+    def _disable_sidebar_drag_hover(self) -> None:
+        """Prevent pointer drags from leaving sidebar buttons highlighted."""
+
+        button_names = (
+            "home_nav_button",
+            "writing_nav_button",
+            "automation_nav_button",
+            "naver_blog_nav_button",
+            "naver_kin_nav_button",
+            "public_data_nav_button",
+            "prompt_nav_button",
+            "settings_nav_button",
+        )
+        for button_name in button_names:
+            button = getattr(self, button_name, None)
+            if button is None:
+                continue
+            try:
+                # CTkButton can miss <Leave> while the primary button is held
+                # on macOS. Several buttons then keep their hover canvas and
+                # look like a selected drag range. Sidebar navigation already
+                # has an explicit selected-page fill, so hover is unnecessary.
+                button.configure(hover=False)
+                button._on_leave()
+            except (AttributeError, tk.TclError):
+                continue
 
     def _build_sidebar_activity_shimmers(self) -> None:
         palette = self._theme_palette()

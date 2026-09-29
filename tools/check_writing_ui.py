@@ -686,6 +686,10 @@ def main() -> None:
                 "prompts": "prompt_nav_button",
                 "settings": "settings_nav_button",
             }
+            assert all(
+                getattr(app, button_name).cget("hover") is False
+                for button_name in sidebar_button_names.values()
+            )
             for page_name, page_frame in app._page_frame_map().items():
                 app._switch_page(page_name)
                 settle(220)
