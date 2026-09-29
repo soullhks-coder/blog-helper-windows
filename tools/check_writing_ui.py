@@ -63,8 +63,13 @@ def main() -> None:
             if not args.screenshots:
                 return
             args.screenshots.mkdir(parents=True, exist_ok=True)
-            app.attributes("-topmost", True)
-            app.lift()
+            modal = getattr(app, "writing_complete_dialog", None)
+            if modal is not None and modal.winfo_exists():
+                modal.attributes("-topmost", True)
+                modal.lift()
+            else:
+                app.attributes("-topmost", True)
+                app.lift()
             settle()
             destination = args.screenshots / f"writing-{args.theme}-{name}.png"
             if sys.platform == "darwin":
@@ -690,6 +695,18 @@ def main() -> None:
                 getattr(app, button_name).cget("hover") is False
                 for button_name in sidebar_button_names.values()
             )
+            app.writing_completion_platforms = ["tistory"]
+            app._show_writing_complete_dialog()
+            settle(220)
+            assert app.writing_complete_dialog.winfo_ismapped()
+            assert app.grab_current() is None
+            assert all(
+                getattr(app, button_name).cget("hover") is False
+                for button_name in sidebar_button_names.values()
+            )
+            screenshot("writing-complete-dialog")
+            app._close_writing_complete_dialog_and_reset()
+            settle(120)
             for page_name, page_frame in app._page_frame_map().items():
                 app._switch_page(page_name)
                 settle(220)

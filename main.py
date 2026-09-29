@@ -26777,7 +26777,6 @@ class KeywordApp(ctk.CTk):
         dialog.geometry(f"+{x}+{y}")
         dialog.bind("<Return>", lambda _event: self._close_writing_complete_dialog_and_reset())
         try:
-            dialog.grab_set()
             dialog.lift()
             confirm_button.focus_set()
         except tk.TclError:
@@ -27085,7 +27084,6 @@ class KeywordApp(ctk.CTk):
         dialog.geometry(f"+{x}+{y}")
         dialog.bind("<Return>", lambda _event: self._close_reference_collection_dialog())
         try:
-            dialog.grab_set()
             dialog.lift()
             confirm_button.focus_set()
         except tk.TclError:
@@ -36317,7 +36315,6 @@ class KeywordApp(ctk.CTk):
         dialog.geometry(f"+{x}+{y}")
         dialog.bind("<Return>", lambda _event: self._close_naver_kin_complete_dialog())
         try:
-            dialog.grab_set()
             dialog.lift()
             confirm_button.focus_set()
         except tk.TclError:
