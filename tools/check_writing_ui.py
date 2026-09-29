@@ -331,8 +331,8 @@ def main() -> None:
             app._save_active_thumbnail_preset()
             assert len(app.thumbnail_preset_buttons) == 3
             assert app.default_thumbnail_preset_index == 0
-            assert int(app.thumbnail_card_set_selector_host.grid_info()["row"]) == 0
-            assert int(app.writing_section_content_title_labels["publish"].grid_info()["row"]) == 1
+            assert int(app.writing_section_content_title_labels["publish"].grid_info()["row"]) == 0
+            assert int(app.thumbnail_card_set_selector_host.grid_info()["row"]) == 1
             assert app.thumbnail_preset_buttons[0].cget("text").startswith("썸네일·카드1")
             app._switch_thumbnail_preset(1)
             app.thumbnail_auto_title_var.set(False)

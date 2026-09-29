@@ -43064,19 +43064,20 @@ class KeywordApp(ctk.CTk):
         toggle_button.grid(row=0, column=2, padx=(6, 10), pady=10, sticky="e")
 
         content_title_row = 0
+        body_row = 1
         if section_key == "publish":
             self.thumbnail_card_set_selector_host = ctk.CTkFrame(
                 card,
                 fg_color="transparent",
             )
             self.thumbnail_card_set_selector_host.grid(
-                row=0,
+                row=1,
                 column=0,
                 padx=24,
-                pady=(18, 8),
+                pady=(4, 12),
                 sticky="ew",
             )
-            content_title_row = 1
+            body_row = 2
 
         content_title_label = ctk.CTkLabel(
             card, text=title, text_color=palette["text"],
@@ -43087,12 +43088,12 @@ class KeywordApp(ctk.CTk):
             row=content_title_row,
             column=0,
             padx=24,
-            pady=((8, 8) if section_key == "publish" else (18, 8)),
+            pady=(18, 8),
             sticky="w",
         )
 
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.grid(row=content_title_row + 1, column=0, sticky="ew")
+        body.grid(row=body_row, column=0, sticky="ew")
         body.grid_columnconfigure(0, weight=1)
 
         self.writing_section_cards[section_key] = card
