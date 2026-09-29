@@ -273,6 +273,12 @@ def main() -> None:
             settle()
             keyword_rows = app.keyword_choice_frame.winfo_children()
             assert len(keyword_rows) == 10
+            assert app.keyword_refresh_button.winfo_ismapped()
+            assert app.keyword_refresh_button.cget("text") == "새로고침"
+            assert (
+                app.keyword_refresh_button.winfo_rootx()
+                > app.writing_section_content_title_labels["keyword"].winfo_rootx()
+            )
             keyword_viewport = app.keyword_choice_frame._parent_canvas
             assert (
                 keyword_rows[-1].winfo_rooty() + keyword_rows[-1].winfo_height()

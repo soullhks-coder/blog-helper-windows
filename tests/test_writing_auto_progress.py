@@ -2,7 +2,7 @@ import ast
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 
@@ -58,6 +58,57 @@ class WritingAutoProgressTests(unittest.TestCase):
         self.assertGreaterEqual(main.WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT, 440)
         self.assertIn("height=WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT", workflow_source)
         self.assertIn("insights[:WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT]", render_source)
+
+    def test_recommended_keyword_header_has_source_refresh_button(self) -> None:
+        workflow_source = self._method_source("_build_writing_workflow")
+
+        self.assertIn("self.keyword_refresh_button", workflow_source)
+        self.assertIn('text="새로고침"', workflow_source)
+        self.assertIn("self._refresh_current_keyword_choices", workflow_source)
+        self.assertIn('self.writing_section_content_headers["keyword"]', workflow_source)
+
+    def test_keyword_refresh_reloads_the_source_used_to_enter_the_step(self) -> None:
+        source_methods = {
+            "daum": "load_daum_keywords",
+            "signal": "load_signal_keywords",
+            "newneek": "load_newneek_keywords",
+            "loword": "load_loword_keywords",
+            "naver": "load_naver_creator_keywords",
+        }
+        for source, expected_method in source_methods.items():
+            actions = {method_name: Mock() for method_name in source_methods.values()}
+            app = SimpleNamespace(
+                current_keyword_source=source,
+                current_keyword="",
+                _writing_keyword_selection_locked=lambda: False,
+                **actions,
+            )
+
+            main.KeywordApp._refresh_current_keyword_choices(app)
+
+            actions[expected_method].assert_called_once_with()
+            for method_name, action in actions.items():
+                if method_name != expected_method:
+                    action.assert_not_called()
+
+    def test_keyword_refresh_repeats_the_entered_topic_analysis(self) -> None:
+        start_analysis = Mock()
+        app = SimpleNamespace(
+            current_keyword_source="analysis",
+            current_keyword="추석",
+            _writing_keyword_selection_locked=lambda: False,
+            load_daum_keywords=Mock(),
+            load_signal_keywords=Mock(),
+            load_newneek_keywords=Mock(),
+            load_loword_keywords=Mock(),
+            load_naver_creator_keywords=Mock(),
+            start_analysis=start_analysis,
+            analysis_worker=None,
+        )
+
+        main.KeywordApp._refresh_current_keyword_choices(app)
+
+        start_analysis.assert_called_once_with()
 
     def test_keyword_selection_is_locked_while_writing_is_active(self) -> None:
         alive_worker = SimpleNamespace(is_alive=lambda: True)

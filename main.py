@@ -26160,6 +26160,7 @@ class KeywordApp(ctk.CTk):
         self.automation_keyword_candidates: list[dict] = []
         self.automation_keyword_candidate_vars: dict[str, tk.BooleanVar] = {}
         self.current_keyword = ""
+        self.current_keyword_source = ""
         self.current_insights: list[KeywordInsight] = []
         self.daum_reference_map: dict[str, str] = {}
         self.signal_reference_map: dict[str, str] = {}
@@ -26247,6 +26248,7 @@ class KeywordApp(ctk.CTk):
         self.writing_section_bodies: dict[str, ctk.CTkFrame] = {}
         self.writing_section_toggle_buttons: dict[str, ctk.CTkButton] = {}
         self.writing_section_title_labels: dict[str, ctk.CTkLabel] = {}
+        self.writing_section_content_headers: dict[str, ctk.CTkFrame] = {}
         self.writing_section_content_title_labels: dict[str, ctk.CTkLabel] = {}
         self.writing_section_titles: dict[str, str] = {}
         self.writing_completed_sections: set[str] = set()
@@ -27827,6 +27829,7 @@ class KeywordApp(ctk.CTk):
         self.writing_section_bodies = {}
         self.writing_section_toggle_buttons = {}
         self.writing_section_title_labels = {}
+        self.writing_section_content_headers = {}
         self.writing_section_content_title_labels = {}
         self.writing_section_titles = {}
         self.writing_fixed_stage_labels = {}
@@ -29093,6 +29096,7 @@ class KeywordApp(ctk.CTk):
             "signal": "시그널 키워드",
             "loword": "로워드 네이버 실시간 검색어",
         }.get(source, "홈 키워드")
+        self.current_keyword_source = source
         self.current_insights = [insight]
         self.selected_keyword_var.set(keyword)
         if hasattr(self, "manual_keyword_entry"):
@@ -36566,6 +36570,7 @@ class KeywordApp(ctk.CTk):
             self.reference_textbox.insert("1.0", reference)
             self._update_reference_count()
         self.current_keyword = title
+        self.current_keyword_source = "external"
         self.selected_keyword_var.set(title)
         if hasattr(self, "manual_keyword_entry"):
             self.manual_keyword_entry.delete(0, "end")
@@ -37899,6 +37904,7 @@ class KeywordApp(ctk.CTk):
         if official_url:
             source_urls["축제 공식 홈페이지"] = official_url
         self.current_keyword = "대한민국 구석구석 축제"
+        self.current_keyword_source = "external"
         self.current_insights = [
             KeywordInsight(
                 keyword=title,
@@ -38515,6 +38521,7 @@ class KeywordApp(ctk.CTk):
         if application_url:
             source_urls["온라인 신청/공식 홈페이지"] = application_url
         self.current_keyword = "복지로 복지·정부지원 정책"
+        self.current_keyword_source = "external"
         self.current_insights = [
             KeywordInsight(
                 keyword=title,
@@ -38894,6 +38901,7 @@ class KeywordApp(ctk.CTk):
         reference_text = str(event.get("reference_text") or "").strip()
         source_url = str(event.get("source_url") or event.get("url") or "").strip()
         self.current_keyword = "공공데이터 공연/행사"
+        self.current_keyword_source = "external"
         self.current_insights = [
             KeywordInsight(
                 keyword=title,
@@ -41730,6 +41738,24 @@ class KeywordApp(ctk.CTk):
             opened=False,
         )
 
+        self.keyword_refresh_button = ctk.CTkButton(
+            self.writing_section_content_headers["keyword"],
+            text="새로고침",
+            width=104,
+            height=36,
+            corner_radius=12,
+            fg_color="#3468e8",
+            hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._refresh_current_keyword_choices,
+        )
+        self.keyword_refresh_button.grid(
+            row=0,
+            column=1,
+            padx=(12, 0),
+            sticky="e",
+        )
+
         self.keyword_choice_frame = ctk.CTkScrollableFrame(
             keyword_card,
             fg_color="#111826",
@@ -43085,16 +43111,24 @@ class KeywordApp(ctk.CTk):
             )
             body_row = 2
 
-        content_title_label = ctk.CTkLabel(
-            card, text=title, text_color=palette["text"],
-            image=self._bootstrap_sidebar_icon_image(f"{row + 1}-circle", palette["accent"], 24),
-            compound="left", font=ctk.CTkFont(size=20, weight="bold"),
-        )
-        content_title_label.grid(
+        content_header = ctk.CTkFrame(card, fg_color="transparent")
+        content_header.grid(
             row=content_title_row,
             column=0,
             padx=24,
             pady=(18, 8),
+            sticky="ew",
+        )
+        content_header.grid_columnconfigure(0, weight=1)
+
+        content_title_label = ctk.CTkLabel(
+            content_header, text=title, text_color=palette["text"],
+            image=self._bootstrap_sidebar_icon_image(f"{row + 1}-circle", palette["accent"], 24),
+            compound="left", font=ctk.CTkFont(size=20, weight="bold"),
+        )
+        content_title_label.grid(
+            row=0,
+            column=0,
             sticky="w",
         )
 
@@ -43106,6 +43140,7 @@ class KeywordApp(ctk.CTk):
         self.writing_section_bodies[section_key] = body
         self.writing_section_toggle_buttons[section_key] = toggle_button
         self.writing_section_title_labels[section_key] = title_label
+        self.writing_section_content_headers[section_key] = content_header
         self.writing_section_content_title_labels[section_key] = content_title_label
         self.writing_section_titles[section_key] = title
         self._refresh_writing_section_completion_styles()
@@ -48759,6 +48794,60 @@ class KeywordApp(ctk.CTk):
             self.loword_keywords_button.configure(state=state, text="로워드")
         if hasattr(self, "naver_creator_keywords_button"):
             self.naver_creator_keywords_button.configure(state=state, text="네이버")
+        if hasattr(self, "keyword_refresh_button"):
+            self.keyword_refresh_button.configure(
+                state=state,
+                text="새로고침" if state == "normal" else "새로고침 중...",
+            )
+
+    def _refresh_current_keyword_choices(self) -> None:
+        """Reload the source that produced the displayed keyword choices."""
+
+        if self._writing_keyword_selection_locked():
+            messagebox.showinfo(
+                "글쓰기 진행 중",
+                "현재 키워드의 참고수집·글작성 또는 발행이 진행 중입니다.\n"
+                "완료되거나 취소된 뒤 키워드를 새로고침해 주세요.",
+            )
+            return
+
+        source = str(getattr(self, "current_keyword_source", "") or "").strip()
+        if not source:
+            source = {
+                "다음 실시간 검색어": "daum",
+                "다음 키워드": "daum",
+                "시그널 실시간 검색어": "signal",
+                "시그널 키워드": "signal",
+                "뉴닉 사회 카테고리": "newneek",
+                "로워드 네이버 실시간 검색어": "loword",
+                "네이버 메인 유입 콘텐츠": "naver",
+            }.get(str(self.current_keyword or "").strip(), "")
+
+        refresh_actions = {
+            "daum": self.load_daum_keywords,
+            "signal": self.load_signal_keywords,
+            "newneek": self.load_newneek_keywords,
+            "loword": self.load_loword_keywords,
+            "naver": self.load_naver_creator_keywords,
+        }
+        action = refresh_actions.get(source)
+        if action is not None:
+            action()
+            return
+
+        if source == "analysis" or (
+            not source and hasattr(self, "topic_entry") and self.topic_entry.get().strip()
+        ):
+            self.start_analysis()
+            if self.analysis_worker and self.analysis_worker.is_alive():
+                self._open_writing_section("keyword", complete_previous=True)
+            return
+
+        messagebox.showinfo(
+            "새로고침할 수 없음",
+            "현재 목록은 외부 데이터에서 전달된 글감입니다.\n"
+            "주제 입력 또는 다음·시그널·뉴닉·로워드·네이버 버튼으로 진입한 키워드 목록에서 이용해 주세요.",
+        )
 
     def start_analysis(self) -> None:
         keyword = self.topic_entry.get().strip()
@@ -48772,6 +48861,7 @@ class KeywordApp(ctk.CTk):
         self._stop_writing_auto_progress()
         self._reset_writing_section_completion()
         self.current_keyword = keyword
+        self.current_keyword_source = "analysis"
         self.current_insights = []
         self.daum_reference_map = {}
         self.signal_reference_map = {}
@@ -48844,6 +48934,7 @@ class KeywordApp(ctk.CTk):
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "다음 실시간 검색어"
+        self.current_keyword_source = "daum"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -48886,6 +48977,7 @@ class KeywordApp(ctk.CTk):
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "시그널 실시간 검색어"
+        self.current_keyword_source = "signal"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -48928,6 +49020,7 @@ class KeywordApp(ctk.CTk):
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "뉴닉 사회 카테고리"
+        self.current_keyword_source = "newneek"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -48970,6 +49063,7 @@ class KeywordApp(ctk.CTk):
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "네이버 메인 유입 콘텐츠"
+        self.current_keyword_source = "naver"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -49012,6 +49106,7 @@ class KeywordApp(ctk.CTk):
         self.naver_creator_reference_map = {}
         self.collected_reference_map = {}
         self.current_keyword = "로워드 네이버 실시간 검색어"
+        self.current_keyword_source = "loword"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -49050,6 +49145,7 @@ class KeywordApp(ctk.CTk):
         self._arm_writing_auto_progress()
         self._reset_writing_section_completion()
         self.current_keyword = "다른사람글 벤치마킹"
+        self.current_keyword_source = "benchmark"
         self.current_insights = []
         self.selected_keyword_var.set("")
         if hasattr(self, "manual_keyword_entry"):
@@ -51314,6 +51410,7 @@ class KeywordApp(ctk.CTk):
                     keyword = str(payload.get("keyword") or "벤치마킹 블로그 글").strip()
                     reference_text = str(payload.get("reference_text") or "").strip()
                     self.current_keyword = "다른사람글 벤치마킹"
+                    self.current_keyword_source = "benchmark"
                     self.selected_keyword_var.set(keyword)
                     if hasattr(self, "manual_keyword_entry"):
                         self.manual_keyword_entry.delete(0, "end")
