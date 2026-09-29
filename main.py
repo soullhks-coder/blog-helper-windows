@@ -26631,6 +26631,28 @@ class KeywordApp(ctk.CTk):
         self.pending_update_payload = None
         self._schedule_update_probe(5_000)
 
+    def _create_in_app_completion_dialog(
+        self,
+        width: int,
+        height: int,
+    ) -> ctk.CTkFrame:
+        """Create a modal overlay without deactivating the macOS parent window."""
+
+        palette = self._theme_palette()
+        dialog = ctk.CTkFrame(
+            self.main_area,
+            width=width,
+            height=height,
+            corner_radius=22,
+            fg_color=palette["shell"],
+            border_width=2,
+            border_color=palette["border"],
+        )
+        dialog.place(relx=0.5, rely=0.5, anchor="center")
+        dialog.pack_propagate(False)
+        dialog.lift()
+        return dialog
+
     def _show_writing_complete_dialog(self) -> None:
         self._set_writing_progress(
             4,
@@ -26650,15 +26672,11 @@ class KeywordApp(ctk.CTk):
 
         daily_usage_rows = self._writing_completion_daily_publish_usage_rows()
         palette = self._theme_palette()
-        dialog = ctk.CTkToplevel(self)
+        dialog = self._create_in_app_completion_dialog(
+            600,
+            350 + (len(daily_usage_rows) * 34),
+        )
         self.writing_complete_dialog = dialog
-        dialog.title("글작성 완료")
-        dialog.geometry(f"600x{350 + (len(daily_usage_rows) * 34)}")
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.configure(fg_color=palette["shell"])
-        dialog.attributes("-topmost", True)
-        dialog.protocol("WM_DELETE_WINDOW", self._close_writing_complete_dialog_and_reset)
 
         card = ctk.CTkFrame(
             dialog,
@@ -26771,12 +26789,10 @@ class KeywordApp(ctk.CTk):
         )
         confirm_button.grid(row=0, column=1)
 
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
-        dialog.geometry(f"+{x}+{y}")
         dialog.bind("<Return>", lambda _event: self._close_writing_complete_dialog_and_reset())
+        dialog.bind("<Escape>", lambda _event: self._close_writing_complete_dialog_and_reset())
         try:
+            dialog.grab_set()
             dialog.lift()
             confirm_button.focus_set()
         except tk.TclError:
@@ -26820,20 +26836,10 @@ class KeywordApp(ctk.CTk):
             self._close_manual_publish_dialog()
 
         palette = self._theme_palette()
-        dialog = ctk.CTkToplevel(self)
+        dialog = self._create_in_app_completion_dialog(600, 370)
         self.manual_publish_dialog = dialog
         self.manual_publish_dialog_platform = platform
         self.manual_publish_dialog_profile_scope = profile_scope
-        dialog.title("글작성 완료")
-        dialog.geometry("600x370")
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.configure(fg_color=palette["shell"])
-        dialog.attributes("-topmost", True)
-        dialog.protocol(
-            "WM_DELETE_WINDOW",
-            lambda: self._resolve_manual_publish_dialog("cancel"),
-        )
 
         card = ctk.CTkFrame(
             dialog,
@@ -26911,14 +26917,6 @@ class KeywordApp(ctk.CTk):
             command=lambda: self._resolve_manual_publish_dialog("cancel"),
         ).grid(row=0, column=1)
 
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + max(
-            0, (self.winfo_width() - dialog.winfo_width()) // 2
-        )
-        y = self.winfo_rooty() + max(
-            0, (self.winfo_height() - dialog.winfo_height()) // 2
-        )
-        dialog.geometry(f"+{x}+{y}")
         dialog.bind(
             "<Return>",
             lambda _event: self._resolve_manual_publish_dialog("complete"),
@@ -26928,6 +26926,7 @@ class KeywordApp(ctk.CTk):
             lambda _event: self._resolve_manual_publish_dialog("cancel"),
         )
         try:
+            dialog.grab_set()
             dialog.lift()
             complete_button.focus_set()
         except tk.TclError:
@@ -27026,15 +27025,8 @@ class KeywordApp(ctk.CTk):
                 pass
 
         palette = self._theme_palette()
-        dialog = ctk.CTkToplevel(self)
+        dialog = self._create_in_app_completion_dialog(520, 310)
         self.reference_collection_dialog = dialog
-        dialog.title("참고내용 수집 완료")
-        dialog.geometry("520x310")
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.configure(fg_color=palette["shell"])
-        dialog.attributes("-topmost", True)
-        dialog.protocol("WM_DELETE_WINDOW", self._close_reference_collection_dialog)
 
         card = ctk.CTkFrame(
             dialog,
@@ -27078,12 +27070,10 @@ class KeywordApp(ctk.CTk):
         )
         confirm_button.pack(padx=24, pady=(0, 18))
 
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
-        dialog.geometry(f"+{x}+{y}")
         dialog.bind("<Return>", lambda _event: self._close_reference_collection_dialog())
+        dialog.bind("<Escape>", lambda _event: self._close_reference_collection_dialog())
         try:
+            dialog.grab_set()
             dialog.lift()
             confirm_button.focus_set()
         except tk.TclError:
@@ -36186,15 +36176,8 @@ class KeywordApp(ctk.CTk):
             return
 
         palette = self._theme_palette()
-        dialog = ctk.CTkToplevel(self)
+        dialog = self._create_in_app_completion_dialog(600, 430)
         self.naver_kin_complete_dialog = dialog
-        dialog.title("N지식인 자동화 완료")
-        dialog.geometry("600x430")
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.configure(fg_color=palette["shell"])
-        dialog.attributes("-topmost", True)
-        dialog.protocol("WM_DELETE_WINDOW", self._close_naver_kin_complete_dialog)
 
         card = ctk.CTkFrame(
             dialog,
@@ -36309,12 +36292,10 @@ class KeywordApp(ctk.CTk):
         )
         confirm_button.grid(row=0, column=1)
 
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
-        dialog.geometry(f"+{x}+{y}")
         dialog.bind("<Return>", lambda _event: self._close_naver_kin_complete_dialog())
+        dialog.bind("<Escape>", lambda _event: self._close_naver_kin_complete_dialog())
         try:
+            dialog.grab_set()
             dialog.lift()
             confirm_button.focus_set()
         except tk.TclError:

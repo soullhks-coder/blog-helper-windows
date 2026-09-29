@@ -43,9 +43,10 @@ class WritingCompletionFlowTests(unittest.TestCase):
         self.assertIn("command=self._open_completed_published_posts", method_source)
         self.assertIn('text="확인"', method_source)
 
-    def test_informational_completion_dialogs_do_not_disable_parent_window(self) -> None:
+    def test_completion_dialogs_are_in_app_overlays(self) -> None:
         for method_name in (
             "_show_writing_complete_dialog",
+            "_show_manual_publish_completion_dialog",
             "_show_reference_collection_complete_dialog",
             "_show_naver_kin_complete_dialog",
         ):
@@ -53,7 +54,9 @@ class WritingCompletionFlowTests(unittest.TestCase):
                 self.source,
                 self.methods[method_name],
             )
-            self.assertNotIn("grab_set", method_source)
+            self.assertIn("_create_in_app_completion_dialog", method_source)
+            self.assertNotIn("CTkToplevel", method_source)
+            self.assertNotIn("transient", method_source)
             self.assertIn("dialog.lift()", method_source)
 
     def test_view_button_opens_all_completed_platform_urls_then_resets(self) -> None:
