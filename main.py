@@ -3830,6 +3830,106 @@ def create_independent_prompt_set(
     return copied_sets, created
 
 
+PROMPT_BUNDLE_HEADER = "Blog Helper 프롬프트 v1"
+PROMPT_BUNDLE_TITLE_MARKER = "===== 제목 프롬프트 ====="
+PROMPT_BUNDLE_ARTICLE_MARKER = "===== 본문 프롬프트 ====="
+PROMPT_BUNDLE_SINGLE_MARKER = "===== 프롬프트 ====="
+PROMPT_BUNDLE_SET_PLATFORMS = frozenset(
+    ("wordpress", "tistory", "naver_blog", "blogspot")
+)
+PROMPT_BUNDLE_SINGLE_PLATFORMS = frozenset(
+    ("tistory_automation", "naver_kin_automation")
+)
+
+
+def _escape_prompt_bundle_text(value: str) -> str:
+    markers = {
+        PROMPT_BUNDLE_TITLE_MARKER,
+        PROMPT_BUNDLE_ARTICLE_MARKER,
+        PROMPT_BUNDLE_SINGLE_MARKER,
+    }
+    return "\n".join(
+        f"\\{line}" if line.startswith("\\") or line in markers else line
+        for line in str(value).rstrip("\n").split("\n")
+    )
+
+
+def _unescape_prompt_bundle_text(lines: list[str]) -> str:
+    markers = {
+        PROMPT_BUNDLE_TITLE_MARKER,
+        PROMPT_BUNDLE_ARTICLE_MARKER,
+        PROMPT_BUNDLE_SINGLE_MARKER,
+    }
+    return "\n".join(
+        line[1:]
+        if line.startswith("\\") and (line[1:].startswith("\\") or line[1:] in markers)
+        else line
+        for line in lines
+    ).rstrip("\n")
+
+
+def format_prompt_bundle(
+    platform: str,
+    name: str,
+    title_prompt: str,
+    article_prompt: str,
+) -> str:
+    """Make one readable TXT containing the active prompt's full editor content."""
+
+    if platform not in PROMPT_BUNDLE_SET_PLATFORMS | PROMPT_BUNDLE_SINGLE_PLATFORMS:
+        raise ValueError("지원하지 않는 프롬프트 종류입니다.")
+    header = f"{PROMPT_BUNDLE_HEADER}\n플랫폼: {platform}\n이름: {str(name).strip()}\n\n"
+    title_text = _escape_prompt_bundle_text(title_prompt)
+    article_text = _escape_prompt_bundle_text(article_prompt)
+    if platform in PROMPT_BUNDLE_SET_PLATFORMS:
+        return (
+            f"{header}{PROMPT_BUNDLE_TITLE_MARKER}\n"
+            f"{title_text}\n"
+            f"{PROMPT_BUNDLE_ARTICLE_MARKER}\n"
+            f"{article_text}\n"
+        )
+    return f"{header}{PROMPT_BUNDLE_SINGLE_MARKER}\n{article_text}\n"
+
+
+def parse_prompt_bundle(text: str) -> dict[str, str]:
+    """Read the format produced by Copy All and TXT export without executing it."""
+
+    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].lstrip("\ufeff") != PROMPT_BUNDLE_HEADER:
+        raise ValueError("블로그헬퍼 '전체 복사' 또는 'TXT 내보내기' 형식의 파일을 선택해 주세요.")
+    if len(lines) < 5 or not lines[1].startswith("플랫폼: ") or not lines[2].startswith("이름: "):
+        raise ValueError("프롬프트 파일의 플랫폼 또는 이름을 읽을 수 없습니다.")
+    platform = lines[1].removeprefix("플랫폼: ").strip()
+    name = lines[2].removeprefix("이름: ").strip()
+    if platform not in PROMPT_BUNDLE_SET_PLATFORMS | PROMPT_BUNDLE_SINGLE_PLATFORMS:
+        raise ValueError("지원하지 않는 프롬프트 종류입니다.")
+    if platform in PROMPT_BUNDLE_SET_PLATFORMS:
+        try:
+            title_index = lines.index(PROMPT_BUNDLE_TITLE_MARKER, 3)
+            article_index = lines.index(PROMPT_BUNDLE_ARTICLE_MARKER, title_index + 1)
+        except ValueError as exc:
+            raise ValueError("제목·본문 프롬프트 구분선을 찾을 수 없습니다.") from exc
+        title_prompt = _unescape_prompt_bundle_text(lines[title_index + 1:article_index])
+        article_prompt = _unescape_prompt_bundle_text(lines[article_index + 1:])
+        if not name or not title_prompt.strip() or not article_prompt.strip():
+            raise ValueError("프롬프트 이름, 제목, 본문을 모두 입력해 주세요.")
+    else:
+        try:
+            body_index = lines.index(PROMPT_BUNDLE_SINGLE_MARKER, 3)
+        except ValueError as exc:
+            raise ValueError("프롬프트 구분선을 찾을 수 없습니다.") from exc
+        title_prompt = ""
+        article_prompt = _unescape_prompt_bundle_text(lines[body_index + 1:])
+        if not article_prompt.strip():
+            raise ValueError("프롬프트 내용을 입력해 주세요.")
+    return {
+        "platform": platform,
+        "name": name,
+        "title_prompt": title_prompt,
+        "article_prompt": article_prompt,
+    }
+
+
 def restore_single_prompt_set_defaults(
     prompt_sets: list[dict],
     platform: str,
@@ -39007,7 +39107,7 @@ class KeywordApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             header,
-            text=f"프롬프트는 데스크톱의 '{PROMPT_DIR.name}' 바로가기에서 TXT 파일로 관리합니다.",
+            text="선택한 프롬프트를 한 번에 복사·붙여넣거나 TXT 파일로 내보내고 불러올 수 있습니다.",
             text_color="#a7b3c4",
             font=ctk.CTkFont(size=14),
         )
@@ -39023,7 +39123,7 @@ class KeywordApp(ctk.CTk):
         self.prompts_scroll = prompt_card
         prompt_card.grid(row=1, column=0, padx=28, pady=(0, 26), sticky="nsew")
         prompt_card.grid_columnconfigure(0, weight=1)
-        prompt_card.grid_rowconfigure(1, weight=1)
+        prompt_card.grid_rowconfigure(2, weight=1)
 
         self.prompt_tab_buttons: dict[str, ctk.CTkButton] = {}
         self.prompt_platform_frames: dict[str, ctk.CTkFrame] = {}
@@ -39048,7 +39148,7 @@ class KeywordApp(ctk.CTk):
             ("tistory_automation", "티스토리 자동화"),
             ("naver_kin_automation", "N지식인자동화"),
         )
-        for column_index in range(len(prompt_tabs)):
+        for column_index in range(3):
             tab_row.grid_columnconfigure(column_index, weight=1, uniform="prompt_tabs")
         for index, (platform, label) in enumerate(prompt_tabs):
             button = ctk.CTkButton(
@@ -39064,15 +39164,57 @@ class KeywordApp(ctk.CTk):
                 command=lambda target=platform: self._switch_prompt_platform(target),
             )
             button.grid(
-                row=0,
-                column=index,
-                padx=(0 if index == 0 else 6, 0 if index == len(prompt_tabs) - 1 else 6),
+                row=index // 3,
+                column=index % 3,
+                padx=(0 if index % 3 == 0 else 4, 0 if index % 3 == 2 else 4),
+                pady=(0, 6) if index < 3 else (0, 0),
                 sticky="ew",
             )
             self.prompt_tab_buttons[platform] = button
 
+        tool_row = ctk.CTkFrame(prompt_card, fg_color="#1b2533", corner_radius=16)
+        tool_row.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="ew")
+        self.prompt_action_buttons: dict[str, ctk.CTkButton] = {}
+        prompt_actions = (
+            ("copy", "전체 복사", self._copy_current_prompt_bundle),
+            ("paste", "전체 붙여넣기", self._paste_prompt_bundle),
+            ("export", "TXT 내보내기", self._export_current_prompt_bundle),
+            ("import", "TXT 불러오기", self._import_prompt_bundle),
+        )
+        for column_index in range(2):
+            tool_row.grid_columnconfigure(column_index, weight=1, uniform="prompt_actions")
+        for action_index, (action, label, command) in enumerate(prompt_actions):
+            button = ctk.CTkButton(
+                tool_row,
+                text=label,
+                width=0,
+                height=40,
+                corner_radius=12,
+                fg_color="#314761",
+                hover_color="#3f5c7f",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                command=command,
+            )
+            button.grid(
+                row=action_index // 2,
+                column=action_index % 2,
+                padx=(12, 4) if action_index % 2 == 0 else (4, 12),
+                pady=(12, 6) if action_index < 2 else (0, 6),
+                sticky="ew",
+            )
+            self.prompt_action_buttons[action] = button
+        ctk.CTkLabel(
+            tool_row,
+            text="현재 선택한 항목의 편집 내용을 사용합니다. 붙여넣기·불러오기는 편집칸에 적용되며 저장 버튼을 눌러 확정합니다.",
+            text_color="#9aa7bb",
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+            justify="left",
+            wraplength=450,
+        ).grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="ew")
+
         platform_holder = ctk.CTkFrame(prompt_card, fg_color="transparent")
-        platform_holder.grid(row=1, column=0, sticky="nsew")
+        platform_holder.grid(row=2, column=0, sticky="nsew")
         platform_holder.grid_columnconfigure(0, weight=1)
         platform_holder.grid_rowconfigure(0, weight=1)
 
@@ -39096,7 +39238,7 @@ class KeywordApp(ctk.CTk):
                 text="프롬프트 제목",
                 text_color="#cbd6e6",
                 font=ctk.CTkFont(size=14, weight="bold"),
-            ).grid(row=0, column=0, padx=(16, 10), pady=14, sticky="w")
+            ).grid(row=0, column=0, padx=(16, 10), pady=(14, 8), sticky="w")
 
             name_entry = ctk.CTkEntry(
                 control_row,
@@ -39107,14 +39249,14 @@ class KeywordApp(ctk.CTk):
                 placeholder_text="예: 후기리뷰, 축제공연",
                 font=ctk.CTkFont(size=14, weight="bold"),
             )
-            name_entry.grid(row=0, column=1, padx=(0, 10), pady=14, sticky="ew")
+            name_entry.grid(row=0, column=1, padx=(0, 16), pady=(14, 8), sticky="ew")
             name_entry.bind("<KeyRelease>", self._on_prompt_text_changed)
             self.prompt_name_entries[platform] = name_entry
 
             menu = ctk.CTkOptionMenu(
                 control_row,
                 values=["기본"],
-                width=180,
+                width=0,
                 height=40,
                 corner_radius=12,
                 fg_color="#314761",
@@ -39123,44 +39265,48 @@ class KeywordApp(ctk.CTk):
                 font=ctk.CTkFont(size=14, weight="bold"),
                 command=lambda _value, target=platform: self._select_prompt_set_from_menu(target),
             )
-            menu.grid(row=0, column=2, padx=(0, 8), pady=14, sticky="e")
+            menu.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 8), sticky="ew")
             self.prompt_set_menus[platform] = menu
 
+            set_actions = ctk.CTkFrame(control_row, fg_color="transparent")
+            set_actions.grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
+            for action_column in range(3):
+                set_actions.grid_columnconfigure(action_column, weight=1, uniform="prompt_set_actions")
             ctk.CTkButton(
-                control_row,
+                set_actions,
                 text="추가",
-                width=72,
+                width=0,
                 height=40,
                 corner_radius=12,
                 fg_color="#1faa4a",
                 hover_color="#16913e",
                 font=ctk.CTkFont(size=14, weight="bold"),
                 command=lambda target=platform: self._add_prompt_set(target),
-            ).grid(row=0, column=3, padx=(0, 8), pady=14, sticky="e")
+            ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
             ctk.CTkButton(
-                control_row,
+                set_actions,
                 text="삭제",
-                width=72,
+                width=0,
                 height=40,
                 corner_radius=12,
                 fg_color="#596579",
                 hover_color="#6a768b",
                 font=ctk.CTkFont(size=14, weight="bold"),
                 command=lambda target=platform: self._delete_prompt_set(target),
-            ).grid(row=0, column=5, padx=(0, 16), pady=14, sticky="e")
+            ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
             ctk.CTkButton(
-                control_row,
+                set_actions,
                 text="수정",
-                width=72,
+                width=0,
                 height=40,
                 corner_radius=12,
                 fg_color="#3b73f6",
                 hover_color="#2f61d2",
                 font=ctk.CTkFont(size=14, weight="bold"),
                 command=lambda target=platform: self._update_prompt_set(target),
-            ).grid(row=0, column=4, padx=(0, 8), pady=14, sticky="e")
+            ).grid(row=0, column=1, padx=4, sticky="ew")
 
             title_prompt_label = ctk.CTkLabel(
                 frame,
@@ -39273,7 +39419,7 @@ class KeywordApp(ctk.CTk):
         self._switch_prompt_platform("wordpress")
 
         button_row = ctk.CTkFrame(prompt_card, fg_color="transparent")
-        button_row.grid(row=2, column=0, padx=24, pady=(0, 22), sticky="ew")
+        button_row.grid(row=3, column=0, padx=24, pady=(0, 22), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
 
         save_button = ctk.CTkButton(
@@ -39303,7 +39449,7 @@ class KeywordApp(ctk.CTk):
 
         open_folder_button = ctk.CTkButton(
             button_row,
-            text="TXT 폴더 열기",
+            text="저장 폴더 열기",
             width=170,
             height=52,
             corner_radius=16,
@@ -39320,7 +39466,7 @@ class KeywordApp(ctk.CTk):
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.prompt_feedback_label.grid(row=3, column=0, padx=24, pady=(0, 22), sticky="w")
+        self.prompt_feedback_label.grid(row=4, column=0, padx=24, pady=(0, 22), sticky="w")
 
     def _prompt_textarea(self, parent, row: int, height: int, sticky: str = "ew") -> tk.Text:
         frame = ctk.CTkFrame(parent, fg_color="#111826", corner_radius=16)
@@ -48661,6 +48807,131 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
         self.codex_status_label.configure(text="● Codex CLI 초기화 완료", text_color="#9aa7bb")
         self._update_quick_status("Codex CLI 초기화", "기본 Codex CLI 경로로 되돌렸습니다.", "#9aa7bb")
+
+    def _current_prompt_bundle(self) -> tuple[str, str]:
+        """Return the active editor as one importable TXT document and file name."""
+
+        platform = self.active_prompt_platform
+        labels = {
+            "wordpress": "워드프레스",
+            "tistory": "티스토리",
+            "naver_blog": "N블로그",
+            "blogspot": "블로그스팟",
+            "tistory_automation": "티스토리 자동화",
+            "naver_kin_automation": "N지식인자동화",
+        }
+        if platform in self.prompt_title_boxes:
+            name = self.prompt_name_entries[platform].get().strip() or "기본"
+            title_prompt = self.prompt_title_boxes[platform].get("1.0", "end-1c")
+            article_prompt = self.prompt_article_boxes[platform].get("1.0", "end-1c")
+        elif platform == "tistory_automation" and self.tistory_automation_prompt_box:
+            name = labels[platform]
+            title_prompt = ""
+            article_prompt = self.tistory_automation_prompt_box.get("1.0", "end-1c")
+        elif platform == "naver_kin_automation" and self.naver_kin_answer_prompt_box:
+            name = labels[platform]
+            title_prompt = ""
+            article_prompt = self.naver_kin_answer_prompt_box.get("1.0", "end-1c")
+        else:
+            raise ValueError("복사할 프롬프트를 선택해 주세요.")
+        safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", name).strip(". ")[:80] or "프롬프트"
+        file_name = f"{labels[platform]}-{safe_name}.txt"
+        return format_prompt_bundle(platform, name, title_prompt, article_prompt), file_name
+
+    def _copy_current_prompt_bundle(self) -> None:
+        try:
+            contents, _ = self._current_prompt_bundle()
+            self.clipboard_clear()
+            self.clipboard_append(contents)
+            self.prompt_feedback_label.configure(
+                text="현재 프롬프트의 제목·본문 전체를 복사했습니다.",
+                text_color="#48d980",
+            )
+        except (ValueError, tk.TclError) as exc:
+            messagebox.showerror("전체 복사 실패", str(exc))
+
+    def _apply_prompt_bundle_to_editor(self, contents: str) -> None:
+        if len(contents) > 2_000_000:
+            raise ValueError("프롬프트 파일이 너무 큽니다. 2MB 이하의 TXT를 선택해 주세요.")
+        imported = parse_prompt_bundle(contents)
+        platform = self.active_prompt_platform
+        if imported["platform"] != platform:
+            raise ValueError("현재 선택한 탭과 프롬프트 파일의 플랫폼이 다릅니다.")
+        if platform in self.prompt_title_boxes:
+            name_entry = self.prompt_name_entries[platform]
+            name_entry.delete(0, "end")
+            name_entry.insert(0, imported["name"])
+            title_box = self.prompt_title_boxes[platform]
+            title_box.delete("1.0", "end")
+            title_box.insert("1.0", imported["title_prompt"])
+            article_box = self.prompt_article_boxes[platform]
+            article_box.delete("1.0", "end")
+            article_box.insert("1.0", imported["article_prompt"])
+        else:
+            prompt_box = (
+                self.tistory_automation_prompt_box
+                if platform == "tistory_automation"
+                else self.naver_kin_answer_prompt_box
+            )
+            if prompt_box is None:
+                raise ValueError("편집할 프롬프트 입력칸을 찾을 수 없습니다.")
+            prompt_box.delete("1.0", "end")
+            prompt_box.insert("1.0", imported["article_prompt"])
+        if self._prompt_feedback_job is not None:
+            self.after_cancel(self._prompt_feedback_job)
+            self._prompt_feedback_job = None
+        self.prompt_feedback_label.configure(
+            text="편집칸에 적용했습니다. '프롬프트 저장'을 눌러 확정해 주세요.",
+            text_color="#f4c95d",
+        )
+
+    def _paste_prompt_bundle(self) -> None:
+        try:
+            self._apply_prompt_bundle_to_editor(self.clipboard_get())
+        except (ValueError, tk.TclError) as exc:
+            messagebox.showerror("전체 붙여넣기 실패", str(exc))
+
+    def _export_current_prompt_bundle(self) -> None:
+        try:
+            contents, file_name = self._current_prompt_bundle()
+        except ValueError as exc:
+            messagebox.showerror("TXT 내보내기 실패", str(exc))
+            return
+        selected_path = filedialog.asksaveasfilename(
+            title="현재 프롬프트 전체를 TXT로 내보내기",
+            initialdir=str(DESKTOP_DIR),
+            initialfile=file_name,
+            defaultextension=".txt",
+            filetypes=[("텍스트 파일", "*.txt")],
+        )
+        if not selected_path:
+            return
+        try:
+            destination = Path(selected_path)
+            destination.write_text(contents, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("TXT 내보내기 실패", str(exc))
+            return
+        self.prompt_feedback_label.configure(
+            text=f"TXT로 내보냈습니다: {destination}",
+            text_color="#48d980",
+        )
+
+    def _import_prompt_bundle(self) -> None:
+        selected_path = filedialog.askopenfilename(
+            title="현재 선택한 프롬프트에 TXT 불러오기",
+            initialdir=str(DESKTOP_DIR),
+            filetypes=[("텍스트 파일", "*.txt")],
+        )
+        if not selected_path:
+            return
+        try:
+            source = Path(selected_path)
+            if source.stat().st_size > 2_000_000:
+                raise ValueError("프롬프트 파일이 너무 큽니다. 2MB 이하의 TXT를 선택해 주세요.")
+            self._apply_prompt_bundle_to_editor(source.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            messagebox.showerror("TXT 불러오기 실패", str(exc))
 
     def _save_prompt_settings(self) -> None:
         try:

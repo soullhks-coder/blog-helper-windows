@@ -869,6 +869,50 @@ def main() -> None:
             assert_segmented_contrast(app.public_data_source_switch)
             app.public_data_source_switch._buttons_dict["구석구석 축제"].invoke()
             screenshot("public-data")
+
+            app._switch_page("prompts")
+            app.geometry("860x680+30+35")
+            settle(260)
+            for button in app.prompt_action_buttons.values():
+                assert button.winfo_ismapped()
+                assert (
+                    button.winfo_rootx() + button.winfo_width()
+                    <= app.prompts_scroll.winfo_rootx() + app.prompts_scroll.winfo_width() + 2
+                )
+            name_entry = app.prompt_name_entries["wordpress"]
+            title_box = app.prompt_title_boxes["wordpress"]
+            article_box = app.prompt_article_boxes["wordpress"]
+            name_entry.delete(0, "end")
+            name_entry.insert(0, "축제전용")
+            title_box.delete("1.0", "end")
+            title_box.insert("1.0", "축제 제목 지침")
+            article_box.delete("1.0", "end")
+            article_box.insert("1.0", "축제 본문 지침\n둘째 줄")
+            app.prompt_action_buttons["copy"].invoke()
+            copied = app_module.parse_prompt_bundle(app.clipboard_get())
+            assert copied["name"] == "축제전용"
+            assert copied["title_prompt"] == "축제 제목 지침"
+            assert copied["article_prompt"] == "축제 본문 지침\n둘째 줄"
+            article_box.delete("1.0", "end")
+            app.prompt_action_buttons["paste"].invoke()
+            assert article_box.get("1.0", "end-1c") == "축제 본문 지침\n둘째 줄"
+            export_path = Path(directory) / "축제전용.txt"
+            with patch.object(
+                app_module.filedialog,
+                "asksaveasfilename",
+                return_value=str(export_path),
+            ):
+                app.prompt_action_buttons["export"].invoke()
+            assert export_path.read_text(encoding="utf-8") == app.clipboard_get()
+            article_box.delete("1.0", "end")
+            with patch.object(
+                app_module.filedialog,
+                "askopenfilename",
+                return_value=str(export_path),
+            ):
+                app.prompt_action_buttons["import"].invoke()
+            assert article_box.get("1.0", "end-1c") == "축제 본문 지침\n둘째 줄"
+            screenshot("prompt-bundle-tools")
             assert not errors, errors
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:
