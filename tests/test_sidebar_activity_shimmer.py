@@ -68,10 +68,16 @@ class SidebarActivityShimmerTests(unittest.TestCase):
         labels_source = inspect.getsource(main.KeywordApp._apply_sidebar_menu_labels)
 
         self.assertIn('mode="indeterminate"', build_source)
+        self.assertIn("self.sidebar_frame", build_source)
+        self.assertNotIn("ctk.CTkProgressBar(\n                button,", build_source)
+        self.assertIn("in_=button", refresh_source)
         self.assertIn("shimmer.start()", refresh_source)
         self.assertIn("shimmer.stop()", refresh_source)
+        self.assertNotIn("shimmer.configure(", refresh_source)
+        self.assertNotIn("_apply_sidebar_menu_labels", refresh_source)
         self.assertNotIn("진행 중", labels_source)
         self.assertIn("text=normalized[page_name]", labels_source)
+        self.assertNotIn("ctk.CTkFont", labels_source)
 
 
 if __name__ == "__main__":

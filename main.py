@@ -26297,6 +26297,7 @@ class KeywordApp(ctk.CTk):
         self._sidebar_activity_job = None
         self._sidebar_activity_states: dict[str, bool] = {}
         self._sidebar_activity_bars: dict[str, ctk.CTkProgressBar] = {}
+        self._sidebar_activity_buttons: dict[str, ctk.CTkButton] = {}
         self._home_platform_logo_cache: dict[str, ctk.CTkImage] = {}
         self._bootstrap_icon_font = None
         self._last_text_input_at = 0.0
@@ -27809,6 +27810,7 @@ class KeywordApp(ctk.CTk):
         self._sidebar_activity_job = None
         self._sidebar_activity_states = {}
         self._sidebar_activity_bars = {}
+        self._sidebar_activity_buttons = {}
         refresh_job = getattr(self, "_automation_queue_refresh_job", None)
         if refresh_job is not None:
             try:
@@ -31079,11 +31081,12 @@ class KeywordApp(ctk.CTk):
         }
         for page_name, button_name in button_names.items():
             button = getattr(self, button_name, None)
-            if button is not None:
-                button.configure(
-                    text=normalized[page_name],
-                    font=ctk.CTkFont(size=19, weight="bold"),
-                )
+            if button is not None and button.cget("text") != normalized[page_name]:
+                # Keep the existing CTkFont and canvas. Recreating the font on
+                # every background task transition can redraw every sidebar
+                # button while the macOS window is inactive, exposing the
+                # native gray Tk canvas behind the labels.
+                button.configure(text=normalized[page_name])
 
     def _refresh_sidebar_navigation_styles(self) -> None:
         """Keep macOS inactive-window rendering from exposing native gray fills."""
@@ -31214,9 +31217,14 @@ class KeywordApp(ctk.CTk):
         }
         self._sidebar_activity_states = {name: False for name in button_map}
         self._sidebar_activity_bars = {}
+        self._sidebar_activity_buttons = dict(button_map)
         for page_name, button in button_map.items():
+            # The progress animation must not be a child of CTkButton. On
+            # macOS, a child canvas repaint can invalidate the button canvas
+            # while Chrome/Playwright owns focus and leave a native gray block
+            # around the otherwise-white icon and label.
             shimmer = ctk.CTkProgressBar(
-                button,
+                self.sidebar_frame,
                 height=4,
                 corner_radius=4,
                 mode="indeterminate",
@@ -31233,29 +31241,26 @@ class KeywordApp(ctk.CTk):
         if getattr(self, "_app_closing", False):
             return
         states = self._sidebar_activity_map()
-        changed = states != getattr(self, "_sidebar_activity_states", {})
-        palette = self._theme_palette()
         previous_states = dict(getattr(self, "_sidebar_activity_states", {}))
         for page_name, shimmer in getattr(self, "_sidebar_activity_bars", {}).items():
             active = bool(states.get(page_name, False))
-            shimmer.configure(
-                fg_color=palette["divider"],
-                progress_color=palette["accent"],
-            )
             if active and not previous_states.get(page_name, False):
+                button = self._sidebar_activity_buttons.get(page_name)
+                if button is None:
+                    continue
                 shimmer.place(
+                    in_=button,
                     relx=0.08,
                     rely=0.91,
                     relwidth=0.84,
                     anchor="w",
                 )
+                shimmer.lift()
                 shimmer.start()
             elif not active and previous_states.get(page_name, False):
                 shimmer.stop()
                 shimmer.place_forget()
         self._sidebar_activity_states = states
-        if changed:
-            self._apply_sidebar_menu_labels()
         self._sidebar_activity_job = self.after(
             220,
             self._refresh_sidebar_activity_shimmers,
@@ -45879,7 +45884,13 @@ class KeywordApp(ctk.CTk):
         if page_name not in self._page_frame_map():
             page_name = "home"
         self.current_page = page_name
-        self._refresh_sidebar_navigation_styles()
+        refresh_sidebar_styles = getattr(
+            self,
+            "_refresh_sidebar_navigation_styles",
+            None,
+        )
+        if callable(refresh_sidebar_styles):
+            refresh_sidebar_styles()
         if hasattr(self, "_apply_sidebar_menu_icons"):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)

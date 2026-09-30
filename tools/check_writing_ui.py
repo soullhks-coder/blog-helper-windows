@@ -81,6 +81,57 @@ def main() -> None:
                 x, y = app.winfo_rootx(), app.winfo_rooty()
                 ImageGrab.grab(bbox=(x, y, x + app.winfo_width(), y + app.winfo_height())).save(destination)
 
+        def screenshot_inactive(name):
+            """Capture the macOS app after another process owns focus."""
+            if not args.screenshots or sys.platform != "darwin":
+                return
+            args.screenshots.mkdir(parents=True, exist_ok=True)
+            app.update()
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Finder" to activate'],
+                check=True,
+            )
+            settle(350)
+            destination = args.screenshots / f"writing-{args.theme}-{name}.png"
+            area = f"{app.winfo_rootx()},{app.winfo_rooty()},{app.winfo_width()},{app.winfo_height()}"
+            subprocess.run(["screencapture", "-x", "-R", area, str(destination)], check=True)
+            from PIL import Image as PILImage
+
+            captured = PILImage.open(destination).convert("RGB")
+            palette = app._theme_palette()
+            button_pages = {
+                "home_nav_button": "home",
+                "writing_nav_button": "writing",
+                "automation_nav_button": "automation",
+                "naver_blog_nav_button": "naver_blog",
+                "naver_kin_nav_button": "naver_kin",
+                "public_data_nav_button": "public_data",
+                "prompt_nav_button": "prompts",
+                "settings_nav_button": "settings",
+            }
+            for button_name, page_name in button_pages.items():
+                button = getattr(app, button_name)
+                sample_x = button.winfo_rootx() - app.winfo_rootx() + 2
+                sample_y = button.winfo_rooty() - app.winfo_rooty() + (button.winfo_height() // 2)
+                actual = captured.getpixel((sample_x, sample_y))
+                expected_color = (
+                    palette["selected"]
+                    if page_name == app.current_page
+                    else palette["sidebar"]
+                ).lstrip("#")
+                expected_rgb = tuple(
+                    int(expected_color[index:index + 2], 16)
+                    for index in (0, 2, 4)
+                )
+                assert all(abs(actual[channel] - expected_rgb[channel]) <= 3 for channel in range(3)), (
+                    button_name,
+                    actual,
+                    expected_rgb,
+                )
+            app.lift()
+            app.focus_force()
+            settle(120)
+
         def resolved_color(widget, option):
             value = widget.cget(option)
             try:
@@ -190,6 +241,7 @@ def main() -> None:
             for page_name in ("writing", "naver_blog", "naver_kin"):
                 assert app._sidebar_activity_states[page_name]
                 assert app._sidebar_activity_bars[page_name].winfo_ismapped()
+                assert app._sidebar_activity_bars[page_name].master is app.sidebar_frame
             assert app.writing_nav_button.cget("text") == "블로그글쓰기"
             assert app.naver_blog_nav_button.cget("text") == "N블로그자동화"
             assert app.naver_kin_nav_button.cget("text") == "N지식인자동화"
@@ -203,6 +255,27 @@ def main() -> None:
                 not bar.winfo_ismapped()
                 for bar in app._sidebar_activity_bars.values()
             )
+            sidebar_palette = app._theme_palette()
+            for page_name, button_name in {
+                "home": "home_nav_button",
+                "writing": "writing_nav_button",
+                "automation": "automation_nav_button",
+                "naver_blog": "naver_blog_nav_button",
+                "naver_kin": "naver_kin_nav_button",
+                "public_data": "public_data_nav_button",
+                "prompts": "prompt_nav_button",
+                "settings": "settings_nav_button",
+            }.items():
+                sidebar_button = getattr(app, button_name)
+                expected_fill = (
+                    sidebar_palette["selected"]
+                    if page_name == app.current_page
+                    else sidebar_palette["sidebar"]
+                )
+                assert resolved_color(sidebar_button, "bg_color") == sidebar_palette["sidebar"]
+                assert resolved_color(sidebar_button, "fg_color") == expected_fill
+                assert resolved_color(sidebar_button._canvas, "bg") == sidebar_palette["sidebar"]
+            screenshot("activity-shimmers-stopped")
 
             app._switch_page("settings")
             app._switch_settings_section("ai")
@@ -716,6 +789,12 @@ def main() -> None:
             app._switch_page("writing")
             app.geometry("970x680+30+35")
             settle(260)
+            app.article_worker = RunningWorker()
+            settle(320)
+            assert app._sidebar_activity_bars["writing"].winfo_ismapped()
+            app.article_worker = None
+            settle(320)
+            assert not app._sidebar_activity_bars["writing"].winfo_ismapped()
             app.writing_completion_platforms = ["tistory"]
             app._show_writing_complete_dialog()
             settle(220)
@@ -727,6 +806,7 @@ def main() -> None:
                 for button_name in sidebar_button_names.values()
             )
             screenshot("writing-complete-dialog")
+            screenshot_inactive("writing-complete-dialog-inactive")
             app._close_writing_complete_dialog_and_reset()
             settle(120)
             app.geometry("1500x1000+30+35")
