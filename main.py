@@ -27716,6 +27716,7 @@ class KeywordApp(ctk.CTk):
             self.sidebar_frame.configure(fg_color=palette["sidebar"])
             self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
             self.sidebar_version_label.configure(text_color=palette["muted"])
+            self._refresh_sidebar_navigation_styles()
             scroll_names_by_page = {
                 "home": ("home_scroll",),
                 "writing": ("writing_scroll", "keyword_choice_frame"),
@@ -31084,6 +31085,45 @@ class KeywordApp(ctk.CTk):
                     font=ctk.CTkFont(size=19, weight="bold"),
                 )
 
+    def _refresh_sidebar_navigation_styles(self) -> None:
+        """Keep macOS inactive-window rendering from exposing native gray fills."""
+
+        palette = self._theme_palette()
+        active_page = getattr(self, "current_page", "home")
+        button_names = {
+            "home": "home_nav_button",
+            "writing": "writing_nav_button",
+            "automation": "automation_nav_button",
+            "naver_blog": "naver_blog_nav_button",
+            "naver_kin": "naver_kin_nav_button",
+            "public_data": "public_data_nav_button",
+            "prompts": "prompt_nav_button",
+            "settings": "settings_nav_button",
+        }
+        for page_name, button_name in button_names.items():
+            button = getattr(self, button_name, None)
+            if button is None:
+                continue
+            selected = page_name == active_page
+            fill_color = palette["selected"] if selected else palette["sidebar"]
+            text_color = palette["accent"] if selected else palette["muted"]
+            try:
+                # A transparent CTkButton can expose a native gray canvas when
+                # macOS moves focus to Chrome or another window. Explicitly
+                # painting both widget layers keeps the sidebar stable.
+                button.configure(
+                    bg_color=palette["sidebar"],
+                    fg_color=fill_color,
+                    hover=False,
+                    hover_color=fill_color,
+                    border_width=0,
+                    text_color=text_color,
+                    text_color_disabled=text_color,
+                )
+                button._on_leave()
+            except (AttributeError, tk.TclError):
+                continue
+
     @staticmethod
     def _worker_is_running(worker) -> bool:
         if worker is None:
@@ -31163,6 +31203,7 @@ class KeywordApp(ctk.CTk):
                 button._on_leave()
             except (AttributeError, tk.TclError):
                 continue
+        self._refresh_sidebar_navigation_styles()
 
     def _build_sidebar_activity_shimmers(self) -> None:
         palette = self._theme_palette()
@@ -45838,30 +45879,7 @@ class KeywordApp(ctk.CTk):
         if page_name not in self._page_frame_map():
             page_name = "home"
         self.current_page = page_name
-        palette = self._theme_palette() if hasattr(self, "_theme_palette") else {
-            "accent": "#6dadff",
-            "muted": "#9aa7bb",
-            "selected": "#0f1724",
-            "hover": "#111826",
-        }
-        nav_buttons = {
-            "writing": self.writing_nav_button,
-            "automation": self.automation_nav_button,
-            "naver_blog": self.naver_blog_nav_button,
-            "naver_kin": self.naver_kin_nav_button,
-            "public_data": self.public_data_nav_button,
-            "prompts": self.prompt_nav_button,
-            "settings": self.settings_nav_button,
-        }
-        home_nav_button = getattr(self, "home_nav_button", None)
-        if home_nav_button is not None:
-            nav_buttons = {"home": home_nav_button, **nav_buttons}
-        for name, button in nav_buttons.items():
-            button.configure(
-                text_color=palette["accent"] if name == page_name else palette["muted"],
-                fg_color=palette["selected"] if name == page_name else "transparent",
-                hover_color=palette["hover"],
-            )
+        self._refresh_sidebar_navigation_styles()
         if hasattr(self, "_apply_sidebar_menu_icons"):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)

@@ -11,15 +11,17 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-09-30",
-        "version": "v1.1.194",
+        "version": "v1.1.194–v1.1.195",
         "category": "환경설정",
-        "title": "Codex CLI GPT-6 Astra 모델 선택",
-        "request": "Codex CLI 업데이트 후 서비스 연동의 모델 선택 목록에서도 GPT-6 Astra를 직접 고를 수 있게 해달라는 요청",
+        "title": "Codex Astra와 화이트테마 사이드바 안정화",
+        "request": "서비스 연동에서 GPT-6 Astra를 직접 선택하고, 화이트테마에서 간헐적으로 왼쪽 메뉴가 회색 블록처럼 보이는 현상을 없애달라는 요청",
         "changes": (
             "환경설정 > 서비스 연동 > Codex CLI 모델 드롭다운에 gpt-6-astra 추가",
             "Astra 선택값을 기존 설정 저장·복원 흐름에 연결",
             "글 생성 시 선택한 Astra가 --model gpt-6-astra 인자로 정확히 전달되는지 회귀 테스트 추가",
             "Codex CLI 0.159.1에서 Astra 한국어 글 생성과 기존 모델 캐시 오류 해소 확인",
+            "macOS에서 다른 창으로 포커스가 이동해도 사이드바의 투명 배경이 회색 네이티브 배경으로 바뀌지 않도록 실제 테마색으로 고정",
+            "페이지 전환과 지연 테마 재도색마다 선택·미선택 메뉴의 배경, 글자색, 내부 캔버스를 다시 정규화",
         ),
     },
     {

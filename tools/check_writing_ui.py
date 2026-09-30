@@ -702,6 +702,17 @@ def main() -> None:
                 getattr(app, button_name).cget("hover") is False
                 for button_name in sidebar_button_names.values()
             )
+            sidebar_palette = app._theme_palette()
+            for page_name, button_name in sidebar_button_names.items():
+                sidebar_button = getattr(app, button_name)
+                expected_fill = (
+                    sidebar_palette["selected"]
+                    if page_name == app.current_page
+                    else sidebar_palette["sidebar"]
+                )
+                assert resolved_color(sidebar_button, "bg_color") == sidebar_palette["sidebar"]
+                assert resolved_color(sidebar_button, "fg_color") == expected_fill
+                assert resolved_color(sidebar_button._canvas, "bg") == sidebar_palette["sidebar"]
             app._switch_page("writing")
             app.geometry("970x680+30+35")
             settle(260)
@@ -727,6 +738,15 @@ def main() -> None:
                 settle(80)
                 selected_nav = getattr(app, sidebar_button_names[page_name])
                 assert resolved_color(selected_nav, "text_color") == app._theme_palette()["accent"]
+                for candidate_page, button_name in sidebar_button_names.items():
+                    sidebar_button = getattr(app, button_name)
+                    expected_fill = (
+                        app._theme_palette()["selected"]
+                        if candidate_page == page_name
+                        else app._theme_palette()["sidebar"]
+                    )
+                    assert resolved_color(sidebar_button, "bg_color") == app._theme_palette()["sidebar"]
+                    assert resolved_color(sidebar_button, "fg_color") == expected_fill
                 assert_white_button_contrast(page_frame)
             app._switch_page("automation")
             settle(220)
