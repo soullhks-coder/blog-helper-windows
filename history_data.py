@@ -10,6 +10,19 @@ from __future__ import annotations
 
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
+        "date": "2026-09-30",
+        "version": "v1.1.194",
+        "category": "환경설정",
+        "title": "Codex CLI GPT-6 Astra 모델 선택",
+        "request": "Codex CLI 업데이트 후 서비스 연동의 모델 선택 목록에서도 GPT-6 Astra를 직접 고를 수 있게 해달라는 요청",
+        "changes": (
+            "환경설정 > 서비스 연동 > Codex CLI 모델 드롭다운에 gpt-6-astra 추가",
+            "Astra 선택값을 기존 설정 저장·복원 흐름에 연결",
+            "글 생성 시 선택한 Astra가 --model gpt-6-astra 인자로 정확히 전달되는지 회귀 테스트 추가",
+            "Codex CLI 0.159.1에서 Astra 한국어 글 생성과 기존 모델 캐시 오류 해소 확인",
+        ),
+    },
+    {
         "date": "2026-09-29",
         "version": "v1.1.188–v1.1.193",
         "category": "블로그글쓰기",

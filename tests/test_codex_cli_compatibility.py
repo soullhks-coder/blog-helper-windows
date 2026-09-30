@@ -27,6 +27,17 @@ class CodexCLICompatibilityTests(unittest.TestCase):
         self.assertNotIn("--model", command)
         self.assertEqual(command.count("exec"), 1)
 
+    def test_astra_is_available_and_forwarded(self) -> None:
+        self.assertIn("gpt-6-astra", main.CODEX_MODEL_OPTIONS)
+        settings = main.WordPressSettings(codex_cli_model="gpt-6-astra")
+        command = main.build_codex_exec_command(
+            settings,
+            "/tmp/codex",
+            Path("/tmp/output.txt"),
+            "hello",
+        )
+        self.assertEqual(command[command.index("--model") + 1], "gpt-6-astra")
+
     def test_legacy_full_command_is_sanitized(self) -> None:
         settings = main.WordPressSettings(
             codex_cli_model="gpt-5.6-sol",

@@ -381,6 +381,7 @@ TISTORY_SAVE_MODE_OPTIONS = (
 CODEX_MODEL_AUTO = "자동 (CLI 기본 모델, 권장)"
 CODEX_MODEL_OPTIONS = (
     CODEX_MODEL_AUTO,
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
