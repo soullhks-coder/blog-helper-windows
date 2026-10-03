@@ -605,10 +605,9 @@ def main() -> None:
                     <= app.home_prompt_frame.winfo_rootx() + 2
                 ), geometry
                 home_canvas = app.home_control_canvas
-                if geometry.startswith("1500"):
-                    assert not app.home_control_scrollbar.winfo_ismapped()
-                else:
-                    assert app.home_control_scrollbar.winfo_ismapped()
+                needs_scroll = app.home_control_top.winfo_reqwidth() > home_canvas.winfo_width() + 2
+                assert bool(app.home_control_scrollbar.winfo_ismapped()) == needs_scroll
+                if needs_scroll:
                     assert home_canvas.xview()[1] - home_canvas.xview()[0] < 1
                     home_canvas.xview_moveto(1)
                     settle()
