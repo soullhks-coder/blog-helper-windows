@@ -598,9 +598,26 @@ def main() -> None:
                 settle()
                 app._switch_page("home")
                 settle()
-                home_right = app.home_control_card.winfo_rootx() + app.home_control_card.winfo_width()
-                for widget in (*app.home_target_groups.values(), app.home_prompt_frame):
-                    assert widget.winfo_rootx() + widget.winfo_width() <= home_right + 2, (geometry, widget)
+                assert int(app.home_prompt_frame.grid_info()["row"]) == 0
+                assert all(int(group.grid_info()["row"]) == 0 for group in app.home_target_groups.values())
+                assert (
+                    app.home_target_row.winfo_rootx() + app.home_target_row.winfo_width()
+                    <= app.home_prompt_frame.winfo_rootx() + 2
+                ), geometry
+                home_canvas = app.home_control_canvas
+                if geometry.startswith("1500"):
+                    assert not app.home_control_scrollbar.winfo_ismapped()
+                else:
+                    assert app.home_control_scrollbar.winfo_ismapped()
+                    assert home_canvas.xview()[1] - home_canvas.xview()[0] < 1
+                    home_canvas.xview_moveto(1)
+                    settle()
+                    assert app.home_prompt_menu.winfo_rootx() + app.home_prompt_menu.winfo_width() <= (
+                        home_canvas.winfo_rootx() + home_canvas.winfo_width() + 2
+                    )
+                    home_canvas.xview_moveto(0)
+                    settle()
+                screenshot("home-" + geometry.split("+", 1)[0])
                 app._switch_page("writing")
                 settle()
                 assert app.writing_step_rail.winfo_width() <= app.writing_page.winfo_width()

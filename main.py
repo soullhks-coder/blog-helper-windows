@@ -28334,20 +28334,46 @@ class KeywordApp(ctk.CTk):
         self.home_control_card = control_card
         control_card.grid(row=1, column=0, pady=(0, 12), sticky="ew")
         control_card.grid_columnconfigure(0, weight=1)
-        control_top = ctk.CTkFrame(control_card, fg_color="transparent")
+        control_viewport = ctk.CTkFrame(control_card, fg_color="transparent")
+        self.home_control_viewport = control_viewport
+        control_viewport.grid(row=0, column=0, columnspan=3, padx=18, pady=(12, 5), sticky="ew")
+        control_viewport.grid_columnconfigure(0, weight=1)
+        control_canvas = tk.Canvas(
+            control_viewport,
+            height=34,
+            highlightthickness=0,
+            borderwidth=0,
+            background=palette["card"],
+        )
+        self.home_control_canvas = control_canvas
+        control_canvas.grid(row=0, column=0, sticky="ew")
+        control_scrollbar = ctk.CTkScrollbar(
+            control_viewport,
+            orientation="horizontal",
+            height=10,
+            command=control_canvas.xview,
+            fg_color=palette["border"],
+            button_color=palette["accent"],
+        )
+        self.home_control_scrollbar = control_scrollbar
+        control_canvas.configure(xscrollcommand=control_scrollbar.set)
+        control_top = ctk.CTkFrame(control_canvas, fg_color=palette["card"])
         self.home_control_top = control_top
-        control_top.grid(row=0, column=0, columnspan=3, padx=18, pady=(12, 5), sticky="ew")
+        self.home_control_window = control_canvas.create_window(
+            0, 0, window=control_top, anchor="nw"
+        )
         control_top.grid_columnconfigure(0, weight=1)
 
         target_row = ctk.CTkFrame(control_top, fg_color="transparent")
         self.home_target_row = target_row
         target_row.grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
+        self.home_target_label = ctk.CTkLabel(
             target_row,
             text="글쓰기 선택",
             text_color=palette["accent"],
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=(0, 12), sticky="w")
+        )
+        self.home_target_label.grid(row=0, column=0, padx=(0, 12), sticky="w")
 
         self.home_target_platform_var = tk.StringVar(
             value=normalize_writing_prompt_active_target(
@@ -28357,6 +28383,8 @@ class KeywordApp(ctk.CTk):
         self.home_blog_menus: dict[str, ctk.CTkOptionMenu] = {}
         self.home_blog_choice_maps: dict[str, dict[str, str]] = {}
         self.home_target_groups: dict[str, ctk.CTkFrame] = {}
+        self.home_target_radios: dict[str, ctk.CTkRadioButton] = {}
+        self.home_target_logo_labels: dict[str, ctk.CTkLabel] = {}
         self._home_platform_compact_logo_cache: dict[str, ctk.CTkImage] = {}
         for column, (platform, label) in enumerate(
             (
@@ -28368,7 +28396,7 @@ class KeywordApp(ctk.CTk):
             group = ctk.CTkFrame(target_row, fg_color="transparent")
             group.grid(row=0, column=column + 1, padx=(0, 10), sticky="w")
             self.home_target_groups[platform] = group
-            ctk.CTkRadioButton(
+            radio = ctk.CTkRadioButton(
                 group,
                 text="",
                 variable=self.home_target_platform_var,
@@ -28377,14 +28405,18 @@ class KeywordApp(ctk.CTk):
                 radiobutton_width=20,
                 radiobutton_height=20,
                 command=self._on_home_target_platform_changed,
-            ).grid(row=0, column=0, padx=(0, 3), sticky="w")
-            ctk.CTkLabel(
+            )
+            radio.grid(row=0, column=0, padx=(0, 3), sticky="w")
+            self.home_target_radios[platform] = radio
+            logo_label = ctk.CTkLabel(
                 group,
                 text="" if self._home_platform_compact_logo(platform) else label,
                 image=self._home_platform_compact_logo(platform),
                 width=22,
                 height=22,
-            ).grid(row=0, column=1, padx=(0, 4), sticky="w")
+            )
+            logo_label.grid(row=0, column=1, padx=(0, 4), sticky="w")
+            self.home_target_logo_labels[platform] = logo_label
             blog_menu = ctk.CTkOptionMenu(
                 group,
                 values=["블로그 미등록"],
@@ -28406,12 +28438,13 @@ class KeywordApp(ctk.CTk):
         prompt_frame = ctk.CTkFrame(control_top, fg_color="transparent")
         self.home_prompt_frame = prompt_frame
         prompt_frame.grid(row=0, column=1, sticky="e")
-        ctk.CTkLabel(
+        self.home_thumbnail_label = ctk.CTkLabel(
             prompt_frame,
             text="썸네일",
             text_color=palette["muted"],
             font=ctk.CTkFont(size=11, weight="bold"),
-        ).grid(row=0, column=0, padx=(0, 5), sticky="e")
+        )
+        self.home_thumbnail_label.grid(row=0, column=0, padx=(0, 5), sticky="e")
         thumbnail_values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
         self.home_thumbnail_menu = ctk.CTkOptionMenu(
             prompt_frame,
@@ -28432,12 +28465,13 @@ class KeywordApp(ctk.CTk):
         self.home_thumbnail_menu.set(
             thumbnail_values[normalize_thumbnail_preset_index(self.wordpress_settings.thumbnail_default_preset)]
         )
-        ctk.CTkLabel(
+        self.home_prompt_label = ctk.CTkLabel(
             prompt_frame,
             text="프롬프트",
             text_color=palette["muted"],
             font=ctk.CTkFont(size=11, weight="bold"),
-        ).grid(row=0, column=2, padx=(0, 5), sticky="e")
+        )
+        self.home_prompt_label.grid(row=0, column=2, padx=(0, 5), sticky="e")
         self.home_prompt_menu = ctk.CTkOptionMenu(
             prompt_frame,
             values=self._prompt_set_menu_values(),
@@ -28475,7 +28509,8 @@ class KeywordApp(ctk.CTk):
         )
         self._refresh_home_prompt_menu()
         self._refresh_home_blog_menus()
-        control_card.bind("<Configure>", self._layout_home_control_card, add="+")
+        control_canvas.bind("<Configure>", self._layout_home_control_card, add="+")
+        control_top.bind("<Configure>", self._layout_home_control_card, add="+")
 
         self.home_launch_status_label = ctk.CTkLabel(
             control_card,
@@ -28809,23 +28844,19 @@ class KeywordApp(ctk.CTk):
         return rendered
 
     def _layout_home_control_card(self, event=None) -> None:
-        width = int(getattr(event, "width", 0) or self.home_control_card.winfo_width())
-        layout = "wide" if width >= 900 else "medium" if width >= 710 else "narrow"
-        if getattr(self, "_home_control_layout", None) == layout:
+        if not hasattr(self, "home_control_canvas"):
             return
-        self._home_control_layout = layout
-        if layout == "wide":
-            self.home_target_row.grid_configure(row=0, column=0, sticky="w")
-            self.home_prompt_frame.grid_configure(row=0, column=1, sticky="e", pady=0)
+        canvas = self.home_control_canvas
+        visible_width = max(1, canvas.winfo_width())
+        content_width = self.home_control_top.winfo_reqwidth()
+        total_width = max(visible_width, content_width)
+        canvas.itemconfigure(self.home_control_window, width=total_width)
+        canvas.configure(scrollregion=(0, 0, total_width, canvas.winfo_height()))
+        if content_width > visible_width + 2:
+            self.home_control_scrollbar.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         else:
-            self.home_target_row.grid_configure(row=0, column=0, sticky="w")
-            self.home_prompt_frame.grid_configure(row=1, column=0, sticky="e", pady=(8, 0))
-        for index, platform in enumerate(("wordpress", "tistory", "blogspot")):
-            group = self.home_target_groups[platform]
-            if layout == "narrow":
-                group.grid_configure(row=0 if index < 2 else 1, column=1 + (index % 2), pady=(0, 5))
-            else:
-                group.grid_configure(row=0, column=index + 1, pady=0)
+            self.home_control_scrollbar.grid_remove()
+            canvas.xview_moveto(0)
 
     def _refresh_home_blog_menus(self) -> None:
         if not hasattr(self, "home_blog_menus"):
