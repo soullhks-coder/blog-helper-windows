@@ -21,6 +21,34 @@ def _insight(keyword: str, source: str) -> main.KeywordInsight:
 
 
 class HomeDashboardTests(unittest.TestCase):
+    def test_blog_writing_preferences_round_trip_per_profile(self) -> None:
+        preferences = {
+            "wordpress": {"thumbnail_preset": 0, "prompt_id": "tistory-default"},
+            "tistory:tistory_1": {"thumbnail_preset": 1, "prompt_id": "blogspot-default"},
+            "tistory:tistory_2": {"thumbnail_preset": 2, "prompt_id": "wordpress-default"},
+            "blogspot:blogspot_3": {"thumbnail_preset": 2, "prompt_id": "blogspot-default"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "app_state.json"
+            settings = main.WordPressSettings(blog_writing_preferences=preferences)
+            with (
+                patch.object(main, "STATE_FILE", state_file),
+                patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
+                patch.object(main.KeychainStore, "load_secret", return_value=""),
+            ):
+                main.AppStateStore.save(settings, save_secrets=False)
+                loaded = main.AppStateStore.load()
+        self.assertEqual(loaded.blog_writing_preferences, preferences)
+
+    def test_blog_writing_preference_normalization_ignores_unknown_slots(self) -> None:
+        self.assertEqual(
+            main.normalize_blog_writing_preferences({
+                "tistory:tistory_2": {"thumbnail_preset": "2", "prompt_id": " other "},
+                "tistory:tistory_9": {"thumbnail_preset": 1, "prompt_id": "unused"},
+            }),
+            {"tistory:tistory_2": {"thumbnail_preset": 2, "prompt_id": "other"}},
+        )
+
     def test_adsense_dashboard_parser_extracts_requested_summary_values(self) -> None:
         dashboard_text = """
         예상 수입
@@ -205,13 +233,14 @@ class HomeDashboardTests(unittest.TestCase):
             home_blog_choice_maps={"tistory": {"two.tistory.com": "티스토리 2"}},
             home_target_platform_var=Variable(),
             tistory_active_profile_var=Variable(),
-            _on_home_target_platform_changed=Mock(),
+            _select_blog_writing_target=Mock(side_effect=lambda platform: app.home_target_platform_var.set(platform)),
             _on_tistory_profile_selected=Mock(),
             _refresh_home_blog_menus=Mock(),
             _refresh_home_publish_counts=Mock(),
         )
         main.KeywordApp._on_home_blog_selected(app, "tistory", "two.tistory.com")
         self.assertEqual(app.home_target_platform_var.value, "tistory")
+        app._select_blog_writing_target.assert_called_once_with("tistory")
         self.assertEqual(app.tistory_active_profile_var.value, "티스토리 2")
         app._on_tistory_profile_selected.assert_called_once_with()
         app._refresh_home_blog_menus.assert_called_once_with()

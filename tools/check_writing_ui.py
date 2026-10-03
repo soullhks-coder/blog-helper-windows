@@ -332,7 +332,10 @@ def main() -> None:
             # consume that timer before Tk's actual event loop has started.
             app.update()
             settle()
-            assert app._selected_writing_targets() == ["wordpress", "tistory", "blogspot"]
+            assert app._selected_writing_targets() == ["wordpress"]
+            assert tuple(app.writing_blog_menus) == ("wordpress", "tistory", "blogspot")
+            assert int(app.writing_thumbnail_menu.cget("height")) == 27
+            assert int(app.writing_header_prompt_menu.cget("height")) == 27
             app._on_inline_images_provider_changed(
                 app_module.INLINE_IMAGES_PROVIDER_MANUAL
             )
@@ -376,48 +379,56 @@ def main() -> None:
             app._clear_keyword_choices()
             settle()
 
-            # Native switch/checkbox callbacks still use the original variables.
+            # The header chooses exactly one publishing target.
             app.writing_auto_progress_switch.toggle()
             assert app.writing_auto_progress_var.get()
-            app.target_platform_vars["wordpress"].set(False)
-            app._on_writing_target_changed()
-            assert app._selected_writing_targets() == ["tistory", "blogspot"]
-            app.target_platform_vars["wordpress"].set(True)
+            app._on_writing_target_changed("tistory")
+            assert app._selected_writing_targets() == ["tistory"]
+            assert app.home_target_platform_var.get() == "tistory"
+            app._on_writing_target_changed("wordpress")
             app.writing_auto_progress_switch.toggle()
 
             # The selected prompt belongs to the publish target's history, not
             # to the prompt's own platform. Cross-platform choices must round-trip.
-            app.target_platform_vars["wordpress"].set(True)
-            app.target_platform_vars["tistory"].set(False)
-            app.target_platform_vars["blogspot"].set(False)
             app._on_writing_target_changed("wordpress")
             app.writing_prompt_menu.set("티스토리 · 기본")
             app._on_writing_prompt_selected("티스토리 · 기본")
             assert app.wordpress_settings.writing_target_prompt_ids["wordpress"] == "tistory-default"
+            app._on_home_thumbnail_selected("썸네일·카드2")
 
-            app.target_platform_vars["wordpress"].set(False)
-            app.target_platform_vars["tistory"].set(True)
             app._on_writing_target_changed("tistory")
             app.writing_prompt_menu.set("블로그스팟 · 기본")
             app._on_writing_prompt_selected("블로그스팟 · 기본")
+            app._on_home_thumbnail_selected("썸네일·카드3")
             active_tistory = app_module.service_profile_by_name(
                 app.wordpress_settings.tistory_profiles,
                 app.wordpress_settings.tistory_active_profile,
             )
             assert active_tistory["last_prompt_id"] == "blogspot-default"
 
-            app.target_platform_vars["wordpress"].set(True)
-            app.target_platform_vars["tistory"].set(False)
             app._on_writing_target_changed("wordpress")
             assert app.writing_prompt_menu.get() == "티스토리 · 기본"
-            app.target_platform_vars["wordpress"].set(False)
-            app.target_platform_vars["tistory"].set(True)
+            assert app.home_prompt_menu.get() == "티스토리 · 기본"
+            assert app.writing_thumbnail_menu.get() == "썸네일·카드2"
             app._on_writing_target_changed("tistory")
             assert app.writing_prompt_menu.get() == "블로그스팟 · 기본"
+            assert app.home_prompt_menu.get() == "블로그스팟 · 기본"
+            assert app.writing_thumbnail_menu.get() == "썸네일·카드3"
 
-            for variable in app.target_platform_vars.values():
-                variable.set(True)
+            app.wordpress_settings.tistory_active_profile = "티스토리 2"
+            app._on_writing_target_changed("tistory")
+            app._on_home_thumbnail_selected("썸네일·카드1")
+            app._on_home_prompt_selected("워드프레스 · 기본")
+            assert app.wordpress_settings.blog_writing_preferences[
+                "tistory:tistory_2"
+            ] == {"thumbnail_preset": 0, "prompt_id": "wordpress-default"}
+            app.wordpress_settings.tistory_active_profile = "티스토리 1"
+            app._on_writing_target_changed("tistory")
+            assert app.writing_thumbnail_menu.get() == "썸네일·카드3"
+            assert app.writing_prompt_menu.get() == "블로그스팟 · 기본"
+
             app._on_writing_target_changed("blogspot")
+            app._on_home_thumbnail_selected("썸네일·카드1")
 
             app.article_title_entry.delete(0, "end")
             app.article_title_entry.insert(0, "오늘의 여행 이야기")
@@ -605,8 +616,15 @@ def main() -> None:
                     <= app.home_prompt_frame.winfo_rootx() + 2
                 ), geometry
                 home_canvas = app.home_control_canvas
+                if not home_canvas.winfo_ismapped():
+                    settle(120)
                 needs_scroll = app.home_control_top.winfo_reqwidth() > home_canvas.winfo_width() + 2
-                assert bool(app.home_control_scrollbar.winfo_ismapped()) == needs_scroll
+                assert bool(app.home_control_scrollbar.winfo_ismapped()) == needs_scroll, (
+                    geometry,
+                    app.home_control_top.winfo_reqwidth(),
+                    home_canvas.winfo_width(),
+                    bool(app.home_control_scrollbar.winfo_ismapped()),
+                )
                 if needs_scroll:
                     assert home_canvas.xview()[1] - home_canvas.xview()[0] < 1
                     home_canvas.xview_moveto(1)
@@ -619,6 +637,30 @@ def main() -> None:
                 screenshot("home-" + geometry.split("+", 1)[0])
                 app._switch_page("writing")
                 settle()
+                screenshot("writing-" + geometry.split("+", 1)[0])
+                writing_canvas = app.writing_control_canvas
+                writing_needs_scroll = (
+                    app.writing_control_row.winfo_reqwidth()
+                    > writing_canvas.winfo_width() + 2
+                )
+                assert bool(app.writing_control_scrollbar.winfo_ismapped()) == writing_needs_scroll
+                assert app.writing_control_scrollbar.cget("height") == app.home_control_scrollbar.cget("height")
+                if not writing_needs_scroll:
+                    assert abs(
+                        writing_canvas.winfo_rootx() + writing_canvas.winfo_width()
+                        - app.writing_header_prompt_menu.winfo_rootx()
+                        - app.writing_header_prompt_menu.winfo_width()
+                    ) <= 16, geometry
+                if writing_needs_scroll:
+                    writing_canvas.xview_moveto(1)
+                    settle()
+                    assert (
+                        app.writing_header_prompt_menu.winfo_rootx()
+                        + app.writing_header_prompt_menu.winfo_width()
+                        <= writing_canvas.winfo_rootx() + writing_canvas.winfo_width() + 2
+                    )
+                    writing_canvas.xview_moveto(0)
+                    settle()
                 assert app.writing_step_rail.winfo_width() <= app.writing_page.winfo_width()
                 selector_width = (
                     app.thumbnail_card_set_selector_host.winfo_width()

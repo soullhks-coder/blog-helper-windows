@@ -3526,6 +3526,7 @@ class WordPressSettings:
     writing_prompt_active_target: str = "wordpress"
     home_target_platform: str = "wordpress"
     home_selected_prompt_id: str = ""
+    blog_writing_preferences: dict[str, dict] = field(default_factory=dict)
     title_prompt_template: str = DEFAULT_TITLE_PROMPT
     article_prompt_template: str = DEFAULT_ARTICLE_PROMPT
     prompt_sets: list[dict] = field(default_factory=list)
@@ -4006,6 +4007,27 @@ def normalize_writing_target_prompt_ids(
     return normalized
 
 
+def normalize_blog_writing_preferences(value: object) -> dict[str, dict]:
+    """Keep thumbnail/prompt choices isolated by service and profile slot."""
+    source = value if isinstance(value, dict) else {}
+    valid_keys = {"wordpress"}
+    valid_keys.update(f"tistory:{scope}" for scope in TISTORY_PROFILE_SCOPES)
+    valid_keys.update(f"blogspot:{scope}" for scope in BLOGSPOT_PROFILE_SCOPES)
+    normalized = {}
+    for key, raw in source.items():
+        if not isinstance(key, str) or not isinstance(raw, dict):
+            continue
+        if key not in valid_keys:
+            continue
+        normalized[key] = {
+            "thumbnail_preset": normalize_thumbnail_preset_index(
+                raw.get("thumbnail_preset", 0)
+            ),
+            "prompt_id": str(raw.get("prompt_id") or "").strip(),
+        }
+    return normalized
+
+
 def normalize_writing_prompt_active_target(
     value: object,
     selected_targets: object = None,
@@ -4047,6 +4069,7 @@ class AppStateStore:
         "writing_prompt_active_target",
         "home_target_platform",
         "home_selected_prompt_id",
+        "blog_writing_preferences",
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
@@ -4411,6 +4434,9 @@ class AppStateStore:
             home_selected_prompt_id=str(
                 payload.get("home_selected_prompt_id", "") or ""
             ).strip(),
+            blog_writing_preferences=normalize_blog_writing_preferences(
+                payload.get("blog_writing_preferences", {})
+            ),
             title_prompt_template=nonempty_text(payload.get("title_prompt_template"), DEFAULT_TITLE_PROMPT),
             article_prompt_template=nonempty_text(payload.get("article_prompt_template"), DEFAULT_ARTICLE_PROMPT),
             prompt_sets=payload.get("prompt_sets", []),
@@ -28350,10 +28376,11 @@ class KeywordApp(ctk.CTk):
         control_scrollbar = ctk.CTkScrollbar(
             control_viewport,
             orientation="horizontal",
-            height=10,
+            height=8,
             command=control_canvas.xview,
-            fg_color=palette["border"],
-            button_color=palette["accent"],
+            fg_color=palette["card"],
+            button_color=palette["muted"],
+            button_hover_color=palette["accent"],
         )
         self.home_control_scrollbar = control_scrollbar
         control_canvas.configure(xscrollcommand=control_scrollbar.set)
@@ -28866,6 +28893,10 @@ class KeywordApp(ctk.CTk):
             labels = [label for _, label in choices]
             self.home_blog_choice_maps[platform] = {label: name for name, label in choices}
             menu.configure(values=labels)
+            writing_menu = getattr(self, "writing_blog_menus", {}).get(platform)
+            if writing_menu is not None:
+                self.writing_blog_choice_maps[platform] = dict(self.home_blog_choice_maps[platform])
+                writing_menu.configure(values=labels)
             active_field = f"{platform}_active_profile"
             active_name = "wordpress" if platform == "wordpress" else str(
                 getattr(self.wordpress_settings, active_field, "")
@@ -28891,21 +28922,138 @@ class KeywordApp(ctk.CTk):
                 labels[0],
             )
             menu.set(active)
+            if writing_menu is not None:
+                writing_menu.set(active)
 
     def _on_home_blog_selected(self, platform: str, label: str) -> None:
         profile_name = self.home_blog_choice_maps.get(platform, {}).get(label, "")
         if not profile_name:
             return
-        self.home_target_platform_var.set(platform)
-        self._on_home_target_platform_changed()
         if platform == "tistory" and hasattr(self, "tistory_active_profile_var"):
             self.tistory_active_profile_var.set(profile_name)
             self._on_tistory_profile_selected()
         elif platform == "blogspot" and hasattr(self, "blogspot_active_profile_var"):
             self.blogspot_active_profile_var.set(profile_name)
             self._on_blogspot_profile_selected()
+        self._select_blog_writing_target(platform)
         self._refresh_home_blog_menus()
         self._refresh_home_publish_counts()
+
+    def _on_writing_blog_selected(self, platform: str, label: str) -> None:
+        self._on_home_blog_selected(platform, label)
+
+    def _blog_writing_identity(self, platform: str) -> str:
+        platform = normalize_writing_prompt_active_target(platform)
+        if platform == "wordpress":
+            return "wordpress"
+        profiles = (
+            normalize_tistory_profiles(self.wordpress_settings.tistory_profiles)
+            if platform == "tistory"
+            else normalize_blogspot_profiles(self.wordpress_settings.blogspot_profiles)
+        )
+        profile = service_profile_by_name(
+            profiles, getattr(self.wordpress_settings, f"{platform}_active_profile")
+        )
+        return f"{platform}:{profile['profile_scope']}"
+
+    def _blog_writing_preference(self, platform: str) -> dict:
+        platform = normalize_writing_prompt_active_target(platform)
+        key = self._blog_writing_identity(platform)
+        saved = normalize_blog_writing_preferences(
+            self.wordpress_settings.blog_writing_preferences
+        ).get(key)
+        if saved is not None:
+            return saved
+        legacy_prompt_id = self._remembered_writing_prompt_id(platform)
+        if not legacy_prompt_id and platform == self.wordpress_settings.home_target_platform:
+            legacy_prompt_id = self.wordpress_settings.home_selected_prompt_id
+        return {
+            "thumbnail_preset": normalize_thumbnail_preset_index(
+                self.wordpress_settings.thumbnail_default_preset
+            ),
+            "prompt_id": legacy_prompt_id,
+        }
+
+    def _remember_blog_writing_preference(
+        self, *, prompt_id: str | None = None, thumbnail_preset: int | None = None
+    ) -> None:
+        platform = normalize_writing_prompt_active_target(
+            self.wordpress_settings.home_target_platform
+        )
+        preferences = normalize_blog_writing_preferences(
+            self.wordpress_settings.blog_writing_preferences
+        )
+        key = self._blog_writing_identity(platform)
+        current = dict(preferences.get(key) or self._blog_writing_preference(platform))
+        if prompt_id is not None:
+            current["prompt_id"] = str(prompt_id or "").strip()
+            self._remember_writing_prompt_for_targets(current["prompt_id"], [platform])
+        if thumbnail_preset is not None:
+            current["thumbnail_preset"] = normalize_thumbnail_preset_index(
+                thumbnail_preset
+            )
+        preferences[key] = current
+        self.wordpress_settings.blog_writing_preferences = preferences
+        AppStateStore.update_fields(blog_writing_preferences=preferences)
+
+    def _select_blog_writing_target(self, platform: str) -> None:
+        platform = normalize_writing_prompt_active_target(platform)
+        preference = self._blog_writing_preference(platform)
+        self.wordpress_settings.home_target_platform = platform
+        self.wordpress_settings.writing_prompt_active_target = platform
+        self.wordpress_settings.target_platforms = [platform]
+        if hasattr(self, "home_target_platform_var"):
+            self.home_target_platform_var.set(platform)
+        if hasattr(self, "writing_target_platform_var"):
+            self.writing_target_platform_var.set(platform)
+        for key, variable in self.target_platform_vars.items():
+            variable.set(key == platform)
+
+        selected = self._prompt_set_by_id(preference["prompt_id"])
+        if selected is None:
+            selected = next(
+                (item for item in self._prompt_sets() if item.get("platform") == platform),
+                None,
+            )
+        prompt_id = str(selected.get("id") or "") if selected else ""
+        if selected:
+            label = self._prompt_set_label(selected)
+            self.wordpress_settings.selected_prompt_id = prompt_id
+            self.wordpress_settings.home_selected_prompt_id = prompt_id
+            for menu_name in (
+                "home_prompt_menu", "writing_header_prompt_menu", "writing_prompt_menu"
+            ):
+                menu = getattr(self, menu_name, None)
+                if menu is not None:
+                    menu.set(label)
+
+        thumbnail_index = normalize_thumbnail_preset_index(
+            preference["thumbnail_preset"]
+        )
+        if hasattr(self, "thumbnail_presets") and hasattr(self, "active_thumbnail_preset_index"):
+            self._switch_thumbnail_preset(thumbnail_index, save=False)
+        self.default_thumbnail_preset_index = thumbnail_index
+        self.wordpress_settings.thumbnail_active_preset = thumbnail_index
+        self.wordpress_settings.thumbnail_default_preset = thumbnail_index
+        thumbnail_label = f"썸네일·카드{thumbnail_index + 1}"
+        for menu_name in ("home_thumbnail_menu", "writing_thumbnail_menu"):
+            menu = getattr(self, menu_name, None)
+            if menu is not None:
+                menu.set(thumbnail_label)
+        self._refresh_thumbnail_preset_buttons()
+        self._remember_blog_writing_preference(
+            prompt_id=prompt_id, thumbnail_preset=thumbnail_index
+        )
+        AppStateStore.update_fields(
+            home_target_platform=platform,
+            writing_prompt_active_target=platform,
+            target_platforms=[platform],
+            selected_prompt_id=prompt_id,
+            home_selected_prompt_id=prompt_id,
+            thumbnail_active_preset=thumbnail_index,
+            thumbnail_default_preset=thumbnail_index,
+        )
+        self._save_ui_state()
 
     def _on_home_thumbnail_selected(self, label: str) -> None:
         values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
@@ -28916,7 +29064,12 @@ class KeywordApp(ctk.CTk):
         self.default_thumbnail_preset_index = index
         self.wordpress_settings.thumbnail_active_preset = index
         self.wordpress_settings.thumbnail_default_preset = index
+        if hasattr(self, "home_thumbnail_menu"):
+            self.home_thumbnail_menu.set(label)
+        if hasattr(self, "writing_thumbnail_menu"):
+            self.writing_thumbnail_menu.set(label)
         self._refresh_thumbnail_preset_buttons()
+        self._remember_blog_writing_preference(thumbnail_preset=index)
         AppStateStore.update_fields(
             thumbnail_active_preset=index,
             thumbnail_default_preset=index,
@@ -29197,6 +29350,10 @@ class KeywordApp(ctk.CTk):
         if label not in values:
             label = values[0]
         self.home_prompt_menu.set(label)
+        header_menu = self.__dict__.get("writing_header_prompt_menu")
+        if header_menu is not None:
+            header_menu.configure(values=values)
+            header_menu.set(label)
         selected = self._prompt_set_by_label(label)
         if selected:
             self.wordpress_settings.home_selected_prompt_id = str(
@@ -29209,8 +29366,7 @@ class KeywordApp(ctk.CTk):
             if hasattr(self, "home_target_platform_var")
             else "wordpress"
         )
-        self.wordpress_settings.home_target_platform = platform
-        AppStateStore.update_fields(home_target_platform=platform)
+        self._select_blog_writing_target(platform)
 
     def _on_home_prompt_selected(self, label: str) -> None:
         selected = self._prompt_set_by_label(label)
@@ -29218,7 +29374,17 @@ class KeywordApp(ctk.CTk):
             return
         prompt_id = str(selected.get("id") or "")
         self.wordpress_settings.home_selected_prompt_id = prompt_id
-        AppStateStore.update_fields(home_selected_prompt_id=prompt_id)
+        self.wordpress_settings.selected_prompt_id = prompt_id
+        for menu_name in ("writing_header_prompt_menu", "writing_prompt_menu"):
+            menu = getattr(self, menu_name, None)
+            if menu is not None:
+                menu.set(label)
+        self._remember_blog_writing_preference(prompt_id=prompt_id)
+        AppStateStore.update_fields(
+            home_selected_prompt_id=prompt_id,
+            selected_prompt_id=prompt_id,
+        )
+        self._save_ui_state()
 
     def _load_home_dashboard_keywords(self, force: bool = False) -> None:
         if self.home_keyword_worker and self.home_keyword_worker.is_alive():
@@ -29415,10 +29581,7 @@ class KeywordApp(ctk.CTk):
             home_selected_prompt_id=prompt_id,
         )
 
-        for platform, variable in self.target_platform_vars.items():
-            variable.set(platform == target)
-        self.wordpress_settings.target_platforms = [target]
-        self.wordpress_settings.writing_prompt_active_target = target
+        self._select_blog_writing_target(target)
         if selected_prompt:
             self.writing_prompt_menu.set(self._prompt_set_label(selected_prompt))
             self._on_writing_prompt_selected(self._prompt_set_label(selected_prompt))
@@ -31891,8 +32054,36 @@ class KeywordApp(ctk.CTk):
         )
         page_title.grid(row=0, column=0, sticky="w")
 
-        auto_row = ctk.CTkFrame(header, fg_color="transparent")
-        auto_row.grid(row=1, column=0, pady=(8, 0), sticky="w")
+        control_viewport = ctk.CTkFrame(header, fg_color="transparent")
+        control_viewport.grid(row=1, column=0, pady=(8, 0), sticky="ew")
+        control_viewport.grid_columnconfigure(0, weight=1)
+        control_canvas = tk.Canvas(
+            control_viewport,
+            height=32,
+            highlightthickness=0,
+            borderwidth=0,
+            background=palette["card"],
+        )
+        self.writing_control_canvas = control_canvas
+        control_canvas.grid(row=0, column=0, sticky="ew")
+        control_scrollbar = ctk.CTkScrollbar(
+            control_viewport,
+            orientation="horizontal",
+            height=8,
+            command=control_canvas.xview,
+            fg_color=palette["card"],
+            button_color=palette["muted"],
+            button_hover_color=palette["accent"],
+        )
+        self.writing_control_scrollbar = control_scrollbar
+        control_canvas.configure(xscrollcommand=control_scrollbar.set)
+        auto_row = tk.Frame(control_canvas, bg=palette["shell"], borderwidth=0)
+        self.writing_control_row = auto_row
+        auto_row.grid_rowconfigure(0, minsize=30)
+        auto_row.grid_columnconfigure(2, weight=1)
+        self.writing_control_window = control_canvas.create_window(
+            0, 0, window=auto_row, anchor="nw"
+        )
 
         self.writing_auto_progress_switch = ctk.CTkSwitch(
             auto_row,
@@ -31910,36 +32101,85 @@ class KeywordApp(ctk.CTk):
         self.writing_auto_progress_switch.grid(row=0, column=0, sticky="w")
 
         target_row = ctk.CTkFrame(auto_row, fg_color="transparent")
-        target_row.grid(row=0, column=1, padx=(20, 0), sticky="w")
-        ctk.CTkLabel(
-            target_row,
-            text="자동 발행 대상",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=(0, 14), sticky="w")
-
-        selected_targets = set(self.wordpress_settings.target_platforms or ["wordpress"])
+        target_row.grid(row=0, column=1, padx=(10, 0), sticky="w")
+        active_platform = normalize_writing_prompt_active_target(
+            self.wordpress_settings.home_target_platform
+            or self.wordpress_settings.writing_prompt_active_target
+        )
+        self.writing_target_platform_var = tk.StringVar(value=active_platform)
+        self.writing_blog_menus: dict[str, ctk.CTkOptionMenu] = {}
+        self.writing_blog_choice_maps: dict[str, dict[str, str]] = {}
+        self.writing_target_radios: dict[str, ctk.CTkRadioButton] = {}
         for index, (platform_key, label) in enumerate(
-            [
-                ("wordpress", "워드프레스"),
-                ("tistory", "티스토리"),
-                ("blogspot", "블로그스팟"),
-            ],
-            start=1,
+            (("wordpress", "워드프레스"), ("tistory", "티스토리"), ("blogspot", "블로그스팟"))
         ):
-            variable = ctk.BooleanVar(value=platform_key in selected_targets)
+            variable = ctk.BooleanVar(value=platform_key == active_platform)
             self.target_platform_vars[platform_key] = variable
-            ctk.CTkCheckBox(
-                target_row,
-                text=label,
-                variable=variable,
-                onvalue=True,
-                offvalue=False,
-                checkbox_width=22,
-                checkbox_height=22,
-                corner_radius=6,
-                font=ctk.CTkFont(size=14, weight="bold"),
+            group = ctk.CTkFrame(target_row, fg_color="transparent")
+            group.grid(row=0, column=index, padx=(0, 6), sticky="w")
+            radio = ctk.CTkRadioButton(
+                group,
+                text="",
+                variable=self.writing_target_platform_var,
+                value=platform_key,
+                width=21,
+                radiobutton_width=20,
+                radiobutton_height=20,
                 command=lambda target=platform_key: self._on_writing_target_changed(target),
-            ).grid(row=0, column=index, padx=(0, 16), sticky="w")
+            )
+            radio.grid(row=0, column=0, padx=(0, 3), sticky="w")
+            self.writing_target_radios[platform_key] = radio
+            logo = self._home_platform_compact_logo(platform_key)
+            ctk.CTkLabel(
+                group,
+                text="" if logo else label,
+                image=logo,
+                width=22,
+                height=22,
+            ).grid(row=0, column=1, padx=(0, 4), sticky="w")
+            blog_menu = ctk.CTkOptionMenu(
+                group,
+                values=["블로그 미등록"],
+                width=100,
+                height=27,
+                corner_radius=10,
+                fg_color=palette["button"],
+                button_color=palette["button"],
+                button_hover_color=palette["button_hover"],
+                dropdown_fg_color=palette["panel"],
+                dropdown_hover_color=palette["hover"],
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda choice, key=platform_key: self._on_writing_blog_selected(key, choice),
+            )
+            blog_menu.grid(row=0, column=2, sticky="w")
+            self.writing_blog_menus[platform_key] = blog_menu
+
+        selectors = ctk.CTkFrame(auto_row, fg_color="transparent")
+        selectors.grid(row=0, column=2, padx=(5, 0), sticky="e")
+        ctk.CTkLabel(selectors, text="썸네일", text_color=palette["muted"], font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=0, padx=(0, 5))
+        thumbnail_values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
+        self.writing_thumbnail_menu = ctk.CTkOptionMenu(
+            selectors, values=thumbnail_values, width=106, height=27, corner_radius=10,
+            fg_color=palette["button"], button_color=palette["button"],
+            button_hover_color=palette["button_hover"], dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["hover"], text_color=palette["text"],
+            font=ctk.CTkFont(size=11, weight="bold"), command=self._on_home_thumbnail_selected,
+        )
+        self.writing_thumbnail_menu.grid(row=0, column=1, padx=(0, 6))
+        ctk.CTkLabel(selectors, text="프롬프트", text_color=palette["muted"], font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=2, padx=(0, 5))
+        self.writing_header_prompt_menu = ctk.CTkOptionMenu(
+            selectors, values=self._prompt_set_menu_values(), width=150, height=27,
+            corner_radius=10, fg_color=palette["button"], button_color=palette["button"],
+            button_hover_color=palette["button_hover"], dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["hover"], text_color=palette["text"],
+            font=ctk.CTkFont(size=11, weight="bold"), command=self._on_writing_prompt_selected,
+        )
+        self.writing_header_prompt_menu.grid(row=0, column=3)
+        control_canvas.bind("<Configure>", self._layout_writing_control_row, add="+")
+        auto_row.bind("<Configure>", self._layout_writing_control_row, add="+")
+        self._refresh_home_blog_menus()
+        self._refresh_writing_prompt_menu()
 
         self._refresh_writing_auto_progress_ui()
 
@@ -32159,25 +32399,32 @@ class KeywordApp(ctk.CTk):
         self._save_ui_state()
 
     def _on_writing_target_changed(self, changed_platform: str = "") -> None:
-        targets = self._selected_writing_targets()
-        changed_platform = str(changed_platform or "").strip().lower()
-        if changed_platform in targets:
-            active_target = changed_platform
-        else:
-            current_active = normalize_writing_prompt_active_target(
-                self.wordpress_settings.writing_prompt_active_target,
-                targets,
-            )
-            active_target = (
-                current_active
-                if current_active in targets
-                else self._primary_prompt_platform(targets)
-            )
-        self.wordpress_settings.writing_prompt_active_target = active_target
-        if targets:
-            self._restore_writing_target_prompt(active_target)
-        self._save_ui_state()
+        self._select_blog_writing_target(changed_platform)
         self._refresh_writing_auto_progress_ui()
+
+    def _layout_writing_control_row(self, _event=None) -> None:
+        if not hasattr(self, "writing_control_canvas"):
+            return
+        canvas = self.writing_control_canvas
+        visible_width = max(1, canvas.winfo_width())
+        content_width = self.writing_control_row.winfo_reqwidth()
+        total_width = max(visible_width, content_width)
+        canvas.itemconfigure(self.writing_control_window, width=total_width)
+        canvas.configure(scrollregion=(0, 0, total_width, canvas.winfo_height()))
+        if content_width > visible_width + 2:
+            self.writing_control_scrollbar.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+        else:
+            self.writing_control_scrollbar.grid_remove()
+            canvas.xview_moveto(0)
+
+    def _refresh_writing_control_canvas(self) -> None:
+        canvas = self.__dict__.get("writing_control_canvas")
+        if canvas is None or not canvas.winfo_exists() or self.current_page != "writing":
+            return
+        # A canvas built on a hidden page can show an empty strip on macOS
+        # until it is repainted after the page becomes visible.
+        canvas.configure(background=self._theme_palette()["shell"])
+        self._layout_writing_control_row()
 
     def _selected_writing_targets(self) -> list[str]:
         return [platform for platform, variable in self.target_platform_vars.items() if variable.get()]
@@ -39824,6 +40071,10 @@ class KeywordApp(ctk.CTk):
         if selected_label not in values:
             selected_label = values[0]
         self.writing_prompt_menu.set(selected_label)
+        header_menu = self.__dict__.get("writing_header_prompt_menu")
+        if header_menu is not None:
+            header_menu.configure(values=values)
+            header_menu.set(selected_label)
 
     def _save_active_prompt_set_to_memory(self, platform: str) -> None:
         if platform not in getattr(self, "prompt_title_boxes", {}):
@@ -39940,6 +40191,14 @@ class KeywordApp(ctk.CTk):
             )
             self.wordpress_settings.writing_prompt_active_target = active_target
             self._remember_writing_prompt_for_targets(prompt_id, targets)
+            self.wordpress_settings.home_selected_prompt_id = prompt_id
+            for menu_name in (
+                "home_prompt_menu", "writing_header_prompt_menu", "writing_prompt_menu"
+            ):
+                menu = getattr(self, menu_name, None)
+                if menu is not None:
+                    menu.set(label)
+            self._remember_blog_writing_preference(prompt_id=prompt_id)
         self._save_ui_state()
 
     def _platform_prompt_values_from_boxes(self) -> dict[str, str]:
@@ -44264,6 +44523,14 @@ class KeywordApp(ctk.CTk):
             getattr(self, "active_thumbnail_preset_index", 0)
         )
         self._refresh_thumbnail_preset_buttons()
+        label = f"썸네일·카드{self.default_thumbnail_preset_index + 1}"
+        for menu_name in ("home_thumbnail_menu", "writing_thumbnail_menu"):
+            menu = getattr(self, menu_name, None)
+            if menu is not None:
+                menu.set(label)
+        self._remember_blog_writing_preference(
+            thumbnail_preset=self.default_thumbnail_preset_index
+        )
         if hasattr(self, "publish_status_label"):
             self.publish_status_label.configure(
                 text=f"썸네일·카드{self.default_thumbnail_preset_index + 1} 세트를 발행 기본 세트로 지정했습니다.",
@@ -46255,6 +46522,11 @@ class KeywordApp(ctk.CTk):
         )
         self._refresh_thumbnail_preset_buttons()
         self._generate_thumbnail_preview()
+        self._select_blog_writing_target(
+            normalize_writing_prompt_active_target(
+                self.wordpress_settings.home_target_platform
+            )
+        )
         self._update_quick_status("워드프레스 연결 전", "검사 버튼으로 실제 연결을 확인해 주세요.", "#9da7ba")
         self.password_entry.focus()
 
@@ -46274,6 +46546,8 @@ class KeywordApp(ctk.CTk):
         self._show_only_page_frame(page_name)
         if page_name == "home":
             self._refresh_home_blog_menus()
+            self._layout_home_control_card()
+            self.after(80, self._layout_home_control_card)
             self.home_thumbnail_menu.set(
                 f"썸네일·카드{normalize_thumbnail_preset_index(self.default_thumbnail_preset_index) + 1}"
             )
@@ -46282,6 +46556,10 @@ class KeywordApp(ctk.CTk):
             self._render_home_adsense_summary()
             self.after(80, self._load_home_dashboard_keywords)
             self.after(650, self._start_adsense_refresh)
+        if page_name == "writing":
+            self._refresh_home_blog_menus()
+            self.writing_control_canvas.configure(background=self._theme_palette()["card"])
+            self.after(80, self._refresh_writing_control_canvas)
         if page_name == "automation":
             if self._is_windows_dark_theme():
                 # Make navigation visible before rebuilding a potentially long
@@ -47617,6 +47895,9 @@ class KeywordApp(ctk.CTk):
                 )
                 or ""
             ).strip(),
+            blog_writing_preferences=normalize_blog_writing_preferences(
+                self.wordpress_settings.blog_writing_preferences
+            ),
             title_prompt_template=selected_title_prompt,
             article_prompt_template=selected_article_prompt,
             prompt_sets=prompt_sets,
@@ -48288,6 +48569,11 @@ class KeywordApp(ctk.CTk):
                 text_color="#48d980" if profile.get("blog_url") else "#9aa7bb",
             )
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        if (
+            self.__dict__.get("home_target_platform_var") is not None
+            and self.home_target_platform_var.get() == "tistory"
+        ):
+            self._select_blog_writing_target("tistory")
 
     def _on_blogspot_profile_selected(self) -> None:
         previous_name = getattr(
@@ -48337,6 +48623,11 @@ class KeywordApp(ctk.CTk):
                 text_color="#48d980" if profile.get("blog_id") else "#9aa7bb",
             )
         AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        if (
+            self.__dict__.get("home_target_platform_var") is not None
+            and self.home_target_platform_var.get() == "blogspot"
+        ):
+            self._select_blog_writing_target("blogspot")
 
     def _save_blogspot_settings(self) -> None:
         settings = self._read_wordpress_settings()
