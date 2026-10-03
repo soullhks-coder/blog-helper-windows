@@ -219,9 +219,24 @@ def main() -> None:
             assert app.home_refresh_button.master is app.home_control_card
             assert int(app.home_refresh_button.grid_info()["row"]) == 1
             assert int(app.home_refresh_button.grid_info()["column"]) == 2
-            assert int(app.home_refresh_button.cget("width")) == 215
+            assert int(app.home_refresh_button.cget("width")) == 165
             assert int(app.home_launch_status_label.grid_info()["row"]) == 1
             assert int(app.home_launch_status_label.grid_info()["columnspan"]) == 2
+            assert tuple(app.home_blog_menus) == ("wordpress", "tistory", "blogspot")
+            assert tuple(app._home_platform_compact_logo_cache) == (
+                "wordpress", "tistory", "blogspot",
+            )
+            for logo in app._home_platform_compact_logo_cache.values():
+                assert logo.cget("size") == (20, 20)
+            assert int(app.home_prompt_menu.cget("height")) == 27
+            assert int(app.home_thumbnail_menu.cget("height")) == 27
+            assert all(int(menu.cget("height")) == 27 for menu in app.home_blog_menus.values())
+            app._on_home_thumbnail_selected("썸네일·카드2")
+            assert app.default_thumbnail_preset_index == 1
+            assert app.active_thumbnail_preset_index == 1
+            app._on_home_thumbnail_selected("썸네일·카드1")
+            assert app.default_thumbnail_preset_index == 0
+            assert app.active_thumbnail_preset_index == 0
             assert resolved_color(app.home_adsense_title_label, "text_color") == "#ffffff"
             assert tuple(app.home_adsense_value_labels) == (
                 "today", "yesterday", "last_7_days", "month_to_date", "balance",
@@ -580,6 +595,13 @@ def main() -> None:
             for geometry in ("1500x1000+30+35", "1100x900+30+35", "860x680+30+35"):
                 print(f"{sys.platform} {args.theme}: layout {geometry}", flush=True)
                 app.geometry(geometry)
+                settle()
+                app._switch_page("home")
+                settle()
+                home_right = app.home_control_card.winfo_rootx() + app.home_control_card.winfo_width()
+                for widget in (*app.home_target_groups.values(), app.home_prompt_frame):
+                    assert widget.winfo_rootx() + widget.winfo_width() <= home_right + 2, (geometry, widget)
+                app._switch_page("writing")
                 settle()
                 assert app.writing_step_rail.winfo_width() <= app.writing_page.winfo_width()
                 selector_width = (

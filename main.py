@@ -10719,6 +10719,42 @@ def service_profile_by_name(profiles: list[dict], profile_name: object) -> dict:
     )
 
 
+def home_blog_choices(platform: str, settings: WordPressSettings) -> list[tuple[str, str]]:
+    """Return configured blog identities for the compact home selector."""
+    if platform == "wordpress":
+        blog_url = str(settings.blog_url or "").strip()
+        host = urlparse(blog_url if "://" in blog_url else f"https://{blog_url}").netloc
+        return [("wordpress", host or "블로그 미등록")]
+    if platform == "tistory":
+        profiles = normalize_tistory_profiles(settings.tistory_profiles)
+        configured = [
+            profile for profile in profiles
+            if any(str(profile.get(key) or "").strip() for key in ("blog_url", "write_url", "kakao_account"))
+        ]
+    elif platform == "blogspot":
+        profiles = normalize_blogspot_profiles(settings.blogspot_profiles)
+        configured = [
+            profile for profile in profiles
+            if any(str(profile.get(key) or "").strip() for key in ("blog_id", "blog_url", "blog_name"))
+        ]
+    else:
+        return []
+    if not configured:
+        return [("", "블로그 미등록")]
+    choices: list[tuple[str, str]] = []
+    for profile in configured:
+        url = str(profile.get("blog_url") or profile.get("write_url") or "").strip()
+        host = urlparse(url if "://" in url else f"https://{url}").netloc if url else ""
+        label = host or str(profile.get("blog_name") or "").strip()
+        label = label or str(profile.get("kakao_account") or "").strip() or str(profile["name"])
+        choices.append((str(profile["name"]), label))
+    labels = [label for _, label in choices]
+    return [
+        (name, f"{label} · {name}" if labels.count(label) > 1 else label)
+        for name, label in choices
+    ]
+
+
 def naver_kin_profile_scope(
     profile: dict | None = None,
     index: int | None = None,
@@ -28297,21 +28333,31 @@ class KeywordApp(ctk.CTk):
         )
         self.home_control_card = control_card
         control_card.grid(row=1, column=0, pady=(0, 12), sticky="ew")
-        control_card.grid_columnconfigure(1, weight=1)
+        control_card.grid_columnconfigure(0, weight=1)
+        control_top = ctk.CTkFrame(control_card, fg_color="transparent")
+        self.home_control_top = control_top
+        control_top.grid(row=0, column=0, columnspan=3, padx=18, pady=(12, 5), sticky="ew")
+        control_top.grid_columnconfigure(0, weight=1)
+
+        target_row = ctk.CTkFrame(control_top, fg_color="transparent")
+        self.home_target_row = target_row
+        target_row.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
-            control_card,
+            target_row,
             text="글쓰기 선택",
             text_color=palette["accent"],
-            font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=0, column=0, padx=(18, 16), pady=(16, 8), sticky="w")
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 12), sticky="w")
 
         self.home_target_platform_var = tk.StringVar(
             value=normalize_writing_prompt_active_target(
                 getattr(self.wordpress_settings, "home_target_platform", "wordpress")
             )
         )
-        target_row = ctk.CTkFrame(control_card, fg_color="transparent")
-        target_row.grid(row=0, column=1, pady=(16, 8), sticky="w")
+        self.home_blog_menus: dict[str, ctk.CTkOptionMenu] = {}
+        self.home_blog_choice_maps: dict[str, dict[str, str]] = {}
+        self.home_target_groups: dict[str, ctk.CTkFrame] = {}
+        self._home_platform_compact_logo_cache: dict[str, ctk.CTkImage] = {}
         for column, (platform, label) in enumerate(
             (
                 ("wordpress", "워드프레스"),
@@ -28319,47 +28365,100 @@ class KeywordApp(ctk.CTk):
                 ("blogspot", "블로그스팟"),
             )
         ):
+            group = ctk.CTkFrame(target_row, fg_color="transparent")
+            group.grid(row=0, column=column + 1, padx=(0, 10), sticky="w")
+            self.home_target_groups[platform] = group
             ctk.CTkRadioButton(
-                target_row,
-                text=label,
+                group,
+                text="",
                 variable=self.home_target_platform_var,
                 value=platform,
-                radiobutton_width=21,
-                radiobutton_height=21,
-                font=ctk.CTkFont(size=14, weight="bold"),
+                width=21,
+                radiobutton_width=20,
+                radiobutton_height=20,
                 command=self._on_home_target_platform_changed,
-            ).grid(row=0, column=column, padx=(0, 18), sticky="w")
+            ).grid(row=0, column=0, padx=(0, 3), sticky="w")
+            ctk.CTkLabel(
+                group,
+                text="" if self._home_platform_compact_logo(platform) else label,
+                image=self._home_platform_compact_logo(platform),
+                width=22,
+                height=22,
+            ).grid(row=0, column=1, padx=(0, 4), sticky="w")
+            blog_menu = ctk.CTkOptionMenu(
+                group,
+                values=["블로그 미등록"],
+                width=112,
+                height=27,
+                corner_radius=10,
+                fg_color=palette["button"],
+                button_color=palette["button"],
+                button_hover_color=palette["button_hover"],
+                dropdown_fg_color=palette["panel"],
+                dropdown_hover_color=palette["hover"],
+                text_color=palette["text"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda choice, key=platform: self._on_home_blog_selected(key, choice),
+            )
+            blog_menu.grid(row=0, column=2, sticky="w")
+            self.home_blog_menus[platform] = blog_menu
 
-        prompt_frame = ctk.CTkFrame(control_card, fg_color="transparent")
+        prompt_frame = ctk.CTkFrame(control_top, fg_color="transparent")
         self.home_prompt_frame = prompt_frame
-        prompt_frame.grid(row=0, column=2, padx=(12, 18), pady=(12, 8), sticky="e")
+        prompt_frame.grid(row=0, column=1, sticky="e")
         ctk.CTkLabel(
             prompt_frame,
-            text="프롬프트",
+            text="썸네일",
             text_color=palette["muted"],
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=0, column=0, padx=(0, 8), sticky="e")
-        self.home_prompt_menu = ctk.CTkOptionMenu(
+            font=ctk.CTkFont(size=11, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 5), sticky="e")
+        thumbnail_values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
+        self.home_thumbnail_menu = ctk.CTkOptionMenu(
             prompt_frame,
-            values=self._prompt_set_menu_values(),
-            width=215,
-            height=38,
-            corner_radius=12,
+            values=thumbnail_values,
+            width=116,
+            height=27,
+            corner_radius=10,
             fg_color=palette["button"],
             button_color=palette["button"],
             button_hover_color=palette["button_hover"],
             dropdown_fg_color=palette["panel"],
             dropdown_hover_color=palette["hover"],
             text_color=palette["text"],
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_home_thumbnail_selected,
+        )
+        self.home_thumbnail_menu.grid(row=0, column=1, padx=(0, 10), sticky="e")
+        self.home_thumbnail_menu.set(
+            thumbnail_values[normalize_thumbnail_preset_index(self.wordpress_settings.thumbnail_default_preset)]
+        )
+        ctk.CTkLabel(
+            prompt_frame,
+            text="프롬프트",
+            text_color=palette["muted"],
+            font=ctk.CTkFont(size=11, weight="bold"),
+        ).grid(row=0, column=2, padx=(0, 5), sticky="e")
+        self.home_prompt_menu = ctk.CTkOptionMenu(
+            prompt_frame,
+            values=self._prompt_set_menu_values(),
+            width=165,
+            height=27,
+            corner_radius=10,
+            fg_color=palette["button"],
+            button_color=palette["button"],
+            button_hover_color=palette["button_hover"],
+            dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["hover"],
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=11, weight="bold"),
             command=self._on_home_prompt_selected,
         )
-        self.home_prompt_menu.grid(row=0, column=1, sticky="e")
+        self.home_prompt_menu.grid(row=0, column=3, sticky="e")
         self.home_refresh_button = ctk.CTkButton(
             control_card,
             text="키워드 새로고침",
-            width=215,
-            height=36,
+            width=165,
+            height=32,
             corner_radius=12,
             fg_color="#2f6df6",
             hover_color="#255dcc",
@@ -28370,11 +28469,13 @@ class KeywordApp(ctk.CTk):
         self.home_refresh_button.grid(
             row=1,
             column=2,
-            padx=(12, 18),
-            pady=(0, 14),
+            padx=(8, 18),
+            pady=(0, 12),
             sticky="e",
         )
         self._refresh_home_prompt_menu()
+        self._refresh_home_blog_menus()
+        control_card.bind("<Configure>", self._layout_home_control_card, add="+")
 
         self.home_launch_status_label = ctk.CTkLabel(
             control_card,
@@ -28388,7 +28489,7 @@ class KeywordApp(ctk.CTk):
             column=0,
             columnspan=2,
             padx=18,
-            pady=(0, 14),
+            pady=(0, 12),
             sticky="ew",
         )
 
@@ -28690,6 +28791,106 @@ class KeywordApp(ctk.CTk):
             return None
         self._home_platform_logo_cache[platform] = rendered
         return rendered
+
+    def _home_platform_compact_logo(self, platform: str) -> ctk.CTkImage | None:
+        cached = self._home_platform_compact_logo_cache.get(platform)
+        if cached is not None:
+            return cached
+        image_path = HOME_PLATFORM_LOGO_PATHS.get(platform)
+        if Image is None or image_path is None or not image_path.exists():
+            return None
+        try:
+            with Image.open(image_path) as opened:
+                logo = opened.convert("RGBA").copy()
+            rendered = ctk.CTkImage(light_image=logo, dark_image=logo, size=(20, 20))
+        except Exception:
+            return None
+        self._home_platform_compact_logo_cache[platform] = rendered
+        return rendered
+
+    def _layout_home_control_card(self, event=None) -> None:
+        width = int(getattr(event, "width", 0) or self.home_control_card.winfo_width())
+        layout = "wide" if width >= 900 else "medium" if width >= 710 else "narrow"
+        if getattr(self, "_home_control_layout", None) == layout:
+            return
+        self._home_control_layout = layout
+        if layout == "wide":
+            self.home_target_row.grid_configure(row=0, column=0, sticky="w")
+            self.home_prompt_frame.grid_configure(row=0, column=1, sticky="e", pady=0)
+        else:
+            self.home_target_row.grid_configure(row=0, column=0, sticky="w")
+            self.home_prompt_frame.grid_configure(row=1, column=0, sticky="e", pady=(8, 0))
+        for index, platform in enumerate(("wordpress", "tistory", "blogspot")):
+            group = self.home_target_groups[platform]
+            if layout == "narrow":
+                group.grid_configure(row=0 if index < 2 else 1, column=1 + (index % 2), pady=(0, 5))
+            else:
+                group.grid_configure(row=0, column=index + 1, pady=0)
+
+    def _refresh_home_blog_menus(self) -> None:
+        if not hasattr(self, "home_blog_menus"):
+            return
+        for platform, menu in self.home_blog_menus.items():
+            choices = home_blog_choices(platform, self.wordpress_settings)
+            labels = [label for _, label in choices]
+            self.home_blog_choice_maps[platform] = {label: name for name, label in choices}
+            menu.configure(values=labels)
+            active_field = f"{platform}_active_profile"
+            active_name = "wordpress" if platform == "wordpress" else str(
+                getattr(self.wordpress_settings, active_field, "")
+            )
+            if (
+                platform in ("tistory", "blogspot")
+                and choices[0][0]
+                and active_name not in (name for name, _ in choices)
+            ):
+                active_name = choices[0][0]
+                setattr(self.wordpress_settings, active_field, active_name)
+                profile_var = getattr(self, active_field + "_var", None)
+                if profile_var is not None:
+                    profile_var.set(active_name)
+                    if platform == "tistory":
+                        self._on_tistory_profile_selected()
+                    else:
+                        self._on_blogspot_profile_selected()
+                else:
+                    AppStateStore.update_fields(**{active_field: active_name})
+            active = next(
+                (label for name, label in choices if name == active_name),
+                labels[0],
+            )
+            menu.set(active)
+
+    def _on_home_blog_selected(self, platform: str, label: str) -> None:
+        profile_name = self.home_blog_choice_maps.get(platform, {}).get(label, "")
+        if not profile_name:
+            return
+        self.home_target_platform_var.set(platform)
+        self._on_home_target_platform_changed()
+        if platform == "tistory" and hasattr(self, "tistory_active_profile_var"):
+            self.tistory_active_profile_var.set(profile_name)
+            self._on_tistory_profile_selected()
+        elif platform == "blogspot" and hasattr(self, "blogspot_active_profile_var"):
+            self.blogspot_active_profile_var.set(profile_name)
+            self._on_blogspot_profile_selected()
+        self._refresh_home_blog_menus()
+        self._refresh_home_publish_counts()
+
+    def _on_home_thumbnail_selected(self, label: str) -> None:
+        values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
+        if label not in values:
+            return
+        index = values.index(label)
+        self._switch_thumbnail_preset(index, save=False)
+        self.default_thumbnail_preset_index = index
+        self.wordpress_settings.thumbnail_active_preset = index
+        self.wordpress_settings.thumbnail_default_preset = index
+        self._refresh_thumbnail_preset_buttons()
+        AppStateStore.update_fields(
+            thumbnail_active_preset=index,
+            thumbnail_default_preset=index,
+        )
+        self._save_ui_state()
 
     def _refresh_home_publish_counts(self) -> None:
         count_labels = getattr(self, "home_publish_count_labels", {})
@@ -46041,6 +46242,11 @@ class KeywordApp(ctk.CTk):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)
         if page_name == "home":
+            self._refresh_home_blog_menus()
+            self.home_thumbnail_menu.set(
+                f"썸네일·카드{normalize_thumbnail_preset_index(self.default_thumbnail_preset_index) + 1}"
+            )
+            self._refresh_home_prompt_menu()
             self._refresh_home_publish_counts()
             self._render_home_adsense_summary()
             self.after(80, self._load_home_dashboard_keywords)

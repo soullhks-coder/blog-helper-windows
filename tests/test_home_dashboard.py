@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 
@@ -149,6 +149,9 @@ class HomeDashboardTests(unittest.TestCase):
             settings = main.WordPressSettings(
                 home_target_platform="blogspot",
                 home_selected_prompt_id="blogspot-custom",
+                tistory_active_profile="티스토리 2",
+                blogspot_active_profile="블로그스팟 3",
+                thumbnail_default_preset=2,
             )
             with (
                 patch.object(main, "STATE_FILE", state_file),
@@ -164,6 +167,80 @@ class HomeDashboardTests(unittest.TestCase):
 
         self.assertEqual(loaded.home_target_platform, "blogspot")
         self.assertEqual(loaded.home_selected_prompt_id, "blogspot-custom")
+        self.assertEqual(loaded.tistory_active_profile, "티스토리 2")
+        self.assertEqual(loaded.blogspot_active_profile, "블로그스팟 3")
+        self.assertEqual(loaded.thumbnail_default_preset, 2)
+
+    def test_home_blog_choices_show_only_registered_profiles(self) -> None:
+        settings = main.WordPressSettings(
+            blog_url="https://blog.example.com/wp-json",
+            tistory_profiles=[{}, {"blog_url": "https://two.tistory.com"}, {}],
+            blogspot_profiles=[
+                {"blog_id": "123", "blog_url": "https://one.blogspot.com"},
+                {},
+                {"blog_id": "789", "blog_name": "세 번째 블로그"},
+            ],
+        )
+        self.assertEqual(
+            main.home_blog_choices("wordpress", settings),
+            [("wordpress", "blog.example.com")],
+        )
+        self.assertEqual(
+            main.home_blog_choices("tistory", settings),
+            [("티스토리 2", "two.tistory.com")],
+        )
+        self.assertEqual(
+            main.home_blog_choices("blogspot", settings),
+            [("블로그스팟 1", "one.blogspot.com"), ("블로그스팟 3", "세 번째 블로그")],
+        )
+
+    def test_home_blog_selection_activates_matching_service_profile(self) -> None:
+        class Variable:
+            value = ""
+
+            def set(self, value):
+                self.value = value
+
+        app = SimpleNamespace(
+            home_blog_choice_maps={"tistory": {"two.tistory.com": "티스토리 2"}},
+            home_target_platform_var=Variable(),
+            tistory_active_profile_var=Variable(),
+            _on_home_target_platform_changed=Mock(),
+            _on_tistory_profile_selected=Mock(),
+            _refresh_home_blog_menus=Mock(),
+            _refresh_home_publish_counts=Mock(),
+        )
+        main.KeywordApp._on_home_blog_selected(app, "tistory", "two.tistory.com")
+        self.assertEqual(app.home_target_platform_var.value, "tistory")
+        self.assertEqual(app.tistory_active_profile_var.value, "티스토리 2")
+        app._on_tistory_profile_selected.assert_called_once_with()
+        app._refresh_home_blog_menus.assert_called_once_with()
+        app._refresh_home_publish_counts.assert_called_once_with()
+
+    def test_home_selector_does_not_display_inactive_profile_as_selected(self) -> None:
+        class Menu:
+            def configure(self, **values):
+                self.values = values["values"]
+
+            def set(self, value):
+                self.selected = value
+
+        settings = main.WordPressSettings(
+            tistory_active_profile="티스토리 1",
+            tistory_profiles=[{}, {"blog_url": "https://two.tistory.com"}, {}],
+        )
+        menu = Menu()
+        app = SimpleNamespace(
+            wordpress_settings=settings,
+            home_blog_menus={"tistory": menu},
+            home_blog_choice_maps={},
+        )
+        with patch.object(main.AppStateStore, "update_fields") as save:
+            main.KeywordApp._refresh_home_blog_menus(app)
+        self.assertEqual(menu.values, ["two.tistory.com"])
+        self.assertEqual(menu.selected, "two.tistory.com")
+        self.assertEqual(settings.tistory_active_profile, "티스토리 2")
+        save.assert_called_once_with(tistory_active_profile="티스토리 2")
 
     def test_home_worker_reports_each_keyword_source(self) -> None:
         result_queue = queue.Queue()
