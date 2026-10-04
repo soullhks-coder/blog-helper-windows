@@ -73,12 +73,29 @@ export default {
       const authorization = request.headers.get("Authorization") || "";
       const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
       const requestedDeviceId = cleanText(url.searchParams.get("deviceId"), 80);
-      const globalTokenMatches = safeEqual(token, String(env.AGENT_TOKEN || ""));
+      const globalTokenMatches = Boolean(env.AGENT_TOKEN)
+        && safeEqual(token, String(env.AGENT_TOKEN));
       const deviceTokenMatches = await verifyDeviceToken(token, env.SESSION_SECRET, requestedDeviceId);
       if (!globalTokenMatches && !deviceTokenMatches) {
         return jsonResponse({ error: "에이전트 인증에 실패했습니다." }, 401);
       }
       return room.fetch(markAuthorized(request, "agent"));
+    }
+
+    if (url.pathname === "/api/publish-limit" && request.method === "POST") {
+      const authorization = request.headers.get("Authorization") || "";
+      const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+      const deviceId = cleanText(url.searchParams.get("deviceId"), 80);
+      const globalTokenMatches = Boolean(env.AGENT_TOKEN)
+        && safeEqual(token, String(env.AGENT_TOKEN));
+      const deviceTokenMatches = await verifyDeviceToken(token, env.SESSION_SECRET, deviceId);
+      if (!deviceId || (!globalTokenMatches && !deviceTokenMatches)) {
+        return jsonResponse({ error: "기기 인증에 실패했습니다." }, 401);
+      }
+      const headers = new Headers(request.headers);
+      headers.set("X-Blog-Helper-Authorized", "publish-agent");
+      headers.set("X-Blog-Helper-Device-Id", deviceId);
+      return room.fetch(new Request(request, { headers }));
     }
 
     const cookie = readCookie(request.headers.get("Cookie") || "", SESSION_COOKIE);
@@ -103,6 +120,10 @@ export class ControlRoom {
     const authorizedAs = request.headers.get("X-Blog-Helper-Authorized");
     if (!authorizedAs) {
       return jsonResponse({ error: "인증되지 않은 내부 요청입니다." }, 401);
+    }
+
+    if (url.pathname === "/api/publish-limit" && authorizedAs === "publish-agent") {
+      return this.updatePublishLimit(request);
     }
 
     if (url.pathname === "/api/agent" && authorizedAs === "agent") {
@@ -173,6 +194,77 @@ export class ControlRoom {
       return this.cancelJob(decodeURIComponent(cancelMatch[1]));
     }
     return jsonResponse({ error: "요청한 API를 찾을 수 없습니다." }, 404);
+  }
+
+  async updatePublishLimit(request) {
+    const deviceId = cleanText(request.headers.get("X-Blog-Helper-Device-Id"), 80);
+    const payload = await readJson(request);
+    const key = String(payload.key || "");
+    const action = String(payload.action || "");
+    const limit = Number(payload.limit);
+    const localCount = Number(payload.localCount);
+    const reservationId = String(payload.reservationId || "");
+    const reservationDate = String(payload.reservationDate || "");
+    if (
+      !deviceId || !/^[a-f0-9]{64}$/.test(key)
+      || !["status", "reserve", "commit", "cancel"].includes(action)
+      || !Number.isInteger(limit) || limit < 1 || limit > 999
+      || !Number.isInteger(localCount) || localCount < 0 || localCount > 999
+      || (["commit", "cancel"].includes(action) && !/^[a-f0-9-]{36}$/.test(reservationId))
+      || (["commit", "cancel"].includes(action) && !/^\d{4}-\d{2}-\d{2}$/.test(reservationDate))
+    ) {
+      return jsonResponse({ error: "발행 횟수 요청이 올바르지 않습니다." }, 400);
+    }
+    const date = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date());
+    const storageKey = `publish-limit:${["commit", "cancel"].includes(action) ? reservationDate : date}:${key}`;
+    const outcome = await this.ctx.storage.transaction(async (transaction) => {
+      const existing = await transaction.get(storageKey);
+      if (!existing && ["commit", "cancel"].includes(action)) {
+        return { ok: false, error: "발행 예약을 찾을 수 없습니다." };
+      }
+      const state = existing || {
+        count: 0, limit, baselines: {}, reservations: {},
+      };
+      state.baselines ||= {};
+      state.reservations ||= {};
+      state.limit = Math.min(Number(state.limit || limit), limit);
+      // Each device contributes its pre-update local count exactly once. Later
+      // local writes (including shared publishes) must not be added again.
+      if (["status", "reserve"].includes(action) && !Object.hasOwn(state.baselines, deviceId)) {
+        state.baselines[deviceId] = localCount;
+        state.count += localCount;
+      }
+      let error = "";
+      let newReservationId = "";
+      if (action === "reserve") {
+        if (state.count >= state.limit) {
+          error = `오늘 공유 발행 한도 ${state.limit}건을 모두 사용했습니다.`;
+        } else {
+          newReservationId = crypto.randomUUID();
+          state.reservations[newReservationId] = deviceId;
+          state.count += 1;
+        }
+      } else if (action === "commit" || action === "cancel") {
+        const owner = state.reservations[reservationId];
+        if (owner && owner !== deviceId) {
+          error = "다른 기기의 발행 예약은 변경할 수 없습니다.";
+        } else if (owner) {
+          delete state.reservations[reservationId];
+          if (action === "cancel") state.count = Math.max(0, state.count - 1);
+        }
+      }
+      await transaction.put(storageKey, state);
+      const pending = Object.keys(state.reservations).length;
+      return {
+        ok: !error, error, date: ["commit", "cancel"].includes(action) ? reservationDate : date,
+        published: Math.max(0, state.count - pending), pending,
+        remaining: Math.max(0, state.limit - state.count),
+        reservationId: newReservationId,
+      };
+    });
+    return jsonResponse(outcome, outcome.ok ? 200 : 409);
   }
 
   async connectAgent(request, url) {

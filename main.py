@@ -97,6 +97,12 @@ from remote_control import (
     RemoteAgentConfigStore,
     RemoteControlAgent,
 )
+from shared_publish_limit import (
+    SHARED_TISTORY_DAILY_LIMIT,
+    SharedTistoryPublishLimitClient,
+    is_shared_tistory_blog,
+    tistory_shared_blog_key,
+)
 from history_data import (
     BLOG_HELPER_HISTORY,
     history_categories,
@@ -3005,6 +3011,15 @@ def resolve_tistory_publish_limit(payload: dict, fallback: object = 0) -> int:
     if value is None:
         value = fallback
     return normalize_daily_publish_limit(value)
+
+
+def effective_tistory_daily_limit(blog_url: str, configured: object) -> int:
+    """The family-shared blog has a fixed 15-post cap; other blogs are unchanged."""
+    return (
+        SHARED_TISTORY_DAILY_LIMIT
+        if is_shared_tistory_blog(blog_url)
+        else normalize_daily_publish_limit(configured)
+    )
 
 
 def format_daily_publish_usage(count: object, limit: object) -> str:
@@ -19006,6 +19021,8 @@ def run_tistory_playwright_automation(
     save_mode: str = "",
     profile_scope: str = TISTORY_PROFILE_SCOPES[0],
     auto_publish: bool = True,
+    on_public_publish_clicked: Callable[[], None] | None = None,
+    before_public_publish: Callable[[], None] | None = None,
 ) -> tuple[bool, str | dict[str, object]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -19145,9 +19162,13 @@ def run_tistory_playwright_automation(
 
                 page.on("response", capture_publish_response)
                 try:
+                    if before_public_publish is not None:
+                        before_public_publish()
                     published = click_tistory_public_publish_native(page, result_queue)
                     if not published:
                         raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
+                    if on_public_publish_clicked is not None:
+                        on_public_publish_clicked()
                     quick_deadline = time.time() + 18
                     manual_deadline = time.time() + TISTORY_MANUAL_PUBLISH_WAIT_SECONDS
                     captcha_notice_sent = False
@@ -25216,14 +25237,52 @@ class TistoryAutomationWorker(threading.Thread):
     def run(self) -> None:
         reference_image_paths: list[str] = []
         reservation_key = ""
+        shared_client: SharedTistoryPublishLimitClient | None = None
+        shared_reservation_id = ""
+        shared_reservation_date = ""
+        public_publish_clicked = False
+
+        def mark_public_publish_clicked() -> None:
+            nonlocal public_publish_clicked
+            public_publish_clicked = True
+
+        def refresh_shared_reservation_before_publish() -> None:
+            nonlocal shared_reservation_id, shared_reservation_date
+            if shared_client is None or not shared_reservation_id:
+                return
+            current = shared_client.status()
+            if current.get("date") == shared_reservation_date:
+                return
+            shared_client.cancel(shared_reservation_id, shared_reservation_date)
+            replacement = shared_client.reserve()
+            shared_reservation_id = str(replacement["reservationId"])
+            shared_reservation_date = str(replacement["date"])
+
         try:
             daily_account = self.public_blog_url or self.write_url
             if self.publish_after_input or not self.auto_publish:
-                reservation_key = DailyPublishLimitStore.reserve_publish(
-                    "tistory",
-                    daily_account,
-                    self.daily_publish_limit,
-                )
+                if is_shared_tistory_blog(daily_account):
+                    shared_client = SharedTistoryPublishLimitClient(
+                        RemoteAgentConfigStore(DATA_DIR).load(),
+                        daily_account,
+                        SHARED_TISTORY_DAILY_LIMIT,
+                        DailyPublishLimitStore.count("tistory", daily_account),
+                    )
+                    shared_status = shared_client.reserve()
+                    shared_reservation_id = str(shared_status["reservationId"])
+                    shared_reservation_date = str(shared_status["date"])
+                    self.result_queue.put((
+                        "tistory_progress",
+                        "tip.lhksoul.com 공유 발행 자리 예약: "
+                        f"오늘 {shared_status['published']}/{SHARED_TISTORY_DAILY_LIMIT}건 발행 · "
+                        f"남은 {shared_status['remaining']}건",
+                    ))
+                else:
+                    reservation_key = DailyPublishLimitStore.reserve_publish(
+                        "tistory",
+                        daily_account,
+                        self.daily_publish_limit,
+                    )
             thumbnail_data_url = ""
             thumbnail_content_url = ""
             native_image_files: dict[str, str] = {}
@@ -25404,6 +25463,8 @@ class TistoryAutomationWorker(threading.Thread):
                 save_mode=self.save_mode,
                 profile_scope=self.profile_scope,
                 auto_publish=self.auto_publish,
+                on_public_publish_clicked=mark_public_publish_clicked,
+                before_public_publish=refresh_shared_reservation_before_publish,
             )
             if success:
                 if isinstance(message, dict):
@@ -25425,29 +25486,71 @@ class TistoryAutomationWorker(threading.Thread):
                         "manual_completed": False,
                     }
                 if (
-                    done_payload["save_mode"] == TISTORY_SAVE_MODE_PUBLISH
-                    and (
-                        done_payload["published_url"]
-                        or done_payload["manual_completed"]
+                    done_payload["published_url"]
+                    or done_payload["manual_completed"]
+                    or (
+                        self.publish_after_input
+                        and done_payload["save_mode"] == TISTORY_SAVE_MODE_PUBLISH
                     )
                 ):
-                    done_payload["daily_publish_count"] = (
-                        DailyPublishLimitStore.record_reserved_success(
-                            "tistory",
-                            daily_account,
-                            reservation_key,
+                    if shared_client is not None:
+                        # The slot remains consumed if the commit response is lost:
+                        # never cancel an already published post in finally.
+                        completed_id = shared_reservation_id
+                        shared_reservation_id = ""
+                        try:
+                            shared_status = shared_client.commit(completed_id, shared_reservation_date)
+                            done_payload["shared_daily_publish_count"] = shared_status["published"]
+                            done_payload["shared_daily_remaining"] = shared_status["remaining"]
+                            done_payload["shared_daily_pending"] = shared_status["pending"]
+                        except Exception as exc:
+                            append_runtime_log("TISTORY", f"공유 발행 예약 확정 확인 실패: {exc}")
+                            done_payload["shared_count_warning"] = (
+                                "글은 발행됐지만 공유 횟수 서버 확인이 실패했습니다. "
+                                "발행 자리는 안전을 위해 계속 사용 중으로 계산됩니다."
+                            )
+                        done_payload["daily_publish_count"] = DailyPublishLimitStore.record_success(
+                            "tistory", daily_account
                         )
-                    )
-                    reservation_key = ""
+                    else:
+                        done_payload["daily_publish_count"] = (
+                            DailyPublishLimitStore.record_reserved_success(
+                                "tistory", daily_account, reservation_key
+                            )
+                        )
+                        reservation_key = ""
                 self.result_queue.put(("tistory_automation_done", done_payload))
             else:
+                if public_publish_clicked and shared_reservation_id:
+                    message = (
+                        f"{message}\n공개발행 버튼이 눌린 뒤 결과를 확인하지 못했습니다. "
+                        "15건 초과 방지를 위해 공유 발행 자리 1건은 오늘 계속 사용 중으로 계산합니다. "
+                        "티스토리 관리 화면에서 실제 발행 여부를 확인해 주세요."
+                    )
                 self.result_queue.put(("tistory_automation_error", message))
         except ManualPublishCancelled:
             pass
         except Exception as exc:  # pragma: no cover - runtime handling
-            self.result_queue.put(("tistory_automation_error", str(exc)))
+            error_message = str(exc)
+            if public_publish_clicked and shared_reservation_id:
+                error_message += (
+                    "\n공개발행 버튼 클릭 후 상태가 불확실해 공유 발행 자리 1건을 "
+                    "안전하게 유지합니다. 티스토리 관리 화면을 확인해 주세요."
+                )
+            self.result_queue.put(("tistory_automation_error", error_message))
         finally:
             DailyPublishLimitStore.cancel_reservation(reservation_key)
+            if shared_client is not None and shared_reservation_id:
+                if public_publish_clicked:
+                    append_runtime_log(
+                        "TISTORY",
+                        "공개발행 버튼 클릭 후 결과 미확인 - 15건 초과 방지를 위해 공유 예약 유지",
+                    )
+                else:
+                    try:
+                        shared_client.cancel(shared_reservation_id, shared_reservation_date)
+                    except Exception as exc:
+                        append_runtime_log("TISTORY", f"공유 발행 예약 반환 실패: {exc}")
             cleanup_generated_upload_images(reference_image_paths)
             cleanup_tistory_automation_files()
 
@@ -26274,6 +26377,8 @@ class KeywordApp(ctk.CTk):
         self.result_queue: queue.Queue = queue.Queue()
         self.remote_agent_store = RemoteAgentConfigStore(DATA_DIR)
         self.remote_agent_config = self.remote_agent_store.load()
+        self.shared_tistory_usage: dict = {}
+        self._shared_tistory_usage_pending = False
         self.remote_agent: RemoteControlAgent | None = None
         self.remote_keyword_worker: RemoteKeywordQueueWorker | None = None
         self.remote_active_job_id = ""
@@ -26495,6 +26600,7 @@ class KeywordApp(ctk.CTk):
         self.after(1200, self._automation_publish_scheduler_tick)
         self.after(2200, self._start_update_check)
         self.after(600, self._start_remote_agent_if_enabled)
+        self.after(1800, self._shared_tistory_usage_tick)
 
     def _update_monitor_enabled(self) -> bool:
         return (
@@ -27165,9 +27271,22 @@ class KeywordApp(ctk.CTk):
                 continue
             seen.add(platform)
             platform_label, limit = configurations[platform]
+            account = self._daily_publish_account(platform)
+            if platform == "tistory" and is_shared_tistory_blog(account):
+                usage = self._current_shared_tistory_usage(account)
+                if not usage or usage.get("error"):
+                    rows.append((platform_label, "공유 발행 횟수 서버 확인 필요", None))
+                    continue
+                shared_limit = int(usage.get("limit") or SHARED_TISTORY_DAILY_LIMIT)
+                rows.append((
+                    platform_label,
+                    format_daily_publish_usage(usage.get("published", 0), shared_limit),
+                    int(usage.get("remaining", 0)),
+                ))
+                continue
             count = DailyPublishLimitStore.count(
                 platform,
-                self._daily_publish_account(platform),
+                account,
             )
             normalized_limit = normalize_daily_publish_limit(limit)
             remaining = (
@@ -29086,9 +29205,31 @@ class KeywordApp(ctk.CTk):
             count_label = count_labels.get(platform)
             if count_label is None:
                 continue
+            account = self._daily_publish_account(platform)
+            if platform == "tistory" and is_shared_tistory_blog(account):
+                usage = self._current_shared_tistory_usage(account)
+                remaining_label = remaining_labels.get(platform)
+                if not usage or usage.get("error"):
+                    count_label.configure(text="공유 발행 횟수 확인 필요")
+                    if remaining_label is not None:
+                        remaining_label.configure(
+                            text="서버 연결 후 표시 · 연결 실패 시 발행 중단",
+                            text_color=("#b94949", "#ffb86b"),
+                        )
+                else:
+                    count_label.configure(text=f"오늘 발행 {usage.get('published', 0)}건")
+                    if remaining_label is not None:
+                        remaining_label.configure(
+                            text=(
+                                f"두 PC 합산 · 남은 {usage.get('remaining', 0)}건"
+                                f" · 발행 중 {usage.get('pending', 0)}건"
+                            ),
+                            text_color=("#315f93", "#6dadff"),
+                        )
+                continue
             count = DailyPublishLimitStore.count(
                 platform,
-                self._daily_publish_account(platform),
+                account,
             )
             limit = self._home_daily_publish_limit(platform)
             count_label.configure(text=f"오늘 발행 {count}건")
@@ -29112,6 +29253,8 @@ class KeywordApp(ctk.CTk):
                 )
 
     def _home_daily_publish_limit(self, platform: str) -> int:
+        if platform == "tistory" and is_shared_tistory_blog(self._daily_publish_account("tistory")):
+            return SHARED_TISTORY_DAILY_LIMIT
         entry_name = {
             "wordpress": "wordpress_daily_publish_limit_entry",
             "tistory": "tistory_daily_publish_limit_entry",
@@ -40384,6 +40527,45 @@ class KeywordApp(ctk.CTk):
         )
         return blog_url or blog_id
 
+    def _current_shared_tistory_usage(self, account: str) -> dict:
+        if not is_shared_tistory_blog(account):
+            return {}
+        usage = getattr(self, "shared_tistory_usage", {})
+        today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+        if usage.get("key") == tistory_shared_blog_key(account) and usage.get("date") == today:
+            return usage
+        return {}
+
+    def _shared_tistory_usage_tick(self) -> None:
+        if getattr(self, "_app_closing", False):
+            return
+        self._refresh_shared_tistory_usage_async()
+        self.after(60_000, self._shared_tistory_usage_tick)
+
+    def _refresh_shared_tistory_usage_async(self) -> None:
+        if getattr(self, "_shared_tistory_usage_pending", False):
+            return
+        account = self._daily_publish_account("tistory")
+        if not is_shared_tistory_blog(account):
+            return
+        self._shared_tistory_usage_pending = True
+        config = self.remote_agent_store.load()
+        local_count = DailyPublishLimitStore.count("tistory", account)
+        key = tistory_shared_blog_key(account)
+
+        def fetch() -> None:
+            try:
+                client = SharedTistoryPublishLimitClient(
+                    config, account, SHARED_TISTORY_DAILY_LIMIT, local_count
+                )
+                result = client.status()
+            except Exception as exc:
+                result = {"error": str(exc)}
+            result["key"] = key
+            self.result_queue.put(("shared_tistory_usage", result))
+
+        threading.Thread(target=fetch, daemon=True, name="shared-tistory-usage").start()
+
     def _refresh_daily_publish_limit_statuses(self) -> None:
         controls = {
             "wordpress": (
@@ -40404,15 +40586,32 @@ class KeywordApp(ctk.CTk):
             label = getattr(self, label_name, None)
             if entry is None or label is None:
                 continue
+            account = self._daily_publish_account(platform)
             limit = normalize_daily_publish_limit(entry.get())
             normalized_text = str(limit)
             if entry.get().strip() != normalized_text:
                 entry.delete(0, "end")
                 entry.insert(0, normalized_text)
-            count = DailyPublishLimitStore.count(
-                platform,
-                self._daily_publish_account(platform),
-            )
+            if platform == "tistory" and is_shared_tistory_blog(account):
+                usage = self._current_shared_tistory_usage(account)
+                if not usage or usage.get("error"):
+                    label.configure(
+                        text="tip.lhksoul.com · 두 PC 공유 15건 · 서버 확인 필요",
+                        text_color=("#b94949", "#ffb86b"),
+                    )
+                    continue
+                count = int(usage.get("published", 0))
+                remaining = int(usage.get("remaining", 0))
+                pending = int(usage.get("pending", 0))
+                label.configure(
+                    text=(
+                        f"tip.lhksoul.com 공유 · 오늘 {count}/15건 발행"
+                        f" · 발행 중 {pending}건 · 남은 {remaining}건"
+                    ),
+                    text_color="#ffb86b" if remaining == 0 else ("#315f93", "#6dadff"),
+                )
+                continue
+            count = DailyPublishLimitStore.count(platform, account)
             if limit:
                 remaining = max(0, limit - count)
                 label.configure(
@@ -41912,6 +42111,21 @@ class KeywordApp(ctk.CTk):
             row=10,
             platform="tistory",
         )
+
+        ctk.CTkLabel(
+            self.tistory_card,
+            text=(
+                "tip.lhksoul.com만 두 PC 합산 하루 15건으로 관리합니다. "
+                "두 PC 모두 같은 원격 서버에 등록해야 하며, 서버 확인에 실패하면 이 블로그의 발행을 중단합니다. "
+                "위 일반 한도 입력값은 이 도메인에서 사용하지 않으며, "
+                "다른 블로그 도메인의 한도 설정은 그대로 유지됩니다."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=850,
+            text_color=("#607089", "#9aa7bb"),
+            font=ctk.CTkFont(size=12),
+        ).grid(row=11, column=0, padx=24, pady=(0, 14), sticky="ew")
 
         button_row = ctk.CTkFrame(self.tistory_card, fg_color="transparent")
         button_row.grid(row=12, column=0, padx=24, pady=(0, 0), sticky="ew")
@@ -48582,6 +48796,7 @@ class KeywordApp(ctk.CTk):
         )
         self._refresh_service_profile_radios("tistory")
         self._refresh_daily_publish_limit_statuses()
+        self._refresh_shared_tistory_usage_async()
         if hasattr(self, "tistory_status_label"):
             self.tistory_status_label.configure(
                 text=(
@@ -48988,6 +49203,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings = settings
         AppStateStore.save(settings)
         self._refresh_daily_publish_limit_statuses()
+        self._refresh_shared_tistory_usage_async()
         self.tistory_status_label.configure(text="● 티스토리 설정 저장 완료", text_color="#48d980")
         self._update_quick_status(
             "티스토리 저장됨",
@@ -51785,6 +52001,18 @@ class KeywordApp(ctk.CTk):
                     )
                 elif event_type == "remote_agent_credentials":
                     self._handle_remote_agent_credentials(str(payload or ""))
+                    self._refresh_shared_tistory_usage_async()
+                elif event_type == "shared_tistory_usage":
+                    self._shared_tistory_usage_pending = False
+                    self.shared_tistory_usage = dict(payload or {})
+                    self._refresh_daily_publish_limit_statuses()
+                    current_account = self._daily_publish_account("tistory")
+                    if (
+                        is_shared_tistory_blog(current_account)
+                        and self.shared_tistory_usage.get("key")
+                        != tistory_shared_blog_key(current_account)
+                    ):
+                        self._refresh_shared_tistory_usage_async()
                 elif event_type == "remote_queue_command":
                     self._handle_remote_queue_command(payload)
                 elif event_type == "remote_job_received":
@@ -52717,7 +52945,20 @@ class KeywordApp(ctk.CTk):
                         self._set_writing_progress(4, payload)
                 elif event_type == "tistory_automation_done":
                     if isinstance(payload, dict):
+                        if "shared_daily_publish_count" in payload:
+                            shared_account = self._daily_publish_account("tistory")
+                            if is_shared_tistory_blog(shared_account):
+                                self.shared_tistory_usage = {
+                                    "key": tistory_shared_blog_key(shared_account),
+                                    "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"),
+                                    "limit": SHARED_TISTORY_DAILY_LIMIT,
+                                    "published": int(payload["shared_daily_publish_count"]),
+                                    "remaining": int(payload.get("shared_daily_remaining", 0)),
+                                    "pending": int(payload.get("shared_daily_pending", 0)),
+                                }
                         tistory_message = str(payload.get("message") or "티스토리 자동화를 완료했습니다.")
+                        if payload.get("shared_count_warning"):
+                            tistory_message += "\n" + str(payload["shared_count_warning"])
                         tistory_published_url = str(payload.get("published_url") or "").strip()
                         tistory_save_mode = normalize_tistory_save_mode(
                             str(payload.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
@@ -52733,6 +52974,7 @@ class KeywordApp(ctk.CTk):
                     if hasattr(self, "tistory_auto_publish_var"):
                         self._on_tistory_auto_publish_changed(save=False)
                     self._refresh_daily_publish_limit_statuses()
+                    self._refresh_shared_tistory_usage_async()
                     if tistory_published_url:
                         self._remember_published_post_url("tistory", tistory_published_url)
                     self._stop_writing_auto_progress()
@@ -52782,6 +53024,7 @@ class KeywordApp(ctk.CTk):
                         else:
                             self._show_writing_complete_dialog()
                 elif event_type == "tistory_automation_error":
+                    self._refresh_shared_tistory_usage_async()
                     self._stop_writing_auto_progress()
                     if hasattr(self, "tistory_auto_publish_var"):
                         self._on_tistory_auto_publish_changed(save=False)
