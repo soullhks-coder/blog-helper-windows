@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def main() -> None:
@@ -31,6 +31,7 @@ def main() -> None:
         os.environ["BLOG_HELPER_DISABLE_UPDATES"] = "1"
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         import main as app_module
+        poll_result_queue = app_module.KeywordApp._poll_queue
 
         settings = app_module.WordPressSettings(
             app_theme="블랙테마" if args.theme == "dark" else "화이트테마",
@@ -336,6 +337,8 @@ def main() -> None:
             assert tuple(app.writing_blog_menus) == ("wordpress", "tistory", "blogspot")
             assert int(app.writing_thumbnail_menu.cget("height")) == 27
             assert int(app.writing_header_prompt_menu.cget("height")) == 27
+            app._open_writing_section("topic")
+            screenshot("direct-topic-input")
             app._on_inline_images_provider_changed(
                 app_module.INLINE_IMAGES_PROVIDER_MANUAL
             )
@@ -638,6 +641,10 @@ def main() -> None:
                 app._switch_page("writing")
                 settle()
                 screenshot("writing-" + geometry.split("+", 1)[0])
+                assert app.topic_entry.winfo_rooty() == app.direct_keyword_start_button.winfo_rooty()
+                assert app.topic_entry.winfo_rootx() + app.topic_entry.winfo_width() < (
+                    app.direct_keyword_start_button.winfo_rootx()
+                )
                 writing_canvas = app.writing_control_canvas
                 writing_needs_scroll = (
                     app.writing_control_row.winfo_reqwidth()
@@ -993,6 +1000,76 @@ def main() -> None:
                 app.prompt_action_buttons["import"].invoke()
             assert article_box.get("1.0", "end-1c") == "축제 본문 지침\n둘째 줄"
             screenshot("prompt-bundle-tools")
+
+            # The new topic shortcut uses the existing Playwright-first
+            # reference worker, then writes without requiring a keyword choice.
+            app._switch_page("writing")
+            app.writing_auto_progress_var.set(False)
+            while not app.result_queue.empty():
+                app.result_queue.get_nowait()
+            app.topic_entry.delete(0, "end")
+            app.topic_entry.insert(0, "청년도약계좌")
+            reference_worker = Mock()
+            reference_worker.is_alive.return_value = False
+            reference_worker.start.side_effect = lambda: app.result_queue.put((
+                "reference_collect_done",
+                {"keyword": "청년도약계좌", "reference_text": "확인한 기사 내용", "count": 1},
+            ))
+            with (
+                patch.object(app_module, "ReferenceCollectionWorker", return_value=reference_worker) as worker_class,
+                patch.object(app, "_start_article_generation") as article_generation,
+            ):
+                app.direct_keyword_start_button.invoke()
+                assert app.direct_keyword_start_keyword == "청년도약계좌"
+                assert app.direct_keyword_start_button.cget("state") == "disabled"
+                assert app.current_keyword_source == "direct"
+                assert app.selected_keyword_var.get() == "청년도약계좌"
+                assert app.manual_keyword_entry.get() == "청년도약계좌"
+                assert worker_class.call_args.kwargs["source_url"].startswith("https://www.google.com/search?q=")
+                poll_result_queue(app)
+                settle(350)
+                article_generation.assert_called_once_with(
+                    "청년도약계좌", "청년도약계좌", "확인한 기사 내용"
+                )
+                assert not app.writing_auto_run_active
+                assert app.direct_keyword_start_button.cget("state") == "normal"
+
+            app.writing_auto_progress_var.set(True)
+            auto_worker = Mock()
+            auto_worker.is_alive.return_value = False
+            auto_worker.start.side_effect = lambda: app.result_queue.put((
+                "reference_collect_done",
+                {"keyword": "청년도약계좌", "reference_text": "자동진행 참고자료", "count": 1},
+            ))
+            with (
+                patch.object(app_module, "ReferenceCollectionWorker", return_value=auto_worker),
+                patch.object(app, "_start_article_generation") as article_generation,
+            ):
+                app.direct_keyword_start_button.invoke()
+                poll_result_queue(app)
+                settle(350)
+                article_generation.assert_called_once_with(
+                    "청년도약계좌", "청년도약계좌", "자동진행 참고자료"
+                )
+                assert app.writing_auto_run_active
+                assert app.writing_auto_stage == "article"
+            app._stop_writing_auto_progress()
+            app.writing_auto_progress_var.set(False)
+
+            failed_worker = Mock()
+            failed_worker.is_alive.return_value = False
+            failed_worker.start.side_effect = lambda: app.result_queue.put((
+                "reference_collect_error", "브라우저 수집 실패"
+            ))
+            with (
+                patch.object(app_module, "ReferenceCollectionWorker", return_value=failed_worker),
+                patch.object(app_module.messagebox, "showerror") as show_error,
+            ):
+                app.direct_keyword_start_button.invoke()
+                poll_result_queue(app)
+                show_error.assert_called_once()
+                assert app.direct_keyword_start_keyword == ""
+                assert app.direct_keyword_start_button.cget("state") == "normal"
             assert not errors, errors
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:

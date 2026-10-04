@@ -26309,6 +26309,7 @@ class KeywordApp(ctk.CTk):
         self.automation_keyword_discovery_worker: AutomationKeywordDiscoveryWorker | None = None
         self.reference_collection_worker: ReferenceCollectionWorker | None = None
         self.pending_reference_keyword = ""
+        self.direct_keyword_start_keyword = ""
         self.tistory_automation_worker: TistoryAutomationWorker | None = None
         self.tistory_profile_worker: TistoryProfileWorker | None = None
         self.blogspot_profile_worker: BlogspotProfileWorker | None = None
@@ -31648,7 +31649,10 @@ class KeywordApp(ctk.CTk):
             "thumbnail_ai_worker",
             "wp_publish_worker",
         )
-        writing_running = bool(getattr(self, "writing_auto_run_active", False)) or any(
+        writing_running = bool(
+            getattr(self, "writing_auto_run_active", False)
+            or getattr(self, "direct_keyword_start_keyword", "")
+        ) or any(
             self._worker_is_running(getattr(self, name, None))
             for name in writing_worker_names
         )
@@ -42228,8 +42232,12 @@ class KeywordApp(ctk.CTk):
             opened=True,
         )
 
+        topic_input_row = ctk.CTkFrame(topic_card, fg_color="transparent")
+        topic_input_row.grid(row=1, column=0, padx=24, pady=(0, 12), sticky="ew")
+        topic_input_row.grid_columnconfigure(0, weight=1)
+
         self.topic_entry = ctk.CTkEntry(
-            topic_card,
+            topic_input_row,
             height=52,
             corner_radius=16,
             fg_color="#3b4658",
@@ -42237,9 +42245,21 @@ class KeywordApp(ctk.CTk):
             placeholder_text="예: 청년도약계좌",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self.topic_entry.grid(row=1, column=0, padx=24, pady=(0, 12), sticky="ew")
+        self.topic_entry.grid(row=0, column=0, sticky="ew")
         self.topic_entry.bind("<Return>", lambda _event: self.start_analysis())
         self.topic_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
+        self.direct_keyword_start_button = ctk.CTkButton(
+            topic_input_row,
+            text="시작",
+            width=92,
+            height=52,
+            corner_radius=16,
+            fg_color="#16a34a",
+            hover_color="#15803d",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self.start_direct_keyword_writing,
+        )
+        self.direct_keyword_start_button.grid(row=0, column=1, padx=(10, 0), sticky="e")
 
         benchmark_card = ctk.CTkFrame(topic_card, fg_color="#111826", corner_radius=16)
         benchmark_card.grid(row=2, column=0, padx=24, pady=(0, 12), sticky="ew")
@@ -47238,6 +47258,8 @@ class KeywordApp(ctk.CTk):
         enabled = bool(self.benchmark_mode_var.get())
         if hasattr(self, "topic_entry"):
             self.topic_entry.configure(state="disabled" if enabled else "normal")
+        if hasattr(self, "direct_keyword_start_button"):
+            self.direct_keyword_start_button.configure(state="disabled" if enabled else "normal")
         if hasattr(self, "benchmark_url_entry"):
             self.benchmark_url_entry.configure(state="normal" if enabled else "disabled")
         if hasattr(self, "benchmark_button"):
@@ -49679,6 +49701,9 @@ class KeywordApp(ctk.CTk):
         )
 
     def start_analysis(self) -> None:
+        if self.direct_keyword_start_keyword:
+            messagebox.showinfo("글쓰기 진행 중", "입력한 키워드의 참고수집과 글작성이 끝난 뒤 검색해 주세요.")
+            return
         keyword = self.topic_entry.get().strip()
         if not keyword:
             messagebox.showwarning("입력 필요", "먼저 쓰고 싶은 주제를 입력해 주세요.")
@@ -49736,6 +49761,116 @@ class KeywordApp(ctk.CTk):
 
         self.analysis_worker = AnalysisWorker(keyword, self.result_queue)
         self.analysis_worker.start()
+
+    def start_direct_keyword_writing(self) -> None:
+        """Collect references for the entered topic and write without keyword suggestions."""
+        keyword = self.topic_entry.get().strip()
+        if not keyword:
+            messagebox.showwarning("입력 필요", "먼저 글을 쓸 키워드를 입력해 주세요.")
+            return
+        if self.benchmark_mode_var.get():
+            messagebox.showinfo("벤치마킹 모드", "벤치마킹 모드를 해제한 뒤 시작해 주세요.")
+            return
+        lookup_workers = (
+            self.analysis_worker,
+            self.daum_worker,
+            self.signal_worker,
+            self.newneek_worker,
+            self.loword_keyword_worker,
+            self.naver_creator_worker,
+        )
+        if self._writing_keyword_selection_locked() or any(
+            worker is not None and worker.is_alive() for worker in lookup_workers
+        ):
+            messagebox.showinfo("진행 중", "현재 글쓰기 또는 키워드 수집이 끝난 뒤 다시 시작해 주세요.")
+            return
+
+        self._stop_writing_auto_progress()
+        if self.writing_auto_progress_var.get() and not self._arm_writing_auto_progress():
+            return
+        self._reset_writing_section_completion()
+        self.current_keyword = keyword
+        self.current_keyword_source = "direct"
+        self.current_insights = []
+        self.daum_reference_map = {}
+        self.signal_reference_map = {}
+        self.newneek_reference_map = {}
+        self.loword_reference_map = {}
+        self.naver_creator_reference_map = {}
+        self.collected_reference_map = {}
+        self.pending_reference_keyword = ""
+        self._clear_keyword_choices()
+        self._clear_result_cards()
+        self.selected_keyword_var.set(keyword)
+        self.accepted_recommended_keyword = keyword
+        self.manual_keyword_entry.delete(0, "end")
+        self.manual_keyword_entry.insert(0, keyword)
+        self.reference_textbox.delete("1.0", "end")
+        self._update_reference_count()
+        self.generated_article_title = ""
+        self.generated_article_html = ""
+        self.article_title_entry.delete(0, "end")
+        self.article_editor.delete("1.0", "end")
+        self.article_editor.insert("1.0", "참고자료를 수집한 뒤 글이 여기에 표시됩니다.")
+        self.article_summary_label.configure(
+            text="입력한 키워드의 참고자료를 수집하고 있습니다.",
+            text_color="#c4cede",
+        )
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(1.0)
+        self._open_writing_section("keyword", complete_previous=True)
+        self.direct_keyword_start_keyword = keyword
+        self.direct_keyword_start_button.configure(state="disabled", text="진행 중...")
+        self.find_keywords_button.configure(state="disabled")
+        self._set_trend_keyword_buttons_state("disabled")
+        self._save_ui_state()
+        try:
+            self._collect_reference_for_selected_keyword(silent=True)
+        except Exception as exc:
+            self._finish_direct_keyword_start()
+            self._stop_writing_auto_progress()
+            self._set_writing_progress(2, f"참고내용 수집을 시작하지 못했습니다: {exc}", state="error")
+            messagebox.showerror("참고내용 수집 실패", str(exc))
+
+    def _continue_direct_keyword_after_reference(self, keyword: str) -> None:
+        if keyword != self.direct_keyword_start_keyword:
+            return
+        if self._selected_or_manual_keyword() != keyword:
+            self._finish_direct_keyword_start()
+            self._stop_writing_auto_progress()
+            return
+        if self.writing_auto_run_active:
+            self.writing_auto_stage = "article"
+            self._refresh_writing_auto_progress_ui()
+        self._open_writing_section("article", complete_previous=True)
+        previous_worker = self.article_worker
+        reference_text = self.reference_textbox.get("1.0", "end").strip()
+        self._start_article_generation(self.current_keyword, keyword, reference_text)
+        if self.article_worker is previous_worker:
+            # Model/image validation can stop generation before a worker exists.
+            self._finish_direct_keyword_start()
+
+    def _schedule_direct_keyword_article(self, keyword: str) -> bool:
+        if keyword != self.direct_keyword_start_keyword:
+            return False
+        self.after(
+            260,
+            lambda current_keyword=keyword: self._continue_direct_keyword_after_reference(current_keyword),
+        )
+        return True
+
+    def _finish_direct_keyword_start(self) -> None:
+        self.direct_keyword_start_keyword = ""
+        if hasattr(self, "find_keywords_button"):
+            self.find_keywords_button.configure(
+                state="disabled" if self.benchmark_mode_var.get() else "normal"
+            )
+        self._set_trend_keyword_buttons_state("normal")
+        if hasattr(self, "direct_keyword_start_button"):
+            self.direct_keyword_start_button.configure(
+                state="disabled" if self.benchmark_mode_var.get() else "normal",
+                text="시작",
+            )
 
     def load_daum_keywords(self) -> None:
         if self.daum_worker and self.daum_worker.is_alive():
@@ -50101,7 +50236,11 @@ class KeywordApp(ctk.CTk):
             self.after(120, lambda keyword=selected_keyword: self._auto_collect_reference_for_keyword(keyword))
 
     def _writing_keyword_selection_locked(self) -> bool:
-        if self.writing_auto_run_active or self.home_reference_launch_context:
+        if (
+            self.writing_auto_run_active
+            or self.home_reference_launch_context
+            or getattr(self, "direct_keyword_start_keyword", "")
+        ):
             return True
         for worker_name in (
             "reference_collection_worker",
@@ -52162,7 +52301,9 @@ class KeywordApp(ctk.CTk):
                         f"'{keyword}' 자료 수집 완료 · 블로그글쓰기 3단계로 이동했습니다.",
                     )
                     self.after(180, self._start_pending_reference_collection)
-                    if self.writing_auto_run_active:
+                    if self._schedule_direct_keyword_article(keyword):
+                        pass
+                    elif self.writing_auto_run_active:
                         self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                     elif keyword == self._selected_or_manual_keyword():
                         self.after(
@@ -52190,12 +52331,22 @@ class KeywordApp(ctk.CTk):
                         f"'{keyword}' 기본 참고자료로 블로그글쓰기 3단계를 시작합니다.",
                     )
                     self.after(180, self._start_pending_reference_collection)
-                    self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
+                    if not self._schedule_direct_keyword_article(keyword):
+                        self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                 elif event_type == "reference_collect_error":
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
                     self.article_progress_bar.set(0)
                     self.collect_reference_button.configure(state="normal", text="수집하기")
+                    if self.direct_keyword_start_keyword:
+                        keyword = self.direct_keyword_start_keyword
+                        self._finish_direct_keyword_start()
+                        self._stop_writing_auto_progress()
+                        self.article_progress_label.configure(text="참고내용 수집에 실패해 글 작성을 시작하지 않았습니다.")
+                        self.keyword_status_label.configure(text="참고내용 수집 실패")
+                        self._set_writing_progress(2, f"'{keyword}' 참고내용 수집에 실패했습니다: {payload}", state="error")
+                        messagebox.showerror("참고내용 수집 실패", str(payload))
+                        continue
                     if "403" in str(payload) or "Forbidden" in str(payload):
                         self.article_progress_label.configure(
                             text="외부 검색 사이트가 자동 요청을 제한해 현재 참고내용을 유지합니다. 글 작성은 그대로 진행할 수 있습니다."
@@ -52281,9 +52432,13 @@ class KeywordApp(ctk.CTk):
                     self._set_writing_progress(3, message, progress)
                 elif event_type == "article_done":
                     self._handle_article_generation_success(payload)
+                    if self.direct_keyword_start_keyword:
+                        self._finish_direct_keyword_start()
                     self.after(300, self._auto_continue_after_article)
                 elif event_type == "article_error":
                     self._stop_writing_auto_progress()
+                    if self.direct_keyword_start_keyword:
+                        self._finish_direct_keyword_start()
                     self.article_worker = None
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
