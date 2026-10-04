@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from app_updater import APP_VERSION
 from remote_control import RemoteAgentConfig
 
 SHARED_TISTORY_HOST = "tip.lhksoul.com"
@@ -79,6 +80,7 @@ class SharedTistoryPublishLimitClient:
             headers={
                 "Authorization": f"Bearer {self.config.agent_token}",
                 "Content-Type": "application/json",
+                "User-Agent": f"BlogHelper/{APP_VERSION}",
             },
             method="POST",
         )

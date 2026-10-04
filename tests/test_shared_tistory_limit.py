@@ -75,6 +75,7 @@ class SharedTistoryLimitTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertIn("deviceId=mom-pc", requests[0].full_url)
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer signed-device-token")
+        self.assertTrue(requests[0].get_header("User-agent").startswith("BlogHelper/"))
         self.assertEqual(json.loads(requests[0].data)["localCount"], 4)
         self.assertEqual(json.loads(requests[1].data)["action"], "commit")
         self.assertEqual(json.loads(requests[1].data)["reservationDate"], "2026-10-04")
