@@ -10,6 +10,17 @@ from __future__ import annotations
 
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
+        "date": "2026-10-05",
+        "version": "v1.1.204",
+        "category": "환경설정·Codex CLI",
+        "title": "GPT-6 Sol·Luna 모델 선택 추가",
+        "request": "환경설정 > 서비스 연동 > Codex CLI에서 GPT-6 Sol과 GPT-6 Luna도 선택하고 사용할 수 있게 해달라는 요청",
+        "changes": (
+            "Codex CLI 모델 드롭다운에 gpt-6-sol과 gpt-6-luna 추가",
+            "선택한 모델을 기존 설정 저장·복원과 글작성 CLI 실행 경로에 연결",
+        ),
+    },
+    {
         "date": "2026-10-04",
         "version": "v1.1.203",
         "category": "티스토리·발행 한도",
