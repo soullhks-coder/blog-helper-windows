@@ -68,6 +68,7 @@ jobs:
         run: |
           python -m py_compile main.py
           python -m py_compile app_updater.py
+          python -m unittest discover -s tests -p test_windows_runtime.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -95,6 +96,16 @@ jobs:
       - name: Test frozen BlogHelper.exe self-update and fresh restart
         shell: pwsh
         run: python tools/test_windows_update_installer.py --executable dist\BlogHelper.exe
+
+      - name: Check frozen Windows startup and cached automation driver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "build\startup-baseline" | Out-Null
+          gh release download v1.1.207 --repo soullhks-coder/blog-helper-releases --pattern BlogHelper.exe --dir "build\startup-baseline" --clobber
+          Move-Item "build\startup-baseline\BlogHelper.exe" "build\startup-baseline\Baseline207.exe" -Force
+          python tools/check_windows_startup.py --executable dist\BlogHelper.exe --baseline build\startup-baseline\Baseline207.exe
 
       - name: Create delivery ZIP
         shell: pwsh

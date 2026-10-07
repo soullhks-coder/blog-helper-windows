@@ -35,6 +35,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
+_PYTHON_STARTUP_STARTED = time.perf_counter()
+
 from startup_guard import acquire_windows_single_instance, release_windows_single_instance
 
 
@@ -231,6 +233,17 @@ def _close_packaged_startup_splash() -> None:
 
         pyi_splash.close()
     except (ImportError, RuntimeError):
+        pass
+
+
+def _update_packaged_startup_splash(text: str) -> None:
+    if os.name != "nt" or not is_frozen_app():
+        return
+    try:
+        import pyi_splash
+
+        pyi_splash.update_text(text)
+    except (ImportError, RuntimeError, OSError):
         pass
 
 
@@ -26285,6 +26298,7 @@ class ContrastSegmentedButton(ctk.CTkFrame):
 class KeywordApp(ctk.CTk):
     def __init__(self) -> None:
         if os.name == "nt":
+            _update_packaged_startup_splash("설정 불러오는 중...\n잠시만 기다려 주세요.")
             try:
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("kr.soullhk.bloghelper")
             except (AttributeError, OSError):
@@ -26591,6 +26605,7 @@ class KeywordApp(ctk.CTk):
         self._scroll_exclusion_bindings: list[tuple[ctk.CTkScrollableFrame, ctk.CTkScrollableFrame]] = []
 
         self._build_layout()
+        _update_packaged_startup_splash("저장값 복원 중...\n마지막 준비 중입니다.")
         self._install_mousewheel_router()
         self._populate_wordpress_fields()
         self._apply_app_theme(self.wordpress_settings.app_theme, save=False)
@@ -28404,49 +28419,67 @@ class KeywordApp(ctk.CTk):
         self.home_page.grid(row=0, column=0, sticky="nsew")
         self.home_page.grid_columnconfigure(0, weight=1)
         self.home_page.grid_rowconfigure(1, weight=1)
+        _update_packaged_startup_splash("1/8 홈 화면 준비 중...")
         self._build_home_page()
 
+        # On Windows, keep inactive pages unmapped while constructing them.
+        # Mapping each page in turn causes costly native redraws at startup;
+        # _show_only_page_frame maps a page normally when the user opens it.
         self.settings_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.settings_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.settings_page.grid(row=0, column=0, sticky="nsew")
         self.settings_page.grid_columnconfigure(0, weight=1)
         self.settings_page.grid_rowconfigure(2, weight=1)
 
+        _update_packaged_startup_splash("2/8 환경설정 준비 중...")
         self._build_settings_page()
 
         self.writing_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.writing_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.writing_page.grid(row=0, column=0, sticky="nsew")
         self.writing_page.grid_columnconfigure(0, weight=1)
         self.writing_page.grid_rowconfigure(1, weight=1)
+        _update_packaged_startup_splash("3/8 글쓰기 준비 중...")
         self._build_writing_page()
 
         self.automation_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.automation_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.automation_page.grid(row=0, column=0, sticky="nsew")
         self.automation_page.grid_columnconfigure(0, weight=1)
         self.automation_page.grid_rowconfigure(2, weight=1)
+        _update_packaged_startup_splash("4/8 자동화 준비 중...")
         self._build_automation_page()
 
         self.naver_blog_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.naver_blog_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.naver_blog_page.grid(row=0, column=0, sticky="nsew")
         self.naver_blog_page.grid_columnconfigure(0, weight=1)
         self.naver_blog_page.grid_rowconfigure(1, weight=1)
+        _update_packaged_startup_splash("5/8 N블로그 준비 중...")
         self._build_naver_blog_page()
 
         self.naver_kin_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.naver_kin_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.naver_kin_page.grid(row=0, column=0, sticky="nsew")
         self.naver_kin_page.grid_columnconfigure(0, weight=1)
         self.naver_kin_page.grid_rowconfigure(1, weight=1)
+        _update_packaged_startup_splash("6/8 N지식인 준비 중...")
         self._build_naver_kin_page()
 
         self.public_data_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.public_data_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.public_data_page.grid(row=0, column=0, sticky="nsew")
         self.public_data_page.grid_columnconfigure(0, weight=1)
         self.public_data_page.grid_rowconfigure(1, weight=1)
+        _update_packaged_startup_splash("7/8 공공데이터 준비 중...")
         self._build_public_data_page()
 
         self.prompts_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.prompts_page.grid(row=0, column=0, sticky="nsew")
+        if os.name != "nt":
+            self.prompts_page.grid(row=0, column=0, sticky="nsew")
         self.prompts_page.grid_columnconfigure(0, weight=1)
         self.prompts_page.grid_rowconfigure(1, weight=1)
+        _update_packaged_startup_splash("8/8 프롬프트 준비 중...")
         self._build_prompts_page()
 
         self._switch_page("home")
@@ -54624,6 +54657,12 @@ class KeywordApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    if os.name == "nt" and is_frozen_app():
+        from windows_runtime import install_windows_playwright_runtime
+
+        install_windows_playwright_runtime(
+            Path(sys._MEIPASS), DATA_DIR / "runtime" / "playwright",
+        )
     self_update_test_source = os.environ.pop("BLOG_HELPER_SELF_UPDATE_TEST_SOURCE", "").strip()
     self_update_test_data_dir = os.environ.pop("BLOG_HELPER_SELF_UPDATE_TEST_DATA_DIR", "").strip()
     if self_update_test_source and os.name == "nt" and is_frozen_app():
@@ -54658,6 +54697,25 @@ if __name__ == "__main__":
             marker_path.write_text(f"restarted pid={os.getpid()}\n", encoding="utf-8")
             time.sleep(8)
     else:
+        startup_test_report = os.environ.get("BLOG_HELPER_STARTUP_TEST_REPORT", "").strip()
+        if startup_test_report and os.name == "nt" and is_frozen_app():
+            # Offline CI exercises the full frozen UI and actual Chrome/driver,
+            # not an empty test window. Never read the user's real settings.
+            for method in (
+                "_load_home_dashboard_keywords", "_start_adsense_refresh",
+                "_start_remote_agent_if_enabled", "_shared_tistory_usage_tick",
+            ):
+                setattr(KeywordApp, method, lambda self, *args, **kwargs: None)
+        app_started = time.perf_counter()
         app = KeywordApp()
         _close_packaged_startup_splash()
+        if os.name == "nt" and is_frozen_app():
+            append_runtime_log(
+                "startup", f"화면 구성 {time.perf_counter() - app_started:.2f}초 · "
+                f"Python 시작 이후 {time.perf_counter() - _PYTHON_STARTUP_STARTED:.2f}초",
+            )
+            if startup_test_report:
+                from windows_runtime import start_frozen_startup_probe
+
+                start_frozen_startup_probe(app, Path(startup_test_report), app_started)
         app.mainloop()

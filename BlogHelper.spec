@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
+import playwright
+
+from windows_runtime import build_driver_archive
 
 
 datas = []
@@ -18,7 +22,7 @@ datas += [
 ]
 
 for package in ("customtkinter", "tkinterdnd2", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):
-    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    package_datas, package_binaries, package_hiddenimports = collect_all(package, include_py_files=False)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hiddenimports
@@ -44,6 +48,20 @@ a = Analysis(
     optimize=1,
 )
 pyz = PYZ(a.pure)
+
+# Do not extract the large Node runtime and driver tree on every double-click.
+# Keep them compressed, then prepare a persistent verified cache on first use.
+driver_archive, driver_metadata = build_driver_archive(
+    Path(playwright.__file__).parent / "driver", Path("build/windows-runtime"),
+)
+def is_driver_entry(entry):
+    return str(entry[0]).replace("\\", "/").startswith("playwright/driver/")
+a.binaries = [entry for entry in a.binaries if not is_driver_entry(entry)]
+a.datas = [entry for entry in a.datas if not is_driver_entry(entry)]
+a.datas += [
+    (driver_archive.name, str(driver_archive), "DATA"),
+    (driver_metadata.name, str(driver_metadata), "DATA"),
+]
 
 splash = Splash(
     "assets/blog_helper_icon.png",

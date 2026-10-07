@@ -11,6 +11,20 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-07",
+        "version": "v1.1.208",
+        "category": "Windows 성능",
+        "title": "Windows 시작 로딩 최적화",
+        "request": "Windows 프로그램 첫 실행 시 오래 걸리고 멈춘 것처럼 보이는 로딩을 단축해달라는 요청",
+        "changes": (
+            "큰 Playwright 드라이버를 압축 상태로 유지하여 매 실행 시 전체 압축 해제하는 비용 절감",
+            "브라우저 자동화 최초 사용 시에만 검증된 드라이버를 준비하고 같은 드라이버는 앱 업데이트 후에도 재사용",
+            "시작 시 숨겨진 메뉴 화면을 표시하지 않아 불필요한 Windows 화면 그리기 감소",
+            "로딩 화면에 1~8단계 준비 상태와 저장값 복원 상태를 표시하고 시작 시간을 진단 로그에 기록",
+            "실제 Windows 실행 파일의 시작·첫 자동화·캐시 재사용·업데이트 재실행 검증 추가, Mac 시작 방식 유지",
+        ),
+    },
+    {
+        "date": "2026-10-07",
         "version": "v1.1.207",
         "category": "프롬프트 관리",
         "title": "프롬프트 입력칸 테두리·확대 편집",
