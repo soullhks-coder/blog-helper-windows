@@ -30266,7 +30266,7 @@ class KeywordApp(ctk.CTk):
         total_changes = sum(len(tuple(entry.get("changes", ()))) for entry in BLOG_HELPER_HISTORY)
         self.history_summary_label = ctk.CTkLabel(
             hero,
-            text=f"기록 {len(BLOG_HELPER_HISTORY)}일 · 주요 변경 {total_changes}건 · 최신 v{APP_VERSION}",
+            text=f"기록 {len(history_dates())}일 · 주요 변경 {total_changes}건 · 최신 v{APP_VERSION}",
             fg_color=palette["selected"],
             corner_radius=11,
             text_color=palette["accent"],
@@ -39725,7 +39725,8 @@ class KeywordApp(ctk.CTk):
     def _build_prompts_page(self) -> None:
         palette = self._theme_palette()
         header = ctk.CTkFrame(self.prompts_page, fg_color="transparent")
-        header.grid(row=0, column=0, padx=28, pady=(22, 12), sticky="ew")
+        header.grid(row=0, column=0, padx=28, pady=(26, 12), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
 
         title = ctk.CTkLabel(
             header,
@@ -39744,10 +39745,8 @@ class KeywordApp(ctk.CTk):
 
         prompt_card = ctk.CTkScrollableFrame(
             self.prompts_page,
-            fg_color=palette["card"],
-            corner_radius=24,
-            border_width=1,
-            border_color=palette["border"],
+            fg_color="transparent",
+            corner_radius=0,
         )
         self.prompts_scroll = prompt_card
         prompt_card.grid(row=1, column=0, padx=28, pady=(0, 12), sticky="nsew")
@@ -39770,7 +39769,8 @@ class KeywordApp(ctk.CTk):
         self._prompt_last_focused_box: tk.Text | None = None
 
         tab_row = ctk.CTkFrame(prompt_card, fg_color="transparent")
-        tab_row.grid(row=0, column=0, columnspan=2, padx=20, pady=(18, 12), sticky="ew")
+        self.prompt_tab_row = tab_row
+        tab_row.grid(row=0, column=0, columnspan=2, pady=(0, 12), sticky="ew")
         prompt_tabs = (
             ("wordpress", "워드프레스"),
             ("tistory", "티스토리"),
@@ -39779,68 +39779,30 @@ class KeywordApp(ctk.CTk):
             ("tistory_automation", "티스토리 자동화"),
             ("naver_kin_automation", "N지식인자동화"),
         )
-        for column_index in range(3):
+        for column_index in range(6):
             tab_row.grid_columnconfigure(column_index, weight=1, uniform="prompt_tabs")
         for index, (platform, label) in enumerate(prompt_tabs):
             button = ctk.CTkButton(
                 tab_row,
                 text=label,
                 width=0,
-                height=42,
-                corner_radius=14,
-                fg_color=palette["selected"] if platform == "wordpress" else "transparent",
+                height=36,
+                corner_radius=10,
+                fg_color=palette["selected"] if platform == "wordpress" else palette["card"],
                 hover_color=palette["hover"],
-                text_color=palette["accent"] if platform == "wordpress" else palette["muted"],
-                font=ctk.CTkFont(size=14, weight="bold"),
+                text_color=palette["accent"] if platform == "wordpress" else palette["text"],
+                font=ctk.CTkFont(size=12, weight="bold"),
                 command=lambda target=platform: self._switch_prompt_platform(target),
             )
             button.grid(
-                row=index // 3,
-                column=index % 3,
-                padx=(0 if index % 3 == 0 else 4, 0 if index % 3 == 2 else 4),
-                pady=(0, 6) if index < 3 else (0, 0),
+                row=0,
+                column=index,
+                padx=(0 if index == 0 else 4, 0 if index == 5 else 4),
                 sticky="ew",
             )
             self.prompt_tab_buttons[platform] = button
-
-        tool_row = ctk.CTkFrame(prompt_card, fg_color=palette["panel"], corner_radius=16)
-        tool_row.grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 16), sticky="ew")
-        ctk.CTkLabel(
-            tool_row,
-            text="선택 항목 전체 복사 · 가져오기 · 내보내기",
-            text_color=palette["text"],
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        ).grid(row=0, column=0, columnspan=4, padx=12, pady=(9, 4), sticky="ew")
-        self.prompt_action_buttons: dict[str, ctk.CTkButton] = {}
-        prompt_actions = (
-            ("copy", "전체 복사", self._copy_current_prompt_bundle),
-            ("paste", "전체 붙이기", self._paste_prompt_bundle),
-            ("export", "TXT 내보내기", self._export_current_prompt_bundle),
-            ("import", "TXT 불러오기", self._import_prompt_bundle),
-        )
-        for column_index in range(4):
-            tool_row.grid_columnconfigure(column_index, weight=1, uniform="prompt_actions")
-        for action_index, (action, label, command) in enumerate(prompt_actions):
-            button = ctk.CTkButton(
-                tool_row,
-                text=label,
-                width=0,
-                height=36,
-                corner_radius=12,
-                fg_color=palette["button"],
-                hover_color=palette["button_hover"],
-                font=ctk.CTkFont(size=11, weight="bold"),
-                command=command,
-            )
-            button.grid(
-                row=1,
-                column=action_index,
-                padx=(12 if action_index == 0 else 3, 12 if action_index == 3 else 3),
-                pady=(0, 10),
-                sticky="ew",
-            )
-            self.prompt_action_buttons[action] = button
+        self._prompt_tab_columns = 6
+        tab_row.bind("<Configure>", self._layout_prompt_platform_tabs, add="+")
 
         library = ctk.CTkFrame(
             prompt_card,
@@ -39851,7 +39813,7 @@ class KeywordApp(ctk.CTk):
             width=190,
         )
         self.prompt_library_panel = library
-        library.grid(row=2, column=0, padx=(20, 6), pady=(0, 20), sticky="nsew")
+        library.grid(row=1, column=0, padx=(0, 6), pady=(0, 20), sticky="nsew")
         library.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             library, text="내 프롬프트", text_color=palette["text"],
@@ -39900,7 +39862,7 @@ class KeywordApp(ctk.CTk):
 
         platform_holder = ctk.CTkFrame(prompt_card, fg_color="transparent")
         self.prompt_editor_holder = platform_holder
-        platform_holder.grid(row=2, column=1, padx=(6, 20), pady=(0, 20), sticky="nsew")
+        platform_holder.grid(row=1, column=1, padx=(6, 0), pady=(0, 8), sticky="nsew")
         platform_holder.grid_columnconfigure(0, weight=1)
         platform_holder.grid_rowconfigure(0, weight=1)
 
@@ -40070,6 +40032,46 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
         ).grid(row=1, column=0, pady=(0, 10), sticky="w")
         self.naver_kin_answer_prompt_box = self._prompt_textarea(naver_kin_frame, row=2, height=16, sticky="nsew", padx=0)
+
+        tool_row = ctk.CTkFrame(prompt_card, fg_color=palette["panel"], corner_radius=16)
+        self.prompt_tool_row = tool_row
+        tool_row.grid(row=2, column=1, padx=(6, 0), pady=(0, 18), sticky="ew")
+        ctk.CTkLabel(
+            tool_row,
+            text="선택 항목 전체 복사 · 가져오기 · 내보내기",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=4, padx=12, pady=(9, 4), sticky="ew")
+        self.prompt_action_buttons: dict[str, ctk.CTkButton] = {}
+        prompt_actions = (
+            ("copy", "전체 복사", self._copy_current_prompt_bundle),
+            ("paste", "전체 붙이기", self._paste_prompt_bundle),
+            ("export", "TXT 내보내기", self._export_current_prompt_bundle),
+            ("import", "TXT 불러오기", self._import_prompt_bundle),
+        )
+        for column_index in range(4):
+            tool_row.grid_columnconfigure(column_index, weight=1, uniform="prompt_actions")
+        for action_index, (action, label, command) in enumerate(prompt_actions):
+            button = ctk.CTkButton(
+                tool_row,
+                text=label,
+                width=0,
+                height=36,
+                corner_radius=12,
+                fg_color=palette["button"],
+                hover_color=palette["button_hover"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=command,
+            )
+            button.grid(
+                row=1,
+                column=action_index,
+                padx=(12 if action_index == 0 else 3, 12 if action_index == 3 else 3),
+                pady=(0, 10),
+                sticky="ew",
+            )
+            self.prompt_action_buttons[action] = button
 
         self.title_prompt_box = self.prompt_title_boxes["wordpress"]
         self.article_prompt_box = self.prompt_article_boxes["wordpress"]
@@ -40296,18 +40298,20 @@ class KeywordApp(ctk.CTk):
         palette = self._theme_palette()
         if platform in self.prompt_title_boxes:
             self.prompt_library_panel.grid()
-            self.prompt_editor_holder.grid_configure(column=1, columnspan=1, padx=(6, 20))
+            self.prompt_editor_holder.grid_configure(column=1, columnspan=1, padx=(6, 0))
+            self.prompt_tool_row.grid_configure(column=1, columnspan=1, padx=(6, 0))
         else:
             self.prompt_library_panel.grid_remove()
-            self.prompt_editor_holder.grid_configure(column=0, columnspan=2, padx=(20, 20))
+            self.prompt_editor_holder.grid_configure(column=0, columnspan=2, padx=0)
+            self.prompt_tool_row.grid_configure(column=0, columnspan=2, padx=0)
         for key, frame in self.prompt_platform_frames.items():
             if key == platform:
                 frame.tkraise()
             button = self.prompt_tab_buttons.get(key)
             if button:
                 button.configure(
-                    text_color=palette["accent"] if key == platform else palette["muted"],
-                    fg_color=palette["selected"] if key == platform else "transparent",
+                    text_color=palette["accent"] if key == platform else palette["text"],
+                    fg_color=palette["selected"] if key == platform else palette["card"],
                     hover_color=palette["hover"],
                 )
         if platform in self.prompt_title_boxes:
@@ -40318,6 +40322,27 @@ class KeywordApp(ctk.CTk):
             self._load_prompt_set_into_boxes(platform)
             self._refresh_prompt_library()
         self._finish_theme_paint()
+
+    def _layout_prompt_platform_tabs(self, event=None) -> None:
+        width = event.width if event is not None else self.prompt_tab_row.winfo_width()
+        columns = 6 if width >= 650 else 3
+        if columns == getattr(self, "_prompt_tab_columns", None):
+            return
+        self._prompt_tab_columns = columns
+        for column in range(6):
+            self.prompt_tab_row.grid_columnconfigure(
+                column, weight=1 if column < columns else 0,
+                uniform="prompt_tabs" if column < columns else "",
+            )
+        for index, button in enumerate(self.prompt_tab_buttons.values()):
+            position = index % columns
+            button.grid(
+                row=index // columns,
+                column=position,
+                padx=(0 if position == 0 else 4, 0 if position == columns - 1 else 4),
+                pady=(0, 6) if index < columns and columns == 3 else 0,
+                sticky="ew",
+            )
 
     def _prompt_sets(self) -> list[dict]:
         if not self.wordpress_settings.prompt_sets:

@@ -960,10 +960,21 @@ def main() -> None:
             app._switch_page("prompts")
             app.geometry("1200x900+30+35")
             settle(200)
+            assert app._prompt_tab_columns == 6
             screenshot("prompt-manager-wide")
+            assert (
+                app.prompt_tool_row.winfo_rooty()
+                >= app.prompt_article_boxes["wordpress"].winfo_rooty()
+                + app.prompt_article_boxes["wordpress"].winfo_height()
+            )
+            app.prompts_scroll._parent_canvas.yview_moveto(1.0)
+            settle(140)
+            screenshot("prompt-manager-bottom")
+            app.prompts_scroll._parent_canvas.yview_moveto(0.0)
             app.geometry("860x680+30+35")
             settle(260)
-            for button in app.prompt_action_buttons.values():
+            assert app._prompt_tab_columns == 3
+            for button in (*app.prompt_tab_buttons.values(), *app.prompt_action_buttons.values()):
                 assert button.winfo_ismapped()
                 assert (
                     button.winfo_rootx() + button.winfo_width()
