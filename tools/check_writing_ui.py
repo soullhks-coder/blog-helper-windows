@@ -60,7 +60,7 @@ def main() -> None:
             app.update_idletasks()
             assert not errors, errors
 
-        def screenshot(name):
+        def screenshot(name, window=None):
             if not args.screenshots:
                 return
             args.screenshots.mkdir(parents=True, exist_ok=True)
@@ -72,15 +72,19 @@ def main() -> None:
             else:
                 app.attributes("-topmost", True)
                 app.lift()
+            target = window if window is not None else app
+            if window is not None:
+                window.attributes("-topmost", True)
+                window.lift()
             settle()
             destination = args.screenshots / f"writing-{args.theme}-{name}.png"
             if sys.platform == "darwin":
-                area = f"{app.winfo_rootx()},{app.winfo_rooty()},{app.winfo_width()},{app.winfo_height()}"
+                area = f"{target.winfo_rootx()},{target.winfo_rooty()},{target.winfo_width()},{target.winfo_height()}"
                 subprocess.run(["screencapture", "-x", "-R", area, str(destination)], check=True)
             else:
                 from PIL import ImageGrab
-                x, y = app.winfo_rootx(), app.winfo_rooty()
-                ImageGrab.grab(bbox=(x, y, x + app.winfo_width(), y + app.winfo_height())).save(destination)
+                x, y = target.winfo_rootx(), target.winfo_rooty()
+                ImageGrab.grab(bbox=(x, y, x + target.winfo_width(), y + target.winfo_height())).save(destination)
 
         def screenshot_inactive(name):
             """Capture the macOS app after another process owns focus."""
@@ -1057,6 +1061,49 @@ def main() -> None:
                 app.prompt_action_buttons["import"].invoke()
             assert title_box.get("1.0", "end-1c") == "외부 TXT로 편집한 본문"
             screenshot("prompt-bundle-tools")
+
+            original_title = title_box.get("1.0", "end-1c")
+            original_article = article_box.get("1.0", "end-1c")
+            app.prompt_expand_buttons[("wordpress", "title")].invoke()
+            settle(140)
+            assert app.prompt_expanded_box.get("1.0", "end-1c") == original_title
+            app.prompt_expanded_box.delete("1.0", "end")
+            app.prompt_expanded_box.insert("1.0", "취소할 편집 내용")
+            app._close_expanded_prompt_editor()
+            assert title_box.get("1.0", "end-1c") == original_title
+            app.prompt_expand_buttons[("wordpress", "article")].invoke()
+            settle(140)
+            assert app.prompt_expanded_box.get("1.0", "end-1c") == original_article
+            expanded_article = "큰 편집창에서 수정한 본문\n\n" + "축제 일정과 방문 정보를 구분해서 설명하세요.\n" * 80
+            app.prompt_expanded_box.delete("1.0", "end")
+            app.prompt_expanded_box.insert("1.0", expanded_article)
+            settle(100)
+            assert article_box.get("1.0", "end-1c") == original_article
+            assert app.prompt_expanded_count_label.cget("text") == f"{len(expanded_article):,}자"
+            screenshot("prompt-expanded-editor", window=app.prompt_expanded_dialog)
+            app.prompt_expanded_dialog.geometry("600x440")
+            settle(160)
+            assert app.prompt_expanded_box.winfo_height() >= 100
+            for widget in app.prompt_expanded_dialog.winfo_children()[-1].winfo_children():
+                if isinstance(widget, app_module.ctk.CTkButton):
+                    assert widget.winfo_rootx() + widget.winfo_width() <= (
+                        app.prompt_expanded_dialog.winfo_rootx() + app.prompt_expanded_dialog.winfo_width()
+                    )
+            screenshot("prompt-expanded-editor-small", window=app.prompt_expanded_dialog)
+            app._apply_expanded_prompt_editor()
+            assert app.prompt_expanded_dialog is None
+            assert article_box.get("1.0", "end-1c") == expanded_article
+            assert title_box.get("1.0", "end-1c") == original_title
+            app.prompt_expand_buttons[("wordpress", "title")].invoke()
+            settle(140)
+            app.prompt_expanded_box.delete("1.0", "end")
+            app.prompt_expanded_box.insert("1.0", "확대 편집창에서 저장한 제목")
+            app._apply_expanded_prompt_editor(save=True)
+            settle(550)
+            saved_prompt = app._prompt_set_by_id(app.active_prompt_set_ids["wordpress"])
+            assert saved_prompt["title_prompt"] == "확대 편집창에서 저장한 제목"
+            assert saved_prompt["article_prompt"] == expanded_article.strip()
+            assert "저장 완료" in app.prompt_feedback_label.cget("text")
 
             # The new topic shortcut uses the existing Playwright-first
             # reference worker, then writes without requiring a keyword choice.

@@ -39760,6 +39760,11 @@ class KeywordApp(ctk.CTk):
         self.prompt_set_menus: dict[str, ctk.CTkOptionMenu] = {}
         self.prompt_name_entries: dict[str, ctk.CTkEntry] = {}
         self.prompt_char_count_labels: dict[tuple[str, str], ctk.CTkLabel] = {}
+        self.prompt_expand_buttons: dict[tuple[str, str], ctk.CTkButton] = {}
+        self.prompt_expanded_dialog: ctk.CTkToplevel | None = None
+        self.prompt_expanded_box: tk.Text | None = None
+        self._prompt_expanded_source: tuple[str, str, str, tk.Text] | None = None
+        self._prompt_expanded_focus_job: str | None = None
         self.active_prompt_set_ids: dict[str, str] = {}
         self.tistory_automation_prompt_box: tk.Text | None = None
         self.naver_blog_title_prompt_box: tk.Text | None = None
@@ -39935,8 +39940,18 @@ class KeywordApp(ctk.CTk):
                     label_row, text="0자", text_color=palette["muted"],
                     font=ctk.CTkFont(size=12),
                 )
-                count_label.grid(row=0, column=1, sticky="e")
+                count_label.grid(row=0, column=1, padx=(0, 8), sticky="e")
                 self.prompt_char_count_labels[(platform, section)] = count_label
+                expand_icon = self._bootstrap_sidebar_icon_image("arrows-angle-expand", palette["text"], 16)
+                expand_button = ctk.CTkButton(
+                    label_row, text="" if expand_icon is not None else "↗",
+                    image=expand_icon, width=32, height=28, corner_radius=8,
+                    fg_color=palette["button"], hover_color=palette["button_hover"],
+                    text_color=palette["text"],
+                    command=lambda target=platform, field=section: self._open_expanded_prompt_editor(target, field),
+                )
+                expand_button.grid(row=0, column=2, sticky="e")
+                self.prompt_expand_buttons[(platform, section)] = expand_button
                 box = self._prompt_textarea(frame, row=row + 1, height=height, padx=0)
                 if section == "title":
                     self.prompt_title_boxes[platform] = box
@@ -40132,7 +40147,7 @@ class KeywordApp(ctk.CTk):
     def _prompt_textarea(self, parent, row: int, height: int, sticky: str = "ew", padx: int = 24) -> tk.Text:
         palette = self._theme_palette()
         frame = ctk.CTkFrame(parent, fg_color=palette["input"], corner_radius=16,
-                             border_width=1, border_color=palette["border"])
+                             border_width=2, border_color=palette["border"])
         frame.grid(row=row, column=0, padx=padx, pady=(0, 18), sticky=sticky)
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(0, weight=1)
@@ -40150,8 +40165,8 @@ class KeywordApp(ctk.CTk):
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            padx=14,
-            pady=12,
+            padx=4,
+            pady=4,
             font=("Helvetica", 14),
         )
         scrollbar = ctk.CTkScrollbar(
@@ -40160,8 +40175,8 @@ class KeywordApp(ctk.CTk):
             button_hover_color=palette["accent"],
         )
         text_box.configure(yscrollcommand=scrollbar.set)
-        text_box.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        text_box.grid(row=0, column=0, padx=(10, 0), pady=10, sticky="nsew")
+        scrollbar.grid(row=0, column=1, padx=(4, 8), pady=10, sticky="ns")
         text_box.bind("<KeyRelease>", self._on_prompt_text_changed)
         text_box.bind("<FocusIn>", lambda _event, box=text_box: setattr(self, "_prompt_last_focused_box", box))
         for shortcut in ("<Command-a>", "<Control-a>"):
@@ -40169,6 +40184,163 @@ class KeywordApp(ctk.CTk):
         self._bind_prompt_save_shortcut(text_box)
         self._bind_private_mousewheel_scroll(text_box)
         return text_box
+
+    def _open_expanded_prompt_editor(self, platform: str, section: str) -> None:
+        if self.prompt_expanded_dialog is not None and self.prompt_expanded_dialog.winfo_exists():
+            self.prompt_expanded_dialog.lift()
+            self.prompt_expanded_box.focus_set()
+            return
+        boxes = self.prompt_title_boxes if section == "title" else self.prompt_article_boxes
+        source = boxes.get(platform)
+        if source is None:
+            return
+        palette = self._theme_palette()
+        section_name = "제목 지침" if section == "title" else "본문 지침"
+        prompt_name = self.prompt_name_entries[platform].get().strip() or "기본"
+        dialog = ctk.CTkToplevel(self)
+        self.prompt_expanded_dialog = dialog
+        self._prompt_expanded_source = (platform, section, self.active_prompt_set_ids.get(platform, ""), source)
+        dialog.title(f"{prompt_name} · {section_name} 편집")
+        dialog.configure(fg_color=palette["shell"])
+        width = max(600, min(1280, self.winfo_screenwidth() - 100))
+        height = max(440, min(900, self.winfo_screenheight() - 120))
+        dialog.geometry(f"{width}x{height}")
+        dialog.minsize(600, 440)
+        dialog.transient(self)
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_expanded_prompt_editor)
+        dialog.bind("<Escape>", lambda _event: self._close_expanded_prompt_editor())
+
+        header = ctk.CTkFrame(dialog, fg_color="transparent")
+        header.grid(row=0, column=0, padx=24, pady=(24, 14), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header, text=section_name, text_color=palette["text"],
+            font=ctk.CTkFont(size=24, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            header, text=prompt_name, text_color=palette["muted"],
+            font=ctk.CTkFont(size=13),
+        ).grid(row=1, column=0, pady=(4, 0), sticky="w")
+        self.prompt_expanded_count_label = ctk.CTkLabel(
+            header, text="", text_color=palette["muted"], font=ctk.CTkFont(size=13),
+        )
+        self.prompt_expanded_count_label.grid(row=0, column=1, rowspan=2, sticky="e")
+
+        editor_frame = ctk.CTkFrame(
+            dialog, fg_color=palette["input"], corner_radius=16,
+            border_width=2, border_color=palette["border"],
+        )
+        editor_frame.grid(row=1, column=0, padx=24, pady=(0, 14), sticky="nsew")
+        editor_frame.grid_columnconfigure(0, weight=1)
+        editor_frame.grid_rowconfigure(0, weight=1)
+        editor = tk.Text(
+            editor_frame, wrap="word", undo=True, maxundo=100,
+            bg=palette["input"], fg=palette["text"], insertbackground=palette["text"],
+            selectbackground=palette["accent"], relief="flat", borderwidth=0,
+            highlightthickness=0, padx=4, pady=4, font=("Helvetica", 16),
+        )
+        self.prompt_expanded_box = editor
+        editor.grid(row=0, column=0, padx=(12, 0), pady=12, sticky="nsew")
+        scrollbar = ctk.CTkScrollbar(
+            editor_frame, orientation="vertical", command=editor.yview, width=12,
+            fg_color=palette["input"], button_color=palette["divider"],
+            button_hover_color=palette["accent"],
+        )
+        scrollbar.grid(row=0, column=1, padx=(6, 10), pady=12, sticky="ns")
+        editor.configure(yscrollcommand=scrollbar.set)
+        editor.insert("1.0", source.get("1.0", "end-1c"))
+        editor.edit_reset()
+        editor.edit_modified(False)
+        editor.bind("<<Modified>>", self._on_expanded_prompt_modified)
+        for shortcut in ("<Command-a>", "<Control-a>"):
+            editor.bind(shortcut, lambda _event: self._select_all_prompt_text(editor))
+        for shortcut in ("<Command-s>", "<Control-s>"):
+            editor.bind(shortcut, lambda _event: self._apply_expanded_prompt_editor(save=True))
+        for shortcut in ("<Command-Return>", "<Control-Return>"):
+            editor.bind(shortcut, lambda _event: self._apply_expanded_prompt_editor())
+        self._bind_private_mousewheel_scroll(editor)
+        self._refresh_expanded_prompt_count()
+
+        footer = ctk.CTkFrame(dialog, fg_color="transparent")
+        footer.grid(row=2, column=0, padx=24, pady=(0, 22), sticky="ew")
+        footer.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            footer, text="적용 후 프롬프트 관리에서 변경사항을 저장하세요.",
+            text_color=palette["muted"], font=ctk.CTkFont(size=12), anchor="w",
+        ).grid(row=0, column=0, columnspan=3, pady=(0, 10), sticky="ew")
+        ctk.CTkLabel(
+            footer, text=f"{'⌘' if sys.platform == 'darwin' else 'Ctrl'} + Enter 적용 · {'⌘' if sys.platform == 'darwin' else 'Ctrl'} + S 저장",
+            text_color=palette["muted"], font=ctk.CTkFont(size=11), anchor="w",
+        ).grid(row=1, column=0, sticky="w")
+        ctk.CTkButton(
+            footer, text="취소", width=100, height=40,
+            fg_color=palette["button"], hover_color=palette["button_hover"],
+            text_color=palette["text"], command=self._close_expanded_prompt_editor,
+        ).grid(row=1, column=1, padx=(12, 8))
+        ctk.CTkButton(
+            footer, text="편집 내용 적용", width=140, height=40,
+            fg_color="#1faa4a", hover_color="#16913e",
+            command=self._apply_expanded_prompt_editor,
+        ).grid(row=1, column=2)
+        dialog.update_idletasks()
+        x = max(0, min(self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2,
+                       self.winfo_screenwidth() - dialog.winfo_width()))
+        y = max(30, min(self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2,
+                        self.winfo_screenheight() - dialog.winfo_height() - 40))
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        self._prompt_expanded_focus_job = dialog.after(100, editor.focus_set)
+
+    def _refresh_expanded_prompt_count(self) -> None:
+        if self.prompt_expanded_box is not None:
+            self.prompt_expanded_count_label.configure(
+                text=f"{len(self.prompt_expanded_box.get('1.0', 'end-1c')):,}자",
+            )
+
+    def _on_expanded_prompt_modified(self, _event=None) -> None:
+        editor = self.prompt_expanded_box
+        if editor is not None and editor.edit_modified():
+            self._refresh_expanded_prompt_count()
+            editor.edit_modified(False)
+
+    def _apply_expanded_prompt_editor(self, save: bool = False) -> str:
+        if self._prompt_expanded_source is None or self.prompt_expanded_box is None:
+            return "break"
+        platform, _section, prompt_id, source = self._prompt_expanded_source
+        if self.active_prompt_set_ids.get(platform) != prompt_id:
+            messagebox.showwarning("프롬프트 선택 변경", "편집 중인 항목의 선택이 변경되었습니다. 내용을 복사한 뒤 다시 열어 주세요.", parent=self.prompt_expanded_dialog)
+            return "break"
+        contents = self.prompt_expanded_box.get("1.0", "end-1c")
+        source.edit_separator()
+        source.delete("1.0", "end")
+        source.insert("1.0", contents)
+        source.edit_separator()
+        self._prompt_last_focused_box = source
+        self._refresh_prompt_character_counts(platform)
+        self._close_expanded_prompt_editor()
+        if save:
+            self._save_prompt_settings()
+        else:
+            self._on_prompt_text_changed()
+        return "break"
+
+    def _close_expanded_prompt_editor(self) -> str:
+        dialog = self.prompt_expanded_dialog
+        source = self._prompt_expanded_source[3] if self._prompt_expanded_source is not None else None
+        self.prompt_expanded_dialog = None
+        self.prompt_expanded_box = None
+        self._prompt_expanded_source = None
+        if dialog is not None and dialog.winfo_exists():
+            if self._prompt_expanded_focus_job is not None:
+                dialog.after_cancel(self._prompt_expanded_focus_job)
+            dialog.grab_release()
+            dialog.destroy()
+        self._prompt_expanded_focus_job = None
+        if source is not None and source.winfo_exists():
+            source.focus_set()
+        return "break"
 
     def _bind_prompt_save_shortcut(self, widget) -> None:
         for shortcut in ("<Command-s>", "<Control-s>"):
@@ -49969,6 +50141,9 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("TXT 불러오기 실패", str(exc))
 
     def _save_prompt_settings(self) -> None:
+        if self._prompt_feedback_job is not None:
+            self.after_cancel(self._prompt_feedback_job)
+            self._prompt_feedback_job = None
         try:
             prompt_values = self._platform_prompt_values_from_boxes()
             PromptFileStore.save_values(prompt_values)
