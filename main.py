@@ -39723,35 +39723,36 @@ class KeywordApp(ctk.CTk):
         return value or "-"
 
     def _build_prompts_page(self) -> None:
+        palette = self._theme_palette()
         header = ctk.CTkFrame(self.prompts_page, fg_color="transparent")
-        header.grid(row=0, column=0, padx=28, pady=(26, 12), sticky="ew")
+        header.grid(row=0, column=0, padx=28, pady=(22, 12), sticky="ew")
 
         title = ctk.CTkLabel(
             header,
-            text="프롬프트관리",
+            text="프롬프트 관리",
             font=ctk.CTkFont(size=28, weight="bold"),
         )
         title.grid(row=0, column=0, sticky="w")
 
         subtitle = ctk.CTkLabel(
             header,
-            text="선택한 프롬프트를 한 번에 복사·붙여넣거나 TXT 파일로 내보내고 불러올 수 있습니다.",
-            text_color="#a7b3c4",
+            text="목록에서 선택하고 바로 편집하세요. TXT로 가져오거나 백업할 수도 있습니다.",
+            text_color=palette["muted"],
             font=ctk.CTkFont(size=14),
         )
         subtitle.grid(row=1, column=0, pady=(6, 0), sticky="w")
 
         prompt_card = ctk.CTkScrollableFrame(
             self.prompts_page,
-            fg_color="#222c3b",
+            fg_color=palette["card"],
             corner_radius=24,
             border_width=1,
-            border_color="#334760",
+            border_color=palette["border"],
         )
         self.prompts_scroll = prompt_card
-        prompt_card.grid(row=1, column=0, padx=28, pady=(0, 26), sticky="nsew")
-        prompt_card.grid_columnconfigure(0, weight=1)
-        prompt_card.grid_rowconfigure(2, weight=1)
+        prompt_card.grid(row=1, column=0, padx=28, pady=(0, 12), sticky="nsew")
+        prompt_card.grid_columnconfigure(0, weight=0, minsize=190)
+        prompt_card.grid_columnconfigure(1, weight=1)
 
         self.prompt_tab_buttons: dict[str, ctk.CTkButton] = {}
         self.prompt_platform_frames: dict[str, ctk.CTkFrame] = {}
@@ -39759,15 +39760,17 @@ class KeywordApp(ctk.CTk):
         self.prompt_article_boxes: dict[str, tk.Text] = {}
         self.prompt_set_menus: dict[str, ctk.CTkOptionMenu] = {}
         self.prompt_name_entries: dict[str, ctk.CTkEntry] = {}
+        self.prompt_char_count_labels: dict[tuple[str, str], ctk.CTkLabel] = {}
         self.active_prompt_set_ids: dict[str, str] = {}
         self.tistory_automation_prompt_box: tk.Text | None = None
         self.naver_blog_title_prompt_box: tk.Text | None = None
         self.naver_blog_topic_prompt_box: tk.Text | None = None
         self.naver_kin_answer_prompt_box: tk.Text | None = None
         self.active_prompt_platform = "wordpress"
+        self._prompt_last_focused_box: tk.Text | None = None
 
         tab_row = ctk.CTkFrame(prompt_card, fg_color="transparent")
-        tab_row.grid(row=0, column=0, padx=24, pady=(22, 16), sticky="ew")
+        tab_row.grid(row=0, column=0, columnspan=2, padx=20, pady=(18, 12), sticky="ew")
         prompt_tabs = (
             ("wordpress", "워드프레스"),
             ("tistory", "티스토리"),
@@ -39785,9 +39788,9 @@ class KeywordApp(ctk.CTk):
                 width=0,
                 height=42,
                 corner_radius=14,
-                fg_color="#0f1724" if platform == "wordpress" else "transparent",
-                hover_color="#111826",
-                text_color="#6dadff" if platform == "wordpress" else "#9aa7bb",
+                fg_color=palette["selected"] if platform == "wordpress" else "transparent",
+                hover_color=palette["hover"],
+                text_color=palette["accent"] if platform == "wordpress" else palette["muted"],
                 font=ctk.CTkFont(size=14, weight="bold"),
                 command=lambda target=platform: self._switch_prompt_platform(target),
             )
@@ -39800,49 +39803,104 @@ class KeywordApp(ctk.CTk):
             )
             self.prompt_tab_buttons[platform] = button
 
-        tool_row = ctk.CTkFrame(prompt_card, fg_color="#1b2533", corner_radius=16)
-        tool_row.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="ew")
+        tool_row = ctk.CTkFrame(prompt_card, fg_color=palette["panel"], corner_radius=16)
+        tool_row.grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 16), sticky="ew")
+        ctk.CTkLabel(
+            tool_row,
+            text="선택 항목 전체 복사 · 가져오기 · 내보내기",
+            text_color=palette["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=4, padx=12, pady=(9, 4), sticky="ew")
         self.prompt_action_buttons: dict[str, ctk.CTkButton] = {}
         prompt_actions = (
             ("copy", "전체 복사", self._copy_current_prompt_bundle),
-            ("paste", "전체 붙여넣기", self._paste_prompt_bundle),
+            ("paste", "전체 붙이기", self._paste_prompt_bundle),
             ("export", "TXT 내보내기", self._export_current_prompt_bundle),
             ("import", "TXT 불러오기", self._import_prompt_bundle),
         )
-        for column_index in range(2):
+        for column_index in range(4):
             tool_row.grid_columnconfigure(column_index, weight=1, uniform="prompt_actions")
         for action_index, (action, label, command) in enumerate(prompt_actions):
             button = ctk.CTkButton(
                 tool_row,
                 text=label,
                 width=0,
-                height=40,
+                height=36,
                 corner_radius=12,
-                fg_color="#314761",
-                hover_color="#3f5c7f",
-                font=ctk.CTkFont(size=13, weight="bold"),
+                fg_color=palette["button"],
+                hover_color=palette["button_hover"],
+                font=ctk.CTkFont(size=11, weight="bold"),
                 command=command,
             )
             button.grid(
-                row=action_index // 2,
-                column=action_index % 2,
-                padx=(12, 4) if action_index % 2 == 0 else (4, 12),
-                pady=(12, 6) if action_index < 2 else (0, 6),
+                row=1,
+                column=action_index,
+                padx=(12 if action_index == 0 else 3, 12 if action_index == 3 else 3),
+                pady=(0, 10),
                 sticky="ew",
             )
             self.prompt_action_buttons[action] = button
+
+        library = ctk.CTkFrame(
+            prompt_card,
+            fg_color=palette["panel"],
+            corner_radius=18,
+            border_width=1,
+            border_color=palette["border"],
+            width=190,
+        )
+        self.prompt_library_panel = library
+        library.grid(row=2, column=0, padx=(20, 6), pady=(0, 20), sticky="nsew")
+        library.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            tool_row,
-            text="현재 선택한 항목의 편집 내용을 사용합니다. 붙여넣기·불러오기는 편집칸에 적용되며 저장 버튼을 눌러 확정합니다.",
-            text_color="#9aa7bb",
-            font=ctk.CTkFont(size=12),
-            anchor="w",
-            justify="left",
-            wraplength=450,
-        ).grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="ew")
+            library, text="내 프롬프트", text_color=palette["text"],
+            font=ctk.CTkFont(size=16, weight="bold"), anchor="w",
+        ).grid(row=0, column=0, padx=14, pady=(16, 0), sticky="ew")
+        self.prompt_library_count_label = ctk.CTkLabel(
+            library, text="", text_color=palette["muted"],
+            font=ctk.CTkFont(size=12), anchor="w",
+        )
+        self.prompt_library_count_label.grid(row=1, column=0, padx=14, pady=(2, 10), sticky="ew")
+        self.prompt_library_search_entry = ctk.CTkEntry(
+            library, height=38, corner_radius=11,
+            fg_color=palette["input"], border_color=palette["border"],
+            placeholder_text="이름·내용 검색",
+            font=ctk.CTkFont(size=13),
+        )
+        self.prompt_library_search_entry.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="ew")
+        self.prompt_library_search_entry.bind("<KeyRelease>", lambda _event: self._refresh_prompt_library())
+        self.prompt_library_list = ctk.CTkScrollableFrame(
+            library, height=235, fg_color="transparent",
+        )
+        self.prompt_library_list.grid(row=4, column=0, padx=9, sticky="ew")
+        self.prompt_library_list.grid_columnconfigure(0, weight=1)
+        library_actions = ctk.CTkFrame(library, fg_color="transparent")
+        library_actions.grid(row=3, column=0, padx=12, pady=(0, 10), sticky="ew")
+        for action_column in (0, 1):
+            library_actions.grid_columnconfigure(action_column, weight=1)
+        ctk.CTkButton(
+            library_actions, text="새 항목", width=0, height=36, corner_radius=10,
+            fg_color=palette["accent"], hover_color="#2563eb",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._create_new_prompt_set,
+        ).grid(row=0, column=0, padx=(0, 3), sticky="ew")
+        ctk.CTkButton(
+            library_actions, text="복제", width=0, height=36, corner_radius=10,
+            fg_color=palette["button"], hover_color=palette["button_hover"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._add_prompt_set(self.active_prompt_platform),
+        ).grid(row=0, column=1, padx=(3, 0), sticky="ew")
+        ctk.CTkButton(
+            library, text="선택 항목 삭제", height=34, corner_radius=10,
+            fg_color=palette["button"], hover_color=palette["button_hover"],
+            text_color=palette["muted"], font=ctk.CTkFont(size=12),
+            command=lambda: self._delete_prompt_set(self.active_prompt_platform),
+        ).grid(row=5, column=0, padx=12, pady=(0, 14), sticky="ew")
 
         platform_holder = ctk.CTkFrame(prompt_card, fg_color="transparent")
-        platform_holder.grid(row=2, column=0, sticky="nsew")
+        self.prompt_editor_holder = platform_holder
+        platform_holder.grid(row=2, column=1, padx=(6, 20), pady=(0, 20), sticky="nsew")
         platform_holder.grid_columnconfigure(0, weight=1)
         platform_holder.grid_rowconfigure(0, weight=1)
 
@@ -39857,100 +39915,71 @@ class KeywordApp(ctk.CTk):
             frame.grid_columnconfigure(0, weight=1)
             self.prompt_platform_frames[platform] = frame
 
-            control_row = ctk.CTkFrame(frame, fg_color="#1b2533", corner_radius=18)
-            control_row.grid(row=0, column=0, padx=24, pady=(0, 18), sticky="ew")
-            control_row.grid_columnconfigure(1, weight=1)
+            control_row = ctk.CTkFrame(
+                frame, fg_color=palette["panel"], corner_radius=18,
+                border_width=1, border_color=palette["border"],
+            )
+            control_row.grid(row=0, column=0, pady=(0, 14), sticky="ew")
+            control_row.grid_columnconfigure(0, weight=1)
 
             ctk.CTkLabel(
                 control_row,
-                text="프롬프트 제목",
-                text_color="#cbd6e6",
+                text="프롬프트 이름",
+                text_color=palette["text"],
                 font=ctk.CTkFont(size=14, weight="bold"),
-            ).grid(row=0, column=0, padx=(16, 10), pady=(14, 8), sticky="w")
+            ).grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
 
             name_entry = ctk.CTkEntry(
                 control_row,
                 height=40,
                 corner_radius=12,
-                fg_color="#0b1220",
-                border_width=0,
+                fg_color=palette["input"],
+                border_color=palette["border"],
                 placeholder_text="예: 후기리뷰, 축제공연",
                 font=ctk.CTkFont(size=14, weight="bold"),
             )
-            name_entry.grid(row=0, column=1, padx=(0, 16), pady=(14, 8), sticky="ew")
+            name_entry.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="ew")
             name_entry.bind("<KeyRelease>", self._on_prompt_text_changed)
+            self._bind_prompt_save_shortcut(name_entry)
             self.prompt_name_entries[platform] = name_entry
 
             menu = ctk.CTkOptionMenu(
                 control_row,
                 values=["기본"],
                 width=0,
-                height=40,
+                height=34,
                 corner_radius=12,
-                fg_color="#314761",
-                button_color="#314761",
-                button_hover_color="#3f5c7f",
-                font=ctk.CTkFont(size=14, weight="bold"),
+                fg_color=palette["button"],
+                button_color=palette["button"],
+                button_hover_color=palette["button_hover"],
+                font=ctk.CTkFont(size=12),
                 command=lambda _value, target=platform: self._select_prompt_set_from_menu(target),
             )
-            menu.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 8), sticky="ew")
+            menu.grid(row=2, column=0, padx=16, pady=(0, 14), sticky="ew")
             self.prompt_set_menus[platform] = menu
 
-            set_actions = ctk.CTkFrame(control_row, fg_color="transparent")
-            set_actions.grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
-            for action_column in range(3):
-                set_actions.grid_columnconfigure(action_column, weight=1, uniform="prompt_set_actions")
-            ctk.CTkButton(
-                set_actions,
-                text="추가",
-                width=0,
-                height=40,
-                corner_radius=12,
-                fg_color="#1faa4a",
-                hover_color="#16913e",
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=lambda target=platform: self._add_prompt_set(target),
-            ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
-            ctk.CTkButton(
-                set_actions,
-                text="삭제",
-                width=0,
-                height=40,
-                corner_radius=12,
-                fg_color="#596579",
-                hover_color="#6a768b",
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=lambda target=platform: self._delete_prompt_set(target),
-            ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
-
-            ctk.CTkButton(
-                set_actions,
-                text="수정",
-                width=0,
-                height=40,
-                corner_radius=12,
-                fg_color="#3b73f6",
-                hover_color="#2f61d2",
-                font=ctk.CTkFont(size=14, weight="bold"),
-                command=lambda target=platform: self._update_prompt_set(target),
-            ).grid(row=0, column=1, padx=4, sticky="ew")
-
-            title_prompt_label = ctk.CTkLabel(
-                frame,
-                text=f"{label} 제목 프롬프트",
-                font=ctk.CTkFont(size=18, weight="bold"),
-            )
-            title_prompt_label.grid(row=1, column=0, padx=24, pady=(0, 10), sticky="w")
-            self.prompt_title_boxes[platform] = self._prompt_textarea(frame, row=2, height=7)
-
-            article_label = ctk.CTkLabel(
-                frame,
-                text=f"{label} 본문글작성 프롬프트",
-                font=ctk.CTkFont(size=18, weight="bold"),
-            )
-            article_label.grid(row=3, column=0, padx=24, pady=(0, 10), sticky="w")
-            self.prompt_article_boxes[platform] = self._prompt_textarea(frame, row=4, height=13)
+            for section, row, section_label, height in (
+                ("title", 1, "제목 지침", 7),
+                ("article", 3, "본문 지침", 13),
+            ):
+                label_row = ctk.CTkFrame(frame, fg_color="transparent")
+                label_row.grid(row=row, column=0, pady=(0, 7), sticky="ew")
+                label_row.grid_columnconfigure(0, weight=1)
+                ctk.CTkLabel(
+                    label_row, text=section_label, text_color=palette["text"],
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                ).grid(row=0, column=0, sticky="w")
+                count_label = ctk.CTkLabel(
+                    label_row, text="0자", text_color=palette["muted"],
+                    font=ctk.CTkFont(size=12),
+                )
+                count_label.grid(row=0, column=1, sticky="e")
+                self.prompt_char_count_labels[(platform, section)] = count_label
+                box = self._prompt_textarea(frame, row=row + 1, height=height, padx=0)
+                if section == "title":
+                    self.prompt_title_boxes[platform] = box
+                else:
+                    self.prompt_article_boxes[platform] = box
 
         # Existing TXT persistence and N blog automation follow the active N blog set.
         self.naver_blog_title_prompt_box = self.prompt_title_boxes["naver_blog"]
@@ -39964,12 +39993,12 @@ class KeywordApp(ctk.CTk):
 
         automation_panel = ctk.CTkFrame(
             automation_frame,
-            fg_color="#1b2533",
-            corner_radius=20,
+            fg_color=palette["panel"],
+            corner_radius=18,
             border_width=1,
-            border_color="#304158",
+            border_color=palette["border"],
         )
-        automation_panel.grid(row=0, column=0, padx=24, pady=(0, 18), sticky="ew")
+        automation_panel.grid(row=0, column=0, pady=(0, 18), sticky="ew")
         automation_panel.grid_columnconfigure(0, weight=1)
 
         automation_title = ctk.CTkLabel(
@@ -39986,7 +40015,7 @@ class KeywordApp(ctk.CTk):
                 "사용 가능한 표현: 경고창 취소, 썸네일 먼저 붙여넣기, HTML 선택, 제목 입력, 본문 붙여넣기, 기본모드로 변경, 확인 누르기.\n"
                 "필수 단계가 빠지거나 문장이 애매하면 기존에 성공한 기본 절차로 안전하게 실행됩니다."
             ),
-            text_color="#a7b3c4",
+            text_color=palette["muted"],
             justify="left",
             wraplength=760,
             font=ctk.CTkFont(size=13),
@@ -39998,8 +40027,8 @@ class KeywordApp(ctk.CTk):
             text="자동화 순서 입력",
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        automation_input_label.grid(row=1, column=0, padx=24, pady=(0, 10), sticky="w")
-        self.tistory_automation_prompt_box = self._prompt_textarea(automation_frame, row=2, height=16, sticky="nsew")
+        automation_input_label.grid(row=1, column=0, pady=(0, 10), sticky="w")
+        self.tistory_automation_prompt_box = self._prompt_textarea(automation_frame, row=2, height=16, sticky="nsew", padx=0)
 
         naver_kin_frame = ctk.CTkFrame(platform_holder, fg_color="transparent")
         naver_kin_frame.grid(row=0, column=0, sticky="nsew")
@@ -40009,12 +40038,12 @@ class KeywordApp(ctk.CTk):
 
         naver_kin_panel = ctk.CTkFrame(
             naver_kin_frame,
-            fg_color="#1b2533",
-            corner_radius=20,
+            fg_color=palette["panel"],
+            corner_radius=18,
             border_width=1,
-            border_color="#304158",
+            border_color=palette["border"],
         )
-        naver_kin_panel.grid(row=0, column=0, padx=24, pady=(0, 18), sticky="ew")
+        naver_kin_panel.grid(row=0, column=0, pady=(0, 18), sticky="ew")
         naver_kin_panel.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -40029,7 +40058,7 @@ class KeywordApp(ctk.CTk):
                 "지식인 질문을 바탕으로 워드프레스 답변형 글을 만들 때 사용할 프롬프트입니다.\n"
                 "저장하면 데스크톱 BlogHelperPrompts 폴더의 naver_kin_answer_prompt.txt에도 함께 보관됩니다."
             ),
-            text_color="#a7b3c4",
+            text_color=palette["muted"],
             justify="left",
             wraplength=760,
             font=ctk.CTkFont(size=13),
@@ -40039,66 +40068,70 @@ class KeywordApp(ctk.CTk):
             naver_kin_frame,
             text="지식인 답변형 글쓰기 프롬프트 입력",
             font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=1, column=0, padx=24, pady=(0, 10), sticky="w")
-        self.naver_kin_answer_prompt_box = self._prompt_textarea(naver_kin_frame, row=2, height=16, sticky="nsew")
+        ).grid(row=1, column=0, pady=(0, 10), sticky="w")
+        self.naver_kin_answer_prompt_box = self._prompt_textarea(naver_kin_frame, row=2, height=16, sticky="nsew", padx=0)
 
         self.title_prompt_box = self.prompt_title_boxes["wordpress"]
         self.article_prompt_box = self.prompt_article_boxes["wordpress"]
         self._switch_prompt_platform("wordpress")
 
-        button_row = ctk.CTkFrame(prompt_card, fg_color="transparent")
-        button_row.grid(row=3, column=0, padx=24, pady=(0, 22), sticky="ew")
+        button_row = ctk.CTkFrame(
+            self.prompts_page, fg_color=palette["panel"],
+            corner_radius=16, border_width=1, border_color=palette["border"],
+        )
+        button_row.grid(row=2, column=0, padx=28, pady=(0, 14), sticky="ew")
         button_row.grid_columnconfigure(0, weight=1)
+
+        self.prompt_feedback_label = ctk.CTkLabel(
+            button_row, text="저장 대기 중", text_color=palette["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w", wraplength=650,
+        )
+        self.prompt_feedback_label.grid(row=0, column=0, columnspan=3, padx=14, pady=(9, 4), sticky="ew")
 
         save_button = ctk.CTkButton(
             button_row,
-            text="프롬프트 저장",
-            height=52,
+            text="변경사항 저장",
+            height=42,
             corner_radius=16,
             fg_color="#1faa4a",
             hover_color="#16913e",
-            font=ctk.CTkFont(size=18, weight="bold"),
+            font=ctk.CTkFont(size=14, weight="bold"),
             command=self._save_prompt_settings,
         )
-        save_button.grid(row=0, column=0, sticky="ew")
+        save_button.grid(row=1, column=0, padx=(14, 0), pady=(0, 12), sticky="ew")
 
         reset_button = ctk.CTkButton(
             button_row,
-            text="선택 항목 기본값 복원",
-            width=205,
-            height=52,
+            text="기본값 복원",
+            width=130,
+            height=42,
             corner_radius=16,
             fg_color="#596579",
             hover_color="#6a768b",
-            font=ctk.CTkFont(size=18, weight="bold"),
+            font=ctk.CTkFont(size=13, weight="bold"),
             command=self._reset_prompt_settings,
         )
-        reset_button.grid(row=0, column=1, padx=(12, 0))
+        reset_button.grid(row=1, column=1, padx=(8, 0), pady=(0, 12))
 
         open_folder_button = ctk.CTkButton(
             button_row,
-            text="저장 폴더 열기",
-            width=170,
-            height=52,
+            text="저장 폴더",
+            width=115,
+            height=42,
             corner_radius=16,
             fg_color="#314761",
             hover_color="#3f5c7f",
-            font=ctk.CTkFont(size=16, weight="bold"),
+            font=ctk.CTkFont(size=13, weight="bold"),
             command=self._open_prompt_folder,
         )
-        open_folder_button.grid(row=0, column=2, padx=(12, 0))
+        open_folder_button.grid(row=1, column=2, padx=(8, 14), pady=(0, 12))
 
-        self.prompt_feedback_label = ctk.CTkLabel(
-            prompt_card,
-            text="저장 대기 중",
-            text_color="#9aa7bb",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        )
-        self.prompt_feedback_label.grid(row=4, column=0, padx=24, pady=(0, 22), sticky="w")
-
-    def _prompt_textarea(self, parent, row: int, height: int, sticky: str = "ew") -> tk.Text:
-        frame = ctk.CTkFrame(parent, fg_color="#111826", corner_radius=16)
-        frame.grid(row=row, column=0, padx=24, pady=(0, 18), sticky=sticky)
+    def _prompt_textarea(self, parent, row: int, height: int, sticky: str = "ew", padx: int = 24) -> tk.Text:
+        palette = self._theme_palette()
+        frame = ctk.CTkFrame(parent, fg_color=palette["input"], corner_radius=16,
+                             border_width=1, border_color=palette["border"])
+        frame.grid(row=row, column=0, padx=padx, pady=(0, 18), sticky=sticky)
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(0, weight=1)
 
@@ -40108,29 +40141,165 @@ class KeywordApp(ctk.CTk):
             wrap="word",
             undo=True,
             maxundo=100,
-            bg="#111826",
-            fg="#e6edf7",
-            insertbackground="#e6edf7",
+            bg=palette["input"],
+            fg=palette["text"],
+            insertbackground=palette["text"],
             selectbackground="#3468e8",
             relief="flat",
             borderwidth=0,
+            highlightthickness=0,
             padx=14,
             pady=12,
             font=("Helvetica", 14),
         )
-        scrollbar = tk.Scrollbar(frame, orient="vertical", command=text_box.yview, bg="#111826", troughcolor="#1b2533")
+        scrollbar = ctk.CTkScrollbar(
+            frame, orientation="vertical", command=text_box.yview, width=10,
+            fg_color=palette["input"], button_color=palette["divider"],
+            button_hover_color=palette["accent"],
+        )
         text_box.configure(yscrollcommand=scrollbar.set)
         text_box.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
         text_box.bind("<KeyRelease>", self._on_prompt_text_changed)
+        text_box.bind("<FocusIn>", lambda _event, box=text_box: setattr(self, "_prompt_last_focused_box", box))
+        for shortcut in ("<Command-a>", "<Control-a>"):
+            text_box.bind(shortcut, lambda _event, box=text_box: self._select_all_prompt_text(box))
+        self._bind_prompt_save_shortcut(text_box)
         self._bind_private_mousewheel_scroll(text_box)
         return text_box
 
+    def _bind_prompt_save_shortcut(self, widget) -> None:
+        for shortcut in ("<Command-s>", "<Control-s>"):
+            widget.bind(shortcut, self._save_prompt_shortcut)
+
+    def _save_prompt_shortcut(self, _event=None) -> str:
+        self._save_prompt_settings()
+        return "break"
+
+    @staticmethod
+    def _select_all_prompt_text(box: tk.Text) -> str:
+        box.tag_add("sel", "1.0", "end-1c")
+        box.mark_set("insert", "1.0")
+        box.see("1.0")
+        return "break"
+
+    def _refresh_prompt_character_counts(self, platform: str) -> None:
+        for section, boxes in (
+            ("title", self.prompt_title_boxes),
+            ("article", self.prompt_article_boxes),
+        ):
+            label = self.prompt_char_count_labels.get((platform, section))
+            if label is not None and platform in boxes:
+                label.configure(text=f"{len(boxes[platform].get('1.0', 'end-1c')):,}자")
+
+    def _refresh_prompt_library(self) -> None:
+        if not hasattr(self, "prompt_library_list"):
+            return
+        platform = self.active_prompt_platform
+        if platform not in self.prompt_title_boxes:
+            return
+        palette = self._theme_palette()
+        prompt_sets = [item for item in self._prompt_sets() if item.get("platform") == platform]
+        query = self.prompt_library_search_entry.get().strip().casefold()
+        active_id = self.active_prompt_set_ids.get(platform)
+        for child in self.prompt_library_list.winfo_children():
+            child.destroy()
+        visible = 0
+        for prompt_set in prompt_sets:
+            prompt_id = str(prompt_set.get("id") or "")
+            name = (
+                self.prompt_name_entries[platform].get().strip()
+                if prompt_id == active_id else str(prompt_set.get("name") or "기본")
+            ) or "기본"
+            searchable = " ".join((
+                name, str(prompt_set.get("title_prompt") or ""),
+                str(prompt_set.get("article_prompt") or ""),
+            )).casefold()
+            if query and query not in searchable:
+                continue
+            selected = prompt_id == active_id
+            button = ctk.CTkButton(
+                self.prompt_library_list,
+                text=f"{'●  ' if selected else '    '}{name}",
+                height=40, corner_radius=10, anchor="w",
+                fg_color=palette["selected"] if selected else "transparent",
+                hover_color=palette["hover"],
+                text_color=palette["accent"] if selected else palette["text"],
+                font=ctk.CTkFont(size=13, weight="bold" if selected else "normal"),
+                command=lambda target=platform, selected_id=prompt_id: self._select_prompt_set_from_library(target, selected_id),
+            )
+            button.grid(row=visible, column=0, padx=3, pady=(0, 4), sticky="ew")
+            visible += 1
+        if not visible:
+            ctk.CTkLabel(
+                self.prompt_library_list, text="검색 결과가 없습니다.",
+                text_color=palette["muted"], font=ctk.CTkFont(size=12),
+            ).grid(row=0, column=0, padx=6, pady=18, sticky="w")
+        self.prompt_library_count_label.configure(text=f"{len(prompt_sets)}개 항목 · {visible}개 표시")
+
+    def _select_prompt_set_from_library(self, platform: str, prompt_id: str) -> None:
+        if prompt_id == self.active_prompt_set_ids.get(platform):
+            return
+        self._save_active_prompt_set_to_memory(platform)
+        selected = self._prompt_set_by_id(prompt_id)
+        if not selected or selected.get("platform") != platform:
+            return
+        self.active_prompt_set_ids[platform] = prompt_id
+        self._load_prompt_set_into_boxes(platform)
+        if platform == "naver_blog":
+            self._apply_naver_blog_prompt_set(selected)
+        self._refresh_prompt_library()
+        self.prompt_feedback_label.configure(
+            text=f"{selected.get('name') or '기본'} 항목을 열었습니다.",
+            text_color=self._theme_palette()["muted"],
+        )
+
+    def _create_new_prompt_set(self) -> None:
+        platform = self.active_prompt_platform
+        if platform not in self.prompt_title_boxes:
+            return
+        self._save_active_prompt_set_to_memory(platform)
+        defaults = {
+            "wordpress": (DEFAULT_WORDPRESS_TITLE_PROMPT, DEFAULT_WORDPRESS_ARTICLE_PROMPT),
+            "tistory": (DEFAULT_TISTORY_TITLE_PROMPT, DEFAULT_TISTORY_ARTICLE_PROMPT),
+            "naver_blog": (DEFAULT_NAVER_BLOG_TITLE_PROMPT, DEFAULT_NAVER_BLOG_TOPIC_PROMPT),
+            "blogspot": (DEFAULT_BLOGSPOT_TITLE_PROMPT, DEFAULT_BLOGSPOT_ARTICLE_PROMPT),
+        }
+        title_prompt, article_prompt = defaults[platform]
+        self.wordpress_settings.prompt_sets, created = create_independent_prompt_set(
+            self._prompt_sets(), platform, "새 프롬프트", title_prompt, article_prompt,
+        )
+        self.active_prompt_set_ids[platform] = str(created["id"])
+        self.prompt_library_search_entry.delete(0, "end")
+        self._refresh_prompt_set_menus()
+        self._load_prompt_set_into_boxes(platform)
+        PromptFileStore.save_prompt_sets(self.wordpress_settings.prompt_sets)
+        if platform == "naver_blog":
+            self._apply_naver_blog_prompt_set(created, persist=True)
+        else:
+            AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self.prompt_name_entries[platform].focus_set()
+        self.prompt_name_entries[platform].select_range(0, "end")
+        self._refresh_prompt_library()
+        self.prompt_feedback_label.configure(
+            text="새 항목을 만들었습니다. 이름과 내용을 수정한 뒤 저장하세요.",
+            text_color=self._theme_palette()["accent"],
+        )
+
     def _switch_prompt_platform(self, platform: str) -> None:
-        if hasattr(self, "active_prompt_platform") and self.active_prompt_platform in getattr(self, "prompt_title_boxes", {}):
+        previous_platform = getattr(self, "active_prompt_platform", None)
+        if previous_platform in getattr(self, "prompt_title_boxes", {}):
             self._save_active_prompt_set_to_memory(self.active_prompt_platform)
+        if previous_platform != platform and hasattr(self, "prompt_library_search_entry"):
+            self.prompt_library_search_entry.delete(0, "end")
         self.active_prompt_platform = platform
         palette = self._theme_palette()
+        if platform in self.prompt_title_boxes:
+            self.prompt_library_panel.grid()
+            self.prompt_editor_holder.grid_configure(column=1, columnspan=1, padx=(6, 20))
+        else:
+            self.prompt_library_panel.grid_remove()
+            self.prompt_editor_holder.grid_configure(column=0, columnspan=2, padx=(20, 20))
         for key, frame in self.prompt_platform_frames.items():
             if key == platform:
                 frame.tkraise()
@@ -40147,6 +40316,7 @@ class KeywordApp(ctk.CTk):
             self.article_prompt_box = self.prompt_article_boxes[platform]
         if platform in getattr(self, "prompt_set_menus", {}):
             self._load_prompt_set_into_boxes(platform)
+            self._refresh_prompt_library()
         self._finish_theme_paint()
 
     def _prompt_sets(self) -> list[dict]:
@@ -40209,6 +40379,7 @@ class KeywordApp(ctk.CTk):
         self._refresh_home_prompt_menu()
         self._refresh_naver_blog_prompt_menu()
         self._refresh_naver_kin_wordpress_prompt_menu()
+        self._refresh_prompt_library()
 
     def _refresh_writing_prompt_menu(self) -> None:
         if not hasattr(self, "writing_prompt_menu"):
@@ -40252,6 +40423,7 @@ class KeywordApp(ctk.CTk):
         self.prompt_title_boxes[platform].insert("1.0", str(prompt_set.get("title_prompt") or ""))
         self.prompt_article_boxes[platform].delete("1.0", "end")
         self.prompt_article_boxes[platform].insert("1.0", str(prompt_set.get("article_prompt") or ""))
+        self._refresh_prompt_character_counts(platform)
 
     def _select_prompt_set_from_menu(self, platform: str) -> None:
         self._save_active_prompt_set_to_memory(platform)
@@ -40261,6 +40433,7 @@ class KeywordApp(ctk.CTk):
             self._load_prompt_set_into_boxes(platform)
             if platform == "naver_blog":
                 self._apply_naver_blog_prompt_set(selected)
+        self._refresh_prompt_library()
         self._on_prompt_text_changed()
 
     def _add_prompt_set(self, platform: str) -> None:
@@ -40278,6 +40451,7 @@ class KeywordApp(ctk.CTk):
             self._apply_naver_blog_prompt_set(created)
         self._refresh_prompt_set_menus()
         self._load_prompt_set_into_boxes(platform)
+        self._refresh_prompt_library()
         PromptFileStore.save_prompt_sets(self.wordpress_settings.prompt_sets)
         if platform == "naver_blog":
             self._apply_naver_blog_prompt_set(created, persist=True)
@@ -40305,6 +40479,7 @@ class KeywordApp(ctk.CTk):
         AppStateStore.save(settings, save_secrets=False)
         self._refresh_prompt_set_menus()
         self._refresh_writing_prompt_menu()
+        self._refresh_prompt_library()
         if platform == "naver_blog":
             updated = self._prompt_set_by_id(prompt_id)
             if updated:
@@ -40318,15 +40493,41 @@ class KeywordApp(ctk.CTk):
             messagebox.showwarning("삭제 불가", "플랫폼마다 최소 1개의 프롬프트는 필요합니다.")
             return
         prompt_id = self.active_prompt_set_ids.get(platform)
+        selected = self._prompt_set_by_id(prompt_id) if prompt_id else None
+        if not selected or not messagebox.askyesno(
+            "프롬프트 삭제",
+            f"'{selected.get('name') or '기본'}' 항목을 삭제할까요?\n이 작업은 저장된 목록에도 바로 반영됩니다.",
+            parent=self,
+        ):
+            return
         self.wordpress_settings.prompt_sets = [item for item in self._prompt_sets() if item.get("id") != prompt_id]
         first = next((item for item in self.wordpress_settings.prompt_sets if item.get("platform") == platform), None)
         if first:
             self.active_prompt_set_ids[platform] = str(first.get("id"))
+            replacement_id = str(first.get("id"))
+            for field in ("selected_prompt_id", "home_selected_prompt_id", "naver_kin_wordpress_prompt_id"):
+                if getattr(self.wordpress_settings, field, "") == prompt_id:
+                    setattr(self.wordpress_settings, field, replacement_id)
+            for field in ("writing_target_prompt_ids", "naver_blog_profile_prompt_ids"):
+                remembered = getattr(self.wordpress_settings, field, None)
+                if isinstance(remembered, dict):
+                    for key, value in remembered.items():
+                        if value == prompt_id:
+                            remembered[key] = replacement_id
+            for field in ("tistory_profiles", "blogspot_profiles"):
+                for profile in getattr(self.wordpress_settings, field, []) or []:
+                    if isinstance(profile, dict) and profile.get("last_prompt_id") == prompt_id:
+                        profile["last_prompt_id"] = replacement_id
+        if hasattr(self, "prompt_library_search_entry"):
+            self.prompt_library_search_entry.delete(0, "end")
         self._refresh_prompt_set_menus()
         self._load_prompt_set_into_boxes(platform)
+        self._refresh_prompt_library()
         if platform == "naver_blog" and first:
             self._apply_naver_blog_prompt_set(first, persist=True)
-        self.prompt_feedback_label.configure(text="프롬프트를 삭제했습니다. 저장 버튼을 누르면 반영됩니다.", text_color="#f4c95d")
+        PromptFileStore.save_prompt_sets(self.wordpress_settings.prompt_sets)
+        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        self.prompt_feedback_label.configure(text="선택 항목을 삭제하고 저장했습니다.", text_color="#48d980")
 
     def _on_writing_prompt_selected(self, label: str) -> None:
         selected = self._prompt_set_by_label(label)
@@ -47493,6 +47694,8 @@ class KeywordApp(ctk.CTk):
 
     def _run_prompt_feedback_update(self) -> None:
         self._prompt_feedback_job = None
+        self._refresh_prompt_character_counts(self.active_prompt_platform)
+        self._refresh_prompt_library()
         if hasattr(self, "prompt_feedback_label"):
             self.prompt_feedback_label.configure(text="수정 중 - 저장 버튼을 누르면 반영됩니다.", text_color="#f4c95d")
 
@@ -49648,8 +49851,43 @@ class KeywordApp(ctk.CTk):
         if self._prompt_feedback_job is not None:
             self.after_cancel(self._prompt_feedback_job)
             self._prompt_feedback_job = None
+        self._refresh_prompt_character_counts(platform)
+        self._refresh_prompt_library()
         self.prompt_feedback_label.configure(
-            text="편집칸에 적용했습니다. '프롬프트 저장'을 눌러 확정해 주세요.",
+            text="편집칸에 적용했습니다. 하단의 '변경사항 저장'을 눌러 확정해 주세요.",
+            text_color="#f4c95d",
+        )
+
+    def _apply_plain_prompt_text_to_editor(self, contents: str) -> None:
+        if not contents.strip():
+            raise ValueError("빈 TXT 파일은 불러올 수 없습니다.")
+        platform = self.active_prompt_platform
+        if platform in self.prompt_title_boxes:
+            title_box = self.prompt_title_boxes[platform]
+            article_box = self.prompt_article_boxes[platform]
+            focused = self._prompt_last_focused_box
+            target = title_box if focused is title_box else article_box
+            section = "제목" if target is title_box else "본문"
+        else:
+            target = (
+                self.tistory_automation_prompt_box
+                if platform == "tistory_automation"
+                else self.naver_kin_answer_prompt_box
+            )
+            section = "프롬프트"
+        if target is None:
+            raise ValueError("편집할 프롬프트 입력칸을 찾을 수 없습니다.")
+        if target.get("1.0", "end-1c").strip() and not messagebox.askyesno(
+            "TXT 불러오기",
+            f"일반 TXT 파일의 내용을 현재 {section} 편집칸에 넣을까요?\n기존 편집 내용은 교체됩니다.",
+            parent=self,
+        ):
+            return
+        target.delete("1.0", "end")
+        target.insert("1.0", contents)
+        self._refresh_prompt_character_counts(platform)
+        self.prompt_feedback_label.configure(
+            text=f"{section} 편집칸에 TXT 내용을 불러왔습니다. 하단에서 저장하세요.",
             text_color="#f4c95d",
         )
 
@@ -49697,7 +49935,11 @@ class KeywordApp(ctk.CTk):
             source = Path(selected_path)
             if source.stat().st_size > 2_000_000:
                 raise ValueError("프롬프트 파일이 너무 큽니다. 2MB 이하의 TXT를 선택해 주세요.")
-            self._apply_prompt_bundle_to_editor(source.read_text(encoding="utf-8-sig"))
+            contents = source.read_text(encoding="utf-8-sig")
+            if contents.startswith(PROMPT_BUNDLE_HEADER):
+                self._apply_prompt_bundle_to_editor(contents)
+            else:
+                self._apply_plain_prompt_text_to_editor(contents)
         except (OSError, UnicodeError, ValueError) as exc:
             messagebox.showerror("TXT 불러오기 실패", str(exc))
 

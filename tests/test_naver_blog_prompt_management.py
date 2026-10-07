@@ -45,9 +45,10 @@ class NaverBlogPromptManagementTests(unittest.TestCase):
             source.index('("naver_blog", "N블로그")'),
             source.index('("blogspot", "블로그스팟")'),
         )
-        self.assertIn('text="추가"', source)
-        self.assertIn('text="수정"', source)
-        self.assertIn('text="삭제"', source)
+        self.assertIn('text="새 항목"', source)
+        self.assertIn('text="복제"', source)
+        self.assertIn('text="선택 항목 삭제"', source)
+        self.assertIn('text="변경사항 저장"', source)
         self.assertIn("self.naver_blog_title_prompt_box", source)
         self.assertIn("self.naver_blog_topic_prompt_box", source)
 

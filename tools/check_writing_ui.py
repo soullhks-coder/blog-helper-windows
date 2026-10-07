@@ -958,6 +958,9 @@ def main() -> None:
             screenshot("public-data")
 
             app._switch_page("prompts")
+            app.geometry("1200x900+30+35")
+            settle(200)
+            screenshot("prompt-manager-wide")
             app.geometry("860x680+30+35")
             settle(260)
             for button in app.prompt_action_buttons.values():
@@ -999,6 +1002,49 @@ def main() -> None:
             ):
                 app.prompt_action_buttons["import"].invoke()
             assert article_box.get("1.0", "end-1c") == "축제 본문 지침\n둘째 줄"
+            plain_path = Path(directory) / "외부에서_수정한_본문.txt"
+            plain_path.write_text("외부 TXT로 편집한 본문", encoding="utf-8")
+            app._prompt_last_focused_box = article_box
+            with (
+                patch.object(app_module.filedialog, "askopenfilename", return_value=str(plain_path)),
+                patch.object(app_module.messagebox, "askyesno", return_value=True),
+            ):
+                app.prompt_action_buttons["import"].invoke()
+            assert article_box.get("1.0", "end-1c") == "외부 TXT로 편집한 본문"
+            app._create_new_prompt_set()
+            created_id = app.active_prompt_set_ids["wordpress"]
+            assert created_id != "wordpress-default"
+            app.prompt_name_entries["wordpress"].delete(0, "end")
+            app.prompt_name_entries["wordpress"].insert(0, "검색 가능한 새 항목")
+            app.prompt_title_boxes["wordpress"].delete("1.0", "end")
+            app.prompt_title_boxes["wordpress"].insert("1.0", "독립된 제목 지침")
+            app._save_prompt_settings()
+            app._select_prompt_set_from_library("wordpress", "wordpress-default")
+            app._select_prompt_set_from_library("wordpress", created_id)
+            assert app.prompt_title_boxes["wordpress"].get("1.0", "end-1c") == "독립된 제목 지침"
+            app.prompt_library_search_entry.insert(0, "검색 가능한")
+            app._refresh_prompt_library()
+            assert "1개 표시" in app.prompt_library_count_label.cget("text")
+            with patch.object(app_module.messagebox, "askyesno", return_value=True):
+                app._delete_prompt_set("wordpress")
+            assert app._prompt_set_by_id(created_id) is None
+            app._switch_prompt_platform("tistory_automation")
+            settle(80)
+            assert not app.prompt_library_panel.winfo_ismapped()
+            app._switch_prompt_platform("naver_kin_automation")
+            settle(80)
+            assert not app.prompt_library_panel.winfo_ismapped()
+            app._switch_prompt_platform("wordpress")
+            settle(80)
+            assert app.prompt_library_panel.winfo_ismapped()
+            title_box = app.prompt_title_boxes["wordpress"]
+            app._prompt_last_focused_box = title_box
+            with (
+                patch.object(app_module.filedialog, "askopenfilename", return_value=str(plain_path)),
+                patch.object(app_module.messagebox, "askyesno", return_value=True),
+            ):
+                app.prompt_action_buttons["import"].invoke()
+            assert title_box.get("1.0", "end-1c") == "외부 TXT로 편집한 본문"
             screenshot("prompt-bundle-tools")
 
             # The new topic shortcut uses the existing Playwright-first
