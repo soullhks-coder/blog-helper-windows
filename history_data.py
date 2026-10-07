@@ -11,6 +11,18 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-07",
+        "version": "v1.1.209",
+        "category": "블로그스팟·이미지",
+        "title": "이미지 아주 크게 선택 후 1.5초 대기",
+        "request": "이미지 크기 변경이 적용되기 전에 다음 작업이 실행되지 않도록 아주 크게 선택 후 1.5초 기다려달라는 요청",
+        "changes": (
+            "현재 Blogger 이미지 도구막대에서 아주 크게·매우 크게 선택 후 1.5초 대기",
+            "기존 이미지 레이아웃 창에서도 크기를 선택한 뒤 1.5초 후 정렬·확인 진행",
+            "여러 이미지를 첨부할 때도 이미지마다 대기 후 다음 이미지나 HTML 전환 진행",
+        ),
+    },
+    {
+        "date": "2026-10-07",
         "version": "v1.1.208",
         "category": "Windows 성능",
         "title": "Windows 시작 로딩 최적화",

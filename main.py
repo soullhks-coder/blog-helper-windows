@@ -9499,6 +9499,9 @@ def _select_blogspot_layout_choice(page, label: str) -> None:
     if choice.get_attribute("aria-checked") != "true":
         choice.click()
     append_runtime_log("BLOGSPOT", f"이미지 레이아웃 선택 완료: {label}")
+    if label in ("아주 크게", "매우 크게"):
+        # Let Blogger apply the size before changing alignment or confirming.
+        page.wait_for_timeout(1_500)
 
 
 def describe_blogspot_upload_state(page) -> str:
@@ -9606,7 +9609,8 @@ def configure_blogspot_inserted_image(page, image_source: str) -> None:
             break
     if size_choice is None:
         raise RuntimeError("Blogger 이미지 크기의 '매우 크게' 항목을 찾지 못했습니다.")
-    page.wait_for_timeout(600)
+    # Blogger applies image sizing asynchronously; do not switch editor modes yet.
+    page.wait_for_timeout(1_500)
 
 
 def find_blogspot_image_insert_button(page):

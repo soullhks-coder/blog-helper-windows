@@ -4,12 +4,78 @@ import inspect
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 
 
 class BlogspotPlaywrightTests(unittest.TestCase):
+    def test_each_compose_image_waits_after_selecting_extra_large_size(self) -> None:
+        for available_label in ("매우 크게", "아주 크게"):
+            with self.subTest(label=available_label):
+                events = []
+
+                def locator_for(name, *, visible=True):
+                    candidate = Mock()
+                    candidate.is_visible.return_value = True
+                    candidate.click.side_effect = lambda **_kwargs: events.append(("click", name))
+                    locator = Mock()
+                    locator.count.return_value = int(visible)
+                    locator.nth.return_value = candidate
+                    return locator
+
+                page = Mock()
+                page.get_by_role.side_effect = lambda _role, name, exact: locator_for(name)
+                page.get_by_text.side_effect = lambda name, exact: locator_for(
+                    name, visible=name == available_label
+                )
+                page.wait_for_timeout.side_effect = lambda timeout: events.append(("wait", timeout))
+                image = Mock()
+                image.click.side_effect = lambda: events.append(("click", "image"))
+
+                with (
+                    patch.object(main, "find_blogspot_compose_image", return_value=image),
+                    patch.object(main, "append_runtime_log"),
+                ):
+                    for image_source in ("first-image", "second-image"):
+                        main.configure_blogspot_inserted_image(page, image_source)
+                        events.append(("next", image_source))
+                        self.assertEqual(
+                            events[-3:],
+                            [("click", available_label), ("wait", 1_500), ("next", image_source)],
+                        )
+                self.assertEqual(events.count(("wait", 1_500)), 2)
+
+    def test_legacy_layout_waits_before_selecting_alignment(self) -> None:
+        for already_selected in (False, True):
+            with self.subTest(already_selected=already_selected):
+                events = []
+
+                def locator_for(name):
+                    candidate = Mock()
+                    candidate.is_visible.return_value = True
+                    candidate.get_attribute.return_value = (
+                        "true" if name == "아주 크게" and already_selected else "false"
+                    )
+                    candidate.click.side_effect = lambda: events.append(("click", name))
+                    locator = Mock()
+                    locator.count.return_value = 1
+                    locator.nth.return_value = candidate
+                    return locator
+
+                page = Mock()
+                page.get_by_role.side_effect = lambda _role, name, exact: locator_for(name)
+                page.wait_for_timeout.side_effect = lambda timeout: events.append(("wait", timeout))
+                with patch.object(main, "append_runtime_log"):
+                    main._select_blogspot_layout_choice(page, "아주 크게")
+                    main._select_blogspot_layout_choice(page, "가운데")
+                    events.append(("next", "confirm"))
+
+                expected = [("wait", 1_500), ("click", "가운데"), ("next", "confirm")]
+                if not already_selected:
+                    expected.insert(0, ("click", "아주 크게"))
+                self.assertEqual(events, expected)
+
     def test_image_button_is_revealed_from_the_responsive_toolbar(self) -> None:
         class CandidateStub:
             def __init__(self, page, *, aria_haspopup=None) -> None:
