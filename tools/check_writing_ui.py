@@ -342,6 +342,32 @@ def main() -> None:
             assert int(app.writing_thumbnail_menu.cget("height")) == 27
             assert int(app.writing_header_prompt_menu.cget("height")) == 27
             app._open_writing_section("topic")
+            assert app.link_card.master is app.writing_section_bodies["topic"]
+            assert int(app.link_card.grid_info()["row"]) == 3
+            app._add_link_row()
+            settle()
+            empty_row = app.link_rows[-1]
+            for entry_key in ("button_entry", "url_entry", "width_entry"):
+                entry = empty_row[entry_key]
+                assert entry.get() == ""
+                assert entry._placeholder_text_active, entry_key
+                assert entry._entry.get() == entry.cget("placeholder_text"), entry_key
+            screenshot("body-link-placeholders")
+            app._remove_link_row(empty_row)
+            app._add_link_row({"button_text": "WP 링크", "url": "https://example.com/wp", "position": "본문상단"})
+            app._on_writing_target_changed("tistory")
+            assert app._current_writing_links() == []
+            app._add_link_row({"button_text": "티스토리 링크", "url": "https://example.com/tistory", "position": "본문중간"})
+            app._on_writing_target_changed("wordpress")
+            assert app._current_writing_links()[0]["button_text"] == "WP 링크"
+            app._on_writing_target_changed("tistory")
+            assert app._current_writing_links()[0]["button_text"] == "티스토리 링크"
+            app._remove_link_row(app.link_rows[0])
+            app._on_writing_target_changed("wordpress")
+            app._remove_link_row(app.link_rows[0])
+            app._on_writing_target_changed("tistory")
+            assert app._current_writing_links() == []
+            app._on_writing_target_changed("wordpress")
             screenshot("direct-topic-input")
             app._on_inline_images_provider_changed(
                 app_module.INLINE_IMAGES_PROVIDER_MANUAL
@@ -428,7 +454,7 @@ def main() -> None:
             app._on_home_prompt_selected("워드프레스 · 기본")
             assert app.wordpress_settings.blog_writing_preferences[
                 "tistory:tistory_2"
-            ] == {"thumbnail_preset": 0, "prompt_id": "wordpress-default"}
+            ] == {"thumbnail_preset": 0, "prompt_id": "wordpress-default", "writing_links": []}
             app.wordpress_settings.tistory_active_profile = "티스토리 1"
             app._on_writing_target_changed("tistory")
             assert app.writing_thumbnail_menu.get() == "썸네일·카드3"

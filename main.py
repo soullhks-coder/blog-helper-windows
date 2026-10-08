@@ -4037,8 +4037,30 @@ def normalize_writing_target_prompt_ids(
     return normalized
 
 
+def normalize_writing_links(value: object) -> list[dict]:
+    """Preserve editable link settings, but never save generated transient links."""
+    links = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict) or raw.get("transient"):
+            continue
+        link = {
+            "button_text": str(raw.get("button_text") or "").strip(),
+            "url": str(raw.get("url") or "").strip(),
+            "width": str(raw.get("width") or "").strip(),
+            "full_width": bool(raw.get("full_width", False)),
+            "position": str(raw.get("position") or "본문하단"),
+        }
+        if link["position"] not in LINK_POSITION_OPTIONS:
+            link["position"] = "본문하단"
+        if any(link[field] for field in ("button_text", "url", "width", "full_width")):
+            links.append(link)
+        if len(links) >= 5:
+            break
+    return links
+
+
 def normalize_blog_writing_preferences(value: object) -> dict[str, dict]:
-    """Keep thumbnail/prompt choices isolated by service and profile slot."""
+    """Keep thumbnail/prompt/link choices isolated by service and profile slot."""
     source = value if isinstance(value, dict) else {}
     valid_keys = {"wordpress"}
     valid_keys.update(f"tistory:{scope}" for scope in TISTORY_PROFILE_SCOPES)
@@ -4055,6 +4077,8 @@ def normalize_blog_writing_preferences(value: object) -> dict[str, dict]:
             ),
             "prompt_id": str(raw.get("prompt_id") or "").strip(),
         }
+        if "writing_links" in raw:
+            normalized[key]["writing_links"] = normalize_writing_links(raw["writing_links"])
     return normalized
 
 
@@ -9498,10 +9522,12 @@ def _select_blogspot_layout_choice(page, label: str) -> None:
         raise RuntimeError(f"Blogger 이미지 레이아웃의 '{label}' 항목을 찾지 못했습니다.")
     if choice.get_attribute("aria-checked") != "true":
         choice.click()
-    append_runtime_log("BLOGSPOT", f"이미지 레이아웃 선택 완료: {label}")
     if label in ("아주 크게", "매우 크게"):
         # Let Blogger apply the size before changing alignment or confirming.
+        append_runtime_log("BLOGSPOT", f"크기 항목 클릭 완료: {label} · 클릭 후 1.5초 대기 시작")
         page.wait_for_timeout(1_500)
+        append_runtime_log("BLOGSPOT", "크기 항목 클릭 후 1.5초 대기 완료")
+    append_runtime_log("BLOGSPOT", f"이미지 레이아웃 선택 완료: {label}")
 
 
 def describe_blogspot_upload_state(page) -> str:
@@ -9564,24 +9590,104 @@ def find_blogspot_compose_image(page, source: str):
     return None
 
 
+def _blogspot_image_size_snapshot(image) -> dict:
+    return image.evaluate("""element => ({
+        src: element.getAttribute('src') || '',
+        width: element.getAttribute('width') || '',
+        height: element.getAttribute('height') || '',
+        styleWidth: element.style.width || '',
+        styleHeight: element.style.height || '',
+        renderedWidth: Math.round(element.getBoundingClientRect().width),
+        renderedHeight: Math.round(element.getBoundingClientRect().height)
+    })""")
+
+
+def _wait_for_blogspot_image_size(page, image, before: dict) -> None:
+    """Do not change editor modes while Blogger still holds the old image size."""
+    for attempt in range(33):
+        after = _blogspot_image_size_snapshot(image)
+        # The upload URL can change before the width/height are applied. A new
+        # src alone must not let the next HTML-mode click race the actual resize.
+        dimensions_changed = any(
+            after.get(field) != before.get(field)
+            for field in ("width", "styleWidth")
+        ) or (
+            bool(before.get("renderedWidth"))
+            and after.get("renderedWidth") != before.get("renderedWidth")
+        )
+        explicit_width = str(after.get("width") or after.get("styleWidth") or after.get("renderedWidth") or "")
+        width_match = re.fullmatch(r"(\d+(?:\.\d+)?)(?:px)?", explicit_width)
+        if (
+            dimensions_changed
+            or (width_match and float(width_match.group(1)) >= 640)
+        ):
+            append_runtime_log(
+                "BLOGSPOT",
+                f"이미지 크기 반영 확인: width={after.get('width') or after.get('styleWidth') or after.get('renderedWidth')}",
+            )
+            return
+        if attempt < 32:
+            page.wait_for_timeout(250)
+    raise RuntimeError("Blogger 이미지 크기 선택은 눌렀지만 본문 이미지에 반영되지 않아 다음 작업을 진행하지 않았습니다.")
+
+
+def _find_blogspot_image_edit_dialog(page):
+    return _first_visible_blogspot_locator(
+        page.get_by_role("dialog").filter(has_text=re.compile(r"이미지 수정|Edit image", re.I))
+    )
+
+
+def _apply_blogspot_image_size_dialog(page, dialog, image, before: dict) -> None:
+    choice = None
+    for label in ("아주 크게", "매우 크게"):
+        choice = _first_visible_blogspot_locator(dialog.get_by_role("radio", name=label, exact=True))
+        if choice is None:
+            choice = _first_visible_blogspot_locator(dialog.get_by_text(label, exact=True))
+        if choice is not None:
+            break
+    if choice is None:
+        raise RuntimeError("Blogger 이미지 수정 창의 '아주 크게' 항목을 찾지 못했습니다.")
+    choice.click()
+    append_runtime_log("BLOGSPOT", f"이미지 수정 창 크기 클릭 완료: {label} · 클릭 후 1.5초 대기 시작")
+    page.wait_for_timeout(1_500)
+    append_runtime_log("BLOGSPOT", "크기 항목 클릭 후 1.5초 대기 완료 · 업데이트 적용")
+    update = _first_visible_blogspot_locator(
+        dialog.get_by_role("button", name=re.compile(r"^(?:업데이트|Update|확인)$", re.I))
+    )
+    if update is None:
+        raise RuntimeError("Blogger 이미지 수정 창의 업데이트 버튼을 찾지 못했습니다.")
+    update.click()
+    dialog.wait_for(state="hidden", timeout=10_000)
+    _wait_for_blogspot_image_size(page, image, before)
+
+
+def _center_blogspot_inserted_image(page, image) -> None:
+    image.scroll_into_view_if_needed()
+    image.click()
+    page.wait_for_timeout(350)
+    center_button = _first_visible_blogspot_locator(
+        page.get_by_role("button", name="가운데 정렬", exact=True)
+    )
+    if center_button is None:
+        raise RuntimeError("Blogger 이미지의 가운데 정렬 버튼을 찾지 못했습니다.")
+    center_button.click()
+    append_runtime_log("BLOGSPOT", "현재 Blogger 도구에서 이미지 가운데 정렬 완료")
+    page.wait_for_timeout(350)
+
+
 def configure_blogspot_inserted_image(page, image_source: str) -> None:
     """Apply Blogger's current compose-toolbar layout to one uploaded image."""
     image = find_blogspot_compose_image(page, image_source)
     if image is None:
         raise RuntimeError("업로드된 Blogger 이미지를 본문에서 다시 찾지 못했습니다.")
 
-    image.scroll_into_view_if_needed()
-    image.click()
-    page.wait_for_timeout(350)
+    dialog = _find_blogspot_image_edit_dialog(page)
+    if dialog is not None:
+        _apply_blogspot_image_size_dialog(page, dialog, image, _blogspot_image_size_snapshot(image))
+        _center_blogspot_inserted_image(page, image)
+        return
 
-    center_button = _first_visible_blogspot_locator(
-        page.get_by_role("button", name="가운데 정렬", exact=True)
-    )
-    if center_button is None:
-        raise RuntimeError("Blogger 이미지의 가운데 정렬 버튼을 찾지 못했습니다.")
-    center_button.click(force=True)
-    append_runtime_log("BLOGSPOT", "현재 Blogger 도구에서 이미지 가운데 정렬 완료")
-    page.wait_for_timeout(350)
+    _center_blogspot_inserted_image(page, image)
 
     # Alignment can dismiss the floating image toolbar, so select the image once
     # more before opening its size menu.
@@ -9592,8 +9698,15 @@ def configure_blogspot_inserted_image(page, image_source: str) -> None:
     )
     if size_button is None:
         raise RuntimeError("Blogger 이미지 크기 버튼을 찾지 못했습니다.")
-    size_button.click(force=True)
+    before = _blogspot_image_size_snapshot(image)
+    size_button.click()
     page.wait_for_timeout(350)
+
+    dialog = _find_blogspot_image_edit_dialog(page)
+    if dialog is not None:
+        _apply_blogspot_image_size_dialog(page, dialog, image, before)
+        _center_blogspot_inserted_image(page, image)
+        return
 
     size_choice = None
     for label in ("매우 크게", "아주 크게"):
@@ -9601,16 +9714,18 @@ def configure_blogspot_inserted_image(page, image_source: str) -> None:
             page.get_by_text(label, exact=True)
         )
         if size_choice is not None:
-            size_choice.click(force=True)
+            size_choice.click()
             append_runtime_log(
                 "BLOGSPOT",
-                f"현재 Blogger 도구에서 이미지 크기 선택 완료: {label}",
+                f"현재 Blogger 도구에서 이미지 크기 클릭 완료: {label} · 클릭 후 1.5초 대기 시작",
             )
+            # This wait belongs to the size-option click, not the upload action.
+            page.wait_for_timeout(1_500)
+            append_runtime_log("BLOGSPOT", "크기 항목 클릭 후 1.5초 대기 완료")
+            _wait_for_blogspot_image_size(page, image, before)
             break
     if size_choice is None:
         raise RuntimeError("Blogger 이미지 크기의 '매우 크게' 항목을 찾지 못했습니다.")
-    # Blogger applies image sizing asynchronously; do not switch editor modes yet.
-    page.wait_for_timeout(1_500)
 
 
 def find_blogspot_image_insert_button(page):
@@ -29157,6 +29272,7 @@ class KeywordApp(ctk.CTk):
 
     def _select_blog_writing_target(self, platform: str) -> None:
         platform = normalize_writing_prompt_active_target(platform)
+        self._restore_writing_links_for_blog(platform)
         preference = self._blog_writing_preference(platform)
         self.wordpress_settings.home_target_platform = platform
         self.wordpress_settings.writing_prompt_active_target = platform
@@ -42958,8 +43074,10 @@ class KeywordApp(ctk.CTk):
         )
         self.benchmark_button.grid(row=0, column=2, padx=(0, 14), pady=12, sticky="e")
 
+        self._build_writing_link_controls(topic_card)
+
         options_row = ctk.CTkFrame(topic_card, fg_color="transparent")
-        options_row.grid(row=3, column=0, padx=24, pady=(0, 12), sticky="ew")
+        options_row.grid(row=4, column=0, padx=24, pady=(0, 12), sticky="ew")
         options_row.grid_columnconfigure(0, weight=1)
 
         self.ai_provider_menu = ctk.CTkOptionMenu(
@@ -43070,10 +43188,10 @@ class KeywordApp(ctk.CTk):
             text_color="#d3d9e6",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.keyword_status_label.grid(row=4, column=0, padx=24, pady=(0, 8), sticky="ew")
+        self.keyword_status_label.grid(row=5, column=0, padx=24, pady=(0, 8), sticky="ew")
 
         self.progress_bar = ctk.CTkProgressBar(topic_card, height=16, corner_radius=10)
-        self.progress_bar.grid(row=5, column=0, padx=24, pady=(0, 18), sticky="ew")
+        self.progress_bar.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="ew")
         self.progress_bar.set(0)
 
         source_note = ctk.CTkLabel(
@@ -43083,7 +43201,7 @@ class KeywordApp(ctk.CTk):
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        source_note.grid(row=6, column=0, padx=24, pady=(0, 18), sticky="w")
+        source_note.grid(row=7, column=0, padx=24, pady=(0, 18), sticky="w")
 
         keyword_card = self._create_writing_section(
             parent=parent,
@@ -43447,50 +43565,8 @@ class KeywordApp(ctk.CTk):
         ]
         self._refresh_writing_manual_image_controls()
 
-        self.link_card = ctk.CTkFrame(keyword_card, fg_color="transparent")
-        self.link_card.grid(row=7, column=0, padx=24, pady=(0, 8), sticky="ew")
-        self.link_card.grid_columnconfigure(0, weight=1)
-
-        self.link_header = ctk.CTkFrame(self.link_card, fg_color="transparent")
-        self.link_header.grid(row=0, column=0, sticky="ew")
-        self.link_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            self.link_header,
-            text="본문 링크 버튼",
-            anchor="w",
-            font=ctk.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, sticky="w")
-
-        self.add_link_button = ctk.CTkButton(
-            self.link_header,
-            text="+ 추가",
-            width=86,
-            height=34,
-            corner_radius=12,
-            fg_color="#2f6fed",
-            hover_color="#255dcc",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._add_link_row,
-        )
-        self.add_link_button.grid(row=0, column=1, sticky="e")
-
-        self.link_hint_label = ctk.CTkLabel(
-            self.link_card,
-            text="URL이 있는 항목만 본문에 버튼으로 들어갑니다. 위치는 본문상단/중간/하단 중 선택할 수 있어요.",
-            anchor="w",
-            text_color="#9aa7bb",
-            font=ctk.CTkFont(size=13),
-        )
-        self.link_hint_label.grid(row=1, column=0, pady=(8, 8), sticky="w")
-
-        self.link_rows: list[dict] = []
-        self.link_list_frame = ctk.CTkFrame(self.link_card, fg_color="transparent")
-        self.link_list_frame.grid(row=2, column=0, sticky="ew")
-        self.link_list_frame.grid_columnconfigure(0, weight=1)
-
         action_row = ctk.CTkFrame(keyword_card, fg_color="transparent")
-        action_row.grid(row=8, column=0, padx=24, pady=(0, 12), sticky="ew")
+        action_row.grid(row=7, column=0, padx=24, pady=(0, 12), sticky="ew")
         action_row.grid_columnconfigure(0, weight=1)
 
         self.generate_article_button = ctk.CTkButton(
@@ -43513,10 +43589,10 @@ class KeywordApp(ctk.CTk):
             text_color="#c4cede",
             font=ctk.CTkFont(size=14),
         )
-        self.article_progress_label.grid(row=9, column=0, padx=24, pady=(0, 8), sticky="ew")
+        self.article_progress_label.grid(row=8, column=0, padx=24, pady=(0, 8), sticky="ew")
 
         self.article_progress_bar = ctk.CTkProgressBar(keyword_card, height=14, corner_radius=10)
-        self.article_progress_bar.grid(row=10, column=0, padx=24, pady=(0, 18), sticky="ew")
+        self.article_progress_bar.grid(row=9, column=0, padx=24, pady=(0, 18), sticky="ew")
         self.article_progress_bar.set(0)
 
         article_card = self._create_writing_section(
@@ -47069,16 +47145,18 @@ class KeywordApp(ctk.CTk):
         self.ai_provider_menu.set(selected_writing_model)
         if hasattr(self, "default_writing_model_var"):
             self.default_writing_model_var.set(selected_writing_model)
-        self.topic_entry.insert(0, self.wordpress_settings.writing_topic)
+        if self.wordpress_settings.writing_topic:
+            self.topic_entry.insert(0, self.wordpress_settings.writing_topic)
         self.benchmark_mode_var.set(self.wordpress_settings.writing_benchmark_enabled)
-        self.benchmark_url_entry.insert(0, self.wordpress_settings.writing_benchmark_url)
+        if self.wordpress_settings.writing_benchmark_url:
+            self.benchmark_url_entry.insert(0, self.wordpress_settings.writing_benchmark_url)
         self._on_benchmark_mode_changed(save=False)
         self.selected_keyword_var.set(self.wordpress_settings.writing_selected_keyword)
         if hasattr(self, "manual_keyword_entry"):
             self.manual_keyword_entry.delete(0, "end")
             self.manual_keyword_entry.insert(0, self.wordpress_settings.writing_selected_keyword)
         self.reference_textbox.insert("1.0", self.wordpress_settings.writing_reference_text)
-        self._load_link_rows(self.wordpress_settings.writing_links)
+        self._restore_writing_links_for_blog(self.wordpress_settings.home_target_platform)
         self._update_reference_count()
         enabled_sources = set(self.wordpress_settings.writing_enabled_sources or ["youtube", "google", "naver"])
         for source_key, variable in self.source_vars.items():
@@ -47872,6 +47950,9 @@ class KeywordApp(ctk.CTk):
         self.imagen_secret_entry.configure(show="" if self.imagen_password_visible else "*")
 
     def _save_ui_state(self) -> None:
+        if self.__dict__.get("_loading_writing_links", False):
+            return
+        self._remember_current_writing_links()
         if self._ui_state_save_job is not None:
             self.after_cancel(self._ui_state_save_job)
         self._ui_state_save_job = self.after(1600, self._save_ui_state_now)
@@ -47939,6 +48020,90 @@ class KeywordApp(ctk.CTk):
         count = len(self.reference_textbox.get("1.0", "end").strip())
         self.reference_count_label.configure(text=f"{count:,}자")
 
+    def _build_writing_link_controls(self, parent) -> None:
+        self.link_card = ctk.CTkFrame(parent, fg_color="transparent")
+        self.link_card.grid(row=3, column=0, padx=24, pady=(0, 8), sticky="ew")
+        self.link_card.grid_columnconfigure(0, weight=1)
+        self.link_header = ctk.CTkFrame(self.link_card, fg_color="transparent")
+        self.link_header.grid(row=0, column=0, sticky="ew")
+        self.link_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self.link_header,
+            text="본문 링크 버튼",
+            anchor="w",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.add_link_button = ctk.CTkButton(
+            self.link_header,
+            text="+ 추가",
+            width=86,
+            height=34,
+            corner_radius=12,
+            fg_color="#2f6fed",
+            hover_color="#255dcc",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._add_link_row,
+        )
+        self.add_link_button.grid(row=0, column=1, sticky="e")
+        self.link_hint_label = ctk.CTkLabel(
+            self.link_card,
+            text="선택한 블로그별로 저장됩니다. URL이 있는 항목만 본문상단·중간·하단에 버튼으로 삽입합니다.",
+            anchor="w",
+            text_color=("#64748b", "#9aa7bb"),
+            font=ctk.CTkFont(size=13),
+        )
+        self.link_hint_label.grid(row=1, column=0, pady=8, sticky="w")
+        self.link_rows: list[dict] = []
+        self.link_list_frame = ctk.CTkFrame(self.link_card, fg_color="transparent")
+        self.link_list_frame.grid(row=2, column=0, sticky="ew")
+        self.link_list_frame.grid_columnconfigure(0, weight=1)
+
+    def _remember_current_writing_links(self) -> None:
+        identity = self.__dict__.get("_writing_links_identity")
+        if not identity or self.__dict__.get("_loading_writing_links", False):
+            return
+        preferences = normalize_blog_writing_preferences(
+            self.wordpress_settings.blog_writing_preferences
+        )
+        current = dict(preferences.get(identity) or {})
+        try:
+            links = self._current_writing_links(include_transient=False)
+        except tk.TclError:
+            # FocusOut can arrive while a deleted row is being destroyed. The
+            # delete handler saves again after removing it from link_rows.
+            return
+        current["writing_links"] = normalize_writing_links(links)
+        preferences[identity] = current
+        self.wordpress_settings.blog_writing_preferences = preferences
+
+    def _restore_writing_links_for_blog(self, platform: str) -> None:
+        if not hasattr(self, "link_list_frame"):
+            return
+        identity = self._blog_writing_identity(platform)
+        previous_identity = self.__dict__.get("_writing_links_identity")
+        if previous_identity == identity:
+            return
+        self._remember_current_writing_links()
+        preference = normalize_blog_writing_preferences(
+            self.wordpress_settings.blog_writing_preferences
+        ).get(identity, {})
+        if not preference:
+            preferences = normalize_blog_writing_preferences(self.wordpress_settings.blog_writing_preferences)
+            preferences[identity] = self._blog_writing_preference(platform)
+            self.wordpress_settings.blog_writing_preferences = preferences
+        # Migrate the old shared links only to the blog selected at startup.
+        links = preference.get(
+            "writing_links", self.wordpress_settings.writing_links if not previous_identity else []
+        )
+        self._loading_writing_links = True
+        try:
+            self._writing_links_identity = identity
+            self._load_link_rows(normalize_writing_links(links))
+            self.wordpress_settings.writing_links = normalize_writing_links(links)
+        finally:
+            self._loading_writing_links = False
+        self._remember_current_writing_links()
+
     def _add_link_row(self, link: dict | None = None) -> None:
         if not hasattr(self, "link_list_frame"):
             return
@@ -47977,8 +48142,10 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         button_entry.grid(row=0, column=0, padx=(10, 8), pady=10, sticky="ew")
-        button_entry.insert(0, str(link.get("button_text", "")))
+        if link.get("button_text"):
+            button_entry.insert(0, str(link["button_text"]))
         button_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
+        button_entry.bind("<FocusOut>", lambda _event: self._save_ui_state())
 
         url_entry = ctk.CTkEntry(
             row_frame,
@@ -47993,8 +48160,10 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         url_entry.grid(row=0, column=1, padx=(0, 8), pady=10, sticky="ew")
-        url_entry.insert(0, str(link.get("url", "")))
+        if link.get("url"):
+            url_entry.insert(0, str(link["url"]))
         url_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
+        url_entry.bind("<FocusOut>", lambda _event: self._save_ui_state())
 
         position = str(link.get("position", "본문하단"))
         if position not in LINK_POSITION_OPTIONS:
@@ -48013,8 +48182,10 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         width_entry.grid(row=0, column=2, padx=(0, 8), pady=10, sticky="e")
-        width_entry.insert(0, str(link.get("width", "")))
+        if link.get("width"):
+            width_entry.insert(0, str(link["width"]))
         width_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
+        width_entry.bind("<FocusOut>", lambda _event: self._save_ui_state())
 
         full_width_var = ctk.BooleanVar(value=bool(link.get("full_width", False)))
         full_width_checkbox = ctk.CTkCheckBox(
@@ -48135,9 +48306,8 @@ class KeywordApp(ctk.CTk):
         for row_data in list(self.link_rows):
             row_data["frame"].destroy()
         self.link_rows = []
-        for link in (links or [])[:5]:
-            if str(link.get("button_text", "")).strip() or str(link.get("url", "")).strip():
-                self._add_link_row(link)
+        for link in normalize_writing_links(links):
+            self._add_link_row(link)
         self._update_add_link_button_state()
 
     def _current_writing_links(self, include_transient: bool = True) -> list[dict]:
@@ -48202,6 +48372,7 @@ class KeywordApp(ctk.CTk):
                 selected_title_prompt = nonempty_text(selected_prompt.get("title_prompt"), selected_title_prompt)
                 selected_article_prompt = nonempty_text(selected_prompt.get("article_prompt"), selected_article_prompt)
         current_writing_links = self._current_writing_links(include_transient=False)
+        self._remember_current_writing_links()
         self._save_active_thumbnail_preset()
         thumbnail_presets = normalize_thumbnail_presets(
             getattr(self, "thumbnail_presets", []),

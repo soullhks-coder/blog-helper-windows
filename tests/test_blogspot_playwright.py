@@ -32,9 +32,14 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                 page.wait_for_timeout.side_effect = lambda timeout: events.append(("wait", timeout))
                 image = Mock()
                 image.click.side_effect = lambda: events.append(("click", "image"))
+                image.evaluate.side_effect = [
+                    {"width": "320"}, {"width": "640"},
+                    {"width": "320"}, {"width": "640"},
+                ]
 
                 with (
                     patch.object(main, "find_blogspot_compose_image", return_value=image),
+                    patch.object(main, "_find_blogspot_image_edit_dialog", return_value=None),
                     patch.object(main, "append_runtime_log"),
                 ):
                     for image_source in ("first-image", "second-image"):
@@ -45,6 +50,92 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                             [("click", available_label), ("wait", 1_500), ("next", image_source)],
                         )
                 self.assertEqual(events.count(("wait", 1_500)), 2)
+
+    def test_image_edit_dialog_waits_after_size_click_before_update(self) -> None:
+        events = []
+        choice = Mock()
+        choice.get_attribute.return_value = "false"
+        choice.evaluate.return_value = False
+        choice.click.side_effect = lambda: events.append("size-click")
+        update = Mock()
+        update.click.side_effect = lambda: events.append("update-click")
+
+        def locator_for(candidate):
+            candidate.is_visible.return_value = True
+            locator = Mock()
+            locator.count.return_value = 1
+            locator.nth.return_value = candidate
+            return locator
+
+        dialog = Mock()
+        dialog.get_by_role.side_effect = lambda role, **_kwargs: locator_for(
+            choice if role == "radio" else update
+        )
+        dialog.wait_for.side_effect = lambda **_kwargs: events.append("dialog-hidden")
+        page = Mock()
+        page.wait_for_timeout.side_effect = lambda delay: events.append(("wait", delay))
+        image = Mock()
+        image.evaluate.return_value = {"width": "640"}
+        with patch.object(main, "append_runtime_log"):
+            main._apply_blogspot_image_size_dialog(page, dialog, image, {"width": "320"})
+        self.assertEqual(events, ["size-click", ("wait", 1_500), "update-click", "dialog-hidden"])
+        choice.click.assert_called_once_with()
+        update.click.assert_called_once_with()
+
+    def test_slow_size_change_keeps_waiting_without_clicking_another_control(self) -> None:
+        page = Mock()
+        image = Mock()
+        image.evaluate.side_effect = [{"width": "320"}] * 5 + [{"width": "640"}]
+        with patch.object(main, "append_runtime_log"):
+            main._wait_for_blogspot_image_size(page, image, {"width": "320"})
+        self.assertEqual([call.args[0] for call in page.wait_for_timeout.call_args_list], [250] * 5)
+        page.get_by_role.assert_not_called()
+        image.click.assert_not_called()
+
+    def test_open_image_dialog_is_applied_before_any_alignment_click(self) -> None:
+        events = []
+        page = Mock()
+        image = Mock()
+        image.evaluate.return_value = {"width": "320"}
+        dialog = Mock()
+        with (
+            patch.object(main, "find_blogspot_compose_image", return_value=image),
+            patch.object(main, "_find_blogspot_image_edit_dialog", return_value=dialog),
+            patch.object(main, "_apply_blogspot_image_size_dialog", side_effect=lambda *_args: events.append("size-and-wait")),
+            patch.object(main, "_center_blogspot_inserted_image", side_effect=lambda *_args: events.append("center")),
+        ):
+            main.configure_blogspot_inserted_image(page, "source")
+        self.assertEqual(events, ["size-and-wait", "center"])
+
+    def test_unapplied_size_change_does_not_silently_continue(self) -> None:
+        page = Mock()
+        image = Mock()
+        image.evaluate.return_value = {"width": "320"}
+        with patch.object(main, "append_runtime_log"):
+            with self.assertRaisesRegex(RuntimeError, "반영되지 않아 다음 작업"):
+                main._wait_for_blogspot_image_size(page, image, {"width": "320"})
+        self.assertEqual(page.wait_for_timeout.call_count, 32)
+
+    def test_new_image_url_alone_does_not_count_as_finished_resize(self) -> None:
+        page = Mock()
+        image = Mock()
+        image.evaluate.side_effect = [
+            {"src": "new-url", "width": "320", "height": "240"},
+            {"src": "new-url", "width": "640"},
+        ]
+        with patch.object(main, "append_runtime_log"):
+            main._wait_for_blogspot_image_size(page, image, {"src": "old-url", "width": "320"})
+        page.wait_for_timeout.assert_called_once_with(250)
+
+    def test_already_extra_large_image_is_allowed_to_continue(self) -> None:
+        for width in ("640", "800"):
+            with self.subTest(width=width):
+                page = Mock()
+                image = Mock()
+                image.evaluate.return_value = {"width": width}
+                with patch.object(main, "append_runtime_log"):
+                    main._wait_for_blogspot_image_size(page, image, {"width": width})
+                page.wait_for_timeout.assert_not_called()
 
     def test_legacy_layout_waits_before_selecting_alignment(self) -> None:
         for already_selected in (False, True):
@@ -313,7 +404,8 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("collect_blogspot_compose_image_sources", upload_source)
         self.assertIn("configure_blogspot_inserted_image", upload_source)
         self.assertIn('"blogger.googleusercontent.com"', upload_source)
-        self.assertIn('name="가운데 정렬"', current_layout_source)
+        self.assertIn('name="가운데 정렬"', inspect.getsource(main._center_blogspot_inserted_image))
+        self.assertIn("_center_blogspot_inserted_image", current_layout_source)
         self.assertIn('(\"매우 크게\", \"아주 크게\")', current_layout_source)
         self.assertIn('_select_blogspot_layout_choice(page, "아주 크게")', upload_source)
         self.assertIn('_select_blogspot_layout_choice(page, "가운데")', upload_source)
