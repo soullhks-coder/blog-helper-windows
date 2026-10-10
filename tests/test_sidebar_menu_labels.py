@@ -22,6 +22,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
                 "naver_blog": "N블로그자동화",
                 "naver_kin": "N지식인자동화",
                 "public_data": "공공데이터",
+                "thumbnails": "썸네일관리",
                 "prompts": "프롬프트관리",
                 "settings": "환경설정",
             },

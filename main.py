@@ -49,6 +49,11 @@ import certifi
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog
+from modal_backdrop import DimmedDialogApi, modal_dimmer
+
+messagebox = DimmedDialogApi(messagebox)
+filedialog = DimmedDialogApi(filedialog)
+simpledialog = DimmedDialogApi(simpledialog)
 
 try:
     from tkinterdnd2 import (
@@ -416,7 +421,7 @@ WRITING_MODEL_GEMINI = "gemini"
 WRITING_MODEL_OPTIONS = ("CLI", "GPT API", "제미나이 API")
 WRITING_RECOMMENDED_KEYWORD_VISIBLE_LIMIT = 10
 WRITING_RECOMMENDED_KEYWORD_LIST_HEIGHT = 440
-THUMBNAIL_PRESET_COUNT = 3
+THUMBNAIL_PRESET_COUNT = 5
 WRITING_MODEL_LABELS = {
     WRITING_MODEL_CODEX: "CLI",
     WRITING_MODEL_GPT: "GPT API",
@@ -892,6 +897,7 @@ SIDEBAR_MENU_DEFAULT_LABELS = {
     "naver_blog": "N블로그자동화",
     "naver_kin": "N지식인자동화",
     "public_data": "공공데이터",
+    "thumbnails": "썸네일관리",
     "prompts": "프롬프트관리",
     "settings": "환경설정",
 }
@@ -948,6 +954,7 @@ SIDEBAR_MENU_DEFAULT_ICONS = {
     "naver_blog": "journal-text",
     "naver_kin": "person-check",
     "public_data": "database",
+    "thumbnails": "image",
     "prompts": "chat-square-text",
     "settings": "gear",
 }
@@ -26501,12 +26508,12 @@ class KeywordApp(ctk.CTk):
         self.update_detail_label: ctk.CTkLabel | None = None
         self.update_close_button: ctk.CTkButton | None = None
         self.pending_update_payload: dict | None = None
-        self.writing_complete_dialog: ctk.CTkToplevel | None = None
-        self.manual_publish_dialog: ctk.CTkToplevel | None = None
+        self.writing_complete_dialog: ctk.CTkFrame | None = None
+        self.manual_publish_dialog: ctk.CTkFrame | None = None
         self.manual_publish_dialog_platform = ""
         self.manual_publish_dialog_profile_scope = ""
-        self.reference_collection_dialog: ctk.CTkToplevel | None = None
-        self.naver_kin_complete_dialog: ctk.CTkToplevel | None = None
+        self.reference_collection_dialog: ctk.CTkFrame | None = None
+        self.naver_kin_complete_dialog: ctk.CTkFrame | None = None
         self.naver_kin_complete_url = ""
 
         self.result_queue: queue.Queue = queue.Queue()
@@ -26810,6 +26817,7 @@ class KeywordApp(ctk.CTk):
         palette = self._theme_palette()
         dialog = ctk.CTkToplevel(self)
         self.update_dialog = dialog
+        modal_dimmer(self).attach(dialog)
         dialog.title("새 버전 자동 업데이트")
         dialog.geometry("620x330")
         dialog.resizable(False, False)
@@ -27060,6 +27068,7 @@ class KeywordApp(ctk.CTk):
         dialog.place(relx=0.5, rely=0.5, anchor="center")
         dialog.pack_propagate(False)
         dialog.lift()
+        modal_dimmer(self).attach(dialog)
         return dialog
 
     def _show_writing_complete_dialog(self) -> None:
@@ -27903,6 +27912,7 @@ class KeywordApp(ctk.CTk):
                     "naver_blog": getattr(self, "naver_blog_nav_button", None),
                     "naver_kin": getattr(self, "naver_kin_nav_button", None),
                     "public_data": getattr(self, "public_data_nav_button", None),
+                    "thumbnails": getattr(self, "thumbnail_nav_button", None),
                     "prompts": getattr(self, "prompt_nav_button", None),
                     "settings": getattr(self, "settings_nav_button", None),
                 }
@@ -28100,6 +28110,10 @@ class KeywordApp(ctk.CTk):
     def _finish_theme_paint(self, force: bool = False) -> None:
         if not hasattr(self, "shell_frame"):
             return
+        if getattr(self, "_modal_dimmer", None) is not None and self._modal_dimmer.active:
+            # Do not reinterpret temporary dimmed fills as permanent theme
+            # colors (especially the white-theme button contrast rules).
+            return
         if self._normalize_app_theme(self.wordpress_settings.app_theme) != "화이트테마":
             return
         if self._defer_while_text_composing("_theme_paint_defer_job", self._finish_theme_paint, 1.2):
@@ -28148,6 +28162,7 @@ class KeywordApp(ctk.CTk):
                     "festival_result_frame",
                 ),
                 "prompts": ("prompts_scroll",),
+                "thumbnails": ("thumbnails_scroll",),
                 "settings": ("settings_scroll", "theme_scroll", "basic_scroll", "history_scroll"),
             }
             for scroll_name in scroll_names_by_page.get(getattr(self, "current_page", "home"), ()):
@@ -28205,6 +28220,8 @@ class KeywordApp(ctk.CTk):
         }
         if hasattr(self, "naver_kin_page"):
             mapping["naver_kin"] = self.naver_kin_page
+        if hasattr(self, "thumbnails_page"):
+            mapping["thumbnails"] = self.thumbnails_page
         return mapping
 
     def _current_page_frame(self):
@@ -28217,6 +28234,10 @@ class KeywordApp(ctk.CTk):
                 frame.tkraise()
             else:
                 frame.grid_remove()
+        dimmer = getattr(self, "_modal_dimmer", None)
+        if dimmer is not None:
+            for dialog in dimmer.dialogs:
+                dialog.lift()
 
     def _reset_widget_state_for_rebuild(self) -> None:
         sidebar_activity_job = getattr(self, "_sidebar_activity_job", None)
@@ -28257,6 +28278,12 @@ class KeywordApp(ctk.CTk):
         self.writing_fixed_stage_labels = {}
         self.category_vars = {}
         self.link_rows = []
+        self.thumbnail_preset_buttons = {}
+        self.thumbnail_manager_preset_buttons = {}
+        self.thumbnail_card_set_selector_host = None
+        self.set_default_thumbnail_button = None
+        self.thumbnail_manager_selector_host = None
+        self.thumbnail_manager_default_button = None
         self.thumbnail_canvas_image = None
         self.thumbnail_background_photo = None
         self.cardnews_preview_background_photo = None
@@ -28286,7 +28313,7 @@ class KeywordApp(ctk.CTk):
         self._populate_wordpress_fields()
         if theme == "화이트테마":
             self._finish_theme_paint()
-        self._switch_page(current_page if current_page in {"home", "writing", "automation", "naver_blog", "naver_kin", "public_data", "prompts", "settings"} else "home")
+        self._switch_page(current_page if current_page in self._page_frame_map() else "home")
 
     def _apply_app_theme(self, theme_name: str, save: bool = False) -> None:
         theme = self._normalize_app_theme(theme_name)
@@ -28486,6 +28513,16 @@ class KeywordApp(ctk.CTk):
         )
         self.public_data_nav_button.grid(row=6, column=0, padx=26, pady=(0, 10), sticky="ew")
 
+        self.thumbnail_nav_button = ctk.CTkButton(
+            self.sidebar_frame,
+            text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "thumbnails"),
+            anchor="w", height=56, corner_radius=14,
+            fg_color="transparent", hover_color="#111826", text_color="#9aa7bb",
+            font=ctk.CTkFont(size=19, weight="bold"),
+            command=lambda: self._switch_page("thumbnails"),
+        )
+        self.thumbnail_nav_button.grid(row=7, column=0, padx=26, pady=(0, 10), sticky="ew")
+
         self.prompt_nav_button = ctk.CTkButton(
             self.sidebar_frame,
             text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "prompts"),
@@ -28498,7 +28535,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("prompts"),
         )
-        self.prompt_nav_button.grid(row=7, column=0, padx=26, sticky="ew")
+        self.prompt_nav_button.grid(row=8, column=0, padx=26, sticky="ew")
 
         self.settings_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -28512,7 +28549,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("settings"),
         )
-        self.settings_nav_button.grid(row=8, column=0, padx=26, pady=(10, 0), sticky="ew")
+        self.settings_nav_button.grid(row=9, column=0, padx=26, pady=(10, 0), sticky="ew")
 
         self._disable_sidebar_drag_hover()
         self._build_sidebar_activity_shimmers()
@@ -28528,6 +28565,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
         )
         self.sidebar_version_label.place(relx=0.12, rely=0.975, anchor="sw")
+        self.sidebar_frame.bind("<Configure>", self._layout_sidebar_navigation, add="+")
 
         self.main_area = ctk.CTkFrame(self.shell_frame, fg_color="transparent")
         self.main_area.grid(row=0, column=1, sticky="nsew")
@@ -28552,6 +28590,13 @@ class KeywordApp(ctk.CTk):
 
         _update_packaged_startup_splash("2/8 환경설정 준비 중...")
         self._build_settings_page()
+
+        self.thumbnails_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
+        if os.name != "nt":
+            self.thumbnails_page.grid(row=0, column=0, sticky="nsew")
+        self.thumbnails_page.grid_columnconfigure(0, weight=1)
+        self.thumbnails_page.grid_rowconfigure(1, weight=1)
+        self._build_thumbnails_page()
 
         self.writing_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
         if os.name != "nt":
@@ -28602,6 +28647,102 @@ class KeywordApp(ctk.CTk):
         self._build_prompts_page()
 
         self._switch_page("home")
+
+    def _layout_sidebar_navigation(self, _event=None) -> None:
+        height = self.sidebar_frame.winfo_height() / self.sidebar_frame._get_widget_scaling()
+        gap = 10 if height >= 730 else 6
+        button_height = max(36, min(56, int((height - 120) / 9) - gap))
+        signature = (button_height, gap)
+        if getattr(self, "_sidebar_layout_signature", None) == signature:
+            return
+        self._sidebar_layout_signature = signature
+        for name in (
+            "home_nav_button", "writing_nav_button", "automation_nav_button",
+            "naver_blog_nav_button", "naver_kin_nav_button", "public_data_nav_button",
+            "thumbnail_nav_button", "prompt_nav_button", "settings_nav_button",
+        ):
+            button = getattr(self, name)
+            button.configure(height=button_height)
+            button.grid_configure(pady=(0, gap))
+
+    def _build_thumbnails_page(self) -> None:
+        palette = self._theme_palette()
+        header = ctk.CTkFrame(self.thumbnails_page, fg_color="transparent")
+        header.grid(row=0, column=0, padx=28, pady=(26, 12), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header, text="썸네일 관리", text_color=palette["text"],
+            font=ctk.CTkFont(size=28, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            header, text="썸네일과 본문 카드뉴스를 5개 세트로 관리하세요. 변경 내용은 자동 저장됩니다.",
+            text_color=palette["muted"], font=ctk.CTkFont(size=14), anchor="w",
+            wraplength=650, justify="left",
+        ).grid(row=1, column=0, columnspan=2, pady=(6, 0), sticky="ew")
+        ctk.CTkButton(
+            header, text="글쓰기로 돌아가기", width=160, height=36,
+            fg_color=palette["button"], hover_color=palette["button_hover"],
+            text_color=palette["text"], command=lambda: self._switch_page("writing"),
+        ).grid(row=0, column=1, padx=(12, 0), sticky="e")
+        self.thumbnails_scroll = ctk.CTkScrollableFrame(
+            self.thumbnails_page, fg_color="transparent", corner_radius=0,
+        )
+        self.thumbnails_scroll.grid(row=1, column=0, padx=28, pady=(0, 12), sticky="nsew")
+        self.thumbnails_scroll.grid_columnconfigure(0, weight=1)
+        self.thumbnail_manager_card = ctk.CTkFrame(
+            self.thumbnails_scroll, fg_color=palette["card"], corner_radius=20,
+            border_width=1, border_color=palette["border"],
+        )
+        self.thumbnail_manager_card.grid(row=0, column=0, sticky="ew")
+        self.thumbnail_manager_card.grid_columnconfigure(0, weight=1)
+        self.thumbnail_manager_selector_host = ctk.CTkFrame(self.thumbnail_manager_card, fg_color="transparent")
+        self.thumbnail_manager_selector_host.grid(row=0, column=0, padx=24, pady=(18, 12), sticky="ew")
+        self.thumbnail_manager_preset_buttons = {}
+        for index in range(THUMBNAIL_PRESET_COUNT):
+            button = ctk.CTkButton(
+                self.thumbnail_manager_selector_host, text=f"썸네일·카드{index + 1}",
+                width=80, height=46, font=ctk.CTkFont(size=14, weight="bold"),
+                command=lambda selected=index: self._switch_thumbnail_preset(selected),
+            )
+            self.thumbnail_manager_preset_buttons[index] = button
+        self.thumbnail_manager_default_button = ctk.CTkButton(
+            self.thumbnail_manager_selector_host, text="기본 세트 지정", width=154, height=46,
+            fg_color="#18a957", hover_color="#138f49", text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold"), command=self._set_default_thumbnail_preset,
+        )
+        self.thumbnail_manager_selector_host.bind("<Configure>", self._layout_thumbnail_card_set_selector, add="+")
+        self.thumbnail_manager_editor_host = ctk.CTkFrame(
+            self.thumbnail_manager_card, fg_color="transparent",
+        )
+        self.thumbnail_manager_editor_host.grid(row=1, column=0, sticky="ew")
+        self.thumbnail_manager_editor_host.grid_columnconfigure(0, weight=1)
+        footer = ctk.CTkFrame(self.thumbnails_page, fg_color=palette["panel"], corner_radius=16)
+        footer.grid(row=2, column=0, padx=28, pady=(0, 14), sticky="ew")
+        footer.grid_columnconfigure(0, weight=1)
+        self.thumbnail_manager_status = ctk.CTkLabel(
+            footer, text="기본 세트는 홈·글쓰기의 썸네일 선택과 함께 사용됩니다.",
+            text_color=palette["muted"], font=ctk.CTkFont(size=13), anchor="w",
+            wraplength=400, justify="left",
+        )
+        self.thumbnail_manager_status.grid(row=0, column=0, padx=16, pady=12, sticky="ew")
+        ctk.CTkButton(
+            footer, text="세트 설정 저장", width=150, height=38,
+            fg_color="#18a957", hover_color="#138f49", text_color="#ffffff",
+            command=self._save_thumbnail_manager_settings,
+        ).grid(row=0, column=1, padx=(8, 16), pady=12, sticky="e")
+
+    def _save_thumbnail_manager_settings(self) -> None:
+        self._save_active_thumbnail_preset()
+        if self._ui_state_save_job is not None:
+            self.after_cancel(self._ui_state_save_job)
+            self._ui_state_save_job = None
+        settings = self._read_wordpress_settings(include_prompts=False)
+        AppStateStore.save(settings, save_secrets=False)
+        self.wordpress_settings = settings
+        self.thumbnail_manager_status.configure(
+            text=f"썸네일·카드{self.active_thumbnail_preset_index + 1} 설정을 저장했습니다.",
+            text_color="#18a957",
+        )
 
     def _build_home_page(self) -> None:
         palette = self._theme_palette()
@@ -31870,6 +32011,7 @@ class KeywordApp(ctk.CTk):
             "naver_blog": "naver_blog_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
+            "thumbnails": "thumbnail_nav_button",
             "prompts": "prompt_nav_button",
             "settings": "settings_nav_button",
         }
@@ -31894,6 +32036,7 @@ class KeywordApp(ctk.CTk):
             "naver_blog": "naver_blog_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
+            "thumbnails": "thumbnail_nav_button",
             "prompts": "prompt_nav_button",
             "settings": "settings_nav_button",
         }
@@ -31987,6 +32130,7 @@ class KeywordApp(ctk.CTk):
             "naver_blog_nav_button",
             "naver_kin_nav_button",
             "public_data_nav_button",
+            "thumbnail_nav_button",
             "prompt_nav_button",
             "settings_nav_button",
         )
@@ -32140,6 +32284,7 @@ class KeywordApp(ctk.CTk):
             "naver_blog": "naver_blog_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
+            "thumbnails": "thumbnail_nav_button",
             "prompts": "prompt_nav_button",
             "settings": "settings_nav_button",
         }
@@ -32918,6 +33063,7 @@ class KeywordApp(ctk.CTk):
             "naver_kin": ("naver_kin_scroll",),
             "public_data": ("public_data_scroll",),
             "prompts": ("prompts_scroll",),
+            "thumbnails": ("thumbnails_scroll",),
             "settings": ("settings_scroll", "basic_scroll", "theme_scroll", "history_scroll"),
         }
         for name in scroll_names_by_page.get(getattr(self, "current_page", "home"), ()):
@@ -40352,6 +40498,7 @@ class KeywordApp(ctk.CTk):
         prompt_name = self.prompt_name_entries[platform].get().strip() or "기본"
         dialog = ctk.CTkToplevel(self)
         self.prompt_expanded_dialog = dialog
+        modal_dimmer(self).attach(dialog)
         self._prompt_expanded_source = (platform, section, self.active_prompt_set_ids.get(platform, ""), source)
         dialog.title(f"{prompt_name} · {section_name} 편집")
         dialog.configure(fg_color=palette["shell"])
@@ -43681,7 +43828,7 @@ class KeywordApp(ctk.CTk):
         )
 
         thumbnail_preset_row = self.thumbnail_card_set_selector_host
-        for column in range(4):
+        for column in range(THUMBNAIL_PRESET_COUNT + 1):
             thumbnail_preset_row.grid_columnconfigure(
                 column,
                 weight=1 if column < THUMBNAIL_PRESET_COUNT else 0,
@@ -43690,6 +43837,7 @@ class KeywordApp(ctk.CTk):
             button = ctk.CTkButton(
                 thumbnail_preset_row,
                 text=f"썸네일·카드{index + 1}",
+                width=80,
                 height=46,
                 corner_radius=14,
                 fg_color="#273142",
@@ -43717,7 +43865,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._set_default_thumbnail_preset,
         )
-        self.set_default_thumbnail_button.grid(row=0, column=3, sticky="e")
+        self.set_default_thumbnail_button.grid(row=0, column=THUMBNAIL_PRESET_COUNT, sticky="e")
         self._thumbnail_card_set_layout_signature = None
         thumbnail_preset_row.bind(
             "<Configure>",
@@ -43727,9 +43875,28 @@ class KeywordApp(ctk.CTk):
         self._layout_thumbnail_card_set_selector()
         self._refresh_thumbnail_preset_buttons()
 
+        preview_card = ctk.CTkFrame(publish_card, fg_color=self._theme_palette()["panel"], corner_radius=18)
+        preview_card.grid(row=0, column=0, padx=18, pady=(10, 16), sticky="ew")
+        preview_card.grid_columnconfigure(0, weight=1)
+        preview_card.grid_columnconfigure(1, weight=1)
+        self.writing_design_preview_panels = []
+        for column, title in enumerate(("발행할 썸네일", "본문 카드뉴스")):
+            panel = ctk.CTkFrame(preview_card, fg_color="transparent")
+            panel.grid(row=0, column=column, padx=16, pady=16, sticky="n")
+            ctk.CTkLabel(panel, text=title, font=ctk.CTkFont(size=16, weight="bold"),
+                         text_color=self._theme_palette()["text"]).pack(pady=(0, 12))
+            canvas = tk.Canvas(panel, width=240, height=240, highlightthickness=0, bd=0, bg="#ffffff")
+            canvas.pack()
+            self.writing_design_preview_panels.append(panel)
+            if column == 0:
+                self.writing_thumbnail_preview_canvas = canvas
+            else:
+                self.writing_cardnews_preview_canvas = canvas
+        preview_card.bind("<Configure>", lambda event: self._layout_publish_design_previews(preview_card, event.width), add="+")
+
         (thumbnail_workspace, thumbnail_header, preview_panel, editor_panel,
          self.thumbnail_preview_canvas) = self._create_writing_design_workspace(
-            publish_card, 0, "썸네일 제작", "미리보기에서 문구와 배경을 확인하고 디자인을 조정하세요."
+            self.thumbnail_manager_editor_host, 0, "썸네일 제작", "미리보기에서 문구와 배경을 확인하고 디자인을 조정하세요."
         )
         self.thumbnail_design_workspace = thumbnail_workspace
 
@@ -43982,7 +44149,7 @@ class KeywordApp(ctk.CTk):
 
         (cardnews_panel, cardnews_header, body_cardnews_preview_card, cardnews_right_panel,
          self.body_cardnews_preview_canvas) = self._create_writing_design_workspace(
-            publish_card, 1, "본문 카드뉴스 제작", "슬라이드별 제목과 디자인을 조정한 뒤 본문에 반영하세요."
+            self.thumbnail_manager_editor_host, 1, "본문 카드뉴스 제작", "슬라이드별 제목과 디자인을 조정한 뒤 본문에 반영하세요."
         )
         self.cardnews_design_workspace = cardnews_panel
 
@@ -44563,6 +44730,13 @@ class KeywordApp(ctk.CTk):
             sticky="w",
         )
 
+        if section_key == "publish":
+            ctk.CTkButton(
+                content_header, text="썸네일 관리", width=120, height=34,
+                fg_color=palette["button"], hover_color=palette["button_hover"],
+                text_color=palette["text"], command=lambda: self._switch_page("thumbnails"),
+            ).grid(row=0, column=1, padx=(12, 0), sticky="e")
+
         body = ctk.CTkFrame(card, fg_color="transparent")
         body.grid(row=body_row, column=0, sticky="ew")
         body.grid_columnconfigure(0, weight=1)
@@ -44985,7 +45159,7 @@ class KeywordApp(ctk.CTk):
         palette = self._theme_palette() if hasattr(self, "_theme_palette") else {
             "button": "#273142", "button_hover": "#334155", "text": "#c4cede"
         }
-        for index, button in getattr(self, "thumbnail_preset_buttons", {}).items():
+        for index, button in list(getattr(self, "thumbnail_preset_buttons", {}).items()) + list(getattr(self, "thumbnail_manager_preset_buttons", {}).items()):
             selected = index == active
             button.configure(
                 text=f"썸네일·카드{index + 1}{' · 기본' if index == default else ''}",
@@ -44993,46 +45167,66 @@ class KeywordApp(ctk.CTk):
                 hover_color="#2d5cd0" if selected else palette["button_hover"],
                 text_color="#ffffff" if selected else palette["text"],
             )
-        default_button = getattr(self, "set_default_thumbnail_button", None)
-        if default_button is not None:
+        for default_button in (getattr(self, "set_default_thumbnail_button", None),
+                               getattr(self, "thumbnail_manager_default_button", None)):
+            if default_button is None:
+                continue
             is_default = active == default
             default_button.configure(
                 text="기본 세트 지정됨" if is_default else "기본 세트 지정",
                 state="disabled" if is_default else "normal",
             )
 
+    def _layout_publish_design_previews(self, host, width: int) -> None:
+        columns = 2 if width / host._get_widget_scaling() >= 600 else 1
+        if getattr(host, "_preview_columns", None) == columns:
+            return
+        host._preview_columns = columns
+        for index, panel in enumerate(self.writing_design_preview_panels):
+            panel.grid(row=index // columns, column=index % columns, padx=16, pady=16, sticky="n")
+        host.grid_columnconfigure(1, weight=1 if columns == 2 else 0)
+
     def _layout_thumbnail_card_set_selector(self, _event=None) -> None:
-        host = getattr(self, "thumbnail_card_set_selector_host", None)
-        default_button = getattr(self, "set_default_thumbnail_button", None)
-        buttons = getattr(self, "thumbnail_preset_buttons", {})
+        for host, default_button, buttons in (
+            (getattr(self, "thumbnail_card_set_selector_host", None),
+             getattr(self, "set_default_thumbnail_button", None),
+             getattr(self, "thumbnail_preset_buttons", {})),
+            (getattr(self, "thumbnail_manager_selector_host", None),
+             getattr(self, "thumbnail_manager_default_button", None),
+             getattr(self, "thumbnail_manager_preset_buttons", {})),
+        ):
+            self._layout_thumbnail_set_buttons(host, default_button, buttons)
+
+    def _layout_thumbnail_set_buttons(self, host, default_button, buttons) -> None:
         if host is None or default_button is None or len(buttons) != THUMBNAIL_PRESET_COUNT:
             return
         available_width = host.winfo_width() / max(host._get_widget_scaling(), 0.1)
-        compact = available_width < 760
-        signature = (compact, id(host))
-        if getattr(self, "_thumbnail_card_set_layout_signature", None) == signature:
+        columns = 5 if available_width >= 1000 else 3 if available_width >= 620 else 2
+        compact = columns < THUMBNAIL_PRESET_COUNT
+        signature = (columns, id(host))
+        if getattr(host, "_thumbnail_card_set_layout_signature", None) == signature:
             return
-        self._thumbnail_card_set_layout_signature = signature
-        for column in range(4):
+        host._thumbnail_card_set_layout_signature = signature
+        for column in range(THUMBNAIL_PRESET_COUNT + 1):
             host.grid_columnconfigure(
                 column,
-                weight=1 if column < THUMBNAIL_PRESET_COUNT else 0,
-                uniform="thumbnail_card_set" if column < 3 else "",
+                weight=1 if column < columns else 0,
+                uniform="thumbnail_card_set" if column < columns else "",
             )
         for index, button in buttons.items():
             button.grid_configure(
-                row=0,
-                column=index,
+                row=index // columns,
+                column=index % columns,
                 columnspan=1,
-                padx=(0, 8 if index < THUMBNAIL_PRESET_COUNT - 1 else (0 if compact else 12)),
-                pady=(0, 0),
+                padx=(0, 8 if index % columns < columns - 1 else (0 if compact else 12)),
+                pady=(0 if index < columns else 8, 0),
                 sticky="ew",
             )
         if compact:
             default_button.grid_configure(
-                row=1,
+                row=(THUMBNAIL_PRESET_COUNT + columns - 1) // columns,
                 column=0,
-                columnspan=3,
+                columnspan=columns,
                 padx=(0, 0),
                 pady=(10, 0),
                 sticky="ew",
@@ -45040,7 +45234,7 @@ class KeywordApp(ctk.CTk):
         else:
             default_button.grid_configure(
                 row=0,
-                column=3,
+                column=THUMBNAIL_PRESET_COUNT,
                 columnspan=1,
                 padx=(0, 0),
                 pady=(0, 0),
@@ -46023,6 +46217,11 @@ class KeywordApp(ctk.CTk):
             keep_photo=True,
             text_lines=actual_text_lines,
         )
+        if hasattr(self, "writing_thumbnail_preview_canvas"):
+            self._draw_thumbnail_on_canvas(
+                self.writing_thumbnail_preview_canvas, preview_width, preview_height,
+                preview_font_size, keep_photo=False, text_lines=actual_text_lines,
+            )
 
     def _draw_body_cardnews_preview(self) -> None:
         if not hasattr(self, "body_cardnews_preview_canvas"):
@@ -46032,6 +46231,12 @@ class KeywordApp(ctk.CTk):
             preview_limit=self._writing_design_preview_limit(),
             photo_attr="body_cardnews_preview_background_photo",
         )
+        if hasattr(self, "writing_cardnews_preview_canvas"):
+            self._draw_body_cardnews_on_canvas(
+                self.writing_cardnews_preview_canvas,
+                preview_limit=self._writing_design_preview_limit(),
+                photo_attr="writing_cardnews_preview_background_photo",
+            )
 
     def _draw_body_cardnews_on_canvas(self, canvas: tk.Canvas, preview_limit: int, photo_attr: str) -> None:
         actual_width = max(400, self._safe_int(self.cardnews_width_entry.get(), 1024))

@@ -111,6 +111,7 @@ def main() -> None:
                 "naver_blog_nav_button": "naver_blog",
                 "naver_kin_nav_button": "naver_kin",
                 "public_data_nav_button": "public_data",
+                "thumbnail_nav_button": "thumbnails",
                 "prompt_nav_button": "prompts",
                 "settings_nav_button": "settings",
             }
@@ -123,7 +124,11 @@ def main() -> None:
                     palette["selected"]
                     if page_name == app.current_page
                     else palette["sidebar"]
-                ).lstrip("#")
+                )
+                if app_module.modal_dimmer(app).active:
+                    expected_color = app_module.modal_dimmer(app).root.winfo_rgb(expected_color)
+                    expected_color = "#" + "".join(f"{round(c / 257 * 0.45):02x}" for c in expected_color)
+                expected_color = expected_color.lstrip("#")
                 expected_rgb = tuple(
                     int(expected_color[index:index + 2], 16)
                     for index in (0, 2, 4)
@@ -283,6 +288,7 @@ def main() -> None:
                 "naver_blog": "naver_blog_nav_button",
                 "naver_kin": "naver_kin_nav_button",
                 "public_data": "public_data_nav_button",
+                "thumbnails": "thumbnail_nav_button",
                 "prompts": "prompt_nav_button",
                 "settings": "settings_nav_button",
             }.items():
@@ -473,7 +479,7 @@ def main() -> None:
             app.thumbnail_prompt_preview.insert("1.0", "오늘의 여행\n소중한 순간")
             app.cardnews_border_color_menu.set("빨간색")
             app._save_active_thumbnail_preset()
-            assert len(app.thumbnail_preset_buttons) == 3
+            assert len(app.thumbnail_preset_buttons) == 5
             assert app.default_thumbnail_preset_index == 0
             assert int(app.writing_section_content_title_labels["publish"].grid_info()["row"]) == 0
             assert int(app.thumbnail_card_set_selector_host.grid_info()["row"]) == 1
@@ -496,7 +502,7 @@ def main() -> None:
             preset_settings = app._read_wordpress_settings(include_prompts=False)
             assert preset_settings.thumbnail_default_preset == 1
             assert preset_settings.thumbnail_active_preset == 0
-            assert len(preset_settings.thumbnail_presets) == 3
+            assert len(preset_settings.thumbnail_presets) == 5
             assert preset_settings.thumbnail_text == "두 번째 블로그 전용"
             assert preset_settings.thumbnail_border_color == "파란색"
             assert preset_settings.cardnews_border_color == "민트색"
@@ -596,7 +602,9 @@ def main() -> None:
             # to the enclosing page instead of swallowing it intermittently.
             app._open_writing_section("publish")
             settle()
-            writing_canvas = app.writing_scroll._parent_canvas
+            app._switch_page("thumbnails")
+            settle()
+            writing_canvas = app.thumbnails_scroll._parent_canvas
             wheel_textbox = app.thumbnail_prompt_preview._textbox
             assert app_module.MOUSE_WHEEL_ROUTER_BINDTAG in wheel_textbox.bindtags()
             wheel_textbox.yview_moveto(0)
@@ -612,6 +620,7 @@ def main() -> None:
             settle()
             assert writing_canvas.yview()[0] < writing_before_wheel
 
+            app._switch_page("writing")
             palette = app._theme_palette()
             app._finish_theme_paint(force=True)
             settle()
@@ -703,11 +712,15 @@ def main() -> None:
                     app.thumbnail_card_set_selector_host.winfo_width()
                     / app.thumbnail_card_set_selector_host._get_widget_scaling()
                 )
-                expected_default_row = 1 if selector_width < 760 else 0
+                selector_columns = 5 if selector_width >= 1000 else 3 if selector_width >= 620 else 2
+                expected_default_row = (5 + selector_columns - 1) // selector_columns if selector_columns < 5 else 0
                 assert int(app.set_default_thumbnail_button.grid_info()["row"]) == expected_default_row
                 app.writing_scroll._parent_canvas.yview_moveto(0)
                 settle()
                 canvas = app.writing_scroll._parent_canvas
+                app._switch_page("thumbnails")
+                settle()
+                canvas = app.thumbnails_scroll._parent_canvas
                 for workspace in (app.thumbnail_design_workspace, app.cardnews_design_workspace):
                     assert workspace.winfo_rootx() + workspace.winfo_width() <= canvas.winfo_rootx() + canvas.winfo_width() + 2
                     assert workspace._design_columns == (2 if workspace.winfo_width() / workspace._get_widget_scaling() >= 960 else 1)
@@ -718,6 +731,9 @@ def main() -> None:
                         if isinstance(widget, (app_module.ctk.CTkButton, app_module.ctk.CTkEntry, app_module.ctk.CTkOptionMenu)):
                             assert widget.winfo_rootx() + widget.winfo_width() <= workspace.winfo_rootx() + workspace.winfo_width() + 2, (geometry, widget, widget.winfo_width())
                 screenshot(geometry.split("+", 1)[0])
+                app._switch_page("writing")
+                settle()
+                canvas = app.writing_scroll._parent_canvas
                 for button in (app.publish_pipeline_button, app.queue_post_button,
                                app.tistory_retry_button, app.open_published_post_button):
                     assert button.winfo_rootx() + button.winfo_width() <= canvas.winfo_rootx() + canvas.winfo_width() + 2
@@ -885,6 +901,7 @@ def main() -> None:
                 "naver_blog": "naver_blog_nav_button",
                 "naver_kin": "naver_kin_nav_button",
                 "public_data": "public_data_nav_button",
+                "thumbnails": "thumbnail_nav_button",
                 "prompts": "prompt_nav_button",
                 "settings": "settings_nav_button",
             }
@@ -918,6 +935,9 @@ def main() -> None:
             assert app.writing_complete_dialog.winfo_ismapped()
             assert app.grab_current() is app.writing_complete_dialog
             assert app.writing_complete_dialog.master is app.main_area
+            assert app_module.modal_dimmer(app).active
+            assert resolved_color(app.sidebar_frame, "fg_color") != app._theme_palette()["sidebar"]
+            assert resolved_color(app.writing_complete_dialog, "fg_color") == app._theme_palette()["shell"]
             assert all(
                 getattr(app, button_name).cget("hover") is False
                 for button_name in sidebar_button_names.values()
@@ -926,6 +946,67 @@ def main() -> None:
             screenshot_inactive("writing-complete-dialog-inactive")
             app._close_writing_complete_dialog_and_reset()
             settle(120)
+            assert not app_module.modal_dimmer(app).active
+            assert resolved_color(app.sidebar_frame, "fg_color") == app._theme_palette()["sidebar"]
+            # Concurrent completion popups share one scrim and restore the
+            # remaining modal grab when the top popup is dismissed.
+            app._show_reference_collection_complete_dialog("검증 키워드", 2)
+            app._show_naver_kin_complete_dialog("")
+            settle(220)
+            assert app_module.modal_dimmer(app).active
+            app._close_naver_kin_complete_dialog()
+            settle(120)
+            assert app.grab_current() is app.reference_collection_dialog
+            assert app_module.modal_dimmer(app).active
+            app._close_reference_collection_dialog()
+            settle(120)
+            assert not app_module.modal_dimmer(app).active
+            app._show_manual_publish_completion_dialog("tistory", "tistory_1")
+            settle(120)
+            assert app_module.modal_dimmer(app).active
+            app._close_manual_publish_dialog()
+            settle(120)
+            assert not app_module.modal_dimmer(app).active
+            app.geometry("1500x1000+30+35")
+            settle(220)
+            app._switch_page("thumbnails")
+            settle(220)
+            assert int(app.thumbnail_nav_button.grid_info()["row"]) < int(app.prompt_nav_button.grid_info()["row"])
+            assert app.thumbnail_manager_selector_host.master is app.thumbnail_manager_card
+            assert app.thumbnail_design_workspace.master is app.thumbnail_manager_editor_host
+            app._switch_thumbnail_preset(4)
+            app.thumbnail_auto_title_var.set(False)
+            app.thumbnail_prompt_preview.delete("1.0", "end")
+            app.thumbnail_prompt_preview.insert("1.0", "다섯 번째 세트 전용")
+            app.cardnews_signature_entry.delete(0, "end")
+            app.cardnews_signature_entry.insert(0, "5번 카드")
+            app._save_thumbnail_manager_settings()
+            assert app.thumbnail_presets[4]["text"] == "다섯 번째 세트 전용"
+            assert app.thumbnail_presets[4]["cardnews_style"]["signature"] == "5번 카드"
+            app._set_default_thumbnail_preset()
+            assert app.home_thumbnail_menu.get() == "썸네일·카드5"
+            assert app.writing_thumbnail_menu.get() == "썸네일·카드5"
+            for geometry in ("1500x1000+30+35", "860x600+30+35"):
+                app.geometry(geometry)
+                app.thumbnails_scroll._parent_canvas.yview_moveto(0)
+                settle(220)
+                assert app.thumbnail_prompt_preview.winfo_ismapped()
+                canvas = app.thumbnail_preview_canvas
+                viewport = app.thumbnails_scroll._parent_canvas
+                offset = max(0, canvas.winfo_rooty() - viewport.winfo_rooty() - 30)
+                viewport.yview_moveto(offset / max(1, viewport.bbox("all")[3]))
+                settle(120)
+                visible = app.winfo_containing(canvas.winfo_rootx() + 10, canvas.winfo_rooty() + 10)
+                assert visible is canvas, (geometry, visible, canvas)
+                assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
+                for button in app.thumbnail_manager_preset_buttons.values():
+                    assert button.winfo_rootx() + button.winfo_width() <= app.thumbnails_scroll._parent_canvas.winfo_rootx() + app.thumbnails_scroll._parent_canvas.winfo_width() + 2
+            app._switch_page("writing")
+            app._open_writing_section("publish")
+            settle(220)
+            assert app.thumbnail_prompt_preview.get("1.0", "end").strip() == "다섯 번째 세트 전용"
+            assert app.writing_thumbnail_preview_canvas.winfo_ismapped()
+            app._switch_thumbnail_preset(0)
             app.geometry("1500x1000+30+35")
             settle(220)
             for page_name, page_frame in app._page_frame_map().items():
