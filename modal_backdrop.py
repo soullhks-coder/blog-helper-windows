@@ -119,22 +119,31 @@ class ModalDimmer:
             # CTk owns its internal canvas/label/entry colors; changing those
             # independently would leave stale native fills after a redraw.
             is_ctk = isinstance(widget, (ctk.CTk, ctk.CTkBaseClass))
-            options = (
-                ("fg_color", "bg_color", "border_color", "text_color", "text_color_disabled",
-                 "hover_color", "button_color", "button_hover_color", "progress_color",
-                 "placeholder_text_color", "checkmark_color")
-                if is_ctk else ("background", "foreground", "insertbackground", "selectbackground")
-            )
+            is_scroll_content = isinstance(widget, ctk.CTkScrollableFrame)
+            if is_ctk:
+                options = ("fg_color", "bg_color", "border_color", "text_color", "text_color_disabled",
+                           "hover_color", "button_color", "button_hover_color", "progress_color",
+                           "placeholder_text_color", "checkmark_color")
+            elif is_scroll_content:
+                options = ("background",)
+            else:
+                options = ("background", "foreground", "insertbackground", "selectbackground")
             for option in options:
                 try:
-                    original = widget.cget(option)
+                    if is_scroll_content:
+                        # ScrollableFrame is a native inner Frame, but its
+                        # public color API delegates to the outer CTkFrame.
+                        # Paint this actual content surface too, otherwise
+                        # padding between dimmed rows stays bright white.
+                        getter = lambda w=widget, o=option: tk.Frame.cget(w, o)
+                        setter = lambda value, w=widget, o=option: tk.Frame.configure(w, **{o: value})
+                    else:
+                        getter = lambda w=widget, o=option: w.cget(o)
+                        setter = lambda value, w=widget, o=option: w.configure(**{o: value})
+                    original = getter()
                     dimmed = dim_color(widget, original)
                     if dimmed != original:
-                        changes.append((
-                            lambda w=widget, o=option: w.cget(o),
-                            lambda value, w=widget, o=option: w.configure(**{o: value}),
-                            original, dimmed,
-                        ))
+                        changes.append((getter, setter, original, dimmed))
                 except (tk.TclError, ValueError):
                     pass
             if is_ctk:

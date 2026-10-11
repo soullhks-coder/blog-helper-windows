@@ -53,6 +53,47 @@ class Widget:
 
 
 class ModalBackdropTests(unittest.TestCase):
+    def test_scroll_content_uses_native_background_not_delegated_outer_api(self):
+        class ScrollContent(Widget):
+            def __init__(self, outer, children):
+                super().__init__(children=children)
+                self.outer = outer
+                self.native_colors = {"background": "#f6f8fc"}
+
+            def cget(self, option):
+                return self.outer.cget(option)
+
+            def configure(self, **values):
+                self.outer.configure(**values)
+
+        row = Widget("#f6f8fc")
+        outer = Widget("#ecf2fa")
+        content = ScrollContent(outer, (row,))
+        outer.children.append(content)
+        root = Widget(children=(outer,))
+        dimmer = ModalDimmer(root)
+        with (
+            patch.object(modal_backdrop.ctk, "CTkScrollableFrame", ScrollContent),
+            patch.object(modal_backdrop.tk.Frame, "cget",
+                         lambda widget, option: widget.native_colors[option]),
+            patch.object(modal_backdrop.tk.Frame, "configure",
+                         lambda widget, **values: widget.native_colors.update(values)),
+        ):
+            dimmer.begin()
+            for _ in range(3):
+                self.assertEqual(content.native_colors["background"], "#6f7071")
+                self.assertEqual(row.cget("background"), "#6f7071")
+                self.assertEqual(outer.cget("background"), "#6a6d70")
+                dimmer.refresh()
+            # A newer content update while the popup is open must survive.
+            content.native_colors["background"] = "#00ff00"
+            dimmer.refresh()
+            self.assertEqual(content.native_colors["background"], "#007300")
+            dimmer.end()
+        self.assertEqual(content.native_colors["background"], "#00ff00")
+        self.assertEqual(row.cget("background"), "#f6f8fc")
+        self.assertEqual(outer.cget("background"), "#ecf2fa")
+
     def test_light_and_dark_colors_use_the_same_scrim(self):
         widget = Widget()
         self.assertEqual(dim_color(widget, "#ffffff"), "#737373")

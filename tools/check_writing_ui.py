@@ -415,6 +415,29 @@ def main() -> None:
                 <= keyword_viewport.winfo_rooty() + keyword_viewport.winfo_height() + 2
             )
             screenshot("ten-recommended-keywords")
+            # CTkScrollableFrame.cget/configure delegate to its outer CTkFrame,
+            # not the native inner Frame visible in the gaps between rows.
+            # Check the actual painted surfaces while a completion popup is up.
+            keyword_backgrounds = [
+                (app.keyword_choice_frame,
+                 app_module.tk.Frame.cget(app.keyword_choice_frame, "background")),
+                (keyword_viewport, keyword_viewport.cget("background")),
+                *[(row._canvas, row._canvas.cget("background")) for row in keyword_rows],
+            ]
+            app._show_reference_collection_complete_dialog("추천 키워드 1", 14)
+            settle(650)
+            from modal_backdrop import dim_color
+            for surface, original in keyword_backgrounds:
+                actual = app_module.tk.Frame.cget(surface, "background")
+                assert actual == dim_color(surface, original), (
+                    "undimmed keyword list background", surface, actual, original
+                )
+            assert resolved_color(app.reference_collection_dialog, "fg_color") == app._theme_palette()["shell"]
+            screenshot("reference-dialog-uniform-dim")
+            app._close_reference_collection_dialog()
+            settle(120)
+            for surface, original in keyword_backgrounds:
+                assert app_module.tk.Frame.cget(surface, "background") == original
             app._clear_keyword_choices()
             settle()
 
