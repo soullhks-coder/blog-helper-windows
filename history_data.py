@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-12",
-        "version": "v1.1.213",
+        "version": "v1.1.214",
         "category": "티스토리 V2",
         "title": "별도 티스토리 V2 메뉴·위키 사진 기반 PPT 스타일 본문 이미지",
         "request": "기존 티스토리 기능을 유지하고 N블로그 자동화 아래 T 아이콘의 티스토리 V2 메뉴를 추가하여 위키백과·나무위키 사진을 넣은 PPT 스타일 본문 이미지를 자동·수동으로 제작해달라는 요청",

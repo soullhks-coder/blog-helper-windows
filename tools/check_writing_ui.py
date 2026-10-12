@@ -283,7 +283,12 @@ def main() -> None:
                 assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
             app.geometry("1500x1000+30+35")
             app._switch_page("home")
-            settle(180)
+            settle(320)
+            # Switching through a compact page can preserve a different
+            # viewport fraction on Windows. The following baseline assertions
+            # inspect the TOP of Home, so explicitly restore that test view.
+            app.home_scroll._parent_canvas.yview_moveto(0)
+            settle(200)
             print(f"{sys.platform} {args.theme}: Tistory V2 manual/auto slides, images, saved edits, body insertion and layout passed", flush=True)
             screenshot("home")
             assert tuple(app._home_platform_logo_cache) == (
@@ -295,7 +300,12 @@ def main() -> None:
             assert tuple(app.home_publish_remaining_labels) == (
                 "wordpress", "tistory", "blogspot",
             )
-            assert app.home_adsense_card.winfo_ismapped()
+            assert app.home_adsense_card.winfo_ismapped(), (
+                app.current_page, app.home_page.winfo_ismapped(),
+                app.home_scroll._parent_canvas.yview(),
+                app.home_scroll._parent_canvas.bbox("all"),
+                app.home_adsense_card.winfo_y(),
+            )
             assert int(app.home_adsense_card.grid_info()["row"]) == 0
             assert int(app.home_control_card.grid_info()["row"]) == 1
             assert int(app.home_keyword_cards_frame.grid_info()["row"]) == 2
