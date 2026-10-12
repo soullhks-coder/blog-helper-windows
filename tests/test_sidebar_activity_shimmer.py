@@ -34,7 +34,7 @@ class SidebarActivityShimmerTests(unittest.TestCase):
 
         self.assertEqual(
             main.KeywordApp._sidebar_activity_map(app),
-            {"writing": True, "naver_blog": True, "naver_kin": True},
+            {"writing": True, "tistory_v2": False, "naver_blog": True, "naver_kin": True},
         )
 
     def test_stopped_workers_clear_each_indicator_independently(self) -> None:
@@ -46,7 +46,7 @@ class SidebarActivityShimmerTests(unittest.TestCase):
 
         self.assertEqual(
             main.KeywordApp._sidebar_activity_map(app),
-            {"writing": False, "naver_blog": True, "naver_kin": False},
+            {"writing": False, "tistory_v2": False, "naver_blog": True, "naver_kin": False},
         )
 
     def test_automation_queue_pipeline_does_not_mark_manual_writing_menu(self) -> None:

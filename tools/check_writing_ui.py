@@ -109,6 +109,7 @@ def main() -> None:
                 "writing_nav_button": "writing",
                 "automation_nav_button": "automation",
                 "naver_blog_nav_button": "naver_blog",
+                "tistory_v2_nav_button": "tistory_v2",
                 "naver_kin_nav_button": "naver_kin",
                 "public_data_nav_button": "public_data",
                 "thumbnail_nav_button": "thumbnails",
@@ -187,6 +188,103 @@ def main() -> None:
             app._switch_page("home")
             app.update()
             settle(900)
+            assert app.tistory_v2_panel is None  # no added startup work
+            app._switch_page("tistory_v2")
+            settle(250)
+            panel = app.tistory_v2_panel
+            assert panel.winfo_ismapped()
+            assert panel.palette == app._theme_palette()
+            assert int(app.tistory_v2_nav_button.grid_info()["row"]) == int(app.naver_blog_nav_button.grid_info()["row"]) + 1
+            assert app_module.SIDEBAR_MENU_DEFAULT_ICONS["tistory_v2"] == "type"
+            assert app._bootstrap_sidebar_icon_image("type", "#2563eb") is not None
+            panel.keyword_entry.insert(0, "서울")
+            panel.title_entry.insert(0, "서울 여행 기본 가이드")
+            panel.body_box.insert("1.0", "\n".join(f"서울 여행 준비 단계 {i}를 확인합니다." for i in range(1, 16)))
+            panel.mode.set("수동 모드")
+            panel._mode_changed("수동 모드")
+            original_article = app.article_editor.get("1.0", "end")
+            panel._start("create")
+            for _ in range(40):
+                settle(100)
+                if panel.worker is None:
+                    break
+            assert panel.worker is None and panel.deck
+            assert len(panel.deck["slides"]) > 1
+            assert app.article_editor.get("1.0", "end") == original_article
+            deck_directory = panel.store.deck_directory(panel.deck)
+            paths = sorted(deck_directory.glob("slide-*.png"))
+            assert len(paths) == len(panel.deck["slides"])
+            assert (deck_directory / "article.html").is_file()
+            assert panel._preview_image is not None
+            from PIL import Image
+            chosen_photo = Path(directory) / "chosen-v2-photo.png"
+            Image.new("RGB", (400, 300), "#ee5533").save(chosen_photo)
+            import tistory_v2_ui
+            with patch.object(tistory_v2_ui.filedialog, "askopenfilename", return_value=str(chosen_photo)):
+                panel._local_photo()
+            assert panel.deck["slides"][0]["image"]["source"] == "내 이미지"
+            panel.slide_title_box.delete("1.0", "end")
+            panel.slide_title_box.insert("1.0", "개별 슬라이드 수정 확인")
+            panel._update_edit()
+            panel._move(1)
+            panel._move(-1)
+            assert panel.slide_title_box.get("1.0", "end").strip() == "개별 슬라이드 수정 확인"
+            saved_deck = panel.store.load_deck(panel.deck["id"])
+            assert saved_deck["slides"][0]["title"] == "개별 슬라이드 수정 확인"
+            fake_asset = {"path": str(chosen_photo), "title": "서울", "source": "위키백과", "source_page": "https://ko.wikipedia.org/wiki/서울"}
+            panel.mode.set("자동 모드")
+            panel._mode_changed("자동 모드")
+            with patch.object(tistory_v2_ui, "collect_wiki_images", return_value=([fake_asset], [])) as collect:
+                panel._start("create")
+                panel._start("create")  # repeat clicks must not create two jobs
+                for _ in range(40):
+                    settle(100)
+                    if panel.worker is None:
+                        break
+                collect.assert_called_once()
+            assert panel.worker is None and panel.deck["images"]
+            assert all(slide["image"]["source"] == "위키백과" for slide in panel.deck["slides"])
+            paths = sorted(panel.store.deck_directory(panel.deck).glob("slide-*.png"))
+            app.article_editor.delete("1.0", "end")
+            app.article_editor.insert("1.0", "<p>기존 본문은 그대로 유지합니다.</p>")
+            with patch.object(app, "_writing_keyword_selection_locked", return_value=False):
+                app._insert_tistory_v2_images(panel.deck, paths)
+                app._insert_tistory_v2_images(panel.deck, paths)
+            inserted_article = app.article_editor.get("1.0", "end")
+            assert "기존 본문은 그대로 유지합니다." in inserted_article
+            assert inserted_article.count("blog-helper-tistory-v2-image") == len(paths)
+            assert len(app_module.extract_inline_image_paths(inserted_article)) == len(paths)
+            hydrated = app_module.hydrate_inline_image_placeholders(inserted_article, "서울")
+            assert hydrated.count("blog-helper-tistory-v2-image") == len(paths)
+            assert "https://ko.wikipedia.org/wiki/서울" in hydrated
+            native_html, native_files = app_module.prepare_tistory_native_attachment_html(hydrated, "서울")
+            assert len(native_files) == len(paths)
+            assert "이용 조건 확인 필요" in native_html
+            assert "https://ko.wikipedia.org/wiki/서울" in native_html
+            assert not app.writing_auto_run_active
+            app.article_editor.delete("1.0", "end")
+            app.article_editor.insert("1.0", original_article.strip())
+            app._switch_page("tistory_v2")
+            settle(160)
+            assert app._current_primary_scroll_frame() is panel.scroll
+            assert panel.scroll in app._mousewheel_scroll_frames
+            panel._enlarge()
+            settle(160)
+            assert app_module.modal_dimmer(app).active
+            modal = app_module.modal_dimmer(app).dialogs[-1]
+            modal.grab_release()
+            modal.destroy()
+            settle(160)
+            assert not app_module.modal_dimmer(app).active
+            for geometry in ("1500x1000+30+35", "860x600+30+35"):
+                app.geometry(geometry)
+                settle(250)
+                assert int(panel.editor_card.grid_info()["row"]) == (0 if panel._wide else 1)
+                assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
+            app.geometry("1500x1000+30+35")
+            app._switch_page("home")
+            settle(180)
+            print(f"{sys.platform} {args.theme}: Tistory V2 manual/auto slides, images, saved edits, body insertion and layout passed", flush=True)
             screenshot("home")
             assert tuple(app._home_platform_logo_cache) == (
                 "wordpress", "tistory", "blogspot",
@@ -286,6 +384,7 @@ def main() -> None:
                 "writing": "writing_nav_button",
                 "automation": "automation_nav_button",
                 "naver_blog": "naver_blog_nav_button",
+                "tistory_v2": "tistory_v2_nav_button",
                 "naver_kin": "naver_kin_nav_button",
                 "public_data": "public_data_nav_button",
                 "thumbnails": "thumbnail_nav_button",
@@ -922,6 +1021,7 @@ def main() -> None:
                 "writing": "writing_nav_button",
                 "automation": "automation_nav_button",
                 "naver_blog": "naver_blog_nav_button",
+                "tistory_v2": "tistory_v2_nav_button",
                 "naver_kin": "naver_kin_nav_button",
                 "public_data": "public_data_nav_button",
                 "thumbnails": "thumbnail_nav_button",

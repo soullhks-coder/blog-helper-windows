@@ -895,6 +895,7 @@ SIDEBAR_MENU_DEFAULT_LABELS = {
     "writing": "블로그글쓰기",
     "automation": "블로그자동화",
     "naver_blog": "N블로그자동화",
+    "tistory_v2": "티스토리 V2",
     "naver_kin": "N지식인자동화",
     "public_data": "공공데이터",
     "thumbnails": "썸네일관리",
@@ -917,6 +918,7 @@ BOOTSTRAP_ICON_CODEPOINTS = {
     "house": 0xF425,
     "image": 0xF42A,
     "journal-text": 0xF444,
+    "type": 0xF5F7,
     "lightning-charge": 0xF46D,
     "pencil-square": 0xF4CA,
     "person-check": 0xF4D6,
@@ -929,6 +931,7 @@ BOOTSTRAP_ICON_OPTIONS = {
     "연필 · bi-pencil-square": "pencil-square",
     "로봇 · bi-robot": "robot",
     "문서 · bi-journal-text": "journal-text",
+    "T · bi-type": "type",
     "사용자 확인 · bi-person-check": "person-check",
     "데이터베이스 · bi-database": "database",
     "대화문 · bi-chat-square-text": "chat-square-text",
@@ -952,6 +955,7 @@ SIDEBAR_MENU_DEFAULT_ICONS = {
     "writing": "pencil-square",
     "automation": "robot",
     "naver_blog": "journal-text",
+    "tistory_v2": "type",
     "naver_kin": "person-check",
     "public_data": "database",
     "thumbnails": "image",
@@ -6420,6 +6424,20 @@ def hydrate_inline_image_placeholders(article_html: str, title: str = "") -> str
         alt = f"{title or '본문'} 이미지 {counter}"
         class_names = "blog-helper-inline-image"
         extra_data = ""
+        caption = escape(alt)
+        if "blog-helper-tistory-v2-image" in match.group(0):
+            class_names += " blog-helper-tistory-v2-image"
+            def v2_attr(name: str) -> str:
+                found = re.search(rf"\b{name}=['\"]([^'\"]*)['\"]", match.group(0), flags=re.I)
+                return unescape(found.group(1)) if found else ""
+            if "blog-helper-reference-image" in match.group(0):
+                class_names += " blog-helper-reference-image"
+                for attribute in ("data-blog-helper-source-url", "data-blog-helper-source-name", "data-blog-helper-license", "data-blog-helper-show-source"):
+                    extra_data += f" {attribute}='{escape(v2_attr(attribute), quote=True)}'"
+                source_url = v2_attr("data-blog-helper-source-url")
+                source_name = v2_attr("data-blog-helper-source-name")
+                if source_url:
+                    caption += f" · 사진 출처: <a href='{escape(source_url, quote=True)}'>{escape(source_name)}</a> · 이용 조건 확인 필요"
         if "blog-helper-cardnews-image" in match.group(0):
             class_names += " blog-helper-cardnews-image"
             extra_data = f" data-blog-helper-cardnews-index='{counter}'"
@@ -6428,7 +6446,7 @@ def hydrate_inline_image_placeholders(article_html: str, title: str = "") -> str
             f"\n<figure class='{class_names}' "
             f"data-blog-helper-inline-image-path='{escape(str(image_path))}'{extra_data}>"
             f"<img src='{data_url}' alt='{escape(alt)}' style='max-width:100%;height:auto;display:block;margin:0 auto;' />"
-            f"<figcaption>{escape(alt)}</figcaption>"
+            f"<figcaption>{caption if 'blog-helper-tistory-v2-image' in match.group(0) else escape(alt)}</figcaption>"
             "</figure>\n"
         )
 
@@ -6478,6 +6496,8 @@ def prepare_tistory_native_attachment_html(
             class_names += " blog-helper-cardnews-image"
         if is_reference:
             class_names += " blog-helper-reference-image"
+        if "blog-helper-tistory-v2-image" in match.group(0):
+            class_names += " blog-helper-tistory-v2-image"
         caption = escape(label)
         if is_reference:
             def attr_value(name: str) -> str:
@@ -27910,6 +27930,7 @@ class KeywordApp(ctk.CTk):
                     "writing": getattr(self, "writing_nav_button", None),
                     "automation": getattr(self, "automation_nav_button", None),
                     "naver_blog": getattr(self, "naver_blog_nav_button", None),
+                    "tistory_v2": getattr(self, "tistory_v2_nav_button", None),
                     "naver_kin": getattr(self, "naver_kin_nav_button", None),
                     "public_data": getattr(self, "public_data_nav_button", None),
                     "thumbnails": getattr(self, "thumbnail_nav_button", None),
@@ -28222,6 +28243,8 @@ class KeywordApp(ctk.CTk):
             mapping["naver_kin"] = self.naver_kin_page
         if hasattr(self, "thumbnails_page"):
             mapping["thumbnails"] = self.thumbnails_page
+        if hasattr(self, "tistory_v2_page"):
+            mapping["tistory_v2"] = self.tistory_v2_page
         return mapping
 
     def _current_page_frame(self):
@@ -28240,6 +28263,9 @@ class KeywordApp(ctk.CTk):
                 dialog.lift()
 
     def _reset_widget_state_for_rebuild(self) -> None:
+        self.tistory_v2_panel = None
+        self.tistory_v2_scroll = None
+        self._sidebar_layout_signature = None
         sidebar_activity_job = getattr(self, "_sidebar_activity_job", None)
         if sidebar_activity_job is not None:
             try:
@@ -28485,6 +28511,16 @@ class KeywordApp(ctk.CTk):
         )
         self.naver_blog_nav_button.grid(row=4, column=0, padx=26, pady=(0, 10), sticky="ew")
 
+        self.tistory_v2_nav_button = ctk.CTkButton(
+            self.sidebar_frame,
+            text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "tistory_v2"),
+            anchor="w", height=56, corner_radius=14,
+            fg_color="transparent", hover_color="#111826", text_color="#9aa7bb",
+            font=ctk.CTkFont(size=19, weight="bold"),
+            command=lambda: self._switch_page("tistory_v2"),
+        )
+        self.tistory_v2_nav_button.grid(row=5, column=0, padx=26, pady=(0, 10), sticky="ew")
+
         self.naver_kin_nav_button = ctk.CTkButton(
             self.sidebar_frame,
             text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "naver_kin"),
@@ -28497,7 +28533,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("naver_kin"),
         )
-        self.naver_kin_nav_button.grid(row=5, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.naver_kin_nav_button.grid(row=6, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.public_data_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -28511,7 +28547,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("public_data"),
         )
-        self.public_data_nav_button.grid(row=6, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.public_data_nav_button.grid(row=7, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.thumbnail_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -28521,7 +28557,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("thumbnails"),
         )
-        self.thumbnail_nav_button.grid(row=7, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.thumbnail_nav_button.grid(row=8, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.prompt_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -28535,7 +28571,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("prompts"),
         )
-        self.prompt_nav_button.grid(row=8, column=0, padx=26, sticky="ew")
+        self.prompt_nav_button.grid(row=9, column=0, padx=26, sticky="ew")
 
         self.settings_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -28549,7 +28585,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("settings"),
         )
-        self.settings_nav_button.grid(row=9, column=0, padx=26, pady=(10, 0), sticky="ew")
+        self.settings_nav_button.grid(row=10, column=0, padx=26, pady=(10, 0), sticky="ew")
 
         self._disable_sidebar_drag_hover()
         self._build_sidebar_activity_shimmers()
@@ -28622,6 +28658,12 @@ class KeywordApp(ctk.CTk):
         _update_packaged_startup_splash("5/8 N블로그 준비 중...")
         self._build_naver_blog_page()
 
+        # V2 is built only on first navigation, keeping startup lightweight.
+        self.tistory_v2_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
+        self.tistory_v2_page.grid_columnconfigure(0, weight=1)
+        self.tistory_v2_page.grid_rowconfigure(0, weight=1)
+        self.tistory_v2_panel = None
+
         self.naver_kin_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
         if os.name != "nt":
             self.naver_kin_page.grid(row=0, column=0, sticky="nsew")
@@ -28651,14 +28693,14 @@ class KeywordApp(ctk.CTk):
     def _layout_sidebar_navigation(self, _event=None) -> None:
         height = self.sidebar_frame.winfo_height() / self.sidebar_frame._get_widget_scaling()
         gap = 10 if height >= 730 else 6
-        button_height = max(36, min(56, int((height - 120) / 9) - gap))
+        button_height = max(32, min(56, int((height - 180) / len(SIDEBAR_MENU_DEFAULT_LABELS)) - gap))
         signature = (button_height, gap)
         if getattr(self, "_sidebar_layout_signature", None) == signature:
             return
         self._sidebar_layout_signature = signature
         for name in (
             "home_nav_button", "writing_nav_button", "automation_nav_button",
-            "naver_blog_nav_button", "naver_kin_nav_button", "public_data_nav_button",
+            "naver_blog_nav_button", "tistory_v2_nav_button", "naver_kin_nav_button", "public_data_nav_button",
             "thumbnail_nav_button", "prompt_nav_button", "settings_nav_button",
         ):
             button = getattr(self, name)
@@ -32009,6 +32051,7 @@ class KeywordApp(ctk.CTk):
             "writing": "writing_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
+            "tistory_v2": "tistory_v2_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
             "thumbnails": "thumbnail_nav_button",
@@ -32034,6 +32077,7 @@ class KeywordApp(ctk.CTk):
             "writing": "writing_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
+            "tistory_v2": "tistory_v2_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
             "thumbnails": "thumbnail_nav_button",
@@ -32114,6 +32158,7 @@ class KeywordApp(ctk.CTk):
         )
         return {
             "writing": writing_running,
+            "tistory_v2": bool(getattr(getattr(self, "tistory_v2_panel", None), "busy", False)),
             "naver_blog": self._worker_is_running(
                 getattr(self, "naver_blog_worker", None)
             ),
@@ -32128,6 +32173,7 @@ class KeywordApp(ctk.CTk):
             "writing_nav_button",
             "automation_nav_button",
             "naver_blog_nav_button",
+            "tistory_v2_nav_button",
             "naver_kin_nav_button",
             "public_data_nav_button",
             "thumbnail_nav_button",
@@ -32154,6 +32200,7 @@ class KeywordApp(ctk.CTk):
         button_map = {
             "writing": self.writing_nav_button,
             "naver_blog": self.naver_blog_nav_button,
+            "tistory_v2": self.tistory_v2_nav_button,
             "naver_kin": self.naver_kin_nav_button,
         }
         self._sidebar_activity_states = {name: False for name in button_map}
@@ -32282,6 +32329,7 @@ class KeywordApp(ctk.CTk):
             "writing": "writing_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
+            "tistory_v2": "tistory_v2_nav_button",
             "naver_kin": "naver_kin_nav_button",
             "public_data": "public_data_nav_button",
             "thumbnails": "thumbnail_nav_button",
@@ -33060,6 +33108,7 @@ class KeywordApp(ctk.CTk):
             "writing": ("writing_scroll",),
             "automation": ("automation_list",),
             "naver_blog": ("naver_blog_scroll",),
+            "tistory_v2": ("tistory_v2_scroll",),
             "naver_kin": ("naver_kin_scroll",),
             "public_data": ("public_data_scroll",),
             "prompts": ("prompts_scroll",),
@@ -47498,6 +47547,16 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "_apply_sidebar_menu_icons"):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)
+        if page_name == "tistory_v2" and self.tistory_v2_panel is None:
+            from tistory_v2_ui import TistoryV2Panel
+            self.tistory_v2_panel = TistoryV2Panel(
+                self.tistory_v2_page, self, DATA_DIR / "Tistory V2",
+                require_google_chrome_executable, self._insert_tistory_v2_images,
+            )
+            self.tistory_v2_panel.grid(row=0, column=0, sticky="nsew")
+            self.tistory_v2_scroll = self.tistory_v2_panel.scroll
+            self._tag_mousewheel_descendants(self.tistory_v2_panel)
+            self._tag_text_input_descendants(self.tistory_v2_panel)
         if page_name == "home":
             self._refresh_home_blog_menus()
             self._layout_home_control_card()
@@ -47552,6 +47611,37 @@ class KeywordApp(ctk.CTk):
                 self._stop_naver_kin_clipboard_monitor()
         if hasattr(self, "shell_frame"):
             self._finish_theme_paint()
+
+    def _insert_tistory_v2_images(self, deck: dict, paths: list[Path]) -> None:
+        from tistory_v2 import insert_slide_figures
+        if self._writing_keyword_selection_locked() or any(
+            self._worker_is_running(getattr(self, name, None))
+            for name in ("tistory_automation_worker", "wp_publish_worker")
+        ):
+            messagebox.showinfo("글쓰기 진행 중", "현재 글쓰기 작업을 완료하거나 취소한 뒤 이미지를 적용해 주세요.", parent=self)
+            return
+        article_html = self.article_editor.get("1.0", "end").strip()
+        if not article_html:
+            messagebox.showinfo("본문 없음", "블로그글쓰기에 본문을 작성한 뒤 적용해 주세요. V2 이미지는 저장되어 있습니다.", parent=self)
+            return
+        figures = []
+        for index, path in enumerate(paths, 1):
+            asset = deck["slides"][index - 1].get("image") or {}
+            if asset.get("source_page"):
+                figure = build_tistory_reference_image_figure(
+                    {"path": str(path), "source_url": asset["source_page"], "source": asset.get("source", ""), "license": "이용 조건 확인 필요"},
+                    deck.get("title", "티스토리 V2"), index,
+                )
+            else:
+                figure = build_inline_image_placeholder_figure(path, deck.get("title", "티스토리 V2"), index)
+            figure = figure.replace("class='blog-helper-inline-image", "class='blog-helper-inline-image blog-helper-tistory-v2-image")
+            figures.append(figure)
+        article_html = re.sub(r"<figure\b[^>]*\bblog-helper-tistory-v2-image\b[^>]*>.*?</figure>", "", article_html, flags=re.S | re.I)
+        self.article_editor.delete("1.0", "end")
+        self.article_editor.insert("1.0", insert_slide_figures(article_html, figures))
+        self._switch_page("writing")
+        self._open_writing_section("article")
+        self.article_progress_label.configure(text=f"티스토리 V2 본문 이미지 {len(figures)}장을 적용했습니다. 자동 발행은 실행하지 않았습니다.")
 
     def _is_windows_dark_theme(self) -> bool:
         return (

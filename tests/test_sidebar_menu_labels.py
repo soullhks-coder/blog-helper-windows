@@ -20,6 +20,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
                 "writing": "블로그글쓰기",
                 "automation": "블로그자동화",
                 "naver_blog": "N블로그자동화",
+                "tistory_v2": "티스토리 V2",
                 "naver_kin": "N지식인자동화",
                 "public_data": "공공데이터",
                 "thumbnails": "썸네일관리",
@@ -55,6 +56,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
             main.SIDEBAR_MENU_DEFAULT_ICONS["writing"],
             "pencil-square",
         )
+        self.assertEqual(main.SIDEBAR_MENU_DEFAULT_ICONS["tistory_v2"], "type")
         self.assertEqual(
             main.BOOTSTRAP_ICON_CODEPOINTS["pencil-square"],
             0xF4CA,
