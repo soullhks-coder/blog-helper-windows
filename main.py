@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import ctypes
 import hashlib
 import io
@@ -339,6 +340,10 @@ _install_windows_dark_ctk_button_release_fix()
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
+from windows_fonts import configure_windows_fonts, configure_windows_named_fonts, ui_font_family
+
+configure_windows_fonts(ctk, RESOURCE_DIR)
+UI_FONT_FAMILY = ui_font_family()
 APP_ICON_PATH = RESOURCE_DIR / "assets" / "blog_helper_icon.png"
 HOME_PLATFORM_LOGO_PATHS = {
     "wordpress": RESOURCE_DIR / "assets" / "wordpress-logo.png",
@@ -18982,20 +18987,28 @@ def launch_tistory_persistent_context(
     playwright,
     profile_scope: str = TISTORY_PROFILE_SCOPES[0],
 ):
+    from tistory_browser_guard import acquire
     profile_dir, _state_file = tistory_profile_paths(profile_scope)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    return playwright.chromium.launch_persistent_context(
-        user_data_dir=str(profile_dir),
-        executable_path=str(require_google_chrome_executable()),
-        headless=False,
-        no_viewport=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-session-crashed-bubble",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
-    )
+    release = acquire(str(profile_dir.resolve()))
+    try:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            executable_path=str(require_google_chrome_executable()),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        context.on("close", release)
+        return context
+    except Exception:
+        release()
+        raise
 
 
 def is_tistory_editor_ready(page) -> bool:
@@ -19081,11 +19094,14 @@ def wait_for_tistory_editor(
     result_queue: queue.Queue,
     timeout_seconds: int = 300,
     event_type: str = "tistory_progress",
+    check_cancel: Callable[[], None] | None = None,
 ) -> tuple[object, str]:
     deadline = time.time() + max(30, timeout_seconds)
     login_notice_sent = False
     chosen_account = ""
     while time.time() < deadline:
+        if check_cancel is not None:
+            check_cancel()
         pages = list(context.pages)
         if pages:
             page = pages[-1]
@@ -19184,6 +19200,10 @@ def run_tistory_playwright_automation(
     auto_publish: bool = True,
     on_public_publish_clicked: Callable[[], None] | None = None,
     before_public_publish: Callable[[], None] | None = None,
+    tistory_v2_slide_paths: list[str] | None = None,
+    tistory_v2_ads: dict | None = None,
+    tistory_v2_slide_size: list[int] | tuple[int, int] | None = None,
+    tistory_v2_slide_sizes: list[list[int]] | None = None,
 ) -> tuple[bool, str | dict[str, object]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -19195,9 +19215,12 @@ def run_tistory_playwright_automation(
 
     if not write_url:
         raise RuntimeError("티스토리 글쓰기 URL이 비어 있습니다.")
+    if tistory_v2_slide_paths is not None and len(tistory_v2_slide_paths) != 10:
+        raise ValueError("티스토리 V2 발행에는 본문 슬라이드 10장이 필요합니다.")
 
     with sync_playwright() as playwright:
         context = launch_tistory_persistent_context(playwright, profile_scope)
+        page = None
         try:
             saved_state = load_tistory_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
@@ -19257,6 +19280,64 @@ def run_tistory_playwright_automation(
                 raise RuntimeError("티스토리 제목 입력 요소를 찾지 못했습니다.")
             if not (result_payload.get("bodyOk") or result_payload.get("richBodyOk")) and not result_payload.get("modeOnly"):
                 raise RuntimeError("티스토리 본문 입력 요소를 찾지 못했습니다.")
+            if tistory_v2_slide_paths is not None:
+                if result_payload.get("modeOnly"):
+                    raise RuntimeError("티스토리 V2는 제목과 본문 입력을 완료한 뒤 실행해야 합니다.")
+                from tistory_v2_editor import insert_native_slide_pairs
+
+                used_urls = set(collect_tistory_hosted_image_urls(page))
+
+                def upload_v2_slide(path: str) -> str:
+                    uploaded_url = upload_tistory_image_file(
+                        page, path, result_queue, excluded_urls=used_urls,
+                    )
+                    if not uploaded_url or uploaded_url in used_urls:
+                        raise RuntimeError("슬라이드의 새 이미지 업로드 주소를 확인하지 못했습니다.")
+                    used_urls.add(uploaded_url)
+                    return uploaded_url
+
+                # The original workflow has already inserted the selected thumbnail.
+                # Keep it separate and upload only the ten body slides here.
+                def report_v2_progress(message: str) -> None:
+                    append_runtime_log("TISTORY V2", message)
+                    result_queue.put(("tistory_progress", message))
+
+                slide_result = insert_native_slide_pairs(
+                    page, tistory_v2_slide_paths, "", upload_v2_slide,
+                    report_v2_progress,
+                    expected_size=tistory_v2_slide_size,
+                    expected_sizes=tistory_v2_slide_sizes,
+                )
+                if not slide_result.get("ok") or slide_result.get("slide_count") != 10 or slide_result.get("collage_count") != 5:
+                    raise RuntimeError("슬라이드 10장과 티스토리 콜라주 5개를 확인하지 못해 발행을 중단했습니다.")
+                if tistory_v2_ads:
+                    ad_code = build_tistory_ad_placement_code(
+                        tistory_v2_ads.get("code", ""), tistory_v2_ads.get("slot_id", ""),
+                    )
+                    ad_count = min(5, normalize_tistory_ad_count(tistory_v2_ads.get("count", 0)))
+                    if ad_code and ad_count:
+                        ad_markup = (
+                            f"<!-- {TISTORY_ADSENSE_IMAGE_BLOCK_START} -->\n"
+                            f"{ad_code}\n<!-- {TISTORY_ADSENSE_IMAGE_BLOCK_END} -->"
+                        )
+                        inserted_count = page.evaluate("""({indices, html, position}) => {
+                            const editor = window.tinymce?.activeEditor;
+                            const body = editor?.getBody?.() || document.querySelector(
+                                '#editor-tistory_ifr, iframe[title*="편집기"]')?.contentDocument?.body ||
+                                document.querySelector('[contenteditable="true"]');
+                            const grids = [...(body?.querySelectorAll('figure[data-blog-helper-v2-pair]') || [])];
+                            if (grids.length !== 5) throw new Error('광고를 배치할 콜라주 5개를 찾지 못했습니다.');
+                            for (const index of indices) grids[index].insertAdjacentHTML(position, html);
+                            editor?.nodeChanged?.(); editor?.setDirty?.(true); editor?.fire?.('change');
+                            body.dispatchEvent(new Event('input', {bubbles:true}));
+                            return indices.length;
+                        }""", {
+                            "indices": random.sample(range(5), ad_count), "html": ad_markup,
+                            "position": "beforebegin" if normalize_tistory_ad_position(tistory_v2_ads.get("position", "")) == TISTORY_AD_POSITION_ABOVE else "afterend",
+                        })
+                        if inserted_count != ad_count:
+                            raise RuntimeError("티스토리 콜라주 주변 광고 배치를 확인하지 못했습니다.")
+                        result_queue.put(("tistory_progress", f"본문 콜라주 {ad_count}곳에 설정한 Google 광고를 배치했습니다."))
             normalized_save_mode = normalize_tistory_save_mode(
                 save_mode or (
                     TISTORY_SAVE_MODE_PUBLISH
@@ -19501,8 +19582,19 @@ def run_tistory_playwright_automation(
                 }
             mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
             return True, f"Playwright {mode_label} 모드로 티스토리 제목·본문 자동입력을 완료했습니다."
-        except PlaywrightTimeoutError as exc:
-            raise RuntimeError(f"티스토리 화면 응답 시간이 초과되었습니다: {exc}") from exc
+        except Exception as exc:
+            error = (RuntimeError(f"티스토리 화면 응답 시간이 초과되었습니다: {exc}")
+                     if isinstance(exc, PlaywrightTimeoutError) else exc)
+            if tistory_v2_slide_paths is not None and not isinstance(exc, ManualPublishCancelled):
+                append_runtime_log("TISTORY V2", f"입력/발행 중단: {type(error).__name__}: {error}")
+                if page is not None and not page.is_closed():
+                    from tistory_v2_editor import wait_for_failed_editor
+
+                    result_queue.put(("tistory_editor_attention", str(error)))
+                    wait_for_failed_editor(page)
+            if error is not exc:
+                raise error from exc
+            raise
         finally:
             save_tistory_storage_state(context, profile_scope)
             context.close()
@@ -25354,6 +25446,10 @@ class TistoryAutomationWorker(threading.Thread):
         profile_scope: str = TISTORY_PROFILE_SCOPES[0],
         auto_publish: bool = True,
         reference_articles: list[dict[str, str]] | None = None,
+        tistory_v2_slide_paths: list[str] | None = None,
+        tistory_v2_source_credits: str = "",
+        tistory_v2_slide_size: list[int] | tuple[int, int] | None = None,
+        tistory_v2_slide_sizes: list[list[int]] | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -25394,6 +25490,10 @@ class TistoryAutomationWorker(threading.Thread):
             for article in (reference_articles or [])
             if isinstance(article, dict)
         ]
+        self.tistory_v2_slide_paths = None if tistory_v2_slide_paths is None else list(tistory_v2_slide_paths)
+        self.tistory_v2_source_credits = str(tistory_v2_source_credits or "")
+        self.tistory_v2_slide_size = None if tistory_v2_slide_size is None else tuple(tistory_v2_slide_size)
+        self.tistory_v2_slide_sizes = None if tistory_v2_slide_sizes is None else [list(size) for size in tistory_v2_slide_sizes]
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -25420,6 +25520,8 @@ class TistoryAutomationWorker(threading.Thread):
             shared_reservation_date = str(replacement["date"])
 
         try:
+            if self.tistory_v2_slide_paths is not None and len(self.tistory_v2_slide_paths) != 10:
+                raise ValueError("티스토리 V2 발행에는 본문 슬라이드 10장이 필요합니다.")
             daily_account = self.public_blog_url or self.write_url
             if self.publish_after_input or not self.auto_publish:
                 if is_shared_tistory_blog(daily_account):
@@ -25459,6 +25561,8 @@ class TistoryAutomationWorker(threading.Thread):
             # Tistory tags now come only from the AI-written comma-separated
             # footer. Do not fall back to the old title/context guesses.
             self.tag_names = prompt_tag_names[:10]
+            if self.tistory_v2_slide_paths is not None:
+                article_html += self.tistory_v2_source_credits
             append_runtime_log(
                 "TISTORY",
                 (
@@ -25468,7 +25572,7 @@ class TistoryAutomationWorker(threading.Thread):
                     else "본문 마지막에서 티스토리 태그용 주요 태그를 찾지 못했습니다."
                 ),
             )
-            if GOOGLE_IMAGE_COLLAGE_ENABLED:
+            if GOOGLE_IMAGE_COLLAGE_ENABLED and self.tistory_v2_slide_paths is None:
                 mode_message = (
                     "글 제목과 일치하는 재사용 허용 참고 이미지를 찾고 있습니다..."
                     if self.reference_image_protection_mode
@@ -25550,7 +25654,7 @@ class TistoryAutomationWorker(threading.Thread):
                     )
 
             inserted_ad_count = 0
-            if self.ads_enabled:
+            if self.ads_enabled and self.tistory_v2_slide_paths is None:
                 article_html, inserted_ad_count = insert_tistory_ads_near_images(
                     article_html,
                     self.ads_code,
@@ -25558,7 +25662,9 @@ class TistoryAutomationWorker(threading.Thread):
                     self.ads_count,
                     ad_slot_id=self.ads_slot_id,
                 )
-            if inserted_ad_count:
+            if self.tistory_v2_slide_paths is not None and self.ads_enabled:
+                ad_message = "티스토리 콜라주 입력 후 설정한 위치에 Google 광고를 배치합니다."
+            elif inserted_ad_count:
                 ad_message = (
                     f"본문 이미지 {inserted_ad_count}곳의 {self.ads_position}에 "
                     "Google 광고 코드를 삽입했습니다."
@@ -25626,6 +25732,14 @@ class TistoryAutomationWorker(threading.Thread):
                 auto_publish=self.auto_publish,
                 on_public_publish_clicked=mark_public_publish_clicked,
                 before_public_publish=refresh_shared_reservation_before_publish,
+                tistory_v2_slide_paths=self.tistory_v2_slide_paths,
+                tistory_v2_slide_size=self.tistory_v2_slide_size,
+                tistory_v2_slide_sizes=self.tistory_v2_slide_sizes,
+                tistory_v2_ads=(
+                    {"code": self.ads_code, "slot_id": self.ads_slot_id,
+                     "position": self.ads_position, "count": self.ads_count}
+                    if self.tistory_v2_slide_paths is not None and self.ads_enabled else None
+                ),
             )
             if success:
                 if isinstance(message, dict):
@@ -25698,6 +25812,8 @@ class TistoryAutomationWorker(threading.Thread):
                     "\n공개발행 버튼 클릭 후 상태가 불확실해 공유 발행 자리 1건을 "
                     "안전하게 유지합니다. 티스토리 관리 화면을 확인해 주세요."
                 )
+            append_runtime_log("TISTORY V2" if self.tistory_v2_slide_paths is not None else "TISTORY",
+                               f"자동입력 실패: {type(exc).__name__}: {error_message}")
             self.result_queue.put(("tistory_automation_error", error_message))
         finally:
             DailyPublishLimitStore.cancel_reservation(reservation_key)
@@ -25724,6 +25840,7 @@ class ArticleGenerationWorker(threading.Thread):
         keyword: str,
         reference_text: str,
         result_queue: queue.Queue,
+        tistory_v2_slides: bool = False,
     ) -> None:
         super().__init__(daemon=True)
         self.settings = settings
@@ -25731,6 +25848,7 @@ class ArticleGenerationWorker(threading.Thread):
         self.keyword = keyword
         self.reference_text = reference_text.strip()
         self.result_queue = result_queue
+        self.tistory_v2_slides = tistory_v2_slides
 
     def run(self) -> None:
         try:
@@ -25786,11 +25904,33 @@ class ArticleGenerationWorker(threading.Thread):
                 + reference_block
             )
             self.result_queue.put(("article_progress", (0.45, "AI 모델에 본문 생성을 요청하고 있습니다...")))
+            if self.tistory_v2_slides:
+                from tistory_v2_summary import ARTICLE_OUTPUT_PROMPT
+                prompt += "\n\n" + ARTICLE_OUTPUT_PROMPT
             article_html, provider_name = self._generate_with_provider(prompt, progress=0.45)
 
             self.result_queue.put(("article_progress", (0.8, "생성된 글을 정리하고 있습니다...")))
+            summary_rows = None
+            summary_warning = ""
+            if self.tistory_v2_slides:
+                from tistory_v2_summary import article_response
+                article_html, summary_rows = article_response(article_html)
             article_html = normalize_generated_article_html(article_html)
             title = generated_title or extract_title_from_article_html(article_html, self.keyword)
+            if self.tistory_v2_slides:
+                from tistory_v2_summary import request_summaries, validate_summaries
+                try:
+                    summary_rows = validate_summaries(summary_rows, title, article_html)
+                except ValueError:
+                    self.result_queue.put(("article_progress", (0.85, "완성된 본문의 슬라이드용 짧은 요약을 정리하고 있습니다...")))
+                    try:
+                        summary_rows = request_summaries(title, article_html, lambda text: self._generate_with_provider(text, progress=0.85))
+                    except Exception as exc:
+                        # Do not discard a complete article or force another paid
+                        # article request when only its separate slide plan fails.
+                        summary_rows = None
+                        summary_warning = str(exc)
+                        append_runtime_log("TISTORY V2", f"본문 생성 완료 · 슬라이드 요약은 재생성 필요: {summary_warning}")
             if self.settings.inline_images_enabled:
                 try:
                     article_html = self._attach_inline_images(title, article_html)
@@ -25808,6 +25948,8 @@ class ArticleGenerationWorker(threading.Thread):
                         "title": title,
                         "html": article_html,
                         "provider": provider_name,
+                        **({"slide_summaries": summary_rows} if self.tistory_v2_slides else {}),
+                        **({"slide_summary_warning": summary_warning} if summary_warning else {}),
                     },
                 )
             )
@@ -25907,6 +26049,9 @@ class PublishPipelineWorker(threading.Thread):
         meta_description: str,
         result_queue: queue.Queue,
         reference_articles: list[dict[str, str]] | None = None,
+        tistory_v2: bool = False,
+        tistory_v2_keyword: str = "",
+        tistory_v2_deck: dict | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.settings = settings
@@ -25918,6 +26063,9 @@ class PublishPipelineWorker(threading.Thread):
         self.slug = slug
         self.meta_description = meta_description
         self.result_queue = result_queue
+        self.tistory_v2 = bool(tistory_v2)
+        self.tistory_v2_keyword = str(tistory_v2_keyword or "").strip()
+        self.tistory_v2_deck = copy.deepcopy(tistory_v2_deck)
         self.reference_articles = [
             dict(article)
             for article in (reference_articles or [])
@@ -25934,6 +26082,8 @@ class PublishPipelineWorker(threading.Thread):
             cleanup_paths.extend(extract_inline_image_paths(self.article_html))
             cleanup_paths.extend(extract_inline_image_paths(prepared_article_html))
             target_platforms = set(self.settings.target_platforms or ["wordpress"])
+            if self.tistory_v2 and target_platforms != {"tistory"}:
+                raise ValueError("티스토리 V2는 티스토리 블로그 한 곳에만 발행할 수 있습니다.")
             is_public_post = self.settings.post_mode != "임시저장"
             if is_public_post and "wordpress" in target_platforms:
                 DailyPublishLimitStore.ensure_can_publish(
@@ -26060,8 +26210,27 @@ class PublishPipelineWorker(threading.Thread):
                 wordpress_url = str(wordpress_result.get("link") or wordpress_result.get("post_url") or "").strip()
             if "tistory" in target_platforms:
                 self.result_queue.put(("publish_progress", (0.88, "티스토리 글쓰기 화면용 초안을 준비하고 있습니다...")))
+                tistory_article_html = prepared_article_html
+                tistory_v2_slide_paths = None
+                if self.tistory_v2:
+                    from tistory_v2_publish import export_edited_slide_deck, prepare_slide_deck
+
+                    slide_progress = lambda message: self.result_queue.put(("publish_progress", (0.88, message)))
+                    if self.tistory_v2_deck is not None:
+                        prepared_slides = export_edited_slide_deck(
+                            self.tistory_v2_deck, self.title, prepared_article_html,
+                            self.tistory_v2_keyword or self.focus_keyword, DATA_DIR / "Tistory V2", slide_progress)
+                    else:
+                        prepared_slides = prepare_slide_deck(
+                            self.title, prepared_article_html,
+                            self.tistory_v2_keyword or self.focus_keyword,
+                            DATA_DIR / "Tistory V2", require_google_chrome_executable(), progress=slide_progress)
+                    tistory_v2_slide_paths = [str(path) for path in prepared_slides["paths"]]
+                    if len(tistory_v2_slide_paths) != 10 or len(set(tistory_v2_slide_paths)) != 10:
+                        raise RuntimeError("티스토리 V2 슬라이드 10장을 준비하지 못해 업로드를 중단했습니다.")
+                    tistory_article_html = prepared_slides["article_html"]
                 write_url = build_tistory_write_url(self.settings.tistory_blog_url, self.settings.tistory_write_url)
-                draft_html = build_tistory_draft_document(self.title, prepared_article_html, self.thumbnail_path)
+                draft_html = build_tistory_draft_document(self.title, tistory_article_html, self.thumbnail_path)
                 TISTORY_DRAFT_FILE.write_text(draft_html, encoding="utf-8")
                 tistory_result = {
                     "status": "ready",
@@ -26070,7 +26239,7 @@ class PublishPipelineWorker(threading.Thread):
                     "public_blog_url": self.settings.tistory_blog_url,
                     "draft_file": str(TISTORY_DRAFT_FILE),
                     "title": self.title,
-                    "html": prepared_article_html,
+                    "html": tistory_article_html,
                     "thumbnail_path": self.thumbnail_path,
                     "focus_keyword": self.focus_keyword,
                     "tag_names": self.tag_names,
@@ -26096,6 +26265,11 @@ class PublishPipelineWorker(threading.Thread):
                     "ads_count": self.settings.tistory_ads_count,
                     "daily_publish_limit": self.settings.tistory_daily_publish_limit,
                 }
+                if tistory_v2_slide_paths is not None:
+                    tistory_result["tistory_v2_slide_paths"] = tistory_v2_slide_paths
+                    tistory_result["tistory_v2_slide_size"] = prepared_slides.get("slide_size", [600, 300])
+                    tistory_result["tistory_v2_slide_sizes"] = prepared_slides.get("slide_sizes")
+                    tistory_result["tistory_v2_source_credits"] = prepared_slides.get("source_credits_html", "")
 
             blogspot_result = None
             if "blogspot" in target_platforms:
@@ -26450,6 +26624,7 @@ class KeywordApp(ctk.CTk):
             except (AttributeError, OSError):
                 pass
         super().__init__()
+        configure_windows_named_fonts(self)
         self._file_drop_available = False
         if TkinterDnD is not None:
             try:
@@ -27429,6 +27604,9 @@ class KeywordApp(ctk.CTk):
                 self.wordpress_settings.blogspot_daily_publish_limit,
             ),
         }
+        v2_run = self.__dict__.get("writing_v2_run_settings")
+        if v2_run is not None:
+            configurations["tistory"] = ("티스토리", v2_run.tistory_daily_publish_limit)
         rows: list[tuple[str, str, int | None]] = []
         seen: set[str] = set()
         for platform in platforms:
@@ -27437,6 +27615,8 @@ class KeywordApp(ctk.CTk):
             seen.add(platform)
             platform_label, limit = configurations[platform]
             account = self._daily_publish_account(platform)
+            if platform == "tistory" and v2_run is not None:
+                account = v2_run.tistory_blog_url or v2_run.tistory_write_url
             if platform == "tistory" and is_shared_tistory_blog(account):
                 usage = self._current_shared_tistory_usage(account)
                 if not usage or usage.get("error"):
@@ -28244,15 +28424,17 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "thumbnails_page"):
             mapping["thumbnails"] = self.thumbnails_page
         if hasattr(self, "tistory_v2_page"):
-            mapping["tistory_v2"] = self.tistory_v2_page
+            mapping["tistory_v2"] = self.writing_page
         return mapping
 
     def _current_page_frame(self):
         return self._page_frame_map().get(getattr(self, "current_page", "home"))
 
     def _show_only_page_frame(self, page_name: str) -> None:
-        for name, frame in self._page_frame_map().items():
-            if name == page_name:
+        mapping = self._page_frame_map()
+        selected = mapping.get(page_name)
+        for frame in dict.fromkeys(mapping.values()):
+            if frame is selected:
                 frame.grid(row=0, column=0, sticky="nsew")
                 frame.tkraise()
             else:
@@ -28265,6 +28447,7 @@ class KeywordApp(ctk.CTk):
     def _reset_widget_state_for_rebuild(self) -> None:
         self.tistory_v2_panel = None
         self.tistory_v2_scroll = None
+        self.tistory_v2_controls = None
         self._sidebar_layout_signature = None
         sidebar_activity_job = getattr(self, "_sidebar_activity_job", None)
         if sidebar_activity_job is not None:
@@ -30039,6 +30222,8 @@ class KeywordApp(ctk.CTk):
             )
 
     def _start_home_keyword_writing(self, source: str, index: int) -> None:
+        if not self._set_writing_variant("writing"):
+            return
         if self.home_reference_launch_context:
             return
         if self.reference_collection_worker and self.reference_collection_worker.is_alive():
@@ -32141,6 +32326,8 @@ class KeywordApp(ctk.CTk):
             self._worker_is_running(getattr(self, name, None))
             for name in writing_worker_names
         )
+        panel = self.__dict__.get("tistory_v2_panel")
+        writing_running = writing_running or bool(panel and panel.busy) or bool(self.__dict__.get("writing_v2_publish_pending"))
         if not str(getattr(self, "active_automation_upload_item_id", "") or "").strip():
             writing_running = writing_running or any(
                 self._worker_is_running(getattr(self, name, None))
@@ -32157,8 +32344,8 @@ class KeywordApp(ctk.CTk):
             )
         )
         return {
-            "writing": writing_running,
-            "tistory_v2": bool(getattr(getattr(self, "tistory_v2_panel", None), "busy", False)),
+            "writing": writing_running and self.__dict__.get("writing_variant", "writing") != "tistory_v2",
+            "tistory_v2": writing_running and self.__dict__.get("writing_variant", "writing") == "tistory_v2",
             "naver_blog": self._worker_is_running(
                 getattr(self, "naver_blog_worker", None)
             ),
@@ -32548,6 +32735,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=28, weight="bold"),
         )
         page_title.grid(row=0, column=0, sticky="w")
+        self.writing_page_title = page_title
 
         control_viewport = ctk.CTkFrame(header, fg_color="transparent")
         control_viewport.grid(row=1, column=0, pady=(8, 0), sticky="ew")
@@ -32597,6 +32785,7 @@ class KeywordApp(ctk.CTk):
 
         target_row = ctk.CTkFrame(auto_row, fg_color="transparent")
         target_row.grid(row=0, column=1, padx=(10, 0), sticky="w")
+        self.writing_target_row = target_row
         active_platform = normalize_writing_prompt_active_target(
             self.wordpress_settings.home_target_platform
             or self.wordpress_settings.writing_prompt_active_target
@@ -32652,6 +32841,7 @@ class KeywordApp(ctk.CTk):
 
         selectors = ctk.CTkFrame(auto_row, fg_color="transparent")
         selectors.grid(row=0, column=2, padx=(5, 0), sticky="e")
+        self.writing_selector_row = selectors
         ctk.CTkLabel(selectors, text="썸네일", text_color=palette["muted"], font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=0, padx=(0, 5))
         thumbnail_values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
         self.writing_thumbnail_menu = ctk.CTkOptionMenu(
@@ -32914,7 +33104,7 @@ class KeywordApp(ctk.CTk):
 
     def _refresh_writing_control_canvas(self) -> None:
         canvas = self.__dict__.get("writing_control_canvas")
-        if canvas is None or not canvas.winfo_exists() or self.current_page != "writing":
+        if canvas is None or not canvas.winfo_exists() or self.current_page not in {"writing", "tistory_v2"}:
             return
         # A canvas built on a hidden page can show an empty strip on macOS
         # until it is repainted after the page becomes visible.
@@ -32922,6 +33112,8 @@ class KeywordApp(ctk.CTk):
         self._layout_writing_control_row()
 
     def _selected_writing_targets(self) -> list[str]:
+        if self._is_tistory_v2_writing():
+            return ["tistory"]
         return [platform for platform, variable in self.target_platform_vars.items() if variable.get()]
 
     def _arm_writing_auto_progress(self) -> bool:
@@ -32990,7 +33182,7 @@ class KeywordApp(ctk.CTk):
         if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
             return
         self._run_publish_pipeline()
-        if not (self.pipeline_worker and self.pipeline_worker.is_alive()):
+        if not (self.pipeline_worker and self.pipeline_worker.is_alive()) and not self.__dict__.get("writing_v2_publish_pending"):
             self._stop_writing_auto_progress()
 
     def _is_widget_inside_scroll_frame(self, widget, scroll_frame: ctk.CTkScrollableFrame) -> bool:
@@ -33108,7 +33300,7 @@ class KeywordApp(ctk.CTk):
             "writing": ("writing_scroll",),
             "automation": ("automation_list",),
             "naver_blog": ("naver_blog_scroll",),
-            "tistory_v2": ("tistory_v2_scroll",),
+            "tistory_v2": ("writing_scroll",),
             "naver_kin": ("naver_kin_scroll",),
             "public_data": ("public_data_scroll",),
             "prompts": ("prompts_scroll",),
@@ -40515,7 +40707,7 @@ class KeywordApp(ctk.CTk):
             highlightthickness=0,
             padx=4,
             pady=4,
-            font=("Helvetica", 14),
+            font=(ui_font_family("Helvetica"), 14),
         )
         scrollbar = ctk.CTkScrollbar(
             frame, orientation="vertical", command=text_box.yview, width=10,
@@ -40588,7 +40780,7 @@ class KeywordApp(ctk.CTk):
             editor_frame, wrap="word", undo=True, maxundo=100,
             bg=palette["input"], fg=palette["text"], insertbackground=palette["text"],
             selectbackground=palette["accent"], relief="flat", borderwidth=0,
-            highlightthickness=0, padx=4, pady=4, font=("Helvetica", 16),
+            highlightthickness=0, padx=4, pady=4, font=(ui_font_family("Helvetica"), 16),
         )
         self.prompt_expanded_box = editor
         editor.grid(row=0, column=0, padx=(12, 0), pady=12, sticky="nsew")
@@ -42724,7 +42916,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color=("#cbd8ea", "#314761"),
             fg_color=("#f7f9fc", "#0c1525"),
-            font=ctk.CTkFont(family="Menlo", size=13),
+            font=ctk.CTkFont(family=ui_font_family("Menlo"), size=13),
             wrap="word",
         )
         self.tistory_ads_code_box.grid(
@@ -43534,6 +43726,7 @@ class KeywordApp(ctk.CTk):
         self.reference_count_label.grid(row=5, column=0, padx=24, pady=(0, 10), sticky="e")
 
         inline_image_card = ctk.CTkFrame(keyword_card, fg_color="#111826", corner_radius=16)
+        self.writing_inline_image_card = inline_image_card
         inline_image_card.grid(row=6, column=0, padx=24, pady=(0, 14), sticky="ew")
         inline_image_card.grid_columnconfigure(1, weight=1)
         inline_image_card.grid_columnconfigure(2, weight=1)
@@ -43551,6 +43744,10 @@ class KeywordApp(ctk.CTk):
             command=self._on_inline_images_enabled_changed,
         )
         self.writing_inline_images_checkbox.grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        self.writing_v2_image_note = ctk.CTkLabel(
+            keyword_card, text="V2 본문 이미지: 최종 수정한 글로 슬라이드 10장을 만들고, 2장씩 콜라주 5개로 넣습니다.\n이미지 크기는 슬라이드 편집에서 설정합니다(기본 600×300). 첫 두 장만 위키 사진, 나머지는 공통 스타일입니다.",
+            anchor="w", justify="left", wraplength=650, text_color=self._theme_palette()["muted"],
+        )
 
         ctk.CTkLabel(
             inline_image_card,
@@ -43925,6 +44122,7 @@ class KeywordApp(ctk.CTk):
         self._refresh_thumbnail_preset_buttons()
 
         preview_card = ctk.CTkFrame(publish_card, fg_color=self._theme_palette()["panel"], corner_radius=18)
+        self.writing_design_preview_card = preview_card
         preview_card.grid(row=0, column=0, padx=18, pady=(10, 16), sticky="ew")
         preview_card.grid_columnconfigure(0, weight=1)
         preview_card.grid_columnconfigure(1, weight=1)
@@ -43942,6 +44140,7 @@ class KeywordApp(ctk.CTk):
             else:
                 self.writing_cardnews_preview_canvas = canvas
         preview_card.bind("<Configure>", lambda event: self._layout_publish_design_previews(preview_card, event.width), add="+")
+        self.writing_v2_editor_host = publish_card
 
         (thumbnail_workspace, thumbnail_header, preview_panel, editor_panel,
          self.thumbnail_preview_canvas) = self._create_writing_design_workspace(
@@ -44951,6 +45150,8 @@ class KeywordApp(ctk.CTk):
         if self._thumbnail_sync_job is not None:
             self.after_cancel(self._thumbnail_sync_job)
             self._thumbnail_sync_job = None
+        if self._is_tistory_v2_writing():
+            self._switch_thumbnail_preset(self.tistory_v2_controls.selection()["thumbnail"] or 0, save=False)
         try:
             self._sync_thumbnail_text_if_needed()
         except Exception:
@@ -44964,6 +45165,13 @@ class KeywordApp(ctk.CTk):
             )
         self._set_writing_progress(4, "글 검토가 끝났습니다. 썸네일과 카드뉴스를 준비해 주세요.", 0.03)
         self._open_writing_section("publish", complete_previous=True)
+        if self._is_tistory_v2_writing():
+            from tistory_v2_publish import deck_matches_article
+            panel = self.tistory_v2_panel
+            panel.offer_article()
+            if not panel.busy and not deck_matches_article(panel.deck, **self._v2_article_source()):
+                if not panel.deck or self.writing_auto_run_active:
+                    panel.prepare_article(confirm=False)
 
     def _set_writing_section_open(self, section_key: str, opened: bool) -> None:
         body = self.writing_section_bodies.get(section_key)
@@ -44975,6 +45183,10 @@ class KeywordApp(ctk.CTk):
             self.writing_section_cards[section_key].grid()
             body.grid()
             button.configure(text="접기")
+            if section_key == "publish" and self._is_tistory_v2_writing():
+                panel = self.__dict__.get("tistory_v2_panel")
+                if panel is not None:
+                    panel.offer_article()
         else:
             body.grid_remove()
             self.writing_section_cards[section_key].grid_remove()
@@ -45225,13 +45437,24 @@ class KeywordApp(ctk.CTk):
                 text="기본 세트 지정됨" if is_default else "기본 세트 지정",
                 state="disabled" if is_default else "normal",
             )
+        controls = self.__dict__.get("tistory_v2_controls")
+        if self._is_tistory_v2_writing() and controls is not None and hasattr(self, "set_default_thumbnail_button"):
+            is_v2_default = active == controls.selection()["thumbnail"]
+            self.set_default_thumbnail_button.configure(
+                text="V2 썸네일 지정됨" if is_v2_default else "V2 썸네일 지정",
+                state="disabled" if is_v2_default else "normal",
+            )
 
     def _layout_publish_design_previews(self, host, width: int) -> None:
-        columns = 2 if width / host._get_widget_scaling() >= 600 else 1
-        if getattr(host, "_preview_columns", None) == columns:
+        is_v2 = self._is_tistory_v2_writing()
+        columns = 2 if not is_v2 and width / host._get_widget_scaling() >= 600 else 1
+        if getattr(host, "_preview_columns", None) == (columns, is_v2):
             return
-        host._preview_columns = columns
+        host._preview_columns = (columns, is_v2)
         for index, panel in enumerate(self.writing_design_preview_panels):
+            if is_v2 and index == 1:
+                panel.grid_remove()
+                continue
             panel.grid(row=index // columns, column=index % columns, padx=16, pady=16, sticky="n")
         host.grid_columnconfigure(1, weight=1 if columns == 2 else 0)
 
@@ -45508,6 +45731,11 @@ class KeywordApp(ctk.CTk):
             self._save_ui_state()
 
     def _set_default_thumbnail_preset(self) -> None:
+        if self._is_tistory_v2_writing() and self.current_page == "tistory_v2":
+            self._save_active_thumbnail_preset()
+            self.tistory_v2_controls.select_thumbnail(self.active_thumbnail_preset_index)
+            self.publish_status_label.configure(text=f"V2 발행 썸네일 {self.active_thumbnail_preset_index + 1}번을 지정했습니다.")
+            return
         self._save_active_thumbnail_preset()
         self.default_thumbnail_preset_index = normalize_thumbnail_preset_index(
             getattr(self, "active_thumbnail_preset_index", 0)
@@ -45873,7 +46101,7 @@ class KeywordApp(ctk.CTk):
         max_width = max(80, width - 90)
         font = self._thumbnail_measure_fonts.get(font_size)
         if font is None:
-            font = tkfont.Font(family="Apple SD Gothic Neo", size=font_size, weight="bold")
+            font = tkfont.Font(family=UI_FONT_FAMILY, size=font_size, weight="bold")
             self._thumbnail_measure_fonts[font_size] = font
             if len(self._thumbnail_measure_fonts) > 12:
                 oldest_size = next(iter(self._thumbnail_measure_fonts))
@@ -46349,11 +46577,11 @@ class KeywordApp(ctk.CTk):
             30,
             text=f"{index + 1} / {total}",
             fill="#6b7280",
-            font=("Apple SD Gothic Neo", 12, "bold"),
+            font=(UI_FONT_FAMILY, 12, "bold"),
             justify="center",
         )
 
-        heading_font = ("Apple SD Gothic Neo", font_size, "bold")
+        heading_font = (UI_FONT_FAMILY, font_size, "bold")
         heading_y = height * 0.38
         if shadow_mode != "없음":
             offset = 2 if shadow_mode == "약한 그림자" else 4
@@ -46404,7 +46632,7 @@ class KeywordApp(ctk.CTk):
             (summary_top + summary_bottom) / 2,
             text=summary_text,
             fill="#1f2937",
-            font=("Apple SD Gothic Neo", 14, "bold"),
+            font=(UI_FONT_FAMILY, 14, "bold"),
             justify="center",
             width=width - 86,
         )
@@ -46414,7 +46642,7 @@ class KeywordApp(ctk.CTk):
                 height * 0.9,
                 text=signature,
                 fill=border_color,
-                font=("Apple SD Gothic Neo", max(10, round(min(width, height) * 0.029)), "bold"),
+                font=(UI_FONT_FAMILY, max(10, round(min(width, height) * 0.029)), "bold"),
                 anchor="center",
                 width=width - 72,
                 justify="center",
@@ -46473,7 +46701,7 @@ class KeywordApp(ctk.CTk):
         preview_text = "\n".join(text_lines) if text_lines is not None else self._wrap_thumbnail_text(text_value, width, font_size)
         center_x = width / 2
         center_y = height / 2
-        font = ("Apple SD Gothic Neo", font_size, "bold")
+        font = (UI_FONT_FAMILY, font_size, "bold")
 
         if shadow_mode != "없음":
             shadow_offset = 3 if shadow_mode == "약한 그림자" else 7
@@ -46888,6 +47116,10 @@ class KeywordApp(ctk.CTk):
         return True
 
     def _ensure_cardnews_ready_for_publish(self) -> bool:
+        if self._is_tistory_v2_writing():
+            # Ten slides are rendered off the UI thread from the final edited
+            # article by PublishPipelineWorker, not the legacy four-card path.
+            return True
         provider = self.writing_inline_images_provider_menu.get() if hasattr(self, "writing_inline_images_provider_menu") else ""
         enabled = self.inline_images_enabled_var.get() if hasattr(self, "inline_images_enabled_var") else False
         if not enabled or provider != "카드뉴스 생성":
@@ -47049,7 +47281,7 @@ class KeywordApp(ctk.CTk):
         return "\n".join(elements)
 
     def _wrap_text_for_svg(self, text: str, max_width: int, font_size: int, max_lines: int) -> list[str]:
-        font = tkfont.Font(family="Apple SD Gothic Neo", size=font_size, weight="bold")
+        font = tkfont.Font(family=UI_FONT_FAMILY, size=font_size, weight="bold")
         words = list(text.strip()) if not re.search(r"\s", text.strip()) else text.strip().split()
         lines: list[str] = []
         current = ""
@@ -47082,7 +47314,7 @@ class KeywordApp(ctk.CTk):
         stroke_color = self._thumbnail_color_value(self.thumbnail_text_stroke_menu.get())
         shadow_mode = self.thumbnail_shadow_menu.get()
         lines = self._thumbnail_text_lines(text_value, width, font_size)
-        font = tkfont.Font(family="Apple SD Gothic Neo", size=font_size, weight="bold")
+        font = tkfont.Font(family=UI_FONT_FAMILY, size=font_size, weight="bold")
         line_height = max(font_size * 1.18, font.metrics("linespace") * 0.92)
         center_x = width / 2
         first_y = (height / 2) - ((len(lines) - 1) * line_height / 2)
@@ -47533,9 +47765,107 @@ class KeywordApp(ctk.CTk):
         self._update_quick_status("워드프레스 연결 전", "검사 버튼으로 실제 연결을 확인해 주세요.", "#9da7ba")
         self.password_entry.focus()
 
+    def _is_tistory_v2_writing(self) -> bool:
+        return self.__dict__.get("writing_variant", "writing") == "tistory_v2"
+
+    def _v2_article_source(self) -> dict:
+        title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
+        body = self._get_current_article_html()
+        if body.strip() == "생성된 글이 여기에 표시됩니다. 내용을 직접 수정한 뒤 업로드할 수 있습니다.":
+            body = ""
+        from tistory_v2 import V2Store
+        source = {"title": title, "article_html": body,
+                  "keyword": self._selected_or_manual_keyword() or self.current_keyword or title}
+        plan = V2Store(DATA_DIR / "Tistory V2").preferences().get("article_summary_plan", {})
+        if not isinstance(plan, dict):
+            plan = {}
+        source["slide_summaries"] = (plan.get("slides") if
+            all(str(plan.get(key, "")).strip() == str(value).strip() for key, value in source.items()) else None)
+        return source
+
+    def _v2_slide_editor_finished(self, success: bool) -> None:
+        if not self.__dict__.get("writing_v2_publish_pending"):
+            return
+        self.writing_v2_publish_pending = False
+        if self.__dict__.get("writing_v2_pending_auto") and not (self.writing_auto_run_active and self.writing_auto_progress_var.get()):
+            return
+        if not success:
+            self._stop_writing_auto_progress()
+            return
+        try:
+            self.tistory_v2_panel.snapshot_for_publish()
+        except ValueError as exc:
+            self._stop_writing_auto_progress()
+            messagebox.showwarning("슬라이드 확인", str(exc), parent=self)
+            return
+        self._run_publish_pipeline()
+
+    def _set_writing_variant(self, variant: str) -> bool:
+        previous = self.__dict__.get("writing_variant", "writing")
+        if previous != variant:
+            active = self._sidebar_activity_map()
+            with self.result_queue.mutex:
+                queued = any(str(event[0]).startswith(("article_", "reference_collect_", "publish_", "tistory_automation_", "daum_", "signal_", "loword_", "newneek_", "analysis_", "benchmark_"))
+                             for event in self.result_queue.queue)
+            if active.get("writing") or active.get("tistory_v2") or queued:
+                messagebox.showinfo("글쓰기 진행 중", "현재 글쓰기 작업을 마친 뒤 일반 글쓰기와 티스토리 V2를 전환해 주세요.", parent=self)
+                return False
+        self.writing_variant = variant
+        is_v2 = variant == "tistory_v2"
+        if is_v2 and self.__dict__.get("tistory_v2_controls") is None:
+            from tistory_v2_writing import TistoryV2WritingControls
+            self.tistory_v2_controls = TistoryV2WritingControls(self.writing_control_row, self, sys.modules[__name__])
+            self._tag_mousewheel_descendants(self.tistory_v2_controls)
+        if is_v2 and self.__dict__.get("tistory_v2_panel") is None:
+            from tistory_v2_ui import TistoryV2Panel
+            self.tistory_v2_panel = TistoryV2Panel(
+                self.writing_v2_editor_host, self, DATA_DIR / "Tistory V2",
+                require_google_chrome_executable, None,
+                workflow=self.tistory_v2_controls.workflow,
+                article_provider=self._v2_article_source, on_finished=self._v2_slide_editor_finished)
+            self._tag_mousewheel_descendants(self.tistory_v2_panel)
+        self.writing_page_title.configure(text="티스토리 V2" if is_v2 else "블로그글쓰기")
+        if is_v2:
+            self.writing_target_row.grid_remove()
+            self.writing_selector_row.grid_remove()
+            self.writing_prompt_menu.grid_remove()
+            self.tistory_v2_controls.refresh()
+            self.tistory_v2_controls.grid(row=0, column=1, columnspan=2, padx=(10, 0), sticky="ew")
+            self.writing_inline_image_card.grid_remove()
+            self.writing_v2_image_note.grid(row=6, column=0, padx=24, pady=(0, 14), sticky="ew")
+            self.tistory_v2_panel.grid(row=1, column=0, padx=6, pady=(0, 16), sticky="ew")
+            self.writing_reference_protection_switch.grid_remove()
+            self.queue_post_button.configure(state="disabled")
+            if previous != variant:
+                self._writing_standard_thumbnail_index = self.active_thumbnail_preset_index
+                self._switch_thumbnail_preset(self.tistory_v2_controls.selection()["thumbnail"] or 0, save=False)
+        else:
+            controls = self.__dict__.get("tistory_v2_controls")
+            if controls is not None:
+                controls.grid_remove()
+            self.writing_target_row.grid()
+            self.writing_selector_row.grid()
+            self.writing_prompt_menu.grid()
+            self.writing_v2_image_note.grid_remove()
+            self.writing_inline_image_card.grid()
+            panel = self.__dict__.get("tistory_v2_panel")
+            if panel is not None:
+                panel.grid_remove()
+            self.writing_design_preview_card.grid()
+            self.writing_reference_protection_switch.grid()
+            self.queue_post_button.configure(state="normal")
+            if previous != variant:
+                self._switch_thumbnail_preset(self.__dict__.get("_writing_standard_thumbnail_index", self.default_thumbnail_preset_index), save=False)
+        self._layout_publish_design_previews(self.writing_design_preview_card, self.writing_design_preview_card.winfo_width())
+        self._refresh_thumbnail_preset_buttons()
+        self._layout_writing_control_row()
+        return True
+
     def _switch_page(self, page_name: str) -> None:
         if page_name not in self._page_frame_map():
             page_name = "home"
+        if page_name in {"writing", "tistory_v2"} and not self._set_writing_variant(page_name):
+            return
         self.current_page = page_name
         refresh_sidebar_styles = getattr(
             self,
@@ -47547,16 +47877,6 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "_apply_sidebar_menu_icons"):
             self._apply_sidebar_menu_icons()
         self._show_only_page_frame(page_name)
-        if page_name == "tistory_v2" and self.tistory_v2_panel is None:
-            from tistory_v2_ui import TistoryV2Panel
-            self.tistory_v2_panel = TistoryV2Panel(
-                self.tistory_v2_page, self, DATA_DIR / "Tistory V2",
-                require_google_chrome_executable, self._insert_tistory_v2_images,
-            )
-            self.tistory_v2_panel.grid(row=0, column=0, sticky="nsew")
-            self.tistory_v2_scroll = self.tistory_v2_panel.scroll
-            self._tag_mousewheel_descendants(self.tistory_v2_panel)
-            self._tag_text_input_descendants(self.tistory_v2_panel)
         if page_name == "home":
             self._refresh_home_blog_menus()
             self._layout_home_control_card()
@@ -47569,7 +47889,7 @@ class KeywordApp(ctk.CTk):
             self._render_home_adsense_summary()
             self.after(80, self._load_home_dashboard_keywords)
             self.after(650, self._start_adsense_refresh)
-        if page_name == "writing":
+        if page_name in {"writing", "tistory_v2"}:
             self._refresh_home_blog_menus()
             self.writing_control_canvas.configure(background=self._theme_palette()["card"])
             self.after(80, self._refresh_writing_control_canvas)
@@ -51399,6 +51719,9 @@ class KeywordApp(ctk.CTk):
             self.after(120, lambda keyword=selected_keyword: self._auto_collect_reference_for_keyword(keyword))
 
     def _writing_keyword_selection_locked(self) -> bool:
+        panel = self.__dict__.get("tistory_v2_panel")
+        if (panel and panel.busy) or self.__dict__.get("writing_v2_publish_pending"):
+            return True
         if (
             self.writing_auto_run_active
             or self.home_reference_launch_context
@@ -51508,7 +51831,8 @@ class KeywordApp(ctk.CTk):
 
         settings = self._read_wordpress_settings()
         if (
-            settings.inline_images_enabled
+            not self._is_tistory_v2_writing()
+            and settings.inline_images_enabled
             and settings.inline_images_provider == INLINE_IMAGES_PROVIDER_MANUAL
         ):
             settings.inline_images_manual_paths = usable_inline_manual_image_paths(
@@ -51529,6 +51853,14 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings = settings
         AppStateStore.save(settings)
 
+        if self._is_tistory_v2_writing():
+            try:
+                settings = self.tistory_v2_controls.execution_settings(settings)
+            except ValueError as exc:
+                self._stop_writing_auto_progress()
+                messagebox.showwarning("V2 글쓰기 설정", str(exc))
+                return
+
         model_error = writing_model_validation_error(settings)
         if model_error:
             self._stop_writing_auto_progress()
@@ -51548,10 +51880,14 @@ class KeywordApp(ctk.CTk):
             keyword,
             reference_text,
             self.result_queue,
+            tistory_v2_slides=self._is_tistory_v2_writing(),
         )
         self.article_worker.start()
 
     def _add_current_post_to_automation_queue(self) -> None:
+        if self._is_tistory_v2_writing():
+            messagebox.showinfo("티스토리 V2", "V2 슬라이드·콜라주는 이 화면의 [썸네일 완료 후 업로드]로 진행해 주세요. 기존 자동화 대기열에는 일반 글만 추가됩니다.")
+            return
         settings = self._read_wordpress_settings()
         if settings.inline_images_enabled and settings.inline_images_provider == "카드뉴스 생성":
             if not self._ensure_cardnews_ready_for_publish():
@@ -52550,11 +52886,37 @@ class KeywordApp(ctk.CTk):
         if not article_html.strip():
             messagebox.showwarning("생성 필요", "먼저 글 작성 단계를 완료해 주세요.")
             return
-        if self.pipeline_worker and self.pipeline_worker.is_alive():
+        if (self.pipeline_worker and self.pipeline_worker.is_alive()) or (
+            self.tistory_automation_worker and self.tistory_automation_worker.is_alive()
+        ):
             messagebox.showinfo("진행 중", "현재 업로드 파이프라인이 실행 중입니다.")
             return
 
-        settings = self._read_wordpress_settings()
+        base_settings = self._read_wordpress_settings()
+        settings = base_settings
+        v2_deck = None
+        if self._is_tistory_v2_writing():
+            try:
+                settings = self.tistory_v2_controls.execution_settings(base_settings)
+            except ValueError as exc:
+                messagebox.showwarning("V2 발행 설정", str(exc))
+                return
+            from tistory_v2_publish import deck_matches_article
+            panel = self.tistory_v2_panel
+            if panel.busy:
+                self.writing_v2_publish_pending = True
+                self.writing_v2_pending_auto = self.writing_auto_run_active
+                self.publish_status_label.configure(text="슬라이드 작업 완료 후 현재 편집한 10장으로 업로드합니다.")
+                return
+            if not deck_matches_article(panel.deck, **self._v2_article_source()):
+                if panel.deck and not self.writing_auto_run_active:
+                    messagebox.showwarning("슬라이드 확인", "현재 글과 슬라이드 원본이 다릅니다. ④ 슬라이드 편집에서 현재 본문으로 10장을 다시 만들어 주세요.", parent=self)
+                    return
+                if panel.prepare_article(confirm=False):
+                    self.writing_v2_publish_pending = True
+                    self.writing_v2_pending_auto = self.writing_auto_run_active
+                return
+            v2_deck = panel.snapshot_for_publish()
         if not settings.target_platforms:
             messagebox.showerror("입력 오류", "글을 쓸 블로그를 최소 1개 이상 선택해 주세요.")
             return
@@ -52575,14 +52937,17 @@ class KeywordApp(ctk.CTk):
                 "블로그스팟 발행을 선택했다면 환경설정에서 블로그 주소를 입력하고 로그인/프로필 확인을 실행해 주세요.",
             )
             return
-        self.wordpress_settings = settings
-        AppStateStore.save(settings)
+        self.wordpress_settings = base_settings
+        AppStateStore.save(base_settings)
         try:
             title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
-            thumbnail_path = self._export_default_thumbnail_png(
-                self._generated_thumbnail_export_path(title),
-                title_override=title,
-            )
+            if self._is_tistory_v2_writing():
+                thumbnail_path = self.tistory_v2_controls.export_thumbnail(title, self._generated_thumbnail_export_path(title))
+            else:
+                thumbnail_path = self._export_default_thumbnail_png(
+                    self._generated_thumbnail_export_path(title),
+                    title_override=title,
+                )
         except Exception as exc:
             messagebox.showerror("썸네일 준비 실패", str(exc))
             return
@@ -52602,6 +52967,7 @@ class KeywordApp(ctk.CTk):
         self.publish_status_label.configure(text="업로드 작업을 시작했습니다. 잠시만 기다려 주세요.", text_color="#6dadff")
         self.last_published_url = ""
         self.last_published_urls = {}
+        self.writing_v2_run_settings = settings if self._is_tistory_v2_writing() else None
         self.writing_completion_platforms = [
             platform
             for platform in settings.target_platforms
@@ -52624,10 +52990,16 @@ class KeywordApp(ctk.CTk):
             meta_description=meta_description,
             result_queue=self.result_queue,
             reference_articles=self._current_reference_article_sources(),
+            tistory_v2=self._is_tistory_v2_writing(),
+            tistory_v2_keyword=self._v2_article_source()["keyword"] if v2_deck is not None else self._selected_or_manual_keyword() or self.current_keyword,
+            tistory_v2_deck=v2_deck,
         )
         self.pipeline_worker.start()
 
     def _retry_tistory_automation(self) -> None:
+        if self._is_tistory_v2_writing():
+            self._run_publish_pipeline()
+            return
         if self.tistory_automation_worker and self.tistory_automation_worker.is_alive():
             messagebox.showinfo("진행 중", "티스토리 자동입력이 이미 진행 중입니다.")
             return
@@ -53970,7 +54342,24 @@ class KeywordApp(ctk.CTk):
                             self._reset_writing_accordion_state()
                         else:
                             self._show_writing_complete_dialog()
+                elif event_type == "tistory_editor_attention":
+                    # The worker still owns the failed Chrome/profile. Do not
+                    # free it or permit another upload while the user inspects it.
+                    self._tistory_v2_attention_reported = True
+                    self._stop_writing_auto_progress()
+                    self.publish_progress_bar.stop()
+                    self.publish_status_label.configure(
+                        text=f"V2 입력 검사 중단: {payload} · Chrome을 열어 두었습니다.", text_color="#ffb86b")
+                    self._set_writing_progress(4, f"V2 입력 검사 중단: {payload} · Chrome에서 확인 후 창을 닫아 주세요.", state="error")
+                    messagebox.showwarning(
+                        "티스토리 V2 입력 확인 필요",
+                        f"{payload}\n\n실패한 Chrome 창을 열어 두었습니다. "
+                        "내용을 확인한 후 해당 Chrome 창을 닫아 주세요. 자동 저장·발행이나 재시도는 하지 않습니다.",
+                    )
                 elif event_type == "tistory_automation_error":
+                    attention_reported = getattr(self, "_tistory_v2_attention_reported", False)
+                    self._tistory_v2_attention_reported = False
+                    v2_failed = getattr(self.tistory_automation_worker, "tistory_v2_slide_paths", None) is not None
                     self._refresh_shared_tistory_usage_async()
                     self._stop_writing_auto_progress()
                     if hasattr(self, "tistory_auto_publish_var"):
@@ -53990,11 +54379,13 @@ class KeywordApp(ctk.CTk):
                         self.tistory_automation_worker = None
                         cleanup_tistory_automation_files()
                         self._set_writing_progress(4, f"티스토리 작업에 실패했습니다: {payload}", state="error")
-                        messagebox.showwarning(
-                            "티스토리 자동입력 실패",
-                            "전용 Chrome의 로그인 상태 또는 티스토리 화면 구조 때문에 자동입력이 막혔을 수 있습니다.\n\n"
-                            f"{payload}",
-                        )
+                        if not attention_reported:
+                            messagebox.showwarning(
+                                "티스토리 V2 입력 실패" if v2_failed else "티스토리 자동입력 실패",
+                                ("슬라이드 입력 또는 본문 검증 중 작업이 중단되었습니다.\n\n" if v2_failed else
+                                 "전용 Chrome의 로그인 상태 또는 티스토리 화면 구조 때문에 자동입력이 막혔을 수 있습니다.\n\n")
+                                + str(payload),
+                            )
                 elif event_type == "naver_blog_progress":
                     if hasattr(self, "naver_blog_status_label"):
                         self.naver_blog_status_label.configure(text=f"현재 상태: {payload}", text_color="#6dadff")
@@ -54403,6 +54794,19 @@ class KeywordApp(ctk.CTk):
             payload.get("html", ""),
             self.generated_article_title,
         )
+        if self._is_tistory_v2_writing():
+            from tistory_v2 import V2Store
+            store = V2Store(DATA_DIR / "Tistory V2")
+            preferences = store.preferences()
+            if payload.get("slide_summaries"):
+                preferences["article_summary_plan"] = {
+                    "title": self.generated_article_title, "article_html": self.generated_article_html,
+                    "keyword": self._selected_or_manual_keyword() or self.current_keyword,
+                    "slides": copy.deepcopy(payload["slide_summaries"]),
+                }
+            else:
+                preferences.pop("article_summary_plan", None)
+            store.save_preferences(preferences)
         random_border_color = self._randomize_thumbnail_border_color(refresh_preview=False)
         self.article_progress_bar.stop()
         self.article_progress_bar.configure(mode="determinate")
@@ -54413,6 +54817,10 @@ class KeywordApp(ctk.CTk):
             text=f"글 생성 완료 - {payload.get('provider', 'AI')}로 작성되었습니다. 썸네일 테두리는 {random_border_color}으로 랜덤 적용되었습니다."
         )
         self._render_generated_article_preview()
+        if payload.get("slide_summary_warning"):
+            self.article_summary_label.configure(
+                text="본문은 완성되었습니다. 슬라이드 요약은 ④에서 ‘10장 만들기’를 눌러 다시 생성해 주세요.",
+                text_color="#ffb86b")
         self._set_writing_progress(
             4,
             "글 작성이 완료되었습니다. 내용을 확인하고 썸네일과 발행을 준비해 주세요.",
@@ -54580,6 +54988,10 @@ class KeywordApp(ctk.CTk):
                             or TISTORY_PROFILE_SCOPES[0]
                         ),
                         reference_articles=list(tistory.get("reference_articles") or []),
+                        tistory_v2_slide_paths=tistory.get("tistory_v2_slide_paths"),
+                        tistory_v2_source_credits=tistory.get("tistory_v2_source_credits", ""),
+                        tistory_v2_slide_size=tistory.get("tistory_v2_slide_size"),
+                        tistory_v2_slide_sizes=tistory.get("tistory_v2_slide_sizes"),
                     )
                     self.tistory_automation_worker.start()
                     tistory_worker_started = True

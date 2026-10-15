@@ -16,12 +16,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--theme", choices=("dark", "light"))
     parser.add_argument("--screenshots", type=Path)
+    parser.add_argument("--windows-dimmer", action="store_true",
+                        help="Exercise Windows-only dim refresh logic on this host (not native Windows rendering).")
+    parser.add_argument("--preview-v2-seconds", type=int, default=0,
+                        help="Keep the isolated V2 editor visible for manual visual inspection.")
     args = parser.parse_args()
     if not args.theme:
         for theme in ("dark", "light"):
             command = [sys.executable, __file__, "--theme", theme]
             if args.screenshots:
                 command.extend(["--screenshots", str(args.screenshots)])
+            if args.windows_dimmer:
+                command.append("--windows-dimmer")
             subprocess.run(command, check=True, timeout=150)
         return
 
@@ -31,12 +37,20 @@ def main() -> None:
         os.environ["BLOG_HELPER_DISABLE_UPDATES"] = "1"
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         import main as app_module
+        if args.windows_dimmer:
+            import modal_backdrop
+            real_dimmer = modal_backdrop.ModalDimmer
+            stack.enter_context(patch.object(
+                modal_backdrop, "ModalDimmer",
+                lambda root: real_dimmer(root, platform_name="win32"),
+            ))
         poll_result_queue = app_module.KeywordApp._poll_queue
 
         settings = app_module.WordPressSettings(
             app_theme="블랙테마" if args.theme == "dark" else "화이트테마",
             window_geometry="1500x1000",
             target_platforms=["wordpress", "tistory", "blogspot"],
+            tistory_profiles=[{"blog_url": "https://v2-first.tistory.com"}, {"blog_url": "https://v2-second.tistory.com"}],
         )
         stack.enter_context(patch.object(app_module.AppStateStore, "load", return_value=settings))
         for method in ("save", "update_fields"):
@@ -188,108 +202,440 @@ def main() -> None:
             app._switch_page("home")
             app.update()
             settle(900)
-            assert app.tistory_v2_panel is None  # no added startup work
+            assert app.tistory_v2_panel is None  # no separate workflow/startup work
+            original_article = app.article_editor.get("1.0", "end")
+            original_target = app.wordpress_settings.home_target_platform
+            original_default = app.default_thumbnail_preset_index
+            shared_topic_entry = app.topic_entry
             app._switch_page("tistory_v2")
             settle(250)
-            panel = app.tistory_v2_panel
-            assert panel.winfo_ismapped()
-            assert panel.palette == app._theme_palette()
+            assert app.current_page == "tistory_v2"
+            assert app._current_page_frame() is app.writing_page
+            assert app.writing_page.winfo_ismapped()
+            assert app.topic_entry is shared_topic_entry
+            assert tuple(app.writing_step_headers) == ("topic", "keyword", "article", "publish")
+            assert app.writing_page_title.cget("text") == "티스토리 V2"
+            assert app._current_primary_scroll_frame() is app.writing_scroll
             assert int(app.tistory_v2_nav_button.grid_info()["row"]) == int(app.naver_blog_nav_button.grid_info()["row"]) + 1
             assert app_module.SIDEBAR_MENU_DEFAULT_ICONS["tistory_v2"] == "type"
-            assert app._bootstrap_sidebar_icon_image("type", "#2563eb") is not None
-            panel.keyword_entry.insert(0, "서울")
-            panel.title_entry.insert(0, "서울 여행 기본 가이드")
-            panel.body_box.insert("1.0", "\n".join(f"서울 여행 준비 단계 {i}를 확인합니다." for i in range(1, 16)))
+            controls = app.tistory_v2_controls
+            assert len(controls.choices["profile"]) == 2
+            assert len(controls.choices["thumbnail"]) == 5
+            assert controls.menus["prompt_id"].get().startswith("티스토리 ·")
+            assert not app.writing_target_row.winfo_ismapped()
+            controls.menus["profile"].set("v2-second.tistory.com")
+            controls.changed("profile")
+            controls.select_thumbnail(3)
+            execution = controls.execution_settings(app.wordpress_settings)
+            assert execution.target_platforms == ["tistory"]
+            assert execution.tistory_active_profile == "티스토리 2"
+            assert execution.tistory_blog_url == "https://v2-second.tistory.com"
+            assert execution.inline_images_enabled is False
+            assert app.wordpress_settings.home_target_platform == original_target
+            assert app.default_thumbnail_preset_index == original_default
+
+            # Same generation worker receives the actual collected references.
+            with patch.object(app_module, "ArticleGenerationWorker") as worker, \
+                 patch.object(app_module, "writing_model_validation_error", return_value=""):
+                worker.return_value.is_alive.return_value = False
+                app._start_article_generation("여행", "서울", "실제로 수집한 참고내용")
+                args_used = worker.call_args.args
+                assert args_used[1:4] == ("여행", "서울", "실제로 수집한 참고내용")
+                assert args_used[0].title_prompt_template == execution.title_prompt_template
+                assert not args_used[0].inline_images_enabled
+                worker.return_value.start.assert_called_once()
+            app.article_worker = None
+            app.article_progress_bar.stop()
+
+            edited_body = "".join(f"<h2>수정한 소제목 {i}</h2><p>검토한 본문 {i}</p>" for i in range(10))
+            app.article_title_entry.delete(0, "end")
+            app.article_title_entry.insert(0, "검토한 서울 여행")
+            app.article_editor.delete("1.0", "end")
+            app.article_editor.insert("1.0", edited_body)
+            from tistory_v2 import V2Store
+            from tistory_v2_summary import validate_summaries
+            cached_summaries = [{"source_sections": [i + 1], "eyebrow": "핵심 요약", "title": f"간단한 요점 {i}",
+                                 "summary": "본문의 핵심만 짧게 정리합니다.", "bullets": ["주요 사항 확인"]}
+                                for i in range(10)]
+            validate_summaries(cached_summaries, "검토한 서울 여행", edited_body)
+            store = V2Store(app_module.DATA_DIR / "Tistory V2")
+            store.save_preferences({**store.preferences(), "article_summary_plan": {
+                **{key: value for key, value in app._v2_article_source().items() if key != "slide_summaries"},
+                "slides": cached_summaries,
+            }})
+            panel = app.tistory_v2_panel
+            assert panel.embedded
+            assert not isinstance(panel.scroll, app_module.ctk.CTkScrollableFrame)
+            assert not panel.connection_card.winfo_ismapped()
             panel.mode.set("수동 모드")
-            panel._mode_changed("수동 모드")
-            original_article = app.article_editor.get("1.0", "end")
-            panel._start("create")
-            for _ in range(40):
-                settle(100)
-                if panel.worker is None:
+            assert panel.prepare_article(confirm=False)
+            for _ in range(200):
+                settle(50)
+                if not panel.busy:
                     break
-            assert panel.worker is None and panel.deck
-            assert len(panel.deck["slides"]) > 1
-            assert app.article_editor.get("1.0", "end") == original_article
-            deck_directory = panel.store.deck_directory(panel.deck)
-            paths = sorted(deck_directory.glob("slide-*.png"))
-            assert len(paths) == len(panel.deck["slides"])
-            assert (deck_directory / "article.html").is_file()
-            assert panel._preview_image is not None
+            assert not panel.busy and len(panel.deck["slides"]) == 10
+            assert panel.deck["text_mode"] == "summary"
+            assert panel.deck["slides"][0]["summary"] == "본문의 핵심만 짧게 정리합니다."
+            panel.show_numbers.set(False)
+            panel._number_display_changed()
+            assert not panel.store.preferences()["show_numbers"]
+            assert not panel.deck["show_numbers"]
+            panel._load_deck(panel.store.load_deck(panel.deck["id"]))
+            assert not panel.show_numbers.get()
+            for entry, value in zip(panel.size_entries, (900, 600)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            assert panel._apply_image_size()
+            assert panel.store.preferences()["slide_size"] == [900, 600]
+            assert panel.deck["slide_size"] == [900, 600]
+            panel._load_deck(panel.store.load_deck(panel.deck["id"]))
+            assert [entry.get() for entry in panel.size_entries] == ["900", "600"]
+            panel.size_entries[0].delete(0, "end")
+            panel.size_entries[0].insert(0, "-1")
+            with patch("tistory_v2_ui.messagebox.showerror") as invalid_size:
+                assert not panel._apply_image_size()
+                invalid_size.assert_called_once()
+            assert panel.deck["slide_size"] == [900, 600]
+            panel.size_entries[0].delete(0, "end")
+            panel.size_entries[0].insert(0, "900")
+            # Legacy work remains 600×300 even when the last preference is larger.
+            legacy_deck = dict(panel.deck)
+            legacy_deck.pop("slide_size")
+            panel._load_deck(legacy_deck)
+            assert panel._output_size == (600, 300)
+            for entry, value in zip(panel.size_entries, (900, 600)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            assert panel._apply_image_size()
+            original_deck_id = panel.deck["id"]
+            # Editing the article invalidates its cached summary plan. Summarize
+            # only the changed final body, never regenerate the full article.
+            changed_body = edited_body + '<p>수정된 추가 조건을 보존합니다.</p>'
+            app.article_editor.insert('end', '<p>수정된 추가 조건을 보존합니다.</p>')
+            assert app._v2_article_source()['slide_summaries'] is None
+            with patch.object(app_module, 'writing_model_validation_error', return_value=''), \
+                 patch.object(panel.workflow, 'summarize', return_value=cached_summaries) as summarize, \
+                 patch.object(panel.workflow, 'generate') as generate:
+                assert panel.prepare_article(confirm=False)
+                for _ in range(200):
+                    settle(50)
+                    if not panel.busy:
+                        break
+                assert not panel.busy
+                summarize.assert_called_once()
+                assert changed_body in summarize.call_args.args[2]
+                generate.assert_not_called()
+            app.article_editor.delete('1.0', 'end')
+            app.article_editor.insert('1.0', edited_body)
+            # Cached summary plans are reused; the body is never regenerated.
+            import tistory_v2_ui as slide_ui
             from PIL import Image
-            chosen_photo = Path(directory) / "chosen-v2-photo.png"
-            Image.new("RGB", (400, 300), "#ee5533").save(chosen_photo)
-            import tistory_v2_ui
-            with patch.object(tistory_v2_ui.filedialog, "askopenfilename", return_value=str(chosen_photo)):
-                panel._local_photo()
-            assert panel.deck["slides"][0]["image"]["source"] == "내 이미지"
-            panel.slide_title_box.delete("1.0", "end")
-            panel.slide_title_box.insert("1.0", "개별 슬라이드 수정 확인")
-            panel._update_edit()
-            panel._move(1)
-            panel._move(-1)
-            assert panel.slide_title_box.get("1.0", "end").strip() == "개별 슬라이드 수정 확인"
-            saved_deck = panel.store.load_deck(panel.deck["id"])
-            assert saved_deck["slides"][0]["title"] == "개별 슬라이드 수정 확인"
-            fake_asset = {"path": str(chosen_photo), "title": "서울", "source": "위키백과", "source_page": "https://ko.wikipedia.org/wiki/서울"}
+            photo_path = Path(directory) / "v2-chosen-photo.png"
+            Image.new("RGB", (200, 100), "#bfd6ff").save(photo_path)
+            asset = {"path": str(photo_path), "source": "테스트 사진", "title": "직접 선택한 사진"}
             panel.mode.set("자동 모드")
-            panel._mode_changed("자동 모드")
-            with patch.object(tistory_v2_ui, "collect_wiki_images", return_value=([fake_asset], [])) as collect:
-                panel._start("create")
-                panel._start("create")  # repeat clicks must not create two jobs
-                for _ in range(40):
-                    settle(100)
-                    if panel.worker is None:
+            with patch.object(slide_ui, "collect_wiki_images", return_value=([asset, dict(asset)], [])) as collect, \
+                 patch.object(panel, "chrome_path_provider", return_value=Path("/fake/chrome")):
+                assert panel.prepare_article(confirm=False)
+                for _ in range(200):
+                    settle(50)
+                    if not panel.busy:
                         break
                 collect.assert_called_once()
-            assert panel.worker is None and panel.deck["images"]
-            assert all(slide["image"]["source"] == "위키백과" for slide in panel.deck["slides"])
-            paths = sorted(panel.store.deck_directory(panel.deck).glob("slide-*.png"))
+            assert not panel.busy and panel.deck["id"] != original_deck_id
+            assert panel.deck["slide_size"] == [900, 600]
+            with Image.open(panel.store.deck_directory(panel.deck) / "slide-01.png") as exported:
+                assert exported.size == (900, 600)
+            assert panel.store.load_deck(original_deck_id)["body"] == panel.deck["body"]
+            assert all(slide["image"] is not None for slide in panel.deck["slides"][:2])
+            assert all(slide["image"] is None for slide in panel.deck["slides"][2:])
+            panel._choose_photo("사진 없음")
+            assert panel.deck["slides"][0]["image"] is None
+            panel._choose_photo(next(iter(panel._image_labels)))
+            panel.layout_menu.set("사진 왼쪽")
+            panel.text_position_menus["text_horizontal"].set("오른쪽")
+            panel.text_position_menus["text_vertical"].set("아래")
+            panel._text_position_changed()
+            panel._move(2)
+            assert panel.text_position_menus["text_horizontal"].get() == "왼쪽"
+            assert panel.text_position_menus["text_vertical"].get() == "기본"
+            assert all(menu.cget("state") == "normal" for menu in panel.text_position_menus.values())
+            panel.text_position_menus["text_horizontal"].set("중앙")
+            panel.text_position_menus["text_vertical"].set("위")
+            panel._text_position_changed()
+            panel._move(-2)
+            assert panel.text_position_menus["text_horizontal"].get() == "오른쪽"
+            assert panel.text_position_menus["text_vertical"].get() == "아래"
+            panel.slide_title_box.delete("1.0", "end")
+            panel.slide_title_box.insert("1.0", "일괄 적용 전 입력한 문구")
+            panel._edited()
+            panel.text_position_menus["text_horizontal"].set("중앙")
+            panel.text_position_menus["text_vertical"].set("중앙")
+            assert panel.text_position_all_button.invoke()
+            assert panel._edit_job is None
+            assert panel.deck["slides"][0]["title"] == "일괄 적용 전 입력한 문구"
+            saved_bulk = panel.store.load_deck(panel.deck["id"])
+            assert all(slide["text_horizontal"] == "중앙" and slide["text_vertical"] == "중앙" for slide in saved_bulk["slides"])
+            assert all(slide["image"] is not None for slide in saved_bulk["slides"][:2])
+            assert all(slide["image"] is None for slide in saved_bulk["slides"][2:])
+            with patch.object(panel, "worker", object()):
+                assert not panel._apply_text_position_to_all()
+            with patch.object(panel, "_publishing", return_value=True):
+                assert not panel._apply_text_position_to_all()
+            # Keep individual override behavior after applying all ten at once.
+            panel._move(2)
+            panel.text_position_menus["text_horizontal"].set("왼쪽")
+            panel.text_position_menus["text_vertical"].set("위")
+            panel._text_position_changed()
+            panel._move(-2)
+            assert panel.text_position_menus["text_horizontal"].get() == "중앙"
+            assert panel.text_position_menus["text_vertical"].get() == "중앙"
+            app._open_writing_section("publish")
+            settle(200)
+            assert panel.winfo_ismapped() and panel.preview.winfo_ismapped()
+            # Editing then immediately uploading must flush the 350ms debounce.
+            panel.slide_title_box.delete("1.0", "end")
+            panel.slide_title_box.insert("1.0", "편집한 슬라이드 제목 유지")
+            panel._edited()
+            # Upload also commits valid pending dimension inputs without an Apply click.
+            for entry, value in zip(panel.size_entries, (1200, 600)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            saved_deck_id = panel.deck["id"]
+            controls.select_thumbnail(4)
+            assert panel.store.preferences()["deck_id"] == saved_deck_id
+            panel._save_preferences()
+            assert panel.store.preferences()["thumbnail"] == 4
+            with patch.object(app_module, "PublishPipelineWorker") as publisher, \
+                 patch.object(controls, "export_thumbnail", return_value=Path(directory) / "thumbnail.png"):
+                publisher.return_value.is_alive.return_value = False
+                app._run_publish_pipeline()
+                options = publisher.call_args.kwargs
+                assert options["tistory_v2"] is True
+                assert edited_body in options["article_html"]
+                assert options["settings"].target_platforms == ["tistory"]
+                assert options["settings"].tistory_active_profile == "티스토리 2"
+                assert options["tistory_v2_deck"]["id"] == saved_deck_id
+                assert options["tistory_v2_deck"]["slide_size"] == [1200, 600]
+                assert options["tistory_v2_deck"]["slides"][0]["title"] == "편집한 슬라이드 제목 유지"
+                assert options["tistory_v2_deck"]["slides"][0]["image"]["path"] == str(photo_path)
+                assert options["tistory_v2_deck"]["slides"][0]["layout"] == "사진 왼쪽"
+                assert options["tistory_v2_deck"]["slides"][0]["text_horizontal"] == "중앙"
+                assert options["tistory_v2_deck"]["slides"][0]["text_vertical"] == "중앙"
+                assert options["tistory_v2_deck"]["slides"][2]["text_horizontal"] == "왼쪽"
+                assert options["tistory_v2_deck"]["slides"][2]["text_vertical"] == "위"
+                assert panel._edit_job is None
+                publisher.return_value.start.assert_called_once()
+            app.pipeline_worker = None
+            app.publish_progress_bar.stop()
+            app.writing_auto_run_active = False
+            app.direct_keyword_start_keyword = ""
+            app.article_editor.insert("end", "본문이 바뀜")
+            with patch.object(app_module, "PublishPipelineWorker") as publisher, \
+                 patch.object(app_module.messagebox, "showwarning") as warning:
+                app._run_publish_pipeline()
+                publisher.assert_not_called()
+                warning.assert_called_once()
             app.article_editor.delete("1.0", "end")
-            app.article_editor.insert("1.0", "<p>기존 본문은 그대로 유지합니다.</p>")
-            with patch.object(app, "_writing_keyword_selection_locked", return_value=False):
-                app._insert_tistory_v2_images(panel.deck, paths)
-                app._insert_tistory_v2_images(panel.deck, paths)
-            inserted_article = app.article_editor.get("1.0", "end")
-            assert "기존 본문은 그대로 유지합니다." in inserted_article
-            assert inserted_article.count("blog-helper-tistory-v2-image") == len(paths)
-            assert len(app_module.extract_inline_image_paths(inserted_article)) == len(paths)
-            hydrated = app_module.hydrate_inline_image_placeholders(inserted_article, "서울")
-            assert hydrated.count("blog-helper-tistory-v2-image") == len(paths)
-            assert "https://ko.wikipedia.org/wiki/서울" in hydrated
-            native_html, native_files = app_module.prepare_tistory_native_attachment_html(hydrated, "서울")
-            assert len(native_files) == len(paths)
-            assert "이용 조건 확인 필요" in native_html
-            assert "https://ko.wikipedia.org/wiki/서울" in native_html
+            app.article_editor.insert("1.0", edited_body)
+            with patch.object(panel, "worker", object()):
+                app.writing_auto_progress_var.set(True)
+                app.writing_auto_run_active = True
+                app._auto_publish_current_article()
+                assert app.writing_v2_publish_pending
+                assert app.writing_auto_run_active  # waiting is not a failed upload
+            app._v2_slide_editor_finished(False)
+            assert not app.writing_v2_publish_pending
             assert not app.writing_auto_run_active
-            app.article_editor.delete("1.0", "end")
-            app.article_editor.insert("1.0", original_article.strip())
-            app._switch_page("tistory_v2")
-            settle(160)
-            assert app._current_primary_scroll_frame() is panel.scroll
-            assert panel.scroll in app._mousewheel_scroll_frames
-            panel._enlarge()
-            settle(160)
-            assert app_module.modal_dimmer(app).active
-            modal = app_module.modal_dimmer(app).dialogs[-1]
-            modal.grab_release()
-            modal.destroy()
-            settle(160)
-            assert not app_module.modal_dimmer(app).active
+            app.writing_auto_progress_var.set(False)
+            panel._load_deck(panel.store.load_deck(saved_deck_id))
+            assert panel.slide_title_box.get("1.0", "end").strip() == "편집한 슬라이드 제목 유지"
+            assert panel.text_position_menus["text_horizontal"].get() == "중앙"
+            assert panel.text_position_menus["text_vertical"].get() == "중앙"
+            assert controls.selection()["thumbnail"] == 4
+            # Loading an older deck must not replace the last actively selected
+            # defaults, even across panel/application reconstruction.
+            expected_defaults = {"text_horizontal": "왼쪽", "text_vertical": "위"}
+            assert panel.store.preferences()["text_position_defaults"] == expected_defaults
+            host = app_module.ctk.CTkFrame(app)
+            restarted_panel = slide_ui.TistoryV2Panel(
+                host, app, panel.store.directory, panel.chrome_path_provider, panel.apply_images,
+                workflow=panel.workflow, article_provider=app._v2_article_source)
+            assert restarted_panel._text_position_defaults == expected_defaults
+            assert restarted_panel.text_position_menus["text_horizontal"].get() == "중앙"
+            assert restarted_panel.text_position_menus["text_vertical"].get() == "중앙"
+            restarted_panel.destroy()
+            host.destroy()
+            assert panel.store.preferences()["text_position_defaults"] == expected_defaults
+            panel.text_position_menus["text_horizontal"].set("오른쪽")
+            panel.text_position_menus["text_vertical"].set("아래")
+            panel._text_position_changed()
+            previous_deck_path = panel.store.deck_directory(panel.deck) / "deck.json"
+            previous_bytes = previous_deck_path.read_bytes()
+            panel.mode.set("수동 모드")
+            assert panel.prepare_article(confirm=False)
+            for _ in range(200):
+                settle(50)
+                if not panel.busy:
+                    break
+            assert not panel.busy
+            assert panel.deck["id"] != saved_deck_id
+            assert all(slide["text_horizontal"] == "오른쪽" and slide["text_vertical"] == "아래" for slide in panel.deck["slides"])
+            assert previous_deck_path.read_bytes() == previous_bytes
+            # Reset uses this deck's initial defaults, not another task's style.
+            panel.text_position_menus["text_horizontal"].set("왼쪽")
+            panel._text_position_changed()
+            panel._reset_slide()
+            assert panel.text_position_menus["text_horizontal"].get() == "오른쪽"
+            assert panel.text_position_menus["text_vertical"].get() == "아래"
+            panel._load_deck(panel.store.load_deck(saved_deck_id))
+            assert panel.store.preferences()["text_position_defaults"] == {"text_horizontal": "왼쪽", "text_vertical": "아래"}
+            assert "랜덤" in panel.theme_menu.cget("values")
+            panel.theme.set("랜덤")
+            panel._theme_changed()
+            # Per-slide sizes coexist with the shared default and random colors.
+            for entry, value in zip(panel.size_entries, (900, 600)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            assert panel._apply_image_size()
+            for entry, value in zip(panel.slide_size_entries, (900, 900)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            assert panel.slide_size_apply_button.invoke()
+            assert panel.deck["slides"][0]["slide_size"] == [900, 900]
+            assert panel.deck["slide_size"] == [900, 600]
+            panel._move(1)
+            assert [entry.get() for entry in panel.slide_size_entries] == ["900", "600"]
+            for entry, value in zip(panel.slide_size_entries, (600, 900)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            assert panel._apply_slide_image_size()
+            panel._move(-1)
+            assert [entry.get() for entry in panel.slide_size_entries] == ["900", "900"]
+            panel.slide_size_entries[0].delete(0, "end")
+            panel.slide_size_entries[0].insert(0, "0")
+            with patch("tistory_v2_ui.messagebox.showerror") as invalid:
+                assert not panel._apply_slide_image_size()
+                invalid.assert_called_once()
+            assert panel.deck["slides"][0]["slide_size"] == [900, 900]
+            panel.slide_size_entries[0].delete(0, "end")
+            panel.slide_size_entries[0].insert(0, "900")
+            panel._start("export")
+            for _ in range(200):
+                settle(50)
+                if not panel.busy:
+                    break
+            assert not panel.busy
+            expected_sizes = [(900, 900), (600, 900)] + [(900, 600)] * 8
+            for index, expected in enumerate(expected_sizes):
+                with Image.open(panel.store.deck_directory(panel.deck) / f"slide-{index+1:02d}.png") as image:
+                    assert image.size == expected
+            assert panel.store.preferences()["slide_size"] == [900, 600]
+            mixed = panel.snapshot_for_publish()
+            assert slide_ui.deck_slide_sizes(mixed) == expected_sizes
+            host = app_module.ctk.CTkFrame(app)
+            restarted_panel = slide_ui.TistoryV2Panel(
+                host, app, panel.store.directory, panel.chrome_path_provider, panel.apply_images,
+                workflow=panel.workflow, article_provider=app._v2_article_source)
+            assert slide_ui.deck_slide_sizes(restarted_panel.deck) == expected_sizes
+            assert [entry.get() for entry in restarted_panel.slide_size_entries] == ["900", "900"]
+            restarted_panel.destroy()
+            host.destroy()
+            # A still-pending individual edit also reaches the upload snapshot.
+            for entry, value in zip(panel.slide_size_entries, (800, 400)):
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+            assert panel.snapshot_for_publish()["slides"][0]["slide_size"] == [800, 400]
+            panel._use_common_slide_size()
+            assert "slide_size" not in panel.deck["slides"][0]
+            assert panel.deck["slides"][1]["slide_size"] == [600, 900]
+            assert panel._apply_image_size()  # Explicit common Apply resets all ten.
+            assert all("slide_size" not in slide for slide in panel.deck["slides"])
+            assert slide_ui.deck_slide_sizes(panel.deck) == [(900, 600)] * 10
+            colors = [slide["color_theme"] for slide in panel.deck["slides"]]
+            assert len(set(colors)) > 1
+            assert panel.store.preferences()["theme"] == "랜덤"
+            assert colors[0] in panel.page_label.cget("text")
+            with patch("tistory_v2.random.choice", side_effect=AssertionError("기존 장의 랜덤 색상 변경 금지")):
+                panel._draw_preview()
+                panel._move(1)
+                panel._move(-1)
+                panel._reset_slide()
+                panel._load_deck(panel.store.load_deck(panel.deck["id"]))
+                assert [slide["color_theme"] for slide in panel.deck["slides"]] == colors
+                assert [slide["color_theme"] for slide in panel.snapshot_for_publish()["slides"]] == colors
+            host = app_module.ctk.CTkFrame(app)
+            restarted_panel = slide_ui.TistoryV2Panel(
+                host, app, panel.store.directory, panel.chrome_path_provider, panel.apply_images,
+                workflow=panel.workflow, article_provider=app._v2_article_source)
+            assert restarted_panel.theme.get() == "랜덤"
+            assert [slide["color_theme"] for slide in restarted_panel.deck["slides"]] == colors
+            restarted_panel.destroy()
+            host.destroy()
+            assert panel.prepare_article(confirm=False)
+            for _ in range(200):
+                settle(50)
+                if not panel.busy:
+                    break
+            assert not panel.busy and panel.deck["theme"] == "랜덤"
+            assert all(slide["color_theme"] in slide_ui.THEME_CHOICES for slide in panel.deck["slides"])
+            assert len({slide["color_theme"] for slide in panel.deck["slides"]}) > 1
+            # A fixed selection must restore a single consistent theme.
+            panel.theme.set("민트")
+            panel._theme_changed()
+            assert panel.deck["theme"] == "민트"
+            assert all("color_theme" not in slide for slide in panel.deck["slides"])
+            panel.theme.set("랜덤")
+            panel._theme_changed()
+            if args.preview_v2_seconds:
+                app.geometry("1450x1000+25+25")
+                settle(250)
+                canvas = app.writing_scroll._parent_canvas
+                y = panel.winfo_rooty() - app.writing_scroll.winfo_rooty()
+                canvas.yview_moveto(max(0, y / max(1, app.writing_scroll.winfo_height())))
+                print("Isolated V2 editor preview ready", flush=True)
+                settle(min(180, args.preview_v2_seconds) * 1000)
+                return
+            with patch.object(panel, "worker", object()), patch.object(app_module.messagebox, "showinfo"):
+                assert app._sidebar_activity_map()["tistory_v2"]
+                assert app._writing_keyword_selection_locked()
+                assert not app._set_writing_variant("writing")
+
+            # Changing menus must not change an in-flight run's image mode.
+            with patch.object(app, "_sidebar_activity_map", return_value={"tistory_v2": True}), \
+                 patch.object(app_module.messagebox, "showinfo"):
+                app._switch_page("writing")
+                assert app.current_page == "tistory_v2"
+            app.result_queue.put(("publish_done", {}))
+            with patch.object(app_module.messagebox, "showinfo"):
+                assert not app._set_writing_variant("writing")
+            with app.result_queue.mutex:
+                app.result_queue.queue.remove(("publish_done", {}))
+
             for geometry in ("1500x1000+30+35", "860x600+30+35"):
                 app.geometry(geometry)
                 settle(250)
-                assert int(panel.editor_card.grid_info()["row"]) == (0 if panel._wide else 1)
+                assert app.writing_page.winfo_ismapped()
                 assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
+            with patch.object(app_module.messagebox, "showinfo"):
+                app._switch_page("writing")
+            settle(160)
+            assert app.current_page == "writing", (app._sidebar_activity_map(), [event[0] for event in app.result_queue.queue])
+            assert app.writing_page.winfo_ismapped()
+            assert app.writing_page_title.cget("text") == "블로그글쓰기"
+            assert app.writing_target_row.winfo_ismapped()
+            assert app.topic_entry is shared_topic_entry
+            assert edited_body in app.article_editor.get("1.0", "end")
+            assert app.wordpress_settings.home_target_platform == original_target
+            assert app.default_thumbnail_preset_index == original_default
+            app.article_editor.delete("1.0", "end")
+            app.article_editor.insert("1.0", original_article.strip())
             app.geometry("1500x1000+30+35")
             app._switch_page("home")
             settle(320)
-            # Switching through a compact page can preserve a different
-            # viewport fraction on Windows. The following baseline assertions
-            # inspect the TOP of Home, so explicitly restore that test view.
             app.home_scroll._parent_canvas.yview_moveto(0)
             settle(200)
-            print(f"{sys.platform} {args.theme}: Tistory V2 manual/auto slides, images, saved edits, body insertion and layout passed", flush=True)
+            print(f"{sys.platform} {args.theme}: V2 shared four-stage flow, prompt/profile/thumbnail isolation, upload routing and guards passed", flush=True)
             screenshot("home")
             assert tuple(app._home_platform_logo_cache) == (
                 "wordpress", "tistory", "blogspot",
@@ -1071,6 +1417,15 @@ def main() -> None:
             assert app_module.modal_dimmer(app).active
             assert resolved_color(app.sidebar_frame, "fg_color") != app._theme_palette()["sidebar"]
             assert resolved_color(app.writing_complete_dialog, "fg_color") == app._theme_palette()["shell"]
+            if sys.platform == "win32" or args.windows_dimmer:
+                dimmer = app_module.modal_dimmer(app)
+                assert dimmer._windows
+                with patch.object(app.sidebar_frame, "configure", wraps=app.sidebar_frame.configure) as writes:
+                    settle(1300)
+                    for _ in range(3):
+                        dimmer.refresh()
+                    writes.assert_not_called()
+                print(f"{sys.platform} {args.theme}: Windows completion scrim remains dim without periodic repaint", flush=True)
             assert all(
                 getattr(app, button_name).cget("hover") is False
                 for button_name in sidebar_button_names.values()

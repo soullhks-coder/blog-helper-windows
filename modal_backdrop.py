@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import io
+import sys
 import threading
 import tkinter as tk
 from contextlib import contextmanager
@@ -31,13 +32,15 @@ def dim_color(widget, value):
 
 
 class ModalDimmer:
-    def __init__(self, root):
+    def __init__(self, root, *, platform_name=None):
         self.root = root
         self.dialogs = []
         self._depth = 0
         self._saved = []
         self._images = []
         self._refresh_job = None
+        self._windows = (sys.platform if platform_name is None else platform_name) == "win32"
+        self._windows_saved = {}
 
     @property
     def active(self):
@@ -95,6 +98,31 @@ class ModalDimmer:
             self.end()
 
     def _restore(self):
+        if self._windows:
+            # Snapshot before restoring parents: CTk parent fills propagate to
+            # children, including children with newer externally set colors.
+            restore = []
+
+            def depth(key):
+                widget, level = key[0], 0
+                while getattr(widget, "master", None) is not None:
+                    widget = widget.master
+                    level += 1
+                return level
+
+            for key in sorted(self._windows_saved, key=depth):
+                getter, setter, original, dimmed, _image = self._windows_saved[key]
+                try:
+                    current = getter()
+                    restore.append((getter, setter, original if current == dimmed else current))
+                except (tk.TclError, ValueError):
+                    pass
+            for getter, setter, value in restore:
+                try:
+                    if getter() != value:
+                        setter(value)
+                except (tk.TclError, ValueError):
+                    pass
         for getter, setter, original, dimmed in self._saved:
             try:
                 if getter() == dimmed:
@@ -102,14 +130,38 @@ class ModalDimmer:
             except (tk.TclError, ValueError):
                 pass
         self._saved.clear()
+        self._windows_saved.clear()
         self._images.clear()
 
     def refresh(self):
+        if self._windows and self._refresh_job:
+            # Manual refreshes must not start additional timer chains.
+            try:
+                self.root.after_cancel(self._refresh_job)
+            except tk.TclError:
+                pass
         self._refresh_job = None
         if not self.active:
             return
-        self._restore()
+        if not self._windows:
+            self._restore()
+        # On Windows, restoring every 500 ms exposes bright intermediate
+        # frames. Keep existing fills/images dimmed and only paint changes.
         changes = []
+        observed = []
+
+        def unchanged(key, value):
+            observed.append(key)
+            if not self._windows:
+                return False
+            previous = self._windows_saved.get(key)
+            if previous is not None:
+                if value == previous[3]:
+                    return True
+                # A live UI update replaces the old original, even when the
+                # new value is transparent or no longer contains an image.
+                self._windows_saved.pop(key)
+            return False
 
         def visit(widget):
             if widget in self.dialogs or isinstance(widget, (tk.Toplevel, ctk.CTkToplevel)):
@@ -141,27 +193,37 @@ class ModalDimmer:
                         getter = lambda w=widget, o=option: w.cget(o)
                         setter = lambda value, w=widget, o=option: w.configure(**{o: value})
                     original = getter()
+                    key = (widget, option)
+                    if unchanged(key, original):
+                        continue
+                    if self._windows and is_ctk and option == "bg_color":
+                        # Newly mapped CTk children may inherit an already
+                        # dimmed parent fill. Recover its original background
+                        # rather than dimming that inherited color twice.
+                        parent = getattr(widget, "master", None)
+                        parent_fill = self._windows_saved.get((parent, "fg_color"))
+                        if parent_fill is not None and original == parent_fill[3]:
+                            original = parent_fill[2]
                     dimmed = dim_color(widget, original)
                     if dimmed != original:
-                        changes.append((getter, setter, original, dimmed))
+                        changes.append((key, getter, setter, original, dimmed, None))
                 except (tk.TclError, ValueError):
                     pass
             if is_ctk:
                 try:
                     original = widget.cget("image")
-                    if isinstance(original, ctk.CTkImage):
+                    if not unchanged((widget, "image"), original) and isinstance(original, ctk.CTkImage):
                         dimmed = ctk.CTkImage(
                             light_image=self._dark_image(original.cget("light_image")),
                             dark_image=self._dark_image(original.cget("dark_image")),
                             size=original.cget("size"),
                         )
-                        self._images.append(dimmed)
-                        changes.append((lambda w=widget: w.cget("image"),
-                                        lambda value, w=widget: w.configure(image=value), original, dimmed))
+                        changes.append(((widget, "image"), lambda w=widget: w.cget("image"),
+                                        lambda value, w=widget: w.configure(image=value), original, dimmed, dimmed))
                 except (tk.TclError, ValueError):
                     pass
             elif isinstance(widget, tk.Canvas):
-                self._dim_canvas(widget, changes)
+                self._dim_canvas(widget, changes, unchanged)
             for child in widget.winfo_children():
                 if is_ctk and child in (
                     getattr(widget, "_canvas", None), getattr(widget, "_label", None),
@@ -173,12 +235,32 @@ class ModalDimmer:
         visit(self.root)
         # Collect before applying: CTk frame background changes propagate to
         # children, so reading while painting would compound the dim effect.
-        for change in changes:
+        for key, getter, setter, original, dimmed, image in changes:
             try:
-                change[1](change[3])
-                self._saved.append(change)
+                setter(dimmed)
+                if self._windows:
+                    # Keep only the current image per property, not every
+                    # historical preview rendered while a popup is open.
+                    self._windows_saved[key] = (getter, setter, original, dimmed, image)
+                else:
+                    self._saved.append((getter, setter, original, dimmed))
+                    if image is not None:
+                        self._images.append(image)
             except (tk.TclError, ValueError):
                 pass
+        if self._windows:
+            for key in observed:
+                record = self._windows_saved.get(key)
+                if record is None:
+                    continue
+                getter, setter, _original, dimmed, _image = record
+                try:
+                    # CTk parent configuration propagates backgrounds into
+                    # children. Reassert our dimmed values, never bright ones.
+                    if getter() != dimmed:
+                        setter(dimmed)
+                except (tk.TclError, ValueError):
+                    pass
         # Keep live progress and newly drawn previews dimmed too.
         self._refresh_job = self.root.after(500, self.refresh)
 
@@ -186,13 +268,17 @@ class ModalDimmer:
     def _dark_image(image):
         return ImageEnhance.Brightness(image).enhance(0.45) if image is not None else None
 
-    def _dim_canvas(self, canvas, changes):
+    def _dim_canvas(self, canvas, changes, unchanged):
         for item in canvas.find_all():
             for option in ("fill", "outline", "image"):
                 try:
                     original = canvas.itemcget(item, option)
+                    key = (canvas, item, option)
+                    if unchanged(key, original):
+                        continue
                     if not original:
                         continue
+                    image = None
                     dimmed = dim_color(canvas, original)
                     if option == "image":
                         data = canvas.tk.call(original, "data", "-format", "png")
@@ -200,12 +286,12 @@ class ModalDimmer:
                             data = base64.b64decode(data)
                         with Image.open(io.BytesIO(data)) as source:
                             dimmed = ImageTk.PhotoImage(self._dark_image(source), master=canvas)
-                        self._images.append(dimmed)
+                        image = dimmed
                         dimmed = str(dimmed)
                     if original != dimmed:
-                        changes.append((lambda c=canvas, i=item, o=option: c.itemcget(i, o),
+                        changes.append((key, lambda c=canvas, i=item, o=option: c.itemcget(i, o),
                                         lambda value, c=canvas, i=item, o=option: c.itemconfigure(i, **{o: value}),
-                                        original, dimmed))
+                                        original, dimmed, image))
                 except (tk.TclError, ValueError, OSError):
                     continue
 

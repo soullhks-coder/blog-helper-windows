@@ -1,4 +1,5 @@
 import io
+import copy
 import tempfile
 import threading
 import unittest
@@ -6,11 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 
 from tistory_v2 import (THEMES, Cancelled, V2Store, allowed_image_url, build_slides,
                         collect_wiki_images, export_deck, plain_text, render_slide,
-                        wiki_document_url, wrap_text, _font, insert_slide_figures)
+                        wiki_document_url, wrap_text, _font, insert_slide_figures,
+                        article_sections, assign_slide_images, collage_preview_body)
+from tistory_v2 import (SLIDE_SIZE, THEME_CHOICES, apply_text_positions, assign_deck_themes,
+                        deck_slide_size, deck_slide_sizes, validate_slide_size, validate_slide_sizes)
 
 
 def png_bytes(color):
@@ -20,6 +24,323 @@ def png_bytes(color):
 
 
 class TistoryV2Tests(unittest.TestCase):
+    def test_individual_dimensions_export_and_round_trip_with_common_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            deck = store.new_deck("서울", "제목", "본문", 10, "랜덤")
+            deck["slide_size"] = [900, 600]
+            deck["slides"][0]["slide_size"] = [600, 900]
+            deck["slides"][1]["slide_size"] = [1200, 600]
+            sizes = [(600, 900), (1200, 600)] + [(900, 600)] * 8
+            self.assertEqual(deck_slide_sizes(deck), sizes)
+            colors = [slide["color_theme"] for slide in deck["slides"]]
+            paths = export_deck(store, deck)
+            saved = store.load_deck(deck["id"])
+            self.assertEqual(deck_slide_sizes(saved), sizes)
+            self.assertEqual([slide["color_theme"] for slide in saved["slides"]], colors)
+            for i, path in enumerate(paths):
+                with Image.open(path) as image:
+                    self.assertEqual(image.size, sizes[i])
+                    self.assertEqual(image.tobytes(), render_slide(saved["slides"][i], "랜덤", i+1, 10, size=(900, 600)).tobytes())
+            original_png = paths[0].read_bytes()
+            deck["slides"][-1]["slide_size"] = [900, 99999]
+            with self.assertRaises(ValueError):
+                export_deck(store, deck)
+            self.assertEqual(paths[0].read_bytes(), original_png)
+
+    def test_individual_size_metadata_requires_all_ten_valid_pairs(self):
+        sizes = [[600, 300], [900, 600]] * 5
+        self.assertEqual(validate_slide_sizes(sizes), [(600, 300), (900, 600)] * 5)
+        for invalid in (None, [], sizes[:9], [None] * 10, [[600, 300]] * 9 + [[0, 300]]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_slide_sizes(invalid)
+
+    def test_random_themes_are_varied_saved_and_stable_across_render_and_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            self.assertIn("랜덤", THEME_CHOICES)
+            deck = store.new_deck("서울", "제목", "본문", 10, "랜덤")
+            colors = [slide["color_theme"] for slide in deck["slides"]]
+            self.assertEqual(deck["theme"], "랜덤")
+            self.assertTrue(all(color in THEMES for color in colors))
+            self.assertGreater(len(set(colors)), 1)
+            self.assertTrue(all(a != b for a, b in zip(colors, colors[1:])))
+            with patch("tistory_v2.random.choice", side_effect=AssertionError("저장/미리보기에서 재추첨 금지")):
+                paths = export_deck(store, deck)
+                pngs = [path.read_bytes() for path in paths]
+                saved = store.load_deck(deck["id"])
+                self.assertEqual([slide["color_theme"] for slide in saved["slides"]], colors)
+                for i, path in enumerate(paths):
+                    with Image.open(path) as image:
+                        expected = render_slide(saved["slides"][i], "랜덤", i+1, 10)
+                        self.assertEqual(image.tobytes(), expected.tobytes())
+                        fixed = render_slide(saved["slides"][i], colors[i], i+1, 10)
+                        self.assertEqual(image.tobytes(), fixed.tobytes())
+                export_deck(store, saved)
+                self.assertEqual([path.read_bytes() for path in paths], pngs)
+
+    def test_random_theme_repair_and_fixed_theme_switch(self):
+        deck = {"theme": "랜덤", "slides": [{"title": str(i)} for i in range(10)]}
+        deck["slides"][0]["color_theme"] = "민트"
+        deck["slides"][5]["color_theme"] = ["bad"]
+        with patch("tistory_v2.random.choice", side_effect=lambda values: values[0]) as choose:
+            self.assertTrue(assign_deck_themes(deck))
+            self.assertEqual(deck["slides"][0]["color_theme"], "민트")
+            self.assertEqual(choose.call_count, 9)
+            choose.reset_mock()
+            self.assertFalse(assign_deck_themes(deck))
+            choose.assert_not_called()
+            assign_deck_themes(deck, "랜덤", reshuffle=True)
+            self.assertEqual(choose.call_count, 10)
+        assign_deck_themes(deck, "코랄")
+        self.assertTrue(all("color_theme" not in slide for slide in deck["slides"]))
+        self.assertEqual(deck["theme"], "코랄")
+        with self.assertRaisesRegex(ValueError, "랜덤 색상"):
+            render_slide({"title": "미지정"}, "랜덤")
+
+    def test_next_deck_inherits_saved_positions_without_changing_existing_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            old = store.new_deck("서울", "기존 글", "기존 본문", 10, "민트")
+            old["slides"][2].update(text_horizontal="왼쪽", text_vertical="아래")
+            path = store.save_deck(old)
+            before = path.read_bytes()
+            defaults = {"text_horizontal": "오른쪽", "text_vertical": "위"}
+            store.save_preferences({"deck_id": old["id"], "text_position_defaults": defaults})
+            restarted = V2Store(Path(directory))
+            new = restarted.new_deck("제주", "새 글", "새 본문", 10, "스카이")
+            self.assertEqual(new["text_position_defaults"], defaults)
+            self.assertTrue(all(slide["text_horizontal"] == "오른쪽" and slide["text_vertical"] == "위" for slide in new["slides"]))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(restarted.load_deck(old["id"])["slides"][2]["text_vertical"], "아래")
+            paths = export_deck(restarted, new)
+            with Image.open(paths[0]) as image:
+                self.assertEqual(image.tobytes(), render_slide(new["slides"][0], "스카이", 1, 10).tobytes())
+
+    def test_old_saved_position_is_migrated_only_without_explicit_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            deck = store.new_deck("서울", "기존 글", "기존 본문", 10, "민트")
+            deck["slides"][0].update(text_horizontal="중앙", text_vertical="아래")
+            path = store.save_deck(deck)
+            original = path.read_bytes()
+            store.save_preferences({"deck_id": deck["id"]})
+            self.assertEqual(store.slide_position_defaults(), {"text_horizontal": "중앙", "text_vertical": "아래"})
+            store.save_preferences({"deck_id": deck["id"], "text_position_defaults": {"text_horizontal": "왼쪽", "text_vertical": "위"}})
+            self.assertEqual(store.slide_position_defaults(), {"text_horizontal": "왼쪽", "text_vertical": "위"})
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_bad_position_preferences_fall_back_to_safe_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            for value in (None, "invalid", {"text_horizontal": [], "text_vertical": "bad"}):
+                store.save_preferences({"text_position_defaults": value})
+                self.assertEqual(store.slide_position_defaults(), {"text_horizontal": "왼쪽", "text_vertical": "기본"})
+            store.save_preferences({"deck_id": "missing"})
+            self.assertEqual(store.slide_position_defaults(), {"text_horizontal": "왼쪽", "text_vertical": "기본"})
+
+    def test_bulk_text_positions_preserve_contents_photos_and_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            deck = store.new_deck("서울", "제목", "본문", 10, "민트")
+            photo = Path(directory) / "photo.png"
+            Image.new("RGB", (200, 100), "red").save(photo)
+            deck["images"] = [{"path": str(photo), "source": "내 이미지", "title": str(i)} for i in range(2)]
+            assign_slide_images(deck["slides"], deck["images"])
+            deck["slides"][0].update(text_horizontal="오른쪽", text_vertical="위")
+            deck["slides"][3].update(text_horizontal="중앙", text_vertical="아래")
+            before = copy.deepcopy(deck)
+            apply_text_positions(deck["slides"], "중앙", "중앙")
+            for old, new in zip(before["slides"], deck["slides"]):
+                self.assertEqual(new["text_horizontal"], "중앙")
+                self.assertEqual(new["text_vertical"], "중앙")
+                without_positions = lambda slide: {k: v for k, v in slide.items() if k not in {"text_horizontal", "text_vertical"}}
+                self.assertEqual(without_positions(old), without_positions(new))
+            paths = export_deck(store, deck)
+            saved = store.load_deck(deck["id"])
+            self.assertTrue(all(slide["text_vertical"] == "중앙" for slide in saved["slides"]))
+            for i, path in enumerate(paths):
+                with Image.open(path) as image:
+                    self.assertEqual(image.tobytes(), render_slide(saved["slides"][i], "민트", i+1, 10).tobytes())
+            # Bulk application does not lock later individual changes.
+            saved["slides"][4]["text_horizontal"] = "왼쪽"
+            self.assertTrue(all(slide["text_horizontal"] == "중앙" for i, slide in enumerate(saved["slides"]) if i != 4))
+
+    def test_invalid_bulk_position_does_not_partially_change_slides(self):
+        slides = [{"title": "유지", "text_horizontal": "오른쪽"}, {"title": "독립"}]
+        original = copy.deepcopy(slides)
+        for horizontal, vertical in (("없음", "위"), ("왼쪽", "없음")):
+            with self.assertRaises(ValueError):
+                apply_text_positions(slides, horizontal, vertical)
+            self.assertEqual(slides, original)
+        with self.assertRaises(ValueError):
+            apply_text_positions([], "왼쪽", "기본")
+
+    def test_text_positions_align_title_and_move_the_whole_block(self):
+        original = ImageDraw.ImageDraw.text
+        slide = {"eyebrow": "핵심 요약", "title": "짧은 제목", "summary": "핵심 내용", "bullets": ["중요 조건", "다음 순서"]}
+        locations = {}
+        for horizontal in ("왼쪽", "중앙", "오른쪽"):
+            for vertical in ("위", "중앙", "아래"):
+                drawn = {}
+                def capture(draw, xy, value, *args, **kwargs):
+                    drawn[value] = draw.textbbox(xy, value, font=kwargs["font"])
+                    return original(draw, xy, value, *args, **kwargs)
+                with patch.object(ImageDraw.ImageDraw, "text", capture):
+                    render_slide({**slide, "text_horizontal": horizontal, "text_vertical": vertical}, show_numbers=False)
+                locations[horizontal, vertical] = drawn
+                title_box = drawn["짧은 제목"]
+                if horizontal == "왼쪽":
+                    self.assertAlmostEqual(title_box[0], 28, delta=1)
+                elif horizontal == "중앙":
+                    self.assertAlmostEqual((title_box[0] + title_box[2]) / 2, 300, delta=1)
+                else:
+                    self.assertAlmostEqual(title_box[2], 572, delta=1)
+                if vertical == "위":
+                    self.assertEqual(min(box[1] for box in drawn.values()), 37)
+                elif vertical == "아래":
+                    self.assertAlmostEqual(max(box[3] for box in drawn.values()), 260, delta=1)
+        for horizontal in ("왼쪽", "중앙", "오른쪽"):
+            top, middle, bottom = [locations[horizontal, vertical] for vertical in ("위", "중앙", "아래")]
+            self.assertLess(top["짧은 제목"][1], middle["짧은 제목"][1])
+            self.assertLess(middle["짧은 제목"][1], bottom["짧은 제목"][1])
+            # Text/summary/bullets move together rather than detaching from the title.
+            for value in slide["bullets"] + [slide["summary"]]:
+                self.assertEqual(top[value][1] - top["짧은 제목"][1], bottom[value][1] - bottom["짧은 제목"][1])
+        legacy = render_slide(slide, show_numbers=False)
+        default = render_slide({**slide, "text_horizontal": "왼쪽", "text_vertical": "기본"}, show_numbers=False)
+        invalid = render_slide({**slide, "text_horizontal": "bad", "text_vertical": "bad"}, show_numbers=False)
+        self.assertEqual(legacy.tobytes(), default.tobytes())
+        self.assertEqual(legacy.tobytes(), invalid.tobytes())
+
+    def test_all_text_positions_stay_in_photo_safe_region_at_custom_sizes(self):
+        original = ImageDraw.ImageDraw.text
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.png"
+            Image.new("RGB", (200, 100), "red").save(photo)
+            for size in ((600, 300), (900, 600), (600, 900), (300, 150), (2400, 150), (300, 2400)):
+                for layout in ("공통 스타일", "사진 왼쪽", "사진 오른쪽"):
+                    for horizontal in ("왼쪽", "중앙", "오른쪽"):
+                        for vertical in ("위", "중앙", "아래"):
+                            bounds = []
+                            def capture(draw, xy, value, *args, **kwargs):
+                                bounds.append(draw.textbbox(xy, value, font=kwargs["font"]))
+                                return original(draw, xy, value, *args, **kwargs)
+                            slide = {"eyebrow": "핵심 요약", "title": "제목 문구 " * 8, "summary": "핵심 설명 " * 10,
+                                     "bullets": ["중요 항목 " * 8] * 3, "layout": layout, "image": {"path": str(photo)},
+                                     "text_horizontal": horizontal, "text_vertical": vertical}
+                            with self.subTest(size=size, layout=layout, horizontal=horizontal, vertical=vertical), \
+                                 patch.object(ImageDraw.ImageDraw, "text", capture):
+                                rendered = render_slide(slide, show_numbers=False, size=size)
+                                self.assertEqual(rendered.size, size)
+                                self.assertTrue(all(0 <= l <= r <= size[0] and 0 <= t <= b <= size[1] for l, t, r, b in bounds), bounds)
+                                if layout == "사진 왼쪽":
+                                    self.assertTrue(all(box[0] >= round(size[0] * .35) for box in bounds), bounds)
+                                elif layout == "사진 오른쪽":
+                                    self.assertTrue(all(box[2] <= size[0] - round(size[0] * .35) for box in bounds), bounds)
+
+    def test_per_slide_positions_round_trip_and_render_in_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            deck = store.new_deck("서울", "제목", "본문", 10, "민트")
+            deck["slides"][0].update(text_horizontal="중앙", text_vertical="아래")
+            deck["slides"][1].update(text_horizontal="오른쪽", text_vertical="위")
+            paths = export_deck(store, deck)
+            saved = store.load_deck(deck["id"])
+            self.assertEqual(saved["slides"][0]["text_vertical"], "아래")
+            self.assertEqual(saved["slides"][1]["text_horizontal"], "오른쪽")
+            self.assertEqual(saved["slides"][2]["text_horizontal"], "왼쪽")
+            self.assertEqual(saved["slides"][2]["text_vertical"], "기본")
+            for i in range(2):
+                with Image.open(paths[i]) as image:
+                    self.assertEqual(image.tobytes(), render_slide(saved["slides"][i], "민트", i + 1, 10).tobytes())
+
+    def test_output_dimensions_are_bounded_whole_pixels_and_old_decks_keep_default(self):
+        self.assertEqual(validate_slide_size(["1200", " 600 "]), (1200, 600))
+        self.assertEqual(deck_slide_size({}), SLIDE_SIZE)
+        for value in ([0, 300], [299, 300], [600, 149], [2401, 300], [600, 2401],
+                      [600.0, 300], [True, 300], ["1e3", 300], ["", 300], [600], "600×300"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_slide_size(value)
+
+    def test_custom_dimensions_render_text_in_bounds_without_mutating_slide(self):
+        slide = {"eyebrow": "시작 가이드", "title": "기본 기능부터 하나씩 익혀요 " * 8,
+                 "summary": "본문 핵심을 짧게 요약합니다. " * 10, "bullets": ["중요 사항 확인 " * 8] * 3}
+        original = ImageDraw.ImageDraw.text
+        bounds = []
+        def capture(draw, xy, value, *args, **kwargs):
+            bounds.append(draw.textbbox(xy, value, font=kwargs.get("font")))
+            return original(draw, xy, value, *args, **kwargs)
+        for size in ((1200, 600), (900, 600), (600, 900), (300, 150), (2400, 150), (300, 2400)):
+            bounds.clear()
+            with self.subTest(size=size), patch.object(ImageDraw.ImageDraw, "text", capture):
+                image = render_slide(slide, size=size)
+                self.assertEqual(image.size, size)
+                self.assertTrue(bounds)
+                self.assertTrue(all(0 <= l <= r <= size[0] and 0 <= t <= b <= size[1]
+                                    for l, t, r, b in bounds), bounds)
+        self.assertEqual(slide["title"], "기본 기능부터 하나씩 익혀요 " * 8)
+
+    def test_custom_deck_dimensions_round_trip_and_export_all_ten_pngs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = V2Store(Path(directory))
+            store.save_preferences({"slide_size": [900, 600]})
+            deck = store.new_deck("서울", "제목", "본문", 10, "민트")
+            self.assertEqual(deck["slide_size"], [900, 600])
+            paths = export_deck(store, deck)
+            for path in paths:
+                with Image.open(path) as image:
+                    self.assertEqual(image.size, (900, 600))
+            self.assertEqual(store.load_deck(deck["id"])["slide_size"], [900, 600])
+            deck.pop("slide_size")
+            export_deck(store, deck)
+            with Image.open(paths[0]) as image:
+                self.assertEqual(image.size, SLIDE_SIZE)
+
+    def test_custom_canvas_keeps_embedded_photo_aspect_ratio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.png"
+            Image.new("RGB", (200, 100), "red").save(photo)
+            for size in ((1200, 600), (900, 600), (600, 900)):
+                for layout in ("사진 왼쪽", "사진 오른쪽"):
+                    with self.subTest(size=size, layout=layout):
+                        image = render_slide({"title": "짧은 제목", "layout": layout,
+                                              "image": {"path": str(photo)}}, size=size)
+                        # The test photo is the only pure red part of the canvas.
+                        mask = Image.eval(image.getchannel("R"), lambda p: 255 if p == 255 else 0)
+                        mask = ImageChops.multiply(mask, Image.eval(image.getchannel("G"), lambda p: 255 if p == 0 else 0))
+                        mask = ImageChops.multiply(mask, Image.eval(image.getchannel("B"), lambda p: 255 if p == 0 else 0))
+                        left, top, right, bottom = mask.getbbox()
+                        self.assertAlmostEqual((right - left) / (bottom - top), 2, delta=.03)
+
+    def test_number_checkbox_controls_image_footer_and_legacy_part_numbers(self):
+        slide = {"eyebrow": "핵심 내용 1 · 1/1", "title": "짧은 제목", "bullets": ["비율 1/2 확인"]}
+        drawn = []
+        original = ImageDraw.ImageDraw.text
+        def capture(draw, xy, text, *args, **kwargs):
+            drawn.append(text)
+            return original(draw, xy, text, *args, **kwargs)
+        with patch.object(ImageDraw.ImageDraw, "text", capture):
+            render_slide(slide, index=1, total=10, show_numbers=False)
+        self.assertNotIn('1 / 10', drawn)
+        self.assertIn('핵심 내용', drawn)
+        self.assertIn('비율 1/2 확인', drawn)
+        drawn.clear()
+        with patch.object(ImageDraw.ImageDraw, "text", capture):
+            render_slide(slide, index=1, total=10)
+        self.assertIn('1 / 10', drawn)
+
+    def test_collage_preview_preserves_article_and_groups_two_slides_after_two_subheadings(self):
+        body = "".join(f"<h2>소제목{i}</h2><p>설명{i}</p>" for i in range(10))
+        images = [f'<figure><img src="slide-{i}.png"></figure>' for i in range(10)]
+        result = collage_preview_body(body, images)
+        self.assertEqual(result.count('class="v2-collage"'), 5)
+        self.assertEqual(result.count('<img '), 10)
+        self.assertTrue(result.index('설명1') < result.index('slide-0.png') < result.index('소제목2'))
+        self.assertTrue(result.index('설명9') < result.index('slide-8.png'))
+        self.assertIn('<p>설명0</p>', result)
+        self.assertIn('<p>수동 원본 글</p>', collage_preview_body('수동 원본 글', images))
+
     def test_body_insertion_does_not_nest_images_inside_other_figure_paragraphs(self):
         figures = [f"<figure><p>슬라이드 {index}</p></figure>" for index in range(5)]
         result = insert_slide_figures("<p>원본 문단</p>", figures)
@@ -42,11 +363,51 @@ class TistoryV2Tests(unittest.TestCase):
     def test_original_html_is_converted_without_scripts_or_inventing_content(self):
         self.assertEqual(plain_text("<h2>제목</h2><p>첫 문장</p><script>hide()</script><p>다음 문장</p>"), "제목\n첫 문장\n다음 문장")
         slides = build_slides("서울", "<p>한강을 산책해요.</p><p>지하철을 이용해요.</p>", 10)
-        self.assertEqual(len(slides), 2)
-        self.assertEqual(slides[1]["title"], "한강을 산책해요.")
-        self.assertEqual(slides[1]["bullets"], ["지하철을 이용해요."])
-        self.assertEqual(len(build_slides("키워드만", "", 10)), 1)
-        self.assertLessEqual(len(build_slides("긴 글", "\n".join("문장입니다." for _ in range(90)), 20)), 10)
+        self.assertEqual(len(slides), 10)
+        self.assertTrue(all(slide["title"] == "서울" for slide in slides))
+        self.assertEqual("".join(slide["source_text"] for slide in slides).replace(" ", ""), "한강을산책해요.지하철을이용해요.")
+        empty = build_slides("키워드만", "", 10)
+        self.assertEqual(len(empty), 10)
+        self.assertTrue(all(not slide["summary"] and not slide["bullets"] for slide in empty))
+        self.assertEqual(len(build_slides("긴 글", "\n".join("문장입니다." for _ in range(90)), 20)), 10)
+
+    def test_html_subheadings_preserve_inline_text_lists_and_source_association(self):
+        body = ("<h1>서울 여행</h1><p>도입 문장.</p><h2><strong>교통</strong> 이용</h2>"
+                "<p>지하철을 이용합니다.</p><ul><li>카드 준비.</li><li>노선 확인.</li></ul>"
+                "<h3>방문 시간</h3><p>아침에 갑니다.</p><script>unwanted()</script>")
+        sections = article_sections(body, "서울 여행")
+        self.assertEqual([section["heading"] for section in article_sections(body, "다른 생성 제목")], ["교통 이용", "방문 시간"])
+        self.assertEqual([section["heading"] for section in sections], ["교통 이용", "방문 시간"])
+        self.assertEqual(sections[0]["text"], "도입 문장.\n지하철을 이용합니다.\n카드 준비.\n노선 확인.")
+        slides = build_slides("서울 여행", body)
+        self.assertEqual(len(slides), 10)
+        self.assertEqual({slide["title"] for slide in slides}, {"교통 이용", "방문 시간"})
+        self.assertTrue(all(slide["source_sections"][0] in sections for slide in slides))
+        self.assertNotIn("unwanted", str(slides))
+        self.assertEqual("".join(slide["source_text"] for slide in slides).replace(" ", "").replace("\n", ""),
+                         "".join(section["text"] for section in sections).replace(" ", "").replace("\n", ""))
+
+    def test_markdown_subheadings_and_more_than_ten_sections_keep_every_section(self):
+        body = "# 서울 여행\n도입.\n" + "\n".join(f"## **소제목 {index}**\n내용 {index}." for index in range(13))
+        sections = article_sections(body, "서울 여행")
+        self.assertEqual(len(sections), 13)
+        self.assertEqual(sections[0]["heading"], "소제목 0")
+        slides = build_slides("서울 여행", body)
+        self.assertEqual(len(slides), 10)
+        self.assertEqual([section for slide in slides for section in slide["source_sections"]], sections)
+        self.assertIn("도입.", slides[0]["source_text"])
+
+    def test_collected_photos_are_used_only_in_first_two_slides_and_never_repeated(self):
+        slides = build_slides("서울", "본문", 10)
+        photos = [{"path": "wiki.png", "source": "위키백과"}, {"path": "namu.png", "source": "나무위키"}]
+        for slide in slides:
+            slide["image"] = {"path": "old.png"}
+        assign_slide_images(slides, photos)
+        self.assertEqual([slide["image"] for slide in slides[:2]], photos)
+        self.assertTrue(all(slide["image"] is None and slide["layout"] == "공통 스타일" for slide in slides[2:]))
+        self.assertIsNot(slides[0]["image"], photos[0])
+        assign_slide_images(slides, photos[:1])
+        self.assertTrue(all(slide["image"] is None for slide in slides[1:]))
 
     def test_preferences_and_separate_decks_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -76,19 +437,27 @@ class TistoryV2Tests(unittest.TestCase):
         for theme in THEMES:
             with self.subTest(theme=theme):
                 image = render_slide(slide, theme, 4, 10)
-                self.assertEqual(image.size, (1600, 900))
+                self.assertEqual(image.size, (600, 300))
                 self.assertEqual(image.mode, "RGB")
         slide["layout"] = "사진 왼쪽"
-        self.assertEqual(render_slide(slide).size, (1600, 900))
+        self.assertEqual(render_slide(slide).size, (600, 300))
 
     def test_long_text_is_bounded_and_original_slide_is_not_changed(self):
         text = "긴 제목을 그대로 편집할 수 있어요 " * 20
-        lines = wrap_text(text, _font(64, True), 792, 3)
+        lines = wrap_text(text, _font(24, True), 336, 3)
         self.assertEqual(len(lines), 3)
         self.assertTrue(lines[-1].endswith("…"))
-        self.assertTrue(all(_font(64, True).getlength(line) <= 792 for line in lines))
+        self.assertTrue(all(_font(24, True).getlength(line) <= 336 for line in lines))
         slide = {"title": text, "bullets": [text] * 10}
-        render_slide(slide)
+        original_text = ImageDraw.ImageDraw.text
+        bounds = []
+        def capture_text(draw, xy, value, *args, **kwargs):
+            bounds.append(draw.textbbox(xy, value, font=kwargs.get("font")))
+            return original_text(draw, xy, value, *args, **kwargs)
+        with patch.object(ImageDraw.ImageDraw, "text", capture_text):
+            render_slide(slide)
+        self.assertTrue(bounds)
+        self.assertTrue(all(0 <= left <= right <= 600 and 0 <= top <= bottom <= 300 for left, top, right, bottom in bounds))
         self.assertEqual(slide["title"], text)
 
     def test_export_has_png_body_preview_source_credit_and_editable_manifest(self):
@@ -96,19 +465,34 @@ class TistoryV2Tests(unittest.TestCase):
             store = V2Store(Path(directory))
             photo = Path(directory) / "photo.png"
             photo.write_bytes(png_bytes("#ff0000"))
-            deck = store.new_deck("서울", "서울 <여행>", "한강 산책\n준비물 확인", 3, "스카이")
-            deck["slides"][0]["image"] = {"path": str(photo), "source": "위키백과", "title": "서울", "source_page": wiki_document_url("wikipedia", "서울")}
+            deck = store.new_deck("서울", "서울 <여행>", "<h2>한강 산책</h2><p>준비물 확인</p>", 10, "스카이")
+            asset = {"path": str(photo), "source": "위키백과", "title": "서울", "source_page": wiki_document_url("wikipedia", "서울")}
+            assign_slide_images(deck["slides"], [asset, asset])
             paths = export_deck(store, deck)
-            self.assertEqual(len(paths), 2)
+            self.assertEqual(len(paths), 10)
             with Image.open(paths[0]) as image:
-                self.assertEqual(image.size, (1600, 900))
+                self.assertEqual(image.size, (600, 300))
                 # Real chosen photo, not a page screenshot or stock placeholder.
-                self.assertEqual(image.getpixel((320, 450)), (255, 0, 0))
+                self.assertEqual(image.getpixel((105, 150)), (255, 0, 0))
+            with Image.open(paths[1]) as image:
+                self.assertEqual(image.getpixel((495, 150)), (255, 0, 0))
+            for path in paths[2:]:
+                with Image.open(path) as image:
+                    self.assertEqual(image.size, (600, 300))
+                    self.assertNotIn((255, 0, 0), {color for _, color in image.getcolors(600 * 300)})
             html = (store.deck_directory(deck) / "article.html").read_text(encoding="utf-8")
             self.assertIn("서울 &lt;여행&gt;", html)
             self.assertIn('src="slide-01.png"', html)
             self.assertIn("사진 출처", html)
             self.assertEqual(store.load_deck(deck["id"])["slides"][0]["image"]["path"], str(photo))
+
+    def test_later_card_does_not_render_or_credit_legacy_repeated_photo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.png"
+            photo.write_bytes(png_bytes("#ff0000"))
+            slide = {"title": "뒤쪽 카드", "layout": "사진 왼쪽", "image": {"path": str(photo), "source": "위키백과"}}
+            result = render_slide(slide, index=3, total=10)
+            self.assertNotIn((255, 0, 0), {color for _, color in result.getcolors(600 * 300)})
 
     def test_cancelled_export_does_not_claim_completion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -138,7 +522,7 @@ class TistoryV2Tests(unittest.TestCase):
             self.assertEqual(paths[0].read_bytes(), original_png)
             self.assertEqual(html_path.read_text(encoding="utf-8"), original_html)
 
-    def _collect(self, directory, namu_error=False, svg=False):
+    def _collect(self, directory, namu_error=False, svg=False, filename="photo.png"):
         page = MagicMock()
         def goto(url, **kwargs):
             page.url = url
@@ -148,7 +532,7 @@ class TistoryV2Tests(unittest.TestCase):
         def metadata(script, args):
             source = args["source"]
             host = "upload.wikimedia.org" if source == "wikipedia" else "i.namu.wiki"
-            return {"title": "서울", "body_found": True, "images": [{"url": f"https://{host}/photo.png", "key": source + "-7"}]}
+            return {"title": "서울", "body_found": True, "images": [{"url": f"https://{host}/{filename}", "key": source + "-7"}]}
         def download(url, **kwargs):
             if svg and "namu.wiki" in url:
                 data = b"<svg/>"
@@ -186,6 +570,12 @@ class TistoryV2Tests(unittest.TestCase):
             (images, warnings), _ = self._collect(Path(directory), namu_error=True)
             self.assertEqual(len(images), 1)
             self.assertIn("나무위키", warnings[0])
+
+    def test_subject_logo_is_not_excluded_because_image_host_contains_wiki(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (images, warnings), _ = self._collect(Path(directory), filename="Subject_Logo.png")
+            self.assertEqual(len(images), 2)
+            self.assertFalse(warnings)
 
     def test_svg_fallback_captures_only_the_exact_marked_image(self):
         with tempfile.TemporaryDirectory() as directory:

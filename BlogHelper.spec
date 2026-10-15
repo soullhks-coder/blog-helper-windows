@@ -19,6 +19,9 @@ datas += [
     ("assets/bootstrap-icons.woff", "assets"),
     ("assets/bootstrap-icons.css", "assets"),
     ("assets/bootstrap-icons-LICENSE.txt", "assets"),
+    ("assets/fonts/NanumGothic.ttf", "assets/fonts"),
+    ("assets/fonts/NanumGothicBold.ttf", "assets/fonts"),
+    ("assets/fonts/NanumGothic-OFL.txt", "assets/fonts"),
 ]
 
 for package in ("customtkinter", "tkinterdnd2", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):

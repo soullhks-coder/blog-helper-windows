@@ -12,6 +12,7 @@ class Widget:
         self.children = list(children)
         self.callbacks = {}
         self.grabbed = False
+        self.writes = []
 
     def winfo_rgb(self, color):
         if not isinstance(color, str) or not color.startswith("#"):
@@ -24,6 +25,7 @@ class Widget:
         return self.colors[option]
 
     def configure(self, **values):
+        self.writes.append(values.copy())
         self.colors.update(values)
 
     def winfo_children(self):
@@ -53,6 +55,93 @@ class Widget:
 
 
 class ModalBackdropTests(unittest.TestCase):
+    def test_windows_refresh_never_brightens_or_repaints_unchanged_widgets(self):
+        child, dialog = Widget(), Widget()
+        root = Widget(children=(child, dialog))
+        dimmer = ModalDimmer(root, platform_name="win32")
+        dimmer.attach(dialog)
+        root.writes.clear()
+        child.writes.clear()
+        for _ in range(10):
+            dimmer.refresh()
+            self.assertEqual(root.cget("background"), "#737373")
+            self.assertEqual(child.cget("background"), "#737373")
+            self.assertEqual(dialog.cget("background"), "#ffffff")
+        self.assertEqual(root.writes, [])
+        self.assertEqual(child.writes, [])
+        dialog.close()
+        self.assertEqual(child.cget("background"), "#ffffff")
+        self.assertEqual(root.cget("background"), "#ffffff")
+        self.assertFalse(dimmer._windows_saved)
+
+    def test_windows_live_update_dims_only_new_value_and_restores_latest(self):
+        root = Widget()
+        dimmer = ModalDimmer(root, platform_name="win32")
+        dimmer.begin()
+        root.configure(foreground="#00ff00")
+        root.writes.clear()
+        dimmer.refresh()
+        self.assertEqual(root.writes, [{"foreground": "#007300"}])
+        dimmer.refresh()
+        self.assertEqual(len(root.writes), 1)
+        dimmer.end()
+        self.assertEqual(root.cget("foreground"), "#00ff00")
+
+    def test_windows_external_update_without_refresh_is_not_overwritten(self):
+        root = Widget()
+        dimmer = ModalDimmer(root, platform_name="win32")
+        dimmer.begin()
+        root.configure(background="#00ff00")
+        dimmer.end()
+        self.assertEqual(root.cget("background"), "#00ff00")
+
+    def test_windows_new_widgets_and_nested_dialogs_keep_one_scrim(self):
+        first = Widget()
+        root = Widget(children=(first,))
+        dimmer = ModalDimmer(root, platform_name="win32")
+        dimmer.attach(first)
+        new_child, second = Widget("#222c3b"), Widget()
+        root.children.extend((new_child, second))
+        dimmer.attach(second)
+        dimmer.refresh()
+        self.assertEqual(new_child.cget("background"), "#0f141b")
+        self.assertEqual(second.cget("background"), "#ffffff")
+        second.close()
+        self.assertTrue(dimmer.active)
+        self.assertTrue(first.grabbed)
+        self.assertEqual(root.cget("background"), "#737373")
+        first.close()
+        self.assertEqual(new_child.cget("background"), "#222c3b")
+        self.assertFalse(root.callbacks)
+
+    def test_windows_manual_refresh_keeps_single_timer(self):
+        class TimerWidget(Widget):
+            def after(self, delay, callback):
+                key = f"job{len(self.callbacks)}"
+                while key in self.callbacks:
+                    key += "x"
+                self.callbacks[key] = callback
+                return key
+
+        root = TimerWidget()
+        dimmer = ModalDimmer(root, platform_name="win32")
+        dimmer.begin()
+        for _ in range(5):
+            dimmer.refresh()
+            self.assertEqual(len(root.callbacks), 1)
+        dimmer.end()
+        self.assertFalse(root.callbacks)
+
+    def test_macos_refresh_keeps_existing_restore_behavior(self):
+        root = Widget()
+        dimmer = ModalDimmer(root, platform_name="darwin")
+        dimmer.begin()
+        root.writes.clear()
+        dimmer.refresh()
+        self.assertIn({"background": "#ffffff"}, root.writes)
+        self.assertEqual(root.cget("background"), "#737373")
+        dimmer.end()
+
     def test_scroll_content_uses_native_background_not_delegated_outer_api(self):
         class ScrollContent(Widget):
             def __init__(self, outer, children):

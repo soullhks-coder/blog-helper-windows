@@ -60,15 +60,19 @@ jobs:
       - name: Install build dependencies
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r requirements-windows.txt
 
       - name: Verify Windows and Playwright dependencies
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m py_compile main.py
           python -m py_compile app_updater.py
           python -m unittest discover -s tests -p test_windows_runtime.py -q
+          python -m unittest discover -s tests -p test_windows_fonts.py -q
+          python -m unittest discover -s tests -p test_modal_backdrop.py -q
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
@@ -86,11 +90,15 @@ jobs:
 
       - name: Check writing UI in dark and light themes
         shell: pwsh
-        run: python tools/check_writing_ui.py
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python tools/check_windows_modal_ui.py
+          python tools/check_writing_ui.py
 
       - name: Build BlogHelper.exe
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m PyInstaller --noconfirm --clean BlogHelper.spec
           if (-not (Test-Path "dist\BlogHelper.exe")) { throw "BlogHelper.exe was not created." }
 
@@ -103,6 +111,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force -Path "build\startup-baseline" | Out-Null
           gh release download v1.1.207 --repo soullhks-coder/blog-helper-releases --pattern BlogHelper.exe --dir "build\startup-baseline" --clobber
           Move-Item "build\startup-baseline\BlogHelper.exe" "build\startup-baseline\Baseline207.exe" -Force
