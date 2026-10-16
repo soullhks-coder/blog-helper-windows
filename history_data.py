@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-16",
-        "version": "v1.2.4",
+        "version": "v1.2.5",
         "category": "환경설정·공통 UI",
         "title": "글꼴 설정·시스템 기본·맥과 윈도우 나눔글꼴 선택",
         "request": "테마 설정 아래 글꼴 설정을 추가하고 시스템 기본·나눔고딕·첨부한 나눔스퀘어 네오를 두 운영체제에서 선택하여 저장 후 재실행으로 적용해달라는 요청",

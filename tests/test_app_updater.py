@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import tempfile
 import threading
@@ -318,7 +319,8 @@ class AppUpdaterTests(unittest.TestCase):
             self.assertIn("MainWindowHandle", windows_contents)
             self.assertIn("새 프로그램 재실행 성공", windows_contents)
             self.assertIn('"$TARGET_APP"', mac_script.read_text(encoding="utf-8"))
-            self.assertTrue(mac_script.stat().st_mode & 0o100)
+            if os.name != "nt":
+                self.assertTrue(mac_script.stat().st_mode & 0o100)
 
     def test_windows_restart_environment_forces_fresh_onefile_unpack(self):
         environment = _windows_restart_environment(
