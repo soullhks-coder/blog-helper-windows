@@ -78,6 +78,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -m unittest discover -s tests -p test_tistory_v2_font_sizes.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
+          python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
@@ -180,6 +181,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -m unittest discover -s tests -p test_tistory_v2_font_sizes.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
+          python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 

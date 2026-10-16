@@ -3591,6 +3591,8 @@ class WordPressSettings:
     blogspot_title_prompt_template: str = DEFAULT_BLOGSPOT_TITLE_PROMPT
     blogspot_article_prompt_template: str = DEFAULT_BLOGSPOT_ARTICLE_PROMPT
     writing_topic: str = ""
+    tistory_v2_topic: str = ""
+    tistory_v2_selected_keyword: str = ""
     writing_benchmark_enabled: bool = False
     writing_benchmark_url: str = ""
     writing_selected_keyword: str = ""
@@ -4526,6 +4528,8 @@ class AppStateStore:
             blogspot_title_prompt_template=nonempty_text(payload.get("blogspot_title_prompt_template"), DEFAULT_BLOGSPOT_TITLE_PROMPT),
             blogspot_article_prompt_template=nonempty_text(payload.get("blogspot_article_prompt_template"), DEFAULT_BLOGSPOT_ARTICLE_PROMPT),
             writing_topic=payload.get("writing_topic", ""),
+            tistory_v2_topic=str(payload.get("tistory_v2_topic") or ""),
+            tistory_v2_selected_keyword=str(payload.get("tistory_v2_selected_keyword") or ""),
             writing_benchmark_enabled=payload.get("writing_benchmark_enabled", False),
             writing_benchmark_url=payload.get("writing_benchmark_url", ""),
             writing_selected_keyword=payload.get("writing_selected_keyword", ""),
@@ -26847,6 +26851,7 @@ class KeywordApp(ctk.CTk):
         self._geometry_save_deadline = 0.0
         self._last_seen_window_geometry = self.geometry().split("+", 1)[0]
         self._ui_state_save_job = None
+        self._writing_keyword_inputs_ready = False
         self._thumbnail_sync_job = None
         self._thumbnail_control_job = None
         self._cardnews_control_job = None
@@ -47781,6 +47786,7 @@ class KeywordApp(ctk.CTk):
         return menu
 
     def _populate_wordpress_fields(self) -> None:
+        self._writing_keyword_inputs_ready = False
         if hasattr(self, "theme_menu"):
             self.theme_menu.set(self.wordpress_settings.app_theme or "블랙테마")
         if hasattr(self, "font_menu"):
@@ -47933,16 +47939,12 @@ class KeywordApp(ctk.CTk):
         self.ai_provider_menu.set(selected_writing_model)
         if hasattr(self, "default_writing_model_var"):
             self.default_writing_model_var.set(selected_writing_model)
-        if self.wordpress_settings.writing_topic:
-            self.topic_entry.insert(0, self.wordpress_settings.writing_topic)
+        self._restore_writing_keyword_inputs(self.__dict__.get("writing_variant", "writing"))
+        self._writing_keyword_inputs_ready = True
         self.benchmark_mode_var.set(self.wordpress_settings.writing_benchmark_enabled)
         if self.wordpress_settings.writing_benchmark_url:
             self.benchmark_url_entry.insert(0, self.wordpress_settings.writing_benchmark_url)
         self._on_benchmark_mode_changed(save=False)
-        self.selected_keyword_var.set(self.wordpress_settings.writing_selected_keyword)
-        if hasattr(self, "manual_keyword_entry"):
-            self.manual_keyword_entry.delete(0, "end")
-            self.manual_keyword_entry.insert(0, self.wordpress_settings.writing_selected_keyword)
         self.reference_textbox.insert("1.0", self.wordpress_settings.writing_reference_text)
         self._restore_writing_links_for_blog(self.wordpress_settings.home_target_platform)
         self._update_reference_count()
@@ -48069,6 +48071,56 @@ class KeywordApp(ctk.CTk):
 
     def _is_tistory_v2_writing(self) -> bool:
         return self.__dict__.get("writing_variant", "writing") == "tistory_v2"
+
+    def _remember_writing_keyword_inputs(self) -> None:
+        if not self.__dict__.get("_writing_keyword_inputs_ready", False):
+            return
+        variant = self.__dict__.get("writing_variant", "writing")
+        topic = self.topic_entry.get()
+        selected = self._selected_or_manual_keyword()
+        prefix = "tistory_v2" if variant == "tistory_v2" else "writing"
+        setattr(self.wordpress_settings, prefix + "_topic", topic.strip())
+        setattr(self.wordpress_settings, prefix + "_selected_keyword", selected)
+        # Lists and source metadata are session-local. Do not let another menu's
+        # radio selection or Refresh button reuse the previous search's source.
+        self.__dict__.setdefault("_writing_keyword_contexts", {})[variant] = {
+            "topic": topic, "manual": self.manual_keyword_entry.get(),
+            "selected": self.selected_keyword_var.get(),
+            "accepted": self.accepted_recommended_keyword,
+            "current_keyword": self.current_keyword,
+            "current_keyword_source": self.current_keyword_source,
+            "insights": copy.deepcopy(self.current_insights),
+            "status": self.keyword_status_label.cget("text"),
+            "maps": {name: copy.deepcopy(getattr(self, name)) for name in (
+                "daum_reference_map", "signal_reference_map", "newneek_reference_map",
+                "loword_reference_map", "naver_creator_reference_map", "collected_reference_map")},
+        }
+
+    def _restore_writing_keyword_inputs(self, variant: str) -> None:
+        prefix = "tistory_v2" if variant == "tistory_v2" else "writing"
+        saved_topic = str(getattr(self.wordpress_settings, prefix + "_topic", "") or "")
+        saved_keyword = str(getattr(self.wordpress_settings, prefix + "_selected_keyword", "") or "")
+        context = self.__dict__.get("_writing_keyword_contexts", {}).get(variant, {
+            "topic": saved_topic, "manual": saved_keyword, "selected": saved_keyword,
+        })
+        for entry, value in ((self.topic_entry, context["topic"]),
+                             (self.manual_keyword_entry, context["manual"])):
+            state = entry.cget("state")
+            entry.configure(state="normal")
+            entry.delete(0, "end")
+            entry.insert(0, value)
+            entry.configure(state=state)
+        self.selected_keyword_var.set(context["selected"])
+        self.current_keyword = context.get("current_keyword", saved_topic)
+        self.current_keyword_source = context.get("current_keyword_source", "")
+        self.current_insights = copy.deepcopy(context.get("insights", []))
+        for name in ("daum_reference_map", "signal_reference_map", "newneek_reference_map",
+                     "loword_reference_map", "naver_creator_reference_map", "collected_reference_map"):
+            setattr(self, name, copy.deepcopy(context.get("maps", {}).get(name, {})))
+        self._render_keyword_choices(self.current_insights)
+        self.accepted_recommended_keyword = context.get("accepted", "")
+        self._clear_result_cards()
+        self.keyword_status_label.configure(text=context.get("status", "주제를 입력하거나 키워드 출처를 선택해 주세요."))
 
     def _writing_result_queue(self):
         if not self._is_tistory_v2_writing():
@@ -48228,7 +48280,11 @@ class KeywordApp(ctk.CTk):
             if active.get("writing") or active.get("tistory_v2") or queued:
                 messagebox.showinfo("글쓰기 진행 중", "현재 글쓰기 작업을 마친 뒤 일반 글쓰기와 티스토리 V2를 전환해 주세요.", parent=self)
                 return False
+            self._remember_writing_keyword_inputs()
         self.writing_variant = variant
+        if previous != variant:
+            self._restore_writing_keyword_inputs(variant)
+            self._save_ui_state()
         is_v2 = variant == "tistory_v2"
         if is_v2 and self.__dict__.get("tistory_v2_controls") is None:
             from tistory_v2_writing import TistoryV2WritingControls
@@ -49371,6 +49427,7 @@ class KeywordApp(ctk.CTk):
         return links
 
     def _read_wordpress_settings(self, include_prompts: bool = True) -> WordPressSettings:
+        self._remember_writing_keyword_inputs()
         wordpress_title_prompt_template = self.wordpress_settings.wordpress_title_prompt_template
         wordpress_article_prompt_template = self.wordpress_settings.wordpress_article_prompt_template
         tistory_title_prompt_template = self.wordpress_settings.tistory_title_prompt_template
@@ -49790,10 +49847,12 @@ class KeywordApp(ctk.CTk):
             tistory_automation_prompt=tistory_automation_prompt or DEFAULT_TISTORY_AUTOMATION_PROMPT,
             blogspot_title_prompt_template=blogspot_title_prompt_template,
             blogspot_article_prompt_template=blogspot_article_prompt_template,
-            writing_topic=self.topic_entry.get().strip(),
+            writing_topic=self.wordpress_settings.writing_topic,
+            tistory_v2_topic=self.wordpress_settings.tistory_v2_topic,
+            tistory_v2_selected_keyword=self.wordpress_settings.tistory_v2_selected_keyword,
             writing_benchmark_enabled=self.benchmark_mode_var.get() if hasattr(self, "benchmark_mode_var") else self.wordpress_settings.writing_benchmark_enabled,
             writing_benchmark_url=self.benchmark_url_entry.get().strip() if hasattr(self, "benchmark_url_entry") else self.wordpress_settings.writing_benchmark_url,
-            writing_selected_keyword=self._selected_or_manual_keyword(),
+            writing_selected_keyword=self.wordpress_settings.writing_selected_keyword,
             writing_reference_text=self.reference_textbox.get("1.0", "end").strip(),
             writing_link_button_text=(current_writing_links[0]["button_text"] if current_writing_links else ""),
             writing_link_url=(current_writing_links[0]["url"] if current_writing_links else ""),

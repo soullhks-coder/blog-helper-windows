@@ -53,6 +53,8 @@ def main() -> None:
             window_geometry="1500x1000",
             target_platforms=["wordpress", "tistory", "blogspot"],
             tistory_profiles=[{"blog_url": "https://v2-first.tistory.com"}, {"blog_url": "https://v2-second.tistory.com"}],
+            writing_topic="일반 저장 주제", writing_selected_keyword="일반 저장 선택",
+            tistory_v2_topic="V2 저장 주제", tistory_v2_selected_keyword="V2 저장 선택",
         )
         stack.enter_context(patch.object(app_module.AppStateStore, "load", return_value=settings))
         for method in ("save", "update_fields"):
@@ -209,8 +211,44 @@ def main() -> None:
             original_target = app.wordpress_settings.home_target_platform
             original_default = app.default_thumbnail_preset_index
             shared_topic_entry = app.topic_entry
+            assert app.topic_entry.get() == "일반 저장 주제"
+            app.topic_entry.delete(0, "end")
+            app.topic_entry.insert(0, "일반 최근 입력")
+            app.manual_keyword_entry.delete(0, "end")
+            app.manual_keyword_entry.insert(0, "일반 직접 입력")
+            app.current_keyword_source = "analysis"
+            app.current_insights = [app_module.KeywordInsight("일반 추천", 80, [], [], [], {})]
             app._switch_page("tistory_v2")
             settle(250)
+            assert app.topic_entry.get() == "V2 저장 주제"
+            assert app._selected_or_manual_keyword() == "V2 저장 선택"
+            assert not app.current_insights and not app.current_keyword_source
+            app.topic_entry.delete(0, "end")
+            app.topic_entry.insert(0, "V2 최근 입력")
+            app.manual_keyword_entry.delete(0, "end")
+            app.manual_keyword_entry.insert(0, "V2 직접 입력")
+            app.current_keyword_source = "daum"
+            app.current_insights = [app_module.KeywordInsight("V2 추천", 80, [], [], [], {})]
+            saved_inputs = app._read_wordpress_settings(include_prompts=False)
+            assert (saved_inputs.writing_topic, saved_inputs.tistory_v2_topic) == ("일반 최근 입력", "V2 최근 입력")
+            assert (saved_inputs.writing_selected_keyword, saved_inputs.tistory_v2_selected_keyword) == ("일반 직접 입력", "V2 직접 입력")
+            app._switch_page("writing")
+            assert app.topic_entry.get() == "일반 최근 입력"
+            assert app.manual_keyword_entry.get() == "일반 직접 입력"
+            assert app.current_keyword_source == "analysis"
+            assert [item.keyword for item in app.current_insights] == ["일반 추천"]
+            app._switch_page("home")
+            app._switch_page("tistory_v2")
+            assert app.topic_entry.get() == "V2 최근 입력"
+            assert app.manual_keyword_entry.get() == "V2 직접 입력"
+            assert app.current_keyword_source == "daum"
+            assert [item.keyword for item in app.current_insights] == ["V2 추천"]
+            app.topic_entry.delete(0, "end")
+            app.manual_keyword_entry.delete(0, "end")
+            app.selected_keyword_var.set("")
+            assert app._read_wordpress_settings(include_prompts=False).tistory_v2_topic == ""
+            print(f"{sys.platform} {args.theme}: normal/V2 keyword inputs, selection, source and persistence are isolated", flush=True)
+            settle(160)
             assert app.current_page == "tistory_v2"
             assert app._current_page_frame() is app.writing_page
             assert app.writing_page.winfo_ismapped()
