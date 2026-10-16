@@ -62,7 +62,9 @@ def main():
                 assert actual["weight"] == weight, actual
                 assert font.measure("가나다라마바사 Blog Helper 123") > 100
             assert not errors, errors
-            print(f"PASS {sys.platform} {theme}: {args.font} -> {expected}, native normal/bold and CTk widgets", flush=True)
+            # Windows CI's redirected stdout can be cp1252 even when Tk itself
+            # correctly displays Korean. Keep diagnostics console-encoding safe.
+            print(f"PASS {sys.platform} {theme}: font option {FONT_OPTIONS.index(args.font)} -> {ascii(expected)}, native normal/bold and CTk widgets", flush=True)
     finally:
         root.destroy()
 
