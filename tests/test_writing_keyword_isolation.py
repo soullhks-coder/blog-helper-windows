@@ -46,6 +46,7 @@ class KeywordUI:
         self._writing_keyword_inputs_ready = True
         self.writing_variant = "writing"
         self.topic_entry, self.manual_keyword_entry, self.selected_keyword_var = Entry(), Entry(), Entry()
+        self.tistory_v2_wiki_keyword_entry = Entry()
         self.keyword_status_label = Entry("준비")
         self.writing_auto_progress_var = Entry(False)
         self._refresh_writing_auto_progress_ui = Mock()

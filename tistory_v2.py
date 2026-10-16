@@ -33,6 +33,11 @@ SLIDE_FONT_SIZE_RANGE = (6, 96)
 SLIDE_FONT_SIZES = {"eyebrow": 10, "title": 26, "summary": 15, "bullets": 14}
 
 
+def deck_wiki_keyword(deck: dict) -> str:
+    return (str(deck.get("wiki_keyword") or "").strip()
+            or str(deck.get("keyword") or deck.get("title") or "").strip())
+
+
 def validate_slide_font_size(value) -> int:
     if isinstance(value, bool) or not re.fullmatch(r"[0-9]{1,3}", str(value).strip()):
         raise ValueError("글자 크기는 6~96 사이의 정수로 입력해 주세요.")
@@ -238,6 +243,7 @@ class V2Store:
         apply_text_positions(slides, positions["text_horizontal"], positions["text_vertical"])
         apply_slide_font_sizes(slides, font_sizes)
         deck = {"id": deck_id, "keyword": keyword, "title": title or keyword,
+                "wiki_keyword": keyword,
                 "body": body, "theme": theme,
                 "show_photo_sources": bool(self.preferences().get("show_photo_sources", True)),
                 "slide_size": list(size),

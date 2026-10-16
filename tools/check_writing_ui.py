@@ -213,6 +213,7 @@ def main() -> None:
             original_default = app.default_thumbnail_preset_index
             shared_topic_entry = app.topic_entry
             assert app.topic_entry.get() == "일반 저장 주제"
+            assert not app.tistory_v2_wiki_keyword_row.winfo_ismapped()
             assert not app.writing_auto_progress_var.get()
             assert app.writing_auto_progress_switch.cget("text") == "자동진행 OFF"
             app.topic_entry.delete(0, "end")
@@ -224,6 +225,10 @@ def main() -> None:
             app._switch_page("tistory_v2")
             settle(250)
             assert app.topic_entry.get() == "V2 저장 주제"
+            assert app.tistory_v2_wiki_keyword_row.winfo_ismapped()
+            assert (app.tistory_v2_wiki_keyword_entry.winfo_rooty() + app.tistory_v2_wiki_keyword_entry.winfo_height()
+                    <= app.benchmark_url_entry.winfo_rooty())
+            assert app.tistory_v2_wiki_keyword_entry.cget("placeholder_text")
             assert app.writing_auto_progress_var.get()
             assert app.writing_auto_progress_switch.cget("text") == "자동진행 ON"
             assert not app.writing_auto_run_active  # restoring ON is not Start
@@ -412,6 +417,33 @@ def main() -> None:
             assert panel.store.load_deck(original_deck_id)["body"] == panel.deck["body"]
             assert all(slide["image"] is not None for slide in panel.deck["slides"][:2])
             assert all(slide["image"] is None for slide in panel.deck["slides"][2:])
+            # Recollect with the stage-1 photo query, retaining edited slides and
+            # the existing summary plan without a second AI request.
+            assert collect.call_args.args[0] == app._v2_article_source()["keyword"]
+            article_keyword = panel.deck["keyword"]
+            app.tistory_v2_wiki_keyword_entry.insert(0, "별도 위키 검색어")
+            assert app._read_wordpress_settings(include_prompts=False).tistory_v2_wiki_keyword == "별도 위키 검색어"
+            assert app._v2_article_source()["slide_summaries"] is not None
+            before_photo_texts = [slide["title"] for slide in panel.deck["slides"]]
+            before_photo_deck_id = panel.deck["id"]
+            with patch.object(slide_ui, "collect_wiki_images", return_value=([asset, dict(asset)], [])) as collect_query, \
+                 patch.object(panel, "chrome_path_provider", return_value=Path("/fake/chrome")), \
+                 patch.object(panel.workflow, "summarize") as summarize:
+                panel._start("collect")
+                for _ in range(200):
+                    settle(50)
+                    if not panel.busy:
+                        break
+                collect_query.assert_called_once()
+                assert collect_query.call_args.args[0] == "별도 위키 검색어"
+                summarize.assert_not_called()
+            assert panel.deck["id"] == before_photo_deck_id
+            assert panel.deck["keyword"] == article_keyword
+            assert panel.deck["wiki_keyword"] == "별도 위키 검색어"
+            assert [slide["title"] for slide in panel.deck["slides"]] == before_photo_texts
+            panel.snapshot_for_publish()
+            # The title/body summary remains reusable when only photos change.
+            print(f"{sys.platform} {args.theme}: independent stage-1 wiki query reaches photo collection without regenerating text", flush=True)
             from PIL import ImageTk
             assert panel.photo_sources_check.cget("text") == "사진출처 표시"
             assert int(panel.photo_sources_check.grid_info()["row"]) == int(panel.number_check.grid_info()["row"]) + 1
@@ -536,6 +568,8 @@ def main() -> None:
                 assert options["settings"].tistory_active_profile == "티스토리 2"
                 assert options["tistory_v2_deck"]["id"] == saved_deck_id
                 assert options["tistory_v2_deck"]["slide_size"] == [1200, 600]
+                assert options["tistory_v2_deck"]["wiki_keyword"] == "별도 위키 검색어"
+                assert options["settings"].tistory_v2_wiki_keyword == "별도 위키 검색어"
                 assert not options["tistory_v2_deck"]["show_photo_sources"]
                 assert options["tistory_v2_deck"]["slides"][0]["title"] == "편집한 슬라이드 제목 유지"
                 assert options["tistory_v2_deck"]["slides"][0]["image"]["path"] == str(photo_path)

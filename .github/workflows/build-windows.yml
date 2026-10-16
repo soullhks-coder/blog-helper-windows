@@ -78,6 +78,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -m unittest discover -s tests -p test_tistory_v2_font_sizes.py -q
           python -m unittest discover -s tests -p test_tistory_v2_photo_sources.py -q
+          python -m unittest discover -s tests -p test_tistory_v2_wiki_keyword.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
           python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
@@ -182,6 +183,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -m unittest discover -s tests -p test_tistory_v2_font_sizes.py -q
           python -m unittest discover -s tests -p test_tistory_v2_photo_sources.py -q
+          python -m unittest discover -s tests -p test_tistory_v2_wiki_keyword.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
           python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q

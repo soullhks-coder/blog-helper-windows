@@ -3593,6 +3593,7 @@ class WordPressSettings:
     writing_topic: str = ""
     tistory_v2_topic: str = ""
     tistory_v2_selected_keyword: str = ""
+    tistory_v2_wiki_keyword: str = ""
     writing_benchmark_enabled: bool = False
     writing_benchmark_url: str = ""
     writing_selected_keyword: str = ""
@@ -4531,6 +4532,7 @@ class AppStateStore:
             writing_topic=payload.get("writing_topic", ""),
             tistory_v2_topic=str(payload.get("tistory_v2_topic") or ""),
             tistory_v2_selected_keyword=str(payload.get("tistory_v2_selected_keyword") or ""),
+            tistory_v2_wiki_keyword=str(payload.get("tistory_v2_wiki_keyword") or ""),
             writing_benchmark_enabled=payload.get("writing_benchmark_enabled", False),
             writing_benchmark_url=payload.get("writing_benchmark_url", ""),
             writing_selected_keyword=payload.get("writing_selected_keyword", ""),
@@ -26400,13 +26402,13 @@ class PublishPipelineWorker(threading.Thread):
                         prepared_slides = export_edited_slide_deck(
                             self.tistory_v2_deck, self.title, prepared_article_html,
                             self.tistory_v2_keyword or self.focus_keyword, DATA_DIR / "Tistory V2", slide_progress,
-                            cancel_event=self.cancel_event)
+                            cancel_event=self.cancel_event, wiki_keyword=self.settings.tistory_v2_wiki_keyword)
                     else:
                         prepared_slides = prepare_slide_deck(
                             self.title, prepared_article_html,
                             self.tistory_v2_keyword or self.focus_keyword,
                             DATA_DIR / "Tistory V2", require_google_chrome_executable(), progress=slide_progress,
-                            cancel_event=self.cancel_event)
+                            cancel_event=self.cancel_event, wiki_keyword=self.settings.tistory_v2_wiki_keyword)
                     check_writing_cancelled(self.cancel_event)
                     tistory_v2_slide_paths = [str(path) for path in prepared_slides["paths"]]
                     if len(tistory_v2_slide_paths) != 10 or len(set(tistory_v2_slide_paths)) != 10:
@@ -43710,6 +43712,19 @@ class KeywordApp(ctk.CTk):
         benchmark_card.grid(row=2, column=0, padx=24, pady=(0, 12), sticky="ew")
         benchmark_card.grid_columnconfigure(1, weight=1)
 
+        self.tistory_v2_wiki_keyword_row = ctk.CTkFrame(benchmark_card, fg_color="transparent")
+        self.tistory_v2_wiki_keyword_row.grid(row=0, column=0, columnspan=3, padx=14, pady=(12, 0), sticky="ew")
+        self.tistory_v2_wiki_keyword_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.tistory_v2_wiki_keyword_row, text="위키백과·나무위키 검색어", anchor="w",
+                     font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.tistory_v2_wiki_keyword_entry = ctk.CTkEntry(
+            self.tistory_v2_wiki_keyword_row, height=40, corner_radius=12, fg_color="#0b1220", border_width=0,
+            placeholder_text="사진을 검색할 단어 · 비워 두면 글쓰기 키워드를 사용합니다.",
+            font=ctk.CTkFont(size=14, weight="bold"))
+        self.tistory_v2_wiki_keyword_entry.grid(row=1, column=0, sticky="ew")
+        self.tistory_v2_wiki_keyword_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
+        self.tistory_v2_wiki_keyword_row.grid_remove()
+
         self.benchmark_checkbox = ctk.CTkCheckBox(
             benchmark_card,
             text="다른사람글 벤치마킹",
@@ -43722,7 +43737,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._on_benchmark_mode_changed,
         )
-        self.benchmark_checkbox.grid(row=0, column=0, padx=14, pady=12, sticky="w")
+        self.benchmark_checkbox.grid(row=1, column=0, padx=14, pady=12, sticky="w")
 
         self.benchmark_url_entry = ctk.CTkEntry(
             benchmark_card,
@@ -43733,7 +43748,7 @@ class KeywordApp(ctk.CTk):
             placeholder_text="벤치마킹할 블로그 글 URL",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.benchmark_url_entry.grid(row=0, column=1, padx=(0, 10), pady=12, sticky="ew")
+        self.benchmark_url_entry.grid(row=1, column=1, padx=(0, 10), pady=12, sticky="ew")
         self.benchmark_url_entry.bind("<Return>", lambda _event: self.start_benchmark_blog())
         self.benchmark_url_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
 
@@ -43750,7 +43765,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self.start_benchmark_blog,
         )
-        self.benchmark_button.grid(row=0, column=2, padx=(0, 14), pady=12, sticky="e")
+        self.benchmark_button.grid(row=1, column=2, padx=(0, 14), pady=12, sticky="e")
 
         self._build_writing_link_controls(topic_card)
 
@@ -48082,6 +48097,8 @@ class KeywordApp(ctk.CTk):
         setattr(self.wordpress_settings, prefix + "_topic", topic.strip())
         setattr(self.wordpress_settings, prefix + "_selected_keyword", selected)
         setattr(self.wordpress_settings, prefix + "_auto_progress", bool(self.writing_auto_progress_var.get()))
+        if variant == "tistory_v2":
+            self.wordpress_settings.tistory_v2_wiki_keyword = self.tistory_v2_wiki_keyword_entry.get().strip()
         # Lists and source metadata are session-local. Do not let another menu's
         # radio selection or Refresh button reuse the previous search's source.
         self.__dict__.setdefault("_writing_keyword_contexts", {})[variant] = {
@@ -48105,6 +48122,8 @@ class KeywordApp(ctk.CTk):
         # start/resume a run or copy the other menu's current switch value.
         self.writing_auto_progress_var.set(bool(getattr(self.wordpress_settings, prefix + "_auto_progress", False)))
         self._refresh_writing_auto_progress_ui()
+        self.tistory_v2_wiki_keyword_entry.delete(0, "end")
+        self.tistory_v2_wiki_keyword_entry.insert(0, self.wordpress_settings.tistory_v2_wiki_keyword)
         context = self.__dict__.get("_writing_keyword_contexts", {}).get(variant, {
             "topic": saved_topic, "manual": saved_keyword, "selected": saved_keyword,
         })
@@ -48204,7 +48223,8 @@ class KeywordApp(ctk.CTk):
                      "loword_reference_map", "naver_creator_reference_map", "collected_reference_map"):
             setattr(self, name, {})
         self.selected_keyword_var.set("")
-        for entry in (self.topic_entry, self.manual_keyword_entry, self.article_title_entry, self.benchmark_url_entry):
+        for entry in (self.topic_entry, self.manual_keyword_entry, self.article_title_entry, self.benchmark_url_entry,
+                      self.tistory_v2_wiki_keyword_entry):
             entry.configure(state="normal")
             entry.delete(0, "end")
         self.reference_textbox.delete("1.0", "end")
@@ -48255,6 +48275,9 @@ class KeywordApp(ctk.CTk):
             plan = {}
         source["slide_summaries"] = (plan.get("slides") if
             all(str(plan.get(key, "")).strip() == str(value).strip() for key, value in source.items()) else None)
+        # Image search is not part of article/summary identity: changing a photo
+        # query must never trigger another paid article or summary generation.
+        source["wiki_keyword"] = self.tistory_v2_wiki_keyword_entry.get().strip()
         return source
 
     def _v2_slide_editor_finished(self, success: bool) -> None:
@@ -48305,6 +48328,7 @@ class KeywordApp(ctk.CTk):
             self._tag_mousewheel_descendants(self.tistory_v2_panel)
         self.writing_page_title.configure(text="티스토리 V2" if is_v2 else "블로그글쓰기")
         if is_v2:
+            self.tistory_v2_wiki_keyword_row.grid()
             self.writing_v2_stop_row.grid()
             self.writing_target_row.grid_remove()
             self.writing_selector_row.grid_remove()
@@ -48320,6 +48344,7 @@ class KeywordApp(ctk.CTk):
                 self._writing_standard_thumbnail_index = self.active_thumbnail_preset_index
                 self._switch_thumbnail_preset(self.tistory_v2_controls.selection()["thumbnail"] or 0, save=False)
         else:
+            self.tistory_v2_wiki_keyword_row.grid_remove()
             self.writing_v2_stop_row.grid_remove()
             controls = self.__dict__.get("tistory_v2_controls")
             if controls is not None:
@@ -49856,6 +49881,7 @@ class KeywordApp(ctk.CTk):
             writing_topic=self.wordpress_settings.writing_topic,
             tistory_v2_topic=self.wordpress_settings.tistory_v2_topic,
             tistory_v2_selected_keyword=self.wordpress_settings.tistory_v2_selected_keyword,
+            tistory_v2_wiki_keyword=self.wordpress_settings.tistory_v2_wiki_keyword,
             writing_benchmark_enabled=self.benchmark_mode_var.get() if hasattr(self, "benchmark_mode_var") else self.wordpress_settings.writing_benchmark_enabled,
             writing_benchmark_url=self.benchmark_url_entry.get().strip() if hasattr(self, "benchmark_url_entry") else self.wordpress_settings.writing_benchmark_url,
             writing_selected_keyword=self.wordpress_settings.writing_selected_keyword,

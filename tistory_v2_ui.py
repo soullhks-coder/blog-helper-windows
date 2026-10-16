@@ -18,7 +18,7 @@ from modal_backdrop import DimmedDialogApi
 from tistory_v2 import (COPYRIGHT_NOTE, THEME_CHOICES, TEXT_HORIZONTAL_POSITIONS, TEXT_VERTICAL_POSITIONS,
                         Cancelled, V2Store, collect_wiki_images,
                         SLIDE_SIZE, apply_text_positions, assign_deck_themes, assign_slide_images, build_slides, deck_slide_size,
-                        deck_slide_sizes, export_deck, plain_text, render_slide, slide_output_size,
+                        deck_slide_sizes, deck_wiki_keyword, export_deck, plain_text, render_slide, slide_output_size,
                         text_position_defaults, validate_slide_size, SLIDE_FONT_SIZE_RANGE, SLIDE_FONT_SIZES,
                         apply_slide_font_sizes, slide_font_sizes, slide_font_size_overrides, validate_slide_font_size)
 from tistory_v2_summary import build_summary_slides
@@ -829,7 +829,8 @@ class TistoryV2Panel(ctk.CTkFrame):
         self._show_slide()
         self._save_preferences()
         if self.embedded:
-            self.article_source_label.configure(text="원본 글: " + deck.get("title", "") + "\n글 내용은 ③에서 수정하세요.")
+            self.article_source_label.configure(text="원본 글: " + deck.get("title", "")
+                                                 + "\n사진 검색어: " + deck_wiki_keyword(deck) + "\n글 내용은 ③에서 수정하세요.")
 
     def _refresh_photo_menu(self):
         self._image_labels = {f"{index}. {asset.get('source', '내 이미지')} · {asset.get('title', '')[:30]}": asset
@@ -977,7 +978,9 @@ class TistoryV2Panel(ctk.CTkFrame):
         if not self.embedded or self.busy:
             return
         source = self.article_provider()
-        self.article_source_label.configure(text="현재 글: " + (source["title"] or "③에서 글을 완성해 주세요.") + "\n글 내용은 ③에서 수정하세요.")
+        self.article_source_label.configure(text="현재 글: " + (source["title"] or "③에서 글을 완성해 주세요.")
+                                             + "\n사진 검색어: " + (source.get("wiki_keyword") or source["keyword"])
+                                             + "\n글은 ③에서, 사진 검색어는 ①에서 수정하세요.")
         from tistory_v2_publish import deck_matches_article
         if self.deck and not deck_matches_article(self.deck, **source):
             self.status.configure(text="저장한 슬라이드를 표시하고 있습니다. 현재 글로 바꾸려면 ‘10장 만들기’를 누르세요. 기존 작업은 저장 목록에 유지됩니다.")
@@ -1006,7 +1009,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         self._commit_slide_image_size()
         from tistory_v2_publish import deck_matches_article
         if not deck_matches_article(self.deck, **self.article_provider()):
-            raise ValueError("현재 본문과 슬라이드 원본이 다릅니다. ‘현재 본문으로 10장 만들기’를 먼저 눌러 주세요.")
+            raise ValueError("현재 본문 또는 사진 검색어가 슬라이드와 다릅니다. 본문이 바뀌면 ‘10장 만들기’, 사진 검색어만 바뀌면 ‘사진 수집’을 눌러 주세요.")
         return copy.deepcopy(self.deck)
 
     def _set_busy(self, busy):
@@ -1078,9 +1081,9 @@ class TistoryV2Panel(ctk.CTkFrame):
         if self.embedded and operation == "create" and source is None:
             self.prepare_article()
             return
-        if self.embedded and operation == "collect" and not self.deck:
+        if self.embedded and operation == "collect":
             source = self.article_provider()
-            if not plain_text(source["article_html"]).strip():
+            if not self.deck and not plain_text(source["article_html"]).strip():
                 messagebox.showinfo("본문 필요", "③ 글 확인·수정에서 글을 먼저 완성해 주세요.", parent=self.app)
                 return
         try:
@@ -1089,7 +1092,9 @@ class TistoryV2Panel(ctk.CTkFrame):
         except ValueError as exc:
             messagebox.showerror("이미지 크기", str(exc), parent=self.app)
             return
-        keyword = source["keyword"] if source else self.keyword_entry.get().strip()
+        keyword = (self.deck["keyword"] if operation == "collect" and self.deck else
+                   source["keyword"] if source else self.keyword_entry.get().strip())
+        wiki_keyword = (str(source.get("wiki_keyword") or "").strip() or keyword) if source else keyword
         automatic = self.mode.get() == "자동 모드"
         if operation in {"collect", "create"} and not keyword:
             messagebox.showinfo("키워드 입력", "사진을 검색할 키워드를 먼저 입력해 주세요.", parent=self.app)
@@ -1121,10 +1126,12 @@ class TistoryV2Panel(ctk.CTkFrame):
             messagebox.showerror("티스토리 V2 설정 확인", str(exc), parent=self.app)
             return
         if operation in {"collect", "create"}:
-            deck = (copy.deepcopy(self.deck) if operation == "collect" and self.deck and self.deck.get("keyword") == keyword
+            deck = (copy.deepcopy(self.deck) if operation == "collect" and self.deck
                     else self.store.new_deck(keyword, source["title"] if source else self.title_entry.get().strip(),
                                             source["article_html"] if source else self.body_box.get("1.0", "end").strip(), 10, self.theme.get()))
-            if operation == "create" and self.deck and self.deck.get("keyword") == keyword:
+            deck["wiki_keyword"] = wiki_keyword
+            if (operation == "create" and self.deck and self.deck.get("keyword") == keyword
+                    and deck_wiki_keyword(self.deck) == wiki_keyword):
                 deck["images"] = copy.deepcopy(self.deck.get("images", []))
         else:
             deck = copy.deepcopy(self.deck)
@@ -1163,7 +1170,7 @@ class TistoryV2Panel(ctk.CTkFrame):
                     assign_deck_themes(deck)
                 if operation == "collect" or (operation == "create" and automatic):
                     try:
-                        deck["images"], warnings = collect_wiki_images(keyword, store.deck_directory(deck) / "images", provider(), cancel,
+                        deck["images"], warnings = collect_wiki_images(wiki_keyword, store.deck_directory(deck) / "images", provider(), cancel,
                                                                       report, visible)
                     except (Cancelled, MemoryError):
                         raise

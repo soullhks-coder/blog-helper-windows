@@ -17,7 +17,7 @@ from PIL import Image
 
 from tistory_v2 import (Cancelled, V2Store, assign_slide_images,
                         collect_wiki_images, deck_slide_size, deck_slide_sizes, export_deck, plain_text,
-                        wiki_document_url)
+                        wiki_document_url, deck_wiki_keyword)
 from writing_run import WritingCancelled, check_writing_cancelled
 
 
@@ -114,21 +114,23 @@ def source_credits_html(deck: dict) -> str:
     return _source_credits(deck.get("slides", [])) if deck.get("show_photo_sources", True) else ""
 
 
-def deck_matches_article(deck: dict | None, title: str, article_html: str, keyword: str, slide_summaries=None) -> bool:
+def deck_matches_article(deck: dict | None, title: str, article_html: str, keyword: str, slide_summaries=None,
+                         wiki_keyword: str | None = None) -> bool:
     """Slide text can differ; the source article must still match stage 3."""
     return bool(deck and len(deck.get("slides", [])) == 10
                 and str(deck.get("title", "")).strip() == title.strip()
                 and _without_generated_figures(str(deck.get("body", ""))).strip()
                 == _without_generated_figures(article_html).strip()
-                and str(deck.get("keyword", "")).strip() == str(keyword or title).strip())
+                and str(deck.get("keyword", "")).strip() == str(keyword or title).strip()
+                and (wiki_keyword is None or deck_wiki_keyword(deck) == (str(wiki_keyword).strip() or str(keyword or title).strip())))
 
 
 def export_edited_slide_deck(deck: dict, title: str, article_html: str, keyword: str,
-                           directory: Path, progress=None, cancel_event=None) -> dict:
+                           directory: Path, progress=None, cancel_event=None, wiki_keyword: str | None = None) -> dict:
     """Render the editor snapshot, never recreate slides or recollect photos."""
     check_writing_cancelled(cancel_event)
-    if not deck_matches_article(deck, title, article_html, keyword):
-        raise ValueError("슬라이드 원본과 현재 글이 다릅니다. ④ 단계에서 최신 본문으로 슬라이드를 다시 만들어 주세요.")
+    if not deck_matches_article(deck, title, article_html, keyword, wiki_keyword=wiki_keyword):
+        raise ValueError("슬라이드 원본과 현재 글 또는 사진 검색어가 다릅니다. ④ 단계에서 본문/사진을 갱신해 주세요.")
     deck = copy.deepcopy(deck)
     size = deck_slide_size(deck)
     sizes = deck_slide_sizes(deck)
@@ -161,6 +163,7 @@ def prepare_slide_deck(
     chrome_path: Path | str,
     progress: Callable[[str], None] | None = None,
     cancel_event=None,
+    wiki_keyword: str = "",
 ) -> dict:
     """Return ten configured-size PNG Paths and the unchanged, cleaned final article.
 
@@ -174,18 +177,20 @@ def prepare_slide_deck(
     if not plain_text(body).strip():
         raise ValueError("티스토리 V2 슬라이드를 만들 최종 본문이 없습니다.")
     keyword = str(keyword or title).strip()
-    wiki_document_url("wikipedia", keyword)
+    image_keyword = str(wiki_keyword or "").strip() or keyword
+    wiki_document_url("wikipedia", image_keyword)
     store = V2Store(Path(directory).expanduser().resolve())
     report("최종 편집 본문으로 티스토리 V2 슬라이드 10장을 준비합니다...")
     check_writing_cancelled(cancel_event)
     deck = store.new_deck(keyword, title, body, 10, store.preferences().get("theme", "스카이"))
+    deck["wiki_keyword"] = image_keyword
     size = deck_slide_size(deck)
     sizes = deck_slide_sizes(deck)
     if len(deck["slides"]) != 10:
         raise ValueError("티스토리 V2 슬라이드는 정확히 10장이어야 합니다.")
     try:
         images, warnings = collect_wiki_images(
-            keyword, store.deck_directory(deck) / "images", Path(chrome_path),
+            image_keyword, store.deck_directory(deck) / "images", Path(chrome_path),
             cancel=cancel_event, progress=report,
         )
     except WritingCancelled:
