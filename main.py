@@ -43717,12 +43717,19 @@ class KeywordApp(ctk.CTk):
         self.tistory_v2_wiki_keyword_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(self.tistory_v2_wiki_keyword_row, text="위키백과·나무위키 검색어", anchor="w",
                      font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        wiki_palette = self._theme_palette()
         self.tistory_v2_wiki_keyword_entry = ctk.CTkEntry(
-            self.tistory_v2_wiki_keyword_row, height=40, corner_radius=12, fg_color="#0b1220", border_width=0,
+            self.tistory_v2_wiki_keyword_row, height=40, corner_radius=12,
+            fg_color=wiki_palette["input"], border_width=2, border_color=wiki_palette["border"],
+            text_color=wiki_palette["text"], placeholder_text_color=wiki_palette["muted"],
             placeholder_text="사진을 검색할 단어 · 비워 두면 글쓰기 키워드를 사용합니다.",
             font=ctk.CTkFont(size=14, weight="bold"))
         self.tistory_v2_wiki_keyword_entry.grid(row=1, column=0, sticky="ew")
         self.tistory_v2_wiki_keyword_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
+        self.tistory_v2_wiki_keyword_entry.bind("<FocusIn>", lambda _event:
+            self.tistory_v2_wiki_keyword_entry.configure(border_color=self._theme_palette()["accent"]))
+        self.tistory_v2_wiki_keyword_entry.bind("<FocusOut>", lambda _event:
+            self.tistory_v2_wiki_keyword_entry.configure(border_color=self._theme_palette()["border"]))
         self.tistory_v2_wiki_keyword_row.grid_remove()
 
         self.benchmark_checkbox = ctk.CTkCheckBox(

@@ -229,6 +229,22 @@ def main() -> None:
             assert (app.tistory_v2_wiki_keyword_entry.winfo_rooty() + app.tistory_v2_wiki_keyword_entry.winfo_height()
                     <= app.benchmark_url_entry.winfo_rooty())
             assert app.tistory_v2_wiki_keyword_entry.cget("placeholder_text")
+            wiki_entry = app.tistory_v2_wiki_keyword_entry
+            palette = app._theme_palette()
+            assert wiki_entry.cget("border_width") == 2
+            assert resolved_color(wiki_entry, "border_color") == palette["border"]
+            border_parts = wiki_entry._canvas.find_withtag("border_parts")
+            assert border_parts
+            assert all(wiki_entry._canvas.itemcget(part, "fill") == palette["border"] for part in border_parts)
+            assert resolved_color(wiki_entry, "fg_color") == palette["input"]
+            assert resolved_color(wiki_entry, "text_color") == palette["text"]
+            assert resolved_color(wiki_entry, "placeholder_text_color") == palette["muted"]
+            wiki_entry._entry.event_generate("<FocusIn>")
+            assert resolved_color(wiki_entry, "border_color") == palette["accent"]
+            wiki_entry._entry.event_generate("<FocusOut>")
+            assert resolved_color(wiki_entry, "border_color") == palette["border"]
+            screenshot("v2-wiki-search-outlined")
+            print(f"{sys.platform} {args.theme}: wiki search input border, fill, placeholder and focus contrast passed", flush=True)
             assert app.writing_auto_progress_var.get()
             assert app.writing_auto_progress_switch.cget("text") == "자동진행 ON"
             assert not app.writing_auto_run_active  # restoring ON is not Start
