@@ -12,6 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+from input_surfaces import InputEntry, InputTextbox
 from PIL import Image, ImageOps, ImageTk
 
 from modal_backdrop import DimmedDialogApi
@@ -93,7 +94,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         return label
 
     def _entry(self, parent, row, placeholder=""):
-        entry = ctk.CTkEntry(parent, height=38, fg_color=self.palette["input"], border_color=self.palette["border"],
+        entry = InputEntry(parent, height=38, fg_color=self.palette["input"], border_color=self.palette["border"],
                              text_color=self.palette["text"], placeholder_text_color=self.palette["muted"],
                              placeholder_text=placeholder)
         entry.grid(row=row, column=0, padx=18, sticky="ew")
@@ -120,7 +121,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         return button
 
     def _textbox(self, parent, row, height):
-        box = ctk.CTkTextbox(parent, height=height, fg_color=self.palette["input"], border_width=1,
+        box = InputTextbox(parent, height=height, fg_color=self.palette["input"], border_width=1,
                              border_color=self.palette["border"], text_color=self.palette["text"],
                              corner_radius=12, font=ctk.CTkFont(size=14))
         box.grid(row=row, column=0, padx=18, sticky="ew")
@@ -139,7 +140,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         )
         slider.grid(row=0, column=1, padx=(4, 7), sticky="e")
         variable = tk.StringVar(value=str(self._font_size_defaults.get(key, SLIDE_FONT_SIZES[key])))
-        entry = ctk.CTkEntry(header, width=44, height=28, textvariable=variable, justify="center",
+        entry = InputEntry(header, width=44, height=28, textvariable=variable, justify="center",
                              fg_color=self.palette["input"], border_color=self.palette["border"],
                              text_color=self.palette["text"], font=ctk.CTkFont(size=12))
         entry.grid(row=0, column=2, sticky="e")
@@ -225,7 +226,7 @@ class TistoryV2Panel(ctk.CTkFrame):
             group.grid(row=1, column=column, padx=(0, 6), sticky="ew")
             group.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(group, text=label, anchor="w", text_color=self.palette["muted"]).grid(row=0, column=0, sticky="ew")
-            entry = ctk.CTkEntry(group, width=70, height=34, fg_color=self.palette["input"],
+            entry = InputEntry(group, width=70, height=34, fg_color=self.palette["input"],
                                   border_color=self.palette["border"], text_color=self.palette["text"])
             entry.grid(row=1, column=0, sticky="ew")
             entry.insert(0, str(value))
@@ -335,7 +336,7 @@ class TistoryV2Panel(ctk.CTkFrame):
             group.grid(row=0, column=column, padx=(0, 6), sticky="ew")
             group.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(group, text=label, anchor="w", text_color=self.palette["muted"]).grid(row=0, column=0, sticky="ew")
-            entry = ctk.CTkEntry(group, width=70, height=34, fg_color=self.palette["input"],
+            entry = InputEntry(group, width=70, height=34, fg_color=self.palette["input"],
                                   border_color=self.palette["border"], text_color=self.palette["text"])
             entry.grid(row=1, column=0, sticky="ew")
             entry.insert(0, str(self._output_size[column]))

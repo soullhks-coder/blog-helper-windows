@@ -79,7 +79,33 @@ def main() -> None:
             app.update_idletasks()
             assert not errors, errors
 
+        def assert_input_outlines(root):
+            pending = [root]
+            count = 0
+            while pending:
+                widget = pending.pop()
+                pending.extend(widget.winfo_children())
+                if not isinstance(widget, (app_module.InputEntry, app_module.InputTextbox)):
+                    continue
+                assert widget.cget("border_width") >= 2, str(widget)
+                if not widget.winfo_ismapped() or widget.winfo_height() < 8:
+                    continue
+                assert widget._canvas.find_withtag("border_parts"), str(widget)
+                native = widget._entry if isinstance(widget, app_module.InputEntry) else widget._textbox
+                border = round(widget._apply_widget_scaling(widget.cget("border_width")))
+                # Check actual native editor bounds, not only CTk color options.
+                # Its background must not cover the bottom stroke of the canvas.
+                bottom = native.winfo_y() + native.winfo_height()
+                safe_bottom = widget.winfo_height() - border - 1
+                assert bottom <= safe_bottom, (str(widget), bottom, safe_bottom)
+                assert native.winfo_y() >= border, (str(widget), native.winfo_y(), border)
+                if isinstance(widget, app_module.InputEntry):
+                    assert 'n' not in native.grid_info()['sticky'] and 's' not in native.grid_info()['sticky']
+                count += 1
+            return count
+
         def screenshot(name, window=None):
+            assert_input_outlines(window if window is not None else app)
             if not args.screenshots:
                 return
             args.screenshots.mkdir(parents=True, exist_ok=True)
@@ -1763,6 +1789,7 @@ def main() -> None:
                 app.thumbnails_scroll._parent_canvas.yview_moveto(0)
                 settle(220)
                 assert app.thumbnail_prompt_preview.winfo_ismapped()
+                assert_input_outlines(app.thumbnails_page)
                 canvas = app.thumbnail_preview_canvas
                 viewport = app.thumbnails_scroll._parent_canvas
                 offset = max(0, canvas.winfo_rooty() - viewport.winfo_rooty() - 30)
@@ -1773,6 +1800,15 @@ def main() -> None:
                 assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
                 for button in app.thumbnail_manager_preset_buttons.values():
                     assert button.winfo_rootx() + button.winfo_width() <= app.thumbnails_scroll._parent_canvas.winfo_rootx() + app.thumbnails_scroll._parent_canvas.winfo_width() + 2
+            for name, editor in (("thumbnail-manager-inputs", app.thumbnail_prompt_preview),
+                                 ("cardnews-manager-inputs", app.cardnews_heading_entry)):
+                viewport = app.thumbnails_scroll._parent_canvas
+                viewport.yview_moveto(0)
+                settle(80)
+                offset = max(0, editor.winfo_rooty() - viewport.winfo_rooty() - 40)
+                viewport.yview_moveto(offset / max(1, viewport.bbox("all")[3]))
+                settle(80)
+                screenshot(name)
             app._switch_page("writing")
             app._open_writing_section("publish")
             settle(220)
@@ -1786,6 +1822,7 @@ def main() -> None:
                 settle(220)
                 app._finish_theme_paint(force=True)
                 settle(80)
+                assert_input_outlines(page_frame)
                 selected_nav = getattr(app, sidebar_button_names[page_name])
                 assert resolved_color(selected_nav, "text_color") == app._theme_palette()["accent"]
                 for candidate_page, button_name in sidebar_button_names.items():

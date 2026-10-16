@@ -79,6 +79,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_font_sizes.py -q
           python -m unittest discover -s tests -p test_tistory_v2_photo_sources.py -q
           python -m unittest discover -s tests -p test_tistory_v2_wiki_keyword.py -q
+          python -m unittest discover -s tests -p test_input_surfaces.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
           python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
@@ -102,6 +103,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python tools/check_windows_modal_ui.py
           python tools/check_app_fonts_ui.py
+          python tools/check_input_surfaces_ui.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.exe
@@ -184,6 +186,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_font_sizes.py -q
           python -m unittest discover -s tests -p test_tistory_v2_photo_sources.py -q
           python -m unittest discover -s tests -p test_tistory_v2_wiki_keyword.py -q
+          python -m unittest discover -s tests -p test_input_surfaces.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
           python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
@@ -192,6 +195,7 @@ jobs:
       - name: Check writing UI in dark and light themes
         run: |
           python tools/check_app_fonts_ui.py
+          python tools/check_input_surfaces_ui.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.app

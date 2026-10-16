@@ -46,6 +46,7 @@ from startup_guard import acquire_windows_single_instance, release_windows_singl
 _WINDOWS_SINGLE_INSTANCE_MUTEX = acquire_windows_single_instance()
 
 import customtkinter as ctk
+from input_surfaces import InputEntry, InputTextbox
 import certifi
 import tkinter as tk
 import tkinter.font as tkfont
@@ -28393,7 +28394,10 @@ class KeywordApp(ctk.CTk):
                 continue
             if child in self._theme_painted_widgets:
                 self._apply_white_widget_polish(child, palette)
-                self._retint_widget_tree(child, palette)
+                if isinstance(child, (InputEntry, InputTextbox)):
+                    child._draw()
+                else:
+                    self._retint_widget_tree(child, palette)
                 continue
             configure_values = {}
             for option in (
@@ -28452,6 +28456,13 @@ class KeywordApp(ctk.CTk):
                 except Exception:
                     pass
             self._apply_white_widget_polish(child, palette)
+            if isinstance(child, (InputEntry, InputTextbox)):
+                # The composite input owns its native editor/canvas colors.
+                # Retinting those children independently overwrites placeholder
+                # styling and can repaint over the rounded outline.
+                child._draw()
+                self._theme_painted_widgets.add(child)
+                continue
             try:
                 fg_value = configure_values.get("fg_color", child.cget("fg_color"))
                 canvas_color = self._map_theme_color(fg_value, palette, "fg_color")
@@ -29162,7 +29173,7 @@ class KeywordApp(ctk.CTk):
         self.thumbnails_scroll.grid_columnconfigure(0, weight=1)
         self.thumbnail_manager_card = ctk.CTkFrame(
             self.thumbnails_scroll, fg_color=palette["card"], corner_radius=20,
-            border_width=1, border_color=palette["border"],
+            border_width=2, border_color=palette["border"],
         )
         self.thumbnail_manager_card.grid(row=0, column=0, sticky="ew")
         self.thumbnail_manager_card.grid_columnconfigure(0, weight=1)
@@ -31052,7 +31063,7 @@ class KeywordApp(ctk.CTk):
         filters.grid(row=1, column=0, pady=(0, 10), sticky="ew")
         filters.grid_columnconfigure(0, weight=1)
 
-        self.history_search_entry = ctk.CTkEntry(
+        self.history_search_entry = InputEntry(
             filters,
             height=44,
             corner_radius=13,
@@ -31521,7 +31532,7 @@ class KeywordApp(ctk.CTk):
             text_color="#cbd6e6",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=0, padx=(18, 12), pady=7, sticky="w")
-        self.remote_gateway_entry = ctk.CTkEntry(
+        self.remote_gateway_entry = InputEntry(
             remote_card,
             height=42,
             corner_radius=13,
@@ -31538,7 +31549,7 @@ class KeywordApp(ctk.CTk):
             text_color="#cbd6e6",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=2, column=0, padx=(18, 12), pady=7, sticky="w")
-        self.remote_device_name_entry = ctk.CTkEntry(
+        self.remote_device_name_entry = InputEntry(
             remote_card,
             height=42,
             corner_radius=13,
@@ -31555,7 +31566,7 @@ class KeywordApp(ctk.CTk):
             text_color="#cbd6e6",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=3, column=0, padx=(18, 12), pady=7, sticky="w")
-        self.remote_pairing_password_entry = ctk.CTkEntry(
+        self.remote_pairing_password_entry = InputEntry(
             remote_card,
             height=42,
             corner_radius=13,
@@ -32395,7 +32406,7 @@ class KeywordApp(ctk.CTk):
             )
             label_var = tk.StringVar(value=saved_labels[page_name])
             self.sidebar_menu_label_vars[page_name] = label_var
-            entry = ctk.CTkEntry(
+            entry = InputEntry(
                 card,
                 textvariable=label_var,
                 height=42,
@@ -33899,7 +33910,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=0, padx=18, pady=(18, 8), sticky="w")
-        self.naver_kin_url_entry = ctk.CTkEntry(
+        self.naver_kin_url_entry = InputEntry(
             setup_card,
             height=40,
             corner_radius=12,
@@ -34030,7 +34041,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=4, column=0, padx=18, pady=8, sticky="w")
-        self.naver_kin_direct_url_entry = ctk.CTkEntry(
+        self.naver_kin_direct_url_entry = InputEntry(
             setup_card,
             height=40,
             corner_radius=12,
@@ -34124,7 +34135,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=6, column=0, padx=18, pady=(8, 12), sticky="nw")
-        self.naver_kin_reference_textbox = ctk.CTkTextbox(
+        self.naver_kin_reference_textbox = InputTextbox(
             setup_card,
             height=100,
             corner_radius=12,
@@ -34303,7 +34314,7 @@ class KeywordApp(ctk.CTk):
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, padx=18, pady=(0, 8), sticky="w")
-        self.naver_kin_answer_template_box = ctk.CTkTextbox(
+        self.naver_kin_answer_template_box = InputTextbox(
             template_card,
             height=110,
             corner_radius=14,
@@ -34344,7 +34355,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, padx=18, pady=(0, 8), sticky="w")
         self.naver_kin_run_logs: list[str] = []
-        self.naver_kin_log_box = ctk.CTkTextbox(
+        self.naver_kin_log_box = InputTextbox(
             log_card,
             height=150,
             corner_radius=14,
@@ -34550,7 +34561,7 @@ class KeywordApp(ctk.CTk):
             hover_color="#6a768b",
             command=self._clear_naver_blog_reference_text,
         ).grid(row=0, column=1, sticky="e")
-        self.naver_blog_reference_textbox = ctk.CTkTextbox(
+        self.naver_blog_reference_textbox = InputTextbox(
             prompt_panel,
             height=150,
             corner_radius=12,
@@ -34615,12 +34626,12 @@ class KeywordApp(ctk.CTk):
         self._refresh_naver_blog_writing_profile_choices()
 
         ctk.CTkLabel(url_panel, text="글쓰기 URL", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_write_url_entry = ctk.CTkEntry(url_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
+        self.naver_blog_write_url_entry = InputEntry(url_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_write_url_entry.grid(row=2, column=1, columnspan=2, padx=(0, 10), pady=8, sticky="ew")
         self.naver_blog_write_url_entry.insert(0, self.wordpress_settings.naver_blog_write_url)
         ctk.CTkButton(url_panel, text="저장하기", width=96, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._save_naver_blog_settings).grid(row=2, column=3, padx=(0, 18), pady=8)
         ctk.CTkLabel(url_panel, text="글 주제", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_publish_name_entry = ctk.CTkEntry(
+        self.naver_blog_publish_name_entry = InputEntry(
             url_panel,
             height=36,
             fg_color=palette["input"],
@@ -34850,7 +34861,7 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=2, column=0, padx=(18, 10), pady=(0, 10), sticky="w")
-        self.naver_blog_quote_click_distance_entry = ctk.CTkEntry(
+        self.naver_blog_quote_click_distance_entry = InputEntry(
             control_panel,
             width=130,
             height=34,
@@ -34961,21 +34972,21 @@ class KeywordApp(ctk.CTk):
 
         model_panel = self._naver_panel(parent, "생성 모델 선택", 1)
         ctk.CTkLabel(model_panel, text="글 생성 모델", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_generation_model_entry = ctk.CTkEntry(model_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
+        self.naver_blog_generation_model_entry = InputEntry(model_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_generation_model_entry.grid(row=1, column=1, columnspan=3, padx=(0, 18), pady=8, sticky="ew")
         self.naver_blog_generation_model_entry.insert(0, self.wordpress_settings.naver_blog_generation_model)
         ctk.CTkLabel(model_panel, text="이미지 모델", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=(8, 16), sticky="w")
-        self.naver_blog_image_model_entry = ctk.CTkEntry(model_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
+        self.naver_blog_image_model_entry = InputEntry(model_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_image_model_entry.grid(row=2, column=1, columnspan=3, padx=(0, 18), pady=(8, 16), sticky="ew")
         self.naver_blog_image_model_entry.insert(0, self.wordpress_settings.naver_blog_image_model)
 
         posting_panel = self._naver_panel(parent, "포스팅 설정", 2)
         ctk.CTkLabel(posting_panel, text="본문 타이핑 간격(ms)", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_body_delay_entry = ctk.CTkEntry(posting_panel, width=130, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
+        self.naver_blog_body_delay_entry = InputEntry(posting_panel, width=130, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_body_delay_entry.grid(row=1, column=1, padx=(0, 10), pady=8, sticky="w")
         self.naver_blog_body_delay_entry.insert(0, str(self.wordpress_settings.naver_blog_body_delay_ms))
         ctk.CTkLabel(posting_panel, text="자동화 횟수", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_run_count_entry = ctk.CTkEntry(posting_panel, width=130, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
+        self.naver_blog_run_count_entry = InputEntry(posting_panel, width=130, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_run_count_entry.grid(row=2, column=1, padx=(0, 10), pady=8, sticky="w")
         self.naver_blog_run_count_entry.insert(0, str(self.wordpress_settings.naver_blog_run_count))
         ctk.CTkLabel(posting_panel, text="첨부 이미지 수", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, padx=18, pady=(8, 16), sticky="w")
@@ -34994,7 +35005,7 @@ class KeywordApp(ctk.CTk):
         self.naver_blog_image_count_menu.set(f"{max(1, min(int(self.wordpress_settings.naver_blog_image_count or 2), 10))}개")
 
         folder_panel = self._naver_panel(parent, "작업 데이터 (이미지/텍스트 폴더)", 3)
-        self.naver_blog_work_folder_entry = ctk.CTkEntry(folder_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
+        self.naver_blog_work_folder_entry = InputEntry(folder_panel, height=36, fg_color=palette["input"], border_color=palette["border"], text_color=palette["text"])
         self.naver_blog_work_folder_entry.grid(row=1, column=0, columnspan=3, padx=18, pady=(0, 16), sticky="ew")
         self.naver_blog_work_folder_entry.insert(0, self.wordpress_settings.naver_blog_work_folder)
         ctk.CTkButton(folder_panel, text="폴더 선택", width=110, height=36, fg_color=palette["button"], hover_color=palette["button_hover"], text_color=palette["text"], command=self._choose_naver_blog_work_folder).grid(row=1, column=3, padx=(0, 18), pady=(0, 16))
@@ -35012,7 +35023,7 @@ class KeywordApp(ctk.CTk):
             wraplength=820,
             font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, columnspan=4, padx=18, pady=(0, 12), sticky="ew")
-        self.naver_blog_rules_box = ctk.CTkTextbox(
+        self.naver_blog_rules_box = InputTextbox(
             panel,
             height=480,
             fg_color="#101722",
@@ -35402,7 +35413,7 @@ class KeywordApp(ctk.CTk):
                 font=ctk.CTkFont(size=12, weight="bold"),
             ).grid(row=1, column=0, padx=(14, 8), pady=4, sticky="w")
             nickname_var = tk.StringVar(value=str(profile.get("nickname") or ""))
-            nickname_entry = ctk.CTkEntry(
+            nickname_entry = InputEntry(
                 card,
                 textvariable=nickname_var,
                 height=32,
@@ -35668,7 +35679,7 @@ class KeywordApp(ctk.CTk):
             ):
                 ctk.CTkLabel(card, text=label, text_color="#aab7c8", font=ctk.CTkFont(size=12, weight="bold")).grid(row=row, column=0, padx=(14, 8), pady=4, sticky="w")
                 var = tk.StringVar(value=str(profile.get(field_key) or ""))
-                entry = ctk.CTkEntry(card, textvariable=var, height=30, fg_color="#111826", border_color="#314761")
+                entry = InputEntry(card, textvariable=var, height=30, fg_color="#111826", border_color="#314761")
                 entry.grid(row=row, column=1, padx=(0, 14), pady=4, sticky="ew")
                 entry.bind(
                     "<FocusOut>",
@@ -38694,7 +38705,7 @@ class KeywordApp(ctk.CTk):
                 text_color="#dce6f3",
                 font=ctk.CTkFont(size=13, weight="bold"),
             ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-            schedule_entry = ctk.CTkEntry(
+            schedule_entry = InputEntry(
                 schedule_row,
                 height=34,
                 corner_radius=10,
@@ -38816,7 +38827,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(control_card, text="공공데이터 API 키", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=0, column=0, padx=(18, 10), pady=(18, 8), sticky="w"
         )
-        self.public_data_key_entry = ctk.CTkEntry(
+        self.public_data_key_entry = InputEntry(
             control_card,
             height=38,
             corner_radius=12,
@@ -38831,7 +38842,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(control_card, text="키워드", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=1, column=0, padx=(18, 10), pady=8, sticky="w"
         )
-        self.public_data_keyword_entry = ctk.CTkEntry(
+        self.public_data_keyword_entry = InputEntry(
             control_card,
             height=38,
             corner_radius=12,
@@ -38845,7 +38856,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(control_card, text="지역", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=1, column=2, padx=(0, 10), pady=8, sticky="w"
         )
-        self.public_data_region_entry = ctk.CTkEntry(
+        self.public_data_region_entry = InputEntry(
             control_card,
             height=38,
             corner_radius=12,
@@ -38879,9 +38890,9 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(date_row, text="기간", text_color="#dce6f3", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=0, column=0, padx=(0, 8), sticky="w"
         )
-        self.public_data_start_entry = ctk.CTkEntry(date_row, height=38, corner_radius=12, fg_color="#111826")
+        self.public_data_start_entry = InputEntry(date_row, height=38, corner_radius=12, fg_color="#111826")
         self.public_data_start_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
-        self.public_data_end_entry = ctk.CTkEntry(date_row, height=38, corner_radius=12, fg_color="#111826")
+        self.public_data_end_entry = InputEntry(date_row, height=38, corner_radius=12, fg_color="#111826")
         self.public_data_end_entry.grid(row=0, column=3, padx=(8, 0), sticky="ew")
         ctk.CTkLabel(date_row, text="~", text_color="#aab7c8").grid(row=0, column=2, sticky="ew")
 
@@ -39670,7 +39681,7 @@ class KeywordApp(ctk.CTk):
         search_row.grid(row=3, column=0, columnspan=4, padx=18, pady=(14, 0), sticky="ew")
         search_row.grid_columnconfigure((0, 1), weight=2)
         search_row.grid_columnconfigure(2, weight=1)
-        self.welfare_keyword_entry = ctk.CTkEntry(
+        self.welfare_keyword_entry = InputEntry(
             search_row,
             height=40,
             corner_radius=12,
@@ -39680,7 +39691,7 @@ class KeywordApp(ctk.CTk):
         )
         self.welfare_keyword_entry.grid(row=0, column=0, padx=(0, 8), sticky="ew")
         self.welfare_keyword_entry.insert(0, str(filters.get("keyword") or ""))
-        self.welfare_excluded_entry = ctk.CTkEntry(
+        self.welfare_excluded_entry = InputEntry(
             search_row,
             height=40,
             corner_radius=12,
@@ -39690,7 +39701,7 @@ class KeywordApp(ctk.CTk):
         )
         self.welfare_excluded_entry.grid(row=0, column=1, padx=8, sticky="ew")
         self.welfare_excluded_entry.insert(0, str(filters.get("excluded_keyword") or ""))
-        self.welfare_age_entry = ctk.CTkEntry(
+        self.welfare_age_entry = InputEntry(
             search_row,
             height=40,
             corner_radius=12,
@@ -40661,7 +40672,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12), anchor="w",
         )
         self.prompt_library_count_label.grid(row=1, column=0, padx=14, pady=(2, 10), sticky="ew")
-        self.prompt_library_search_entry = ctk.CTkEntry(
+        self.prompt_library_search_entry = InputEntry(
             library, height=38, corner_radius=11,
             fg_color=palette["input"], border_color=palette["border"],
             placeholder_text="이름·내용 검색",
@@ -40728,7 +40739,7 @@ class KeywordApp(ctk.CTk):
                 font=ctk.CTkFont(size=14, weight="bold"),
             ).grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
 
-            name_entry = ctk.CTkEntry(
+            name_entry = InputEntry(
                 control_row,
                 height=40,
                 corner_radius=12,
@@ -41677,7 +41688,7 @@ class KeywordApp(ctk.CTk):
             text="하루 글 발행 수",
             font=ctk.CTkFont(size=15, weight="bold"),
         ).grid(row=0, column=0, padx=(16, 12), pady=(14, 7), sticky="w")
-        entry = ctk.CTkEntry(
+        entry = InputEntry(
             frame,
             width=130,
             height=38,
@@ -41891,7 +41902,7 @@ class KeywordApp(ctk.CTk):
         password_row.grid(row=6, column=0, padx=24, sticky="ew")
         password_row.grid_columnconfigure(0, weight=1)
 
-        self.password_entry = ctk.CTkEntry(
+        self.password_entry = InputEntry(
             password_row,
             height=56,
             corner_radius=16,
@@ -42113,7 +42124,7 @@ class KeywordApp(ctk.CTk):
         api_row.grid(row=6, column=0, padx=24, sticky="ew")
         api_row.grid_columnconfigure(0, weight=1)
 
-        self.gpt_secret_entry = ctk.CTkEntry(
+        self.gpt_secret_entry = InputEntry(
             api_row,
             height=56,
             corner_radius=16,
@@ -42227,7 +42238,7 @@ class KeywordApp(ctk.CTk):
         api_row.grid(row=4, column=0, padx=24, sticky="ew")
         api_row.grid_columnconfigure(0, weight=1)
 
-        self.gemini_secret_entry = ctk.CTkEntry(
+        self.gemini_secret_entry = InputEntry(
             api_row,
             height=56,
             corner_radius=16,
@@ -42328,7 +42339,7 @@ class KeywordApp(ctk.CTk):
         api_row.grid(row=4, column=0, padx=24, sticky="ew")
         api_row.grid_columnconfigure(0, weight=1)
 
-        self.imagen_secret_entry = ctk.CTkEntry(
+        self.imagen_secret_entry = InputEntry(
             api_row,
             height=56,
             corner_radius=16,
@@ -42557,7 +42568,7 @@ class KeywordApp(ctk.CTk):
         path_row = ctk.CTkFrame(self.codex_card, fg_color="transparent")
         path_row.grid(row=3, column=0, padx=24, sticky="ew")
         path_row.grid_columnconfigure(0, weight=1)
-        self.codex_cli_path_entry = ctk.CTkEntry(
+        self.codex_cli_path_entry = InputEntry(
             path_row,
             height=46,
             corner_radius=14,
@@ -42612,7 +42623,7 @@ class KeywordApp(ctk.CTk):
         self.codex_cli_model_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
         self.codex_cli_model_entry.bind("<KeyRelease>", lambda _event: self._sync_codex_display_name())
 
-        self.codex_display_name_entry = ctk.CTkEntry(
+        self.codex_display_name_entry = InputEntry(
             model_grid,
             height=46,
             corner_radius=14,
@@ -42624,7 +42635,7 @@ class KeywordApp(ctk.CTk):
         self.codex_display_name_entry.grid(row=0, column=1, padx=(0, 10), sticky="ew")
         self.codex_display_name_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
 
-        self.codex_cli_timeout_entry = ctk.CTkEntry(
+        self.codex_cli_timeout_entry = InputEntry(
             model_grid,
             height=46,
             width=120,
@@ -43201,7 +43212,7 @@ class KeywordApp(ctk.CTk):
             pady=(14, 8),
             sticky="e",
         )
-        self.tistory_ads_code_box = ctk.CTkTextbox(
+        self.tistory_ads_code_box = InputTextbox(
             ads_frame,
             height=108,
             corner_radius=12,
@@ -43236,7 +43247,7 @@ class KeywordApp(ctk.CTk):
             text="광고 슬롯 ID",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=0, padx=(0, 12), sticky="w")
-        self.tistory_ads_slot_entry = ctk.CTkEntry(
+        self.tistory_ads_slot_entry = InputEntry(
             slot_frame,
             height=38,
             corner_radius=12,
@@ -43465,7 +43476,7 @@ class KeywordApp(ctk.CTk):
             text_color=("#5f6f86", "#9aa7bb"),
             font=ctk.CTkFont(size=13),
         ).grid(row=4, column=0, padx=24, pady=(0, 8), sticky="w")
-        self.threads_post_prompt_box = ctk.CTkTextbox(
+        self.threads_post_prompt_box = InputTextbox(
             self.threads_card,
             height=170,
             corner_radius=16,
@@ -43683,7 +43694,7 @@ class KeywordApp(ctk.CTk):
         topic_input_row.grid(row=1, column=0, padx=24, pady=(0, 12), sticky="ew")
         topic_input_row.grid_columnconfigure(0, weight=1)
 
-        self.topic_entry = ctk.CTkEntry(
+        self.topic_entry = InputEntry(
             topic_input_row,
             height=52,
             corner_radius=16,
@@ -43718,7 +43729,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(self.tistory_v2_wiki_keyword_row, text="위키백과·나무위키 검색어", anchor="w",
                      font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="ew", pady=(0, 6))
         wiki_palette = self._theme_palette()
-        self.tistory_v2_wiki_keyword_entry = ctk.CTkEntry(
+        self.tistory_v2_wiki_keyword_entry = InputEntry(
             self.tistory_v2_wiki_keyword_row, height=40, corner_radius=12,
             fg_color=wiki_palette["input"], border_width=2, border_color=wiki_palette["border"],
             text_color=wiki_palette["text"], placeholder_text_color=wiki_palette["muted"],
@@ -43746,7 +43757,7 @@ class KeywordApp(ctk.CTk):
         )
         self.benchmark_checkbox.grid(row=1, column=0, padx=14, pady=12, sticky="w")
 
-        self.benchmark_url_entry = ctk.CTkEntry(
+        self.benchmark_url_entry = InputEntry(
             benchmark_card,
             height=40,
             corner_radius=12,
@@ -43947,7 +43958,7 @@ class KeywordApp(ctk.CTk):
         )
         manual_keyword_label.grid(row=1, column=0, padx=24, pady=(0, 8), sticky="w")
 
-        self.manual_keyword_entry = ctk.CTkEntry(
+        self.manual_keyword_entry = InputEntry(
             keyword_card,
             height=46,
             corner_radius=14,
@@ -44016,7 +44027,7 @@ class KeywordApp(ctk.CTk):
         )
         self.collect_reference_button.grid(row=0, column=3, sticky="e")
 
-        self.reference_textbox = ctk.CTkTextbox(
+        self.reference_textbox = InputTextbox(
             keyword_card,
             height=220,
             corner_radius=16,
@@ -44319,7 +44330,7 @@ class KeywordApp(ctk.CTk):
         )
         self.article_summary_label.grid(row=0, column=0, padx=24, pady=(18, 10), sticky="ew")
 
-        self.article_title_entry = ctk.CTkEntry(
+        self.article_title_entry = InputEntry(
             article_card,
             height=48,
             corner_radius=14,
@@ -44348,7 +44359,7 @@ class KeywordApp(ctk.CTk):
         )
         self.preview_article_button.grid(row=0, column=1, sticky="e")
 
-        self.article_editor = ctk.CTkTextbox(
+        self.article_editor = InputTextbox(
             article_card,
             height=320,
             corner_radius=16,
@@ -44433,7 +44444,10 @@ class KeywordApp(ctk.CTk):
         self._layout_thumbnail_card_set_selector()
         self._refresh_thumbnail_preset_buttons()
 
-        preview_card = ctk.CTkFrame(publish_card, fg_color=self._theme_palette()["panel"], corner_radius=18)
+        preview_card = ctk.CTkFrame(
+            publish_card, fg_color=self._theme_palette()["panel"], corner_radius=18,
+            border_width=2, border_color=self._theme_palette()["border"],
+        )
         self.writing_design_preview_card = preview_card
         preview_card.grid(row=0, column=0, padx=18, pady=(10, 16), sticky="ew")
         preview_card.grid_columnconfigure(0, weight=1)
@@ -44485,7 +44499,7 @@ class KeywordApp(ctk.CTk):
         )
         thumbnail_intro.grid(row=0, column=0, pady=(0, 10), sticky="ew")
 
-        self.thumbnail_prompt_preview = ctk.CTkTextbox(
+        self.thumbnail_prompt_preview = InputTextbox(
             editor_panel,
             height=78,
             corner_radius=16,
@@ -44658,12 +44672,12 @@ class KeywordApp(ctk.CTk):
         size_label = ctk.CTkLabel(size_row, text="썸네일 크기 (가로×세로)", font=ctk.CTkFont(size=14, weight="bold"))
         size_label.grid(row=0, column=0, padx=(0, 10), sticky="w")
 
-        self.thumbnail_width_entry = ctk.CTkEntry(size_row, height=40, corner_radius=12, fg_color="#111826", border_width=0, font=ctk.CTkFont(size=14, weight="bold"))
+        self.thumbnail_width_entry = InputEntry(size_row, height=40, corner_radius=12, fg_color="#111826", border_width=0, font=ctk.CTkFont(size=14, weight="bold"))
         self.thumbnail_width_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
         self.thumbnail_width_entry.insert(0, "400")
         self.thumbnail_width_entry.bind("<KeyRelease>", self._schedule_thumbnail_control_update)
 
-        self.thumbnail_height_entry = ctk.CTkEntry(size_row, height=40, corner_radius=12, fg_color="#111826", border_width=0, font=ctk.CTkFont(size=14, weight="bold"))
+        self.thumbnail_height_entry = InputEntry(size_row, height=40, corner_radius=12, fg_color="#111826", border_width=0, font=ctk.CTkFont(size=14, weight="bold"))
         self.thumbnail_height_entry.grid(row=0, column=2, sticky="ew")
         self.thumbnail_height_entry.insert(0, "400")
         self.thumbnail_height_entry.bind("<KeyRelease>", self._schedule_thumbnail_control_update)
@@ -44696,7 +44710,7 @@ class KeywordApp(ctk.CTk):
 
         font_size_label = ctk.CTkLabel(text_effect_row, text="글씨 크기", font=ctk.CTkFont(size=14, weight="bold"))
         font_size_label.grid(row=0, column=0, padx=(0, 8), sticky="w")
-        self.thumbnail_font_size_entry = ctk.CTkEntry(text_effect_row, height=40, width=86, corner_radius=12, fg_color="#111826", border_width=0, font=ctk.CTkFont(size=14, weight="bold"))
+        self.thumbnail_font_size_entry = InputEntry(text_effect_row, height=40, width=86, corner_radius=12, fg_color="#111826", border_width=0, font=ctk.CTkFont(size=14, weight="bold"))
         self.thumbnail_font_size_entry.grid(row=0, column=1, padx=(0, 12), sticky="w")
         self.thumbnail_font_size_entry.insert(0, "56")
         self.thumbnail_font_size_entry.bind("<KeyRelease>", self._schedule_thumbnail_control_update)
@@ -44785,7 +44799,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, padx=14, pady=(12, 6), sticky="w")
-        self.cardnews_heading_entry = ctk.CTkEntry(
+        self.cardnews_heading_entry = InputEntry(
             cardnews_edit_grid,
             height=38,
             corner_radius=12,
@@ -44804,7 +44818,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
         ).grid(row=2, column=0, padx=14, pady=(0, 6), sticky="w")
-        self.cardnews_summary_entry = ctk.CTkEntry(
+        self.cardnews_summary_entry = InputEntry(
             cardnews_edit_grid,
             height=38,
             corner_radius=12,
@@ -44823,7 +44837,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
         ).grid(row=4, column=0, padx=14, pady=(0, 6), sticky="w")
-        self.cardnews_signature_entry = ctk.CTkEntry(
+        self.cardnews_signature_entry = InputEntry(
             cardnews_edit_grid,
             height=38,
             corner_radius=12,
@@ -44953,11 +44967,11 @@ class KeywordApp(ctk.CTk):
         cardnews_size_row.grid_columnconfigure(1, weight=1)
         cardnews_size_row.grid_columnconfigure(2, weight=1)
         ctk.CTkLabel(cardnews_size_row, text="카드뉴스 크기", font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=0, padx=(0, 10), sticky="w")
-        self.cardnews_width_entry = ctk.CTkEntry(cardnews_size_row, height=38, corner_radius=12, fg_color="#111826", border_width=1, border_color="#304158", font=ctk.CTkFont(size=13, weight="bold"))
+        self.cardnews_width_entry = InputEntry(cardnews_size_row, height=38, corner_radius=12, fg_color="#111826", border_width=1, border_color="#304158", font=ctk.CTkFont(size=13, weight="bold"))
         self.cardnews_width_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
         self.cardnews_width_entry.insert(0, "1024")
         self.cardnews_width_entry.bind("<KeyRelease>", self._schedule_cardnews_control_update)
-        self.cardnews_height_entry = ctk.CTkEntry(cardnews_size_row, height=38, corner_radius=12, fg_color="#111826", border_width=1, border_color="#304158", font=ctk.CTkFont(size=13, weight="bold"))
+        self.cardnews_height_entry = InputEntry(cardnews_size_row, height=38, corner_radius=12, fg_color="#111826", border_width=1, border_color="#304158", font=ctk.CTkFont(size=13, weight="bold"))
         self.cardnews_height_entry.grid(row=0, column=2, sticky="ew")
         self.cardnews_height_entry.insert(0, "1024")
         self.cardnews_height_entry.bind("<KeyRelease>", self._schedule_cardnews_control_update)
@@ -44992,7 +45006,7 @@ class KeywordApp(ctk.CTk):
         cardnews_text_effect_row.grid_columnconfigure(1, weight=1)
         cardnews_text_effect_row.grid_columnconfigure(3, weight=1)
         ctk.CTkLabel(cardnews_text_effect_row, text="글씨 크기", font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=0, padx=(0, 8), sticky="w")
-        self.cardnews_font_size_entry = ctk.CTkEntry(cardnews_text_effect_row, height=38, width=86, corner_radius=12, fg_color="#111826", border_width=1, border_color="#304158", font=ctk.CTkFont(size=13, weight="bold"))
+        self.cardnews_font_size_entry = InputEntry(cardnews_text_effect_row, height=38, width=86, corner_radius=12, fg_color="#111826", border_width=1, border_color="#304158", font=ctk.CTkFont(size=13, weight="bold"))
         self.cardnews_font_size_entry.grid(row=0, column=1, padx=(0, 12), sticky="w")
         self.cardnews_font_size_entry.insert(0, "78")
         self.cardnews_font_size_entry.bind("<KeyRelease>", self._schedule_cardnews_control_update)
@@ -45149,7 +45163,7 @@ class KeywordApp(ctk.CTk):
         )
         title.grid(row=0, column=0, padx=24, pady=(20, 10), sticky="w")
 
-        self.keyword_entry = ctk.CTkEntry(
+        self.keyword_entry = InputEntry(
             parent,
             height=54,
             corner_radius=16,
@@ -45524,7 +45538,7 @@ class KeywordApp(ctk.CTk):
         palette = self._theme_palette()
         workspace = ctk.CTkFrame(
             parent, fg_color=palette["panel"], corner_radius=18,
-            border_width=1, border_color=palette["border"],
+            border_width=2, border_color=palette["border"],
         )
         workspace._uses_writing_design_theme = True
         workspace.grid(row=row, column=0, padx=18, pady=(10, 16), sticky="ew")
@@ -45619,7 +45633,7 @@ class KeywordApp(ctk.CTk):
             for child in parent.winfo_children():
                 if isinstance(child, ctk.CTkFrame) and child.cget("fg_color") != "transparent":
                     child.configure(fg_color=palette["shell"], corner_radius=14,
-                                    border_width=1, border_color=palette["border"])
+                                    border_width=2, border_color=palette["border"])
                 elif isinstance(child, ctk.CTkButton):
                     primary = getattr(child.cget("command"), "__name__", "") in primary_commands
                     child.configure(
@@ -47772,7 +47786,7 @@ class KeywordApp(ctk.CTk):
         )
         label_widget.grid(row=row, column=0, padx=24, pady=(0 if row == 1 else 18, 8), sticky="w")
 
-        entry = ctk.CTkEntry(
+        entry = InputEntry(
             parent,
             height=56,
             corner_radius=16,
@@ -49258,7 +49272,7 @@ class KeywordApp(ctk.CTk):
         row_frame.grid_columnconfigure(4, weight=0)
         row_frame.grid_columnconfigure(5, weight=0)
 
-        button_entry = ctk.CTkEntry(
+        button_entry = InputEntry(
             row_frame,
             height=40,
             corner_radius=12,
@@ -49276,7 +49290,7 @@ class KeywordApp(ctk.CTk):
         button_entry.bind("<KeyRelease>", lambda _event: self._save_ui_state())
         button_entry.bind("<FocusOut>", lambda _event: self._save_ui_state())
 
-        url_entry = ctk.CTkEntry(
+        url_entry = InputEntry(
             row_frame,
             height=40,
             corner_radius=12,
@@ -49297,7 +49311,7 @@ class KeywordApp(ctk.CTk):
         position = str(link.get("position", "본문하단"))
         if position not in LINK_POSITION_OPTIONS:
             position = "본문하단"
-        width_entry = ctk.CTkEntry(
+        width_entry = InputEntry(
             row_frame,
             height=40,
             width=88,
