@@ -55,6 +55,7 @@ def main() -> None:
             tistory_profiles=[{"blog_url": "https://v2-first.tistory.com"}, {"blog_url": "https://v2-second.tistory.com"}],
             writing_topic="일반 저장 주제", writing_selected_keyword="일반 저장 선택",
             tistory_v2_topic="V2 저장 주제", tistory_v2_selected_keyword="V2 저장 선택",
+            writing_auto_progress=False, tistory_v2_auto_progress=True,
         )
         stack.enter_context(patch.object(app_module.AppStateStore, "load", return_value=settings))
         for method in ("save", "update_fields"):
@@ -212,6 +213,8 @@ def main() -> None:
             original_default = app.default_thumbnail_preset_index
             shared_topic_entry = app.topic_entry
             assert app.topic_entry.get() == "일반 저장 주제"
+            assert not app.writing_auto_progress_var.get()
+            assert app.writing_auto_progress_switch.cget("text") == "자동진행 OFF"
             app.topic_entry.delete(0, "end")
             app.topic_entry.insert(0, "일반 최근 입력")
             app.manual_keyword_entry.delete(0, "end")
@@ -221,6 +224,11 @@ def main() -> None:
             app._switch_page("tistory_v2")
             settle(250)
             assert app.topic_entry.get() == "V2 저장 주제"
+            assert app.writing_auto_progress_var.get()
+            assert app.writing_auto_progress_switch.cget("text") == "자동진행 ON"
+            assert not app.writing_auto_run_active  # restoring ON is not Start
+            app.writing_auto_progress_switch.toggle()
+            assert not app.writing_auto_progress_var.get()
             assert app._selected_or_manual_keyword() == "V2 저장 선택"
             assert not app.current_insights and not app.current_keyword_source
             app.topic_entry.delete(0, "end")
@@ -232,17 +240,31 @@ def main() -> None:
             saved_inputs = app._read_wordpress_settings(include_prompts=False)
             assert (saved_inputs.writing_topic, saved_inputs.tistory_v2_topic) == ("일반 최근 입력", "V2 최근 입력")
             assert (saved_inputs.writing_selected_keyword, saved_inputs.tistory_v2_selected_keyword) == ("일반 직접 입력", "V2 직접 입력")
+            assert not saved_inputs.writing_auto_progress and not saved_inputs.tistory_v2_auto_progress
             app._switch_page("writing")
             assert app.topic_entry.get() == "일반 최근 입력"
             assert app.manual_keyword_entry.get() == "일반 직접 입력"
             assert app.current_keyword_source == "analysis"
             assert [item.keyword for item in app.current_insights] == ["일반 추천"]
+            assert not app.writing_auto_progress_var.get()
+            app.writing_auto_progress_switch.toggle()
+            saved_inputs = app._read_wordpress_settings(include_prompts=False)
+            assert saved_inputs.writing_auto_progress and not saved_inputs.tistory_v2_auto_progress
             app._switch_page("home")
             app._switch_page("tistory_v2")
             assert app.topic_entry.get() == "V2 최근 입력"
             assert app.manual_keyword_entry.get() == "V2 직접 입력"
             assert app.current_keyword_source == "daum"
             assert [item.keyword for item in app.current_insights] == ["V2 추천"]
+            assert not app.writing_auto_progress_var.get()
+            assert app.writing_auto_progress_switch.cget("text") == "자동진행 OFF"
+            app._switch_page("writing")
+            assert app.writing_auto_progress_var.get()
+            assert app.writing_auto_progress_switch.cget("text") == "자동진행 ON"
+            app.writing_auto_progress_switch.toggle()
+            app._switch_page("tistory_v2")
+            assert not app.writing_auto_progress_var.get()
+            print(f"{sys.platform} {args.theme}: normal/V2 auto-progress switches and saved preferences are isolated", flush=True)
             app.topic_entry.delete(0, "end")
             app.manual_keyword_entry.delete(0, "end")
             app.selected_keyword_var.set("")

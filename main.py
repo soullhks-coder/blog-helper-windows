@@ -3602,6 +3602,7 @@ class WordPressSettings:
     writing_links: list[dict] = field(default_factory=list)
     writing_enabled_sources: list[str] = field(default_factory=lambda: ["youtube", "google", "naver"])
     writing_auto_progress: bool = False
+    tistory_v2_auto_progress: bool = False
     thumbnail_text: str = ""
     thumbnail_auto_title: bool = True
     thumbnail_width: int = 400
@@ -4539,6 +4540,7 @@ class AppStateStore:
             writing_links=writing_links,
             writing_enabled_sources=payload.get("writing_enabled_sources", ["youtube", "google", "naver"]),
             writing_auto_progress=payload.get("writing_auto_progress", False),
+            tistory_v2_auto_progress=bool(payload.get("tistory_v2_auto_progress", False)),
             thumbnail_text=payload.get("thumbnail_text", ""),
             thumbnail_auto_title=payload.get("thumbnail_auto_title", True),
             thumbnail_width=payload.get("thumbnail_width", 400),
@@ -47954,8 +47956,6 @@ class KeywordApp(ctk.CTk):
         target_platforms = set(self.wordpress_settings.target_platforms or ["wordpress"])
         for platform_key, variable in self.target_platform_vars.items():
             variable.set(platform_key in target_platforms)
-        self.writing_auto_progress_var.set(self.wordpress_settings.writing_auto_progress)
-        self._refresh_writing_auto_progress_ui()
         self.prompt_title_boxes["wordpress"].insert("1.0", self.wordpress_settings.wordpress_title_prompt_template)
         self.prompt_article_boxes["wordpress"].insert("1.0", self.wordpress_settings.wordpress_article_prompt_template)
         self.prompt_title_boxes["tistory"].insert("1.0", self.wordpress_settings.tistory_title_prompt_template)
@@ -48081,6 +48081,7 @@ class KeywordApp(ctk.CTk):
         prefix = "tistory_v2" if variant == "tistory_v2" else "writing"
         setattr(self.wordpress_settings, prefix + "_topic", topic.strip())
         setattr(self.wordpress_settings, prefix + "_selected_keyword", selected)
+        setattr(self.wordpress_settings, prefix + "_auto_progress", bool(self.writing_auto_progress_var.get()))
         # Lists and source metadata are session-local. Do not let another menu's
         # radio selection or Refresh button reuse the previous search's source.
         self.__dict__.setdefault("_writing_keyword_contexts", {})[variant] = {
@@ -48100,6 +48101,10 @@ class KeywordApp(ctk.CTk):
         prefix = "tistory_v2" if variant == "tistory_v2" else "writing"
         saved_topic = str(getattr(self.wordpress_settings, prefix + "_topic", "") or "")
         saved_keyword = str(getattr(self.wordpress_settings, prefix + "_selected_keyword", "") or "")
+        # Restore the preference only. Turning ON during navigation must not
+        # start/resume a run or copy the other menu's current switch value.
+        self.writing_auto_progress_var.set(bool(getattr(self.wordpress_settings, prefix + "_auto_progress", False)))
+        self._refresh_writing_auto_progress_ui()
         context = self.__dict__.get("_writing_keyword_contexts", {}).get(variant, {
             "topic": saved_topic, "manual": saved_keyword, "selected": saved_keyword,
         })
@@ -49858,11 +49863,8 @@ class KeywordApp(ctk.CTk):
             writing_link_url=(current_writing_links[0]["url"] if current_writing_links else ""),
             writing_links=current_writing_links,
             writing_enabled_sources=[source for source, var in self.source_vars.items() if var.get()],
-            writing_auto_progress=(
-                self.writing_auto_progress_var.get()
-                if hasattr(self, "writing_auto_progress_var")
-                else self.wordpress_settings.writing_auto_progress
-            ),
+            writing_auto_progress=self.wordpress_settings.writing_auto_progress,
+            tistory_v2_auto_progress=self.wordpress_settings.tistory_v2_auto_progress,
             thumbnail_text=str(default_thumbnail.get("text") or ""),
             thumbnail_auto_title=bool(default_thumbnail.get("auto_title", True)),
             thumbnail_width=self._safe_int(default_thumbnail.get("width"), 400),

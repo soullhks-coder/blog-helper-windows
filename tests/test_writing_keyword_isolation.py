@@ -47,6 +47,8 @@ class KeywordUI:
         self.writing_variant = "writing"
         self.topic_entry, self.manual_keyword_entry, self.selected_keyword_var = Entry(), Entry(), Entry()
         self.keyword_status_label = Entry("준비")
+        self.writing_auto_progress_var = Entry(False)
+        self._refresh_writing_auto_progress_ui = Mock()
         self.current_keyword = self.current_keyword_source = self.accepted_recommended_keyword = ""
         self.current_insights = []
         for name in ("daum_reference_map", "signal_reference_map", "newneek_reference_map",
@@ -164,6 +166,65 @@ class WritingKeywordIsolationTests(unittest.TestCase):
         remember.assert_not_called()
         restore.assert_not_called()
         self.assertEqual(app.writing_variant, "writing")
+
+    def test_auto_progress_is_independent_in_all_four_on_off_combinations(self):
+        for normal in (False, True):
+            for v2 in (False, True):
+                with self.subTest(normal=normal, v2=v2):
+                    app = KeywordUI(main.WordPressSettings(writing_auto_progress=normal, tistory_v2_auto_progress=v2))
+                    app._restore_writing_keyword_inputs("writing")
+                    self.assertEqual(app.writing_auto_progress_var.get(), normal)
+                    for variant, expected in (("tistory_v2", v2), ("writing", normal), ("tistory_v2", v2)):
+                        app.switch(variant)
+                        self.assertEqual(app.writing_auto_progress_var.get(), expected)
+                    self.assertEqual(app.wordpress_settings.writing_auto_progress, normal)
+                    self.assertEqual(app.wordpress_settings.tistory_v2_auto_progress, v2)
+
+    def test_auto_progress_edits_only_update_current_menu_and_false_is_preserved(self):
+        app = KeywordUI(main.WordPressSettings(writing_auto_progress=True, tistory_v2_auto_progress=True))
+        app._restore_writing_keyword_inputs("writing")
+        app.switch("tistory_v2")
+        app.writing_auto_progress_var.set(False)
+        app.switch("writing")
+        self.assertTrue(app.writing_auto_progress_var.get())
+        self.assertFalse(app.wordpress_settings.tistory_v2_auto_progress)
+        app.writing_auto_progress_var.set(False)
+        app.switch("tistory_v2")
+        self.assertFalse(app.writing_auto_progress_var.get())
+        self.assertFalse(app.wordpress_settings.writing_auto_progress)
+        app.writing_auto_progress_var.set(True)
+        app.switch("writing")
+        self.assertFalse(app.writing_auto_progress_var.get())
+        self.assertTrue(app.wordpress_settings.tistory_v2_auto_progress)
+
+    def test_auto_progress_round_trip_and_restart_keep_both_modes(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main, "STATE_FILE", Path(directory) / "app_state.json"), \
+             patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value), \
+             patch.object(main.KeychainStore, "load_secret", return_value=""):
+            for normal, v2 in ((True, False), (False, True), (False, False), (True, True)):
+                main.AppStateStore.save(main.WordPressSettings(writing_auto_progress=normal,
+                                                               tistory_v2_auto_progress=v2), save_secrets=False)
+                settings = main.AppStateStore.load()
+                self.assertEqual((settings.writing_auto_progress, settings.tistory_v2_auto_progress), (normal, v2))
+                app = KeywordUI(settings)
+                app._restore_writing_keyword_inputs("writing")
+                self.assertEqual(app.writing_auto_progress_var.get(), normal)
+                app.switch("tistory_v2")
+                self.assertEqual(app.writing_auto_progress_var.get(), v2)
+
+    def test_old_normal_on_does_not_seed_v2_and_restoring_on_never_starts_work(self):
+        settings = main.WordPressSettings(writing_auto_progress=True)
+        self.assertFalse(settings.tistory_v2_auto_progress)
+        app = KeywordUI(settings)
+        app._arm_writing_auto_progress = Mock()
+        app._stop_writing_auto_progress = Mock()
+        app._restore_writing_keyword_inputs("writing")
+        self.assertTrue(app.writing_auto_progress_var.get())
+        app.switch("tistory_v2")
+        self.assertFalse(app.writing_auto_progress_var.get())
+        app._arm_writing_auto_progress.assert_not_called()
+        app._stop_writing_auto_progress.assert_not_called()
 
 
 if __name__ == "__main__":
