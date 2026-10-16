@@ -126,7 +126,8 @@ class WindowsFontTests(unittest.TestCase):
                     pass
         for name in (*windows_fonts.FONT_FILES, "NanumGothic-OFL.txt"):
             self.assertIn((f"assets/fonts/{name}", "assets/fonts"), entries)
-        self.assertNotIn("NanumGothic", (PROJECT_ROOT / "BlogHelperMac.spec").read_text(encoding="utf-8"))
+        # macOS now bundles the same opt-in font choices, too.
+        self.assertIn("assets/fonts/NanumGothic.ttf", (PROJECT_ROOT / "BlogHelperMac.spec").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

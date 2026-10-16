@@ -17,6 +17,12 @@ datas += [
     ("assets/bootstrap-icons.woff", "assets"),
     ("assets/bootstrap-icons.css", "assets"),
     ("assets/bootstrap-icons-LICENSE.txt", "assets"),
+    ("assets/fonts/NanumGothic.ttf", "assets/fonts"),
+    ("assets/fonts/NanumGothicBold.ttf", "assets/fonts"),
+    ("assets/fonts/NanumGothic-OFL.txt", "assets/fonts"),
+    ("assets/fonts/NanumSquareNeo-bRg.ttf", "assets/fonts"),
+    ("assets/fonts/NanumSquareNeo-cBd.ttf", "assets/fonts"),
+    ("assets/fonts/NanumSquareNeo-OFL.txt", "assets/fonts"),
 ]
 with open("version.json", "r", encoding="utf-8") as version_file:
     app_version = str(json.load(version_file).get("version") or "1.0.4")

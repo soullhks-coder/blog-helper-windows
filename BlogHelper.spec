@@ -22,6 +22,9 @@ datas += [
     ("assets/fonts/NanumGothic.ttf", "assets/fonts"),
     ("assets/fonts/NanumGothicBold.ttf", "assets/fonts"),
     ("assets/fonts/NanumGothic-OFL.txt", "assets/fonts"),
+    ("assets/fonts/NanumSquareNeo-bRg.ttf", "assets/fonts"),
+    ("assets/fonts/NanumSquareNeo-cBd.ttf", "assets/fonts"),
+    ("assets/fonts/NanumSquareNeo-OFL.txt", "assets/fonts"),
 ]
 
 for package in ("customtkinter", "tkinterdnd2", "playwright", "yt_dlp", "certifi", "keyring", "PIL", "pillow_heif", "bsdiff4", "websocket"):

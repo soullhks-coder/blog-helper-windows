@@ -342,9 +342,9 @@ _install_windows_dark_ctk_button_release_fix()
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
-from windows_fonts import configure_windows_fonts, configure_windows_named_fonts, ui_font_family
+from app_fonts import (FONT_OPTIONS, SYSTEM_FONT, configure_app_fonts,
+                       configure_app_named_fonts, normalize_app_font, ui_font_family)
 
-configure_windows_fonts(ctk, RESOURCE_DIR)
 UI_FONT_FAMILY = ui_font_family()
 APP_ICON_PATH = RESOURCE_DIR / "assets" / "blog_helper_icon.png"
 HOME_PLATFORM_LOGO_PATHS = {
@@ -3644,6 +3644,7 @@ class WordPressSettings:
     automation_target_platforms: list[str] = field(default_factory=lambda: ["wordpress"])
     window_geometry: str = "970x680"
     app_theme: str = "블랙테마"
+    app_font: str = SYSTEM_FONT
     app_title: str = "현기쿠"
     sidebar_menu_labels: dict[str, str] = field(
         default_factory=lambda: dict(SIDEBAR_MENU_DEFAULT_LABELS)
@@ -4585,6 +4586,7 @@ class AppStateStore:
             automation_target_platforms=payload.get("automation_target_platforms", payload.get("target_platforms", ["wordpress"])),
             window_geometry=payload.get("window_geometry", "970x680"),
             app_theme=payload.get("app_theme", "블랙테마"),
+            app_font=normalize_app_font(payload.get("app_font", SYSTEM_FONT)),
             app_title=payload.get("app_title", "현기쿠"),
             sidebar_menu_labels=normalize_sidebar_menu_labels(
                 payload.get("sidebar_menu_labels", {})
@@ -26806,14 +26808,19 @@ class ContrastSegmentedButton(ctk.CTkFrame):
 
 class KeywordApp(ctk.CTk):
     def __init__(self) -> None:
+        global UI_FONT_FAMILY
         if os.name == "nt":
             _update_packaged_startup_splash("설정 불러오는 중...\n잠시만 기다려 주세요.")
             try:
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("kr.soullhk.bloghelper")
             except (AttributeError, OSError):
                 pass
+        # CoreText/GDI registration must precede Tk's initial font discovery.
+        settings = AppStateStore.load()
+        self._app_font_loaded = configure_app_fonts(ctk, RESOURCE_DIR, settings.app_font)
         super().__init__()
-        configure_windows_named_fonts(self)
+        configure_app_named_fonts(self, ctk)
+        UI_FONT_FAMILY = ui_font_family()
         self._file_drop_available = False
         if TkinterDnD is not None:
             try:
@@ -26832,7 +26839,7 @@ class KeywordApp(ctk.CTk):
                 self.iconphoto(True, self._window_icon_image)
         except tk.TclError:
             self._window_icon_image = None
-        self.wordpress_settings = AppStateStore.load()
+        self.wordpress_settings = settings
         ctk.set_appearance_mode("light" if self.wordpress_settings.app_theme == "화이트테마" else "dark")
         self.geometry(self._safe_window_geometry(self.wordpress_settings.window_geometry))
         self.minsize(860, 600)
@@ -28757,12 +28764,47 @@ class KeywordApp(ctk.CTk):
             AppStateStore.update_fields(app_theme=theme)
 
         self._theme_restart_pending = True
+        self._appearance_restart_label = "테마"
         if hasattr(self, "theme_menu"):
             self.theme_menu.configure(state="disabled")
+        if hasattr(self, "font_menu"):
+            self.font_menu.configure(state="disabled")
         if hasattr(self, "theme_status_label"):
             self.theme_status_label.configure(
                 text=f"{theme} 저장 완료 · 프로그램을 다시 시작합니다...",
                 text_color=self._theme_palette(previous_theme)["accent"],
+            )
+        self.after(350, self._restart_after_theme_change)
+
+    def _on_font_changed(self, font_name: str) -> None:
+        selected = normalize_app_font(font_name)
+        previous = normalize_app_font(getattr(self.wordpress_settings, "app_font", SYSTEM_FONT))
+        if self._theme_restart_pending or selected == previous:
+            return
+        try:
+            latest_settings = self._read_wordpress_settings(include_prompts=False)
+            latest_settings.app_font = selected
+            AppStateStore.save(latest_settings, save_secrets=False)
+        except Exception:
+            try:
+                AppStateStore.update_fields(app_font=selected)
+            except Exception as exc:
+                if hasattr(self, "font_menu"):
+                    self.font_menu.set(previous)
+                messagebox.showerror("글꼴 설정 저장 실패", f"설정을 저장하지 못해 재시작하지 않았습니다.\n\n{exc}")
+                return
+            self.wordpress_settings.app_font = selected
+        else:
+            self.wordpress_settings = latest_settings
+        self._theme_restart_pending = True
+        self._appearance_restart_label = "글꼴"
+        for name in ("theme_menu", "font_menu"):
+            if hasattr(self, name):
+                getattr(self, name).configure(state="disabled")
+        if hasattr(self, "font_status_label"):
+            self.font_status_label.configure(
+                text=f"{selected} 저장 완료 · 프로그램을 다시 시작합니다...",
+                text_color=self._theme_palette()["accent"],
             )
         self.after(350, self._restart_after_theme_change)
 
@@ -28784,14 +28826,18 @@ class KeywordApp(ctk.CTk):
             self._theme_restart_pending = False
             if hasattr(self, "theme_menu"):
                 self.theme_menu.configure(state="normal")
-            if hasattr(self, "theme_status_label"):
-                self.theme_status_label.configure(
-                    text="테마는 저장했지만 자동 재시작에 실패했습니다.",
+            if hasattr(self, "font_menu"):
+                self.font_menu.configure(state="normal")
+            setting_label = getattr(self, "_appearance_restart_label", "테마")
+            status_label = getattr(self, "font_status_label" if setting_label == "글꼴" else "theme_status_label", None)
+            if status_label is not None:
+                status_label.configure(
+                    text=f"{setting_label} 설정은 저장했지만 자동 재시작에 실패했습니다.",
                     text_color="#ff6b6b",
                 )
             messagebox.showerror(
                 "프로그램 재시작 실패",
-                f"테마 설정은 저장했습니다. 프로그램을 직접 다시 실행해 주세요.\n\n{exc}",
+                f"{setting_label} 설정은 저장했습니다. 프로그램을 직접 다시 실행해 주세요.\n\n{exc}",
             )
             return
         self._on_app_close()
@@ -32217,7 +32263,53 @@ class KeywordApp(ctk.CTk):
         )
         self.theme_status_label.grid(row=3, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
 
+        self._build_font_settings_card()
         self._build_menu_settings_card()
+
+    def _build_font_settings_card(self) -> None:
+        card = ctk.CTkFrame(
+            self.theme_scroll, fg_color="#222c3b", corner_radius=28,
+            border_width=1, border_color="#334760",
+        )
+        card.grid(row=1, column=0, pady=(18, 0), sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            card, text="글꼴 설정", font=ctk.CTkFont(size=26, weight="bold"),
+            text_color="#6dadff",
+        ).grid(row=0, column=0, columnspan=2, padx=28, pady=(28, 8), sticky="w")
+        description = ctk.CTkLabel(
+            card, text=("프로그램 화면에 사용할 글꼴을 선택합니다. 기본값은 컴퓨터의 ‘시스템 기본’ 글꼴입니다.\n"
+                        "나눔글꼴은 맥·윈도우 모두 별도 설치 없이 사용할 수 있습니다. 변경하면 저장 후 자동 재시작합니다."),
+            text_color="#a7b3c4", font=ctk.CTkFont(size=14), wraplength=760, justify="left",
+            anchor="w",
+        )
+        description.grid(row=1, column=0, columnspan=2, padx=28, pady=(0, 24), sticky="ew")
+        ctk.CTkLabel(
+            card, text="글꼴", text_color="#cbd6e6", font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=2, column=0, padx=(28, 16), pady=(0, 16), sticky="w")
+        self.font_menu = ctk.CTkOptionMenu(
+            card, values=list(FONT_OPTIONS), height=44, corner_radius=14,
+            fg_color="#0b1220", button_color="#314761", button_hover_color="#3f5c7f",
+            dropdown_fg_color="#0b1220", dropdown_hover_color="#111826",
+            font=ctk.CTkFont(size=15, weight="bold"), command=self._on_font_changed,
+        )
+        self.font_menu.grid(row=2, column=1, padx=(0, 28), pady=(0, 16), sticky="ew")
+        self.font_menu.set(normalize_app_font(self.wordpress_settings.app_font))
+        loaded = getattr(self, "_app_font_loaded", True)
+        self.font_status_label = ctk.CTkLabel(
+            card, text=("글꼴을 변경하면 설정을 저장하고 프로그램을 자동 재시작합니다." if loaded else
+                        "선택한 글꼴을 불러오지 못해 시스템 기본 글꼴을 사용 중입니다."),
+            text_color="#9aa7bb" if loaded else "#ff6b6b", font=ctk.CTkFont(size=14, weight="bold"),
+            wraplength=760, justify="left",
+        )
+        self.font_status_label.grid(row=3, column=0, columnspan=2, padx=28, pady=(0, 28), sticky="w")
+        def fit_font_labels(_event=None):
+            width = max(160, int(card.winfo_width() / card._get_widget_scaling()) - 56)
+            if description.cget("wraplength") != width:
+                description.configure(wraplength=width)
+            if self.font_status_label.cget("wraplength") != width:
+                self.font_status_label.configure(wraplength=width)
+        card.bind("<Configure>", fit_font_labels, add="+")
 
     def _build_menu_settings_card(self) -> None:
         card = ctk.CTkFrame(
@@ -32227,7 +32319,7 @@ class KeywordApp(ctk.CTk):
             border_width=1,
             border_color="#334760",
         )
-        card.grid(row=1, column=0, pady=(18, 0), sticky="ew")
+        card.grid(row=2, column=0, pady=(18, 0), sticky="ew")
         card.grid_columnconfigure(1, weight=1)
         card.grid_columnconfigure(2, weight=1)
 
@@ -47691,6 +47783,8 @@ class KeywordApp(ctk.CTk):
     def _populate_wordpress_fields(self) -> None:
         if hasattr(self, "theme_menu"):
             self.theme_menu.set(self.wordpress_settings.app_theme or "블랙테마")
+        if hasattr(self, "font_menu"):
+            self.font_menu.set(normalize_app_font(self.wordpress_settings.app_font))
         if hasattr(self, "app_title_var"):
             self.app_title_var.set(self.wordpress_settings.app_title or "현기쿠")
         if hasattr(self, "app_title_display_label"):
@@ -48346,7 +48440,7 @@ class KeywordApp(ctk.CTk):
             self._load_version_catalog()
         elif self.settings_section == "theme":
             self.theme_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
-            self._update_quick_status("테마 설정", "블랙/화이트 테마를 선택하고 자동 저장합니다.", palette["accent"])
+            self._update_quick_status("테마 설정", "테마와 글꼴을 선택하고 저장 후 재시작해 적용합니다.", palette["accent"])
         elif self.settings_section == "history":
             self.history_scroll.grid(row=2, column=0, padx=28, pady=(4, 26), sticky="nsew")
             self._render_history_cards()
@@ -49774,6 +49868,7 @@ class KeywordApp(ctk.CTk):
             automation_target_platforms=self._automation_target_platforms(),
             window_geometry=self.wordpress_settings.window_geometry,
             app_theme=self.theme_menu.get() if hasattr(self, "theme_menu") else self.wordpress_settings.app_theme,
+            app_font=normalize_app_font(self.font_menu.get() if hasattr(self, "font_menu") else self.wordpress_settings.app_font),
             app_title=(
                 self.app_title_var.get().strip()
                 if hasattr(self, "app_title_var")

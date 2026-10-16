@@ -32,7 +32,9 @@ def main() -> None:
         return
 
     with tempfile.TemporaryDirectory(prefix="blog-helper-writing-ui-") as directory, ExitStack() as stack:
-        faulthandler.dump_traceback_later(90, repeat=True)
+        # Expanded full-app UI checks can exceed 90s on Windows CI runners.
+        # Keep diagnostics before the unchanged enforcing 150s parent timeout.
+        faulthandler.dump_traceback_later(120, repeat=True)
         os.environ["BLOG_HELPER_DATA_DIR"] = directory
         os.environ["BLOG_HELPER_DISABLE_UPDATES"] = "1"
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -841,6 +843,28 @@ def main() -> None:
             screenshot("activity-shimmers-stopped")
 
             app._switch_page("settings")
+            app._switch_settings_section("theme")
+            settle()
+            assert app.font_menu.cget("values") == list(app_module.FONT_OPTIONS)
+            assert app.font_menu.get() == app_module.SYSTEM_FONT
+            assert int(app.font_menu.master.grid_info()["row"]) == 1
+            assert int(app.sidebar_menu_settings_status_label.master.grid_info()["row"]) == 2
+            assert app._read_wordpress_settings().app_font == app_module.SYSTEM_FONT
+            screenshot("font-settings")
+            with patch.object(app, "_restart_after_theme_change") as restart:
+                app.font_menu.set("나눔스퀘어 네오")
+                app._on_font_changed("나눔스퀘어 네오")
+                assert app.wordpress_settings.app_font == "나눔스퀘어 네오"
+                assert app.font_menu.cget("state") == "disabled"
+                assert app.theme_menu.cget("state") == "disabled"
+                settle(500)
+                restart.assert_called_once()
+            app._theme_restart_pending = False
+            app.wordpress_settings.app_font = app_module.SYSTEM_FONT
+            app.font_menu.set(app_module.SYSTEM_FONT)
+            app.font_menu.configure(state="normal")
+            app.theme_menu.configure(state="normal")
+            print(f"{sys.platform} {args.theme}: font settings placement, persistence and restart callback passed", flush=True)
             app._switch_settings_section("ai")
             app._switch_settings_tab("adsense")
             app.update()

@@ -29,12 +29,13 @@ def release_windows_fonts():
 atexit.register(release_windows_fonts)
 
 
-def configure_windows_fonts(ctk, resource_dir: Path, *, platform_name=None, gdi32=None) -> bool:
+def configure_windows_fonts(ctk, resource_dir: Path, *, platform_name=None, gdi32=None,
+                            font_family=FONT_FAMILY, font_files=FONT_FILES) -> bool:
     """Register regular/bold before Tk creates widgets; no registry/admin writes."""
     global _family
     if (sys.platform if platform_name is None else platform_name) != "win32":
         return False
-    paths = [Path(resource_dir) / "assets" / "fonts" / name for name in FONT_FILES]
+    paths = [Path(resource_dir) / "assets" / "fonts" / name for name in font_files]
     if not all(path.is_file() for path in paths):
         _family = "Malgun Gothic"
         ctk.ThemeManager.theme["CTkFont"]["family"] = _family
@@ -54,7 +55,7 @@ def configure_windows_fonts(ctk, resource_dir: Path, *, platform_name=None, gdi3
                 raise OSError(f"Font registration failed: {path.name}")
             _registered[key] = api
             added.append(key)
-        _family = FONT_FAMILY
+        _family = font_family
     except (AttributeError, OSError):
         for key in added:
             try:
@@ -64,7 +65,7 @@ def configure_windows_fonts(ctk, resource_dir: Path, *, platform_name=None, gdi3
             _registered.pop(key, None)
         _family = "Malgun Gothic"
     ctk.ThemeManager.theme["CTkFont"]["family"] = _family
-    return _family == FONT_FAMILY
+    return _family == font_family
 
 
 def ui_font_family(mac_family="Apple SD Gothic Neo", *, platform_name=None) -> str:
