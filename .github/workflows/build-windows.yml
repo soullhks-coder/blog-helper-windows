@@ -104,6 +104,7 @@ jobs:
           python tools/check_windows_modal_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
+          python tools/check_modal_controls_ui.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.exe
@@ -196,6 +197,7 @@ jobs:
         run: |
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
+          python tools/check_modal_controls_ui.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.app

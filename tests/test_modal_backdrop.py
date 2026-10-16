@@ -55,6 +55,82 @@ class Widget:
 
 
 class ModalBackdropTests(unittest.TestCase):
+    def test_dialog_restoration_waits_until_native_destroy_event_finishes(self):
+        dialog = Widget()
+        root = Widget(children=(dialog,))
+        idle = []
+        root.after_idle = idle.append
+        dimmer = ModalDimmer(root)
+        dimmer.attach(dialog)
+        dialog.close()
+        self.assertTrue(dimmer.active)
+        self.assertEqual(root.cget('background'), '#737373')
+        self.assertEqual(len(idle), 1)
+        idle.pop()()
+        self.assertFalse(dimmer.active)
+        self.assertEqual(root.cget('background'), '#ffffff')
+
+    def test_already_normal_hidden_child_survives_old_parent_background_propagation(self):
+        class TransparentParent(Widget):
+            def configure(self, **values):
+                if 'background' in values:
+                    for child in self.children:
+                        child.configure(background=self.colors['background'])
+                super().configure(**values)
+
+        for platform in ('darwin', 'win32'):
+            child = Widget('#f6f8fc')
+            child.winfo_ismapped = lambda: False
+            root = TransparentParent('#f6f8fc', children=(child,))
+            dimmer = ModalDimmer(root, platform_name=platform)
+            dimmer.begin()
+            self.assertEqual(child.cget('background'), '#f6f8fc')
+            dimmer.end()
+            self.assertEqual(child.cget('background'), '#f6f8fc', platform)
+
+    def test_new_hidden_inherited_background_is_restored_before_first_refresh(self):
+        for platform in ('darwin', 'win32'):
+            root = Widget('#f6f8fc')
+            dimmer = ModalDimmer(root, platform_name=platform)
+            dimmer.begin()
+            child = Widget(root.cget('background'))
+            child.winfo_ismapped = lambda: False
+            root.children.append(child)
+            dimmer.end()
+            self.assertEqual(child.cget('background'), '#f6f8fc', platform)
+
+    def test_new_inherited_background_is_not_saved_as_dimmed_original(self):
+        for platform in ('darwin', 'win32'):
+            root = Widget('#f6f8fc')
+            dimmer = ModalDimmer(root, platform_name=platform)
+            dimmer.begin()
+            child = Widget(root.cget('background'))
+            explicit = Widget('#abcdef')
+            root.children.extend((child, explicit))
+            for _ in range(3):
+                dimmer.refresh()
+                self.assertEqual(child.cget('background'), '#6f7071', platform)
+            dimmer.end()
+            self.assertEqual(child.cget('background'), '#f6f8fc', platform)
+            self.assertEqual(explicit.cget('background'), '#abcdef', platform)
+
+    def test_restore_snapshots_child_live_changes_before_parent_propagation(self):
+        class Parent(Widget):
+            def configure(self, **values):
+                super().configure(**values)
+                if 'background' in values:
+                    for child in self.children:
+                        child.configure(background=values['background'])
+
+        for platform in ('darwin', 'win32'):
+            child = Widget('#ffffff')
+            root = Parent(children=(child,))
+            dimmer = ModalDimmer(root, platform_name=platform)
+            dimmer.begin()
+            child.configure(background='#abcdef')
+            dimmer.end()
+            self.assertEqual(child.cget('background'), '#abcdef', platform)
+
     def test_windows_refresh_never_brightens_or_repaints_unchanged_widgets(self):
         child, dialog = Widget(), Widget()
         root = Widget(children=(child, dialog))
@@ -123,14 +199,15 @@ class ModalBackdropTests(unittest.TestCase):
                 self.callbacks[key] = callback
                 return key
 
-        root = TimerWidget()
-        dimmer = ModalDimmer(root, platform_name="win32")
-        dimmer.begin()
-        for _ in range(5):
-            dimmer.refresh()
-            self.assertEqual(len(root.callbacks), 1)
-        dimmer.end()
-        self.assertFalse(root.callbacks)
+        for platform in ('win32', 'darwin'):
+            root = TimerWidget()
+            dimmer = ModalDimmer(root, platform_name=platform)
+            dimmer.begin()
+            for _ in range(5):
+                dimmer.refresh()
+                self.assertEqual(len(root.callbacks), 1, platform)
+            dimmer.end()
+            self.assertFalse(root.callbacks)
 
     def test_macos_refresh_keeps_existing_restore_behavior(self):
         root = Widget()

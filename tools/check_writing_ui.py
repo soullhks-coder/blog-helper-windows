@@ -85,6 +85,16 @@ def main() -> None:
             while pending:
                 widget = pending.pop()
                 pending.extend(widget.winfo_children())
+                if (isinstance(widget, app_module.ctk.CTkBaseClass) and widget.winfo_ismapped()
+                        and not app_module.modal_dimmer(app).active):
+                    from modal_backdrop import dim_color
+                    background = widget._apply_appearance_mode(widget.cget("bg_color"))
+                    parent_background = widget._apply_appearance_mode(widget._detect_color_of_master())
+                    assert background == parent_background or background != dim_color(widget, parent_background), (
+                        str(widget), "stale dimmed background", background, parent_background)
+                    if isinstance(widget, app_module.ctk.CTkOptionMenu):
+                        assert widget._canvas.cget("bg") == background, str(widget)
+                        assert widget._text_label.cget("bg") == widget._apply_appearance_mode(widget.cget("fg_color")), str(widget)
                 if not isinstance(widget, (app_module.InputEntry, app_module.InputTextbox)):
                     continue
                 assert widget.cget("border_width") >= 2, str(widget)
@@ -248,8 +258,24 @@ def main() -> None:
             app.manual_keyword_entry.insert(0, "일반 직접 입력")
             app.current_keyword_source = "analysis"
             app.current_insights = [app_module.KeywordInsight("일반 추천", 80, [], [], [], {})]
-            app._switch_page("tistory_v2")
+            # Lazy selectors created while a popup is open must not remember
+            # its dimmed grey as their permanent label/corner background.
+            app._switch_page("writing")
+            settle(120)
+            dimmer = app_module.modal_dimmer(app)
+            dimmer.begin()
+            try:
+                app._switch_page("tistory_v2")
+                settle(120)
+                dimmer.refresh()
+            finally:
+                dimmer.end()
             settle(250)
+            for menu in app.tistory_v2_controls.menus.values():
+                assert resolved_color(menu, "bg_color") == app._theme_palette()["shell"]
+                assert resolved_color(menu._canvas, "bg") == app._theme_palette()["shell"]
+                assert resolved_color(menu._text_label, "bg") == resolved_color(menu, "fg_color")
+            print(f"{sys.platform} {args.theme}: lazy V2 selectors restore clean label and corner backgrounds after popup", flush=True)
             assert app.topic_entry.get() == "V2 저장 주제"
             assert app.tistory_v2_wiki_keyword_row.winfo_ismapped()
             assert (app.tistory_v2_wiki_keyword_entry.winfo_rooty() + app.tistory_v2_wiki_keyword_entry.winfo_height()

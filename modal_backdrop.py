@@ -31,15 +31,21 @@ def dim_color(widget, value):
     return "#" + "".join(f"{round(channel / 257 * 0.45):02x}" for channel in rgb)
 
 
+def owned_ctk_children(widget):
+    """Native drawing/editor children belong to their composite CTk control."""
+    return {child for name in ("_canvas", "_label", "_text_label", "_image_label", "_entry", "_textbox")
+            if (child := getattr(widget, name, None)) is not None}
+
+
 class ModalDimmer:
     def __init__(self, root, *, platform_name=None):
         self.root = root
         self.dialogs = []
         self._depth = 0
-        self._saved = []
-        self._images = []
         self._refresh_job = None
         self._windows = (sys.platform if platform_name is None else platform_name) == "win32"
+        # Shared snapshots; retain the diagnostic attribute name used by the
+        # Windows no-flicker checks, but snapshot Mac restores atomically too.
         self._windows_saved = {}
 
     @property
@@ -55,15 +61,25 @@ class ModalDimmer:
                 return
             if dialog in self.dialogs:
                 self.dialogs.remove(dialog)
-                self.end()
-                if self.dialogs:
-                    # Closing one of two concurrent completion dialogs must
-                    # not release the remaining dialog's modal input grab.
-                    try:
-                        self.dialogs[-1].lift()
-                        self.dialogs[-1].grab_set()
-                    except tk.TclError:
-                        pass
+
+                def finish_close():
+                    self.end()
+                    if self.dialogs:
+                        # Keep the remaining dialog's modal input grab.
+                        try:
+                            self.dialogs[-1].lift()
+                            self.dialogs[-1].grab_set()
+                        except tk.TclError:
+                            pass
+
+                # Destroy fires before Tk has finished removing the dialog's
+                # children. CTk parent.configure() propagates into those dying
+                # controls and can raise before restoring its own background.
+                # Finish after destruction, not from inside that native event.
+                if hasattr(self.root, "after_idle"):
+                    self.root.after_idle(finish_close)
+                else:
+                    finish_close()
 
         # CTkFrame.bind delegates to its internal drawing canvas. We need the
         # frame's own lifecycle event, not the canvas's earlier destruction.
@@ -97,44 +113,89 @@ class ModalDimmer:
         finally:
             self.end()
 
-    def _restore(self):
-        if self._windows:
-            # Snapshot before restoring parents: CTk parent fills propagate to
-            # children, including children with newer externally set colors.
-            restore = []
-
-            def depth(key):
-                widget, level = key[0], 0
-                while getattr(widget, "master", None) is not None:
-                    widget = widget.master
-                    level += 1
-                return level
-
-            for key in sorted(self._windows_saved, key=depth):
-                getter, setter, original, dimmed, _image = self._windows_saved[key]
-                try:
-                    current = getter()
-                    restore.append((getter, setter, original if current == dimmed else current))
-                except (tk.TclError, ValueError):
-                    pass
-            for getter, setter, value in restore:
-                try:
-                    if getter() != value:
-                        setter(value)
-                except (tk.TclError, ValueError):
-                    pass
-        for getter, setter, original, dimmed in self._saved:
+    def _restoration_values(self):
+        # Freeze values before touching parents: their configure() calls can
+        # propagate background changes into otherwise independent children.
+        values = {}
+        for key, (getter, setter, original, dimmed, _image) in self._windows_saved.items():
             try:
-                if getter() == dimmed:
-                    setter(original)
+                current = getter()
+                values[key] = (getter, setter, original if current == dimmed else current)
             except (tk.TclError, ValueError):
                 pass
-        self._saved.clear()
+
+        def value(widget, option, getter):
+            record = values.get((widget, option))
+            return record[2] if record is not None else getter()
+
+        def visit(widget, parent_surface=None):
+            if widget in self.dialogs or isinstance(widget, (tk.Toplevel, ctk.CTkToplevel)):
+                return
+            is_ctk = isinstance(widget, (ctk.CTk, ctk.CTkBaseClass))
+            is_scroll = isinstance(widget, ctk.CTkScrollableFrame)
+            option = "bg_color" if is_ctk else "background"
+            if is_scroll:
+                getter = lambda w=widget: tk.Frame.cget(w, "background")
+                setter = lambda color, w=widget: tk.Frame.configure(w, background=color)
+            else:
+                getter = lambda w=widget, o=option: w.cget(o)
+                setter = lambda color, w=widget, o=option: w.configure(**{o: color})
+            surface = parent_surface
+            try:
+                key = (widget, option)
+                background = value(widget, option, getter)
+                # A newly created (even hidden) control can inherit a dimmed
+                # parent. It was never in the original snapshot; do not retain
+                # that temporary grey as its permanent rounded-corner fill.
+                if key not in values and parent_surface is not None:
+                    normal, was_dimmed = parent_surface
+                    if was_dimmed:
+                        if background != normal and background == dim_color(widget, normal):
+                            background = normal
+                        # Freeze normal/explicit child backgrounds too. A
+                        # transparent CTk parent propagates its OLD background
+                        # before updating itself during configure(bg_color=...).
+                        # Without a child snapshot that redraw can reintroduce
+                        # the dim color even after we restored the parent.
+                        values[key] = (getter, setter, background)
+                surface = (background, key in values)
+            except (tk.TclError, ValueError):
+                pass
+            if is_ctk:
+                try:
+                    foreground = value(widget, "fg_color", lambda: widget.cget("fg_color"))
+                    if foreground not in (None, "", "transparent"):
+                        surface = (foreground, (widget, "fg_color") in values)
+                except (tk.TclError, ValueError):
+                    pass
+            owned = owned_ctk_children(widget) if is_ctk else set()
+            for child in widget.winfo_children():
+                if child not in owned:
+                    visit(child, surface)
+
+        visit(self.root)
+        return values
+
+    def _restore(self):
+        def depth(key):
+            widget, level = key[0], 0
+            while getattr(widget, "master", None) is not None:
+                widget = widget.master
+                level += 1
+            return level
+
+        restore = self._restoration_values()
+        for key in sorted(restore, key=depth):
+            getter, setter, target = restore[key]
+            try:
+                if getter() != target:
+                    setter(target)
+            except (tk.TclError, ValueError):
+                pass
         self._windows_saved.clear()
-        self._images.clear()
 
     def refresh(self):
-        if self._windows and self._refresh_job:
+        if self._refresh_job:
             # Manual refreshes must not start additional timer chains.
             try:
                 self.root.after_cancel(self._refresh_job)
@@ -145,6 +206,7 @@ class ModalDimmer:
             return
         if not self._windows:
             self._restore()
+        backgrounds = self._restoration_values() if self._windows else {}
         # On Windows, restoring every 500 ms exposes bright intermediate
         # frames. Keep existing fills/images dimmed and only paint changes.
         changes = []
@@ -196,6 +258,9 @@ class ModalDimmer:
                     key = (widget, option)
                     if unchanged(key, original):
                         continue
+                    inherited = backgrounds.get(key)
+                    if self._windows and inherited is not None and key not in self._windows_saved:
+                        original = inherited[2]
                     if self._windows and is_ctk and option == "bg_color":
                         # Newly mapped CTk children may inherit an already
                         # dimmed parent fill. Recover its original background
@@ -225,10 +290,7 @@ class ModalDimmer:
             elif isinstance(widget, tk.Canvas):
                 self._dim_canvas(widget, changes, unchanged)
             for child in widget.winfo_children():
-                if is_ctk and child in (
-                    getattr(widget, "_canvas", None), getattr(widget, "_label", None),
-                    getattr(widget, "_entry", None), getattr(widget, "_textbox", None),
-                ):
+                if is_ctk and child in owned_ctk_children(widget):
                     continue
                 visit(child)
 
@@ -238,14 +300,9 @@ class ModalDimmer:
         for key, getter, setter, original, dimmed, image in changes:
             try:
                 setter(dimmed)
-                if self._windows:
-                    # Keep only the current image per property, not every
-                    # historical preview rendered while a popup is open.
-                    self._windows_saved[key] = (getter, setter, original, dimmed, image)
-                else:
-                    self._saved.append((getter, setter, original, dimmed))
-                    if image is not None:
-                        self._images.append(image)
+                # Keep only the current image per property, not every
+                # historical preview rendered while a popup is open.
+                self._windows_saved[key] = (getter, setter, original, dimmed, image)
             except (tk.TclError, ValueError):
                 pass
         if self._windows:
