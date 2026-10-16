@@ -392,6 +392,48 @@ def main() -> None:
             panel._move(-2)
             assert panel.text_position_menus["text_horizontal"].get() == "중앙"
             assert panel.text_position_menus["text_vertical"].get() == "중앙"
+            # Font controls update the actual preview without a Save/Apply click.
+            from PIL import ImageTk
+            before_preview = ImageTk.getimage(panel._preview_image).tobytes()
+            font_sizes = {"eyebrow": 12, "title": 30, "summary": 16, "bullets": 15}
+            for key, value in font_sizes.items():
+                panel.font_size_vars[key].set(str(value))
+            settle(140)
+            assert panel._font_preview_job is None
+            assert ImageTk.getimage(panel._preview_image).tobytes() != before_preview
+            assert panel.deck["slides"][0]["font_sizes"] == font_sizes
+            settle(400)
+            assert panel.store.load_deck(panel.deck["id"])["slides"][0]["font_sizes"] == font_sizes
+            for invalid in ("", "0", "9999"):
+                panel.font_size_vars["title"].set(invalid)
+                assert panel.deck["slides"][0]["font_sizes"]["title"] == 30
+                panel._finish_font_size_input("title")
+                assert panel.font_size_vars["title"].get() == "30"
+            panel.font_size_sliders["summary"].cget("command")(18)
+            assert panel.font_size_vars["summary"].get() == "18"
+            font_sizes["summary"] = 18
+            panel._move(1)
+            assert panel.font_size_vars["title"].get() == "24"  # untouched photo slide
+            panel.font_size_vars["title"].set("34")
+            panel._move(-1)
+            assert panel.font_size_vars["title"].get() == "30"
+            font_content = app_module.copy.deepcopy(panel.deck["slides"])
+            assert panel.font_size_all_button.invoke()
+            assert all(slide["font_sizes"] == font_sizes for slide in panel.deck["slides"])
+            for old_slide, slide in zip(font_content, panel.deck["slides"]):
+                assert {key: value for key, value in old_slide.items() if key != "font_sizes"} == {
+                    key: value for key, value in slide.items() if key != "font_sizes"}
+            panel.font_size_reset_button.invoke()
+            assert "font_sizes" not in panel.deck["slides"][0]
+            assert panel.font_size_vars["title"].get() == "24"
+            assert panel.deck["slides"][1]["font_sizes"] == font_sizes
+            for key, value in font_sizes.items():
+                panel.font_size_vars[key].set(str(value))
+            with patch.object(panel, "worker", object()):
+                assert not panel._apply_font_sizes_to_all()
+            with patch.object(panel, "_publishing", return_value=True):
+                assert not panel._apply_font_sizes_to_all()
+            print(f"{sys.platform} {args.theme}: V2 live font preview, per-slide sizes, bulk apply and persistence passed", flush=True)
             app._open_writing_section("publish")
             settle(200)
             assert panel.winfo_ismapped() and panel.preview.winfo_ismapped()
@@ -422,6 +464,7 @@ def main() -> None:
                 assert options["tistory_v2_deck"]["slides"][0]["title"] == "편집한 슬라이드 제목 유지"
                 assert options["tistory_v2_deck"]["slides"][0]["image"]["path"] == str(photo_path)
                 assert options["tistory_v2_deck"]["slides"][0]["layout"] == "사진 왼쪽"
+                assert options["tistory_v2_deck"]["slides"][0]["font_sizes"] == font_sizes
                 assert options["tistory_v2_deck"]["slides"][0]["text_horizontal"] == "중앙"
                 assert options["tistory_v2_deck"]["slides"][0]["text_vertical"] == "중앙"
                 assert options["tistory_v2_deck"]["slides"][2]["text_horizontal"] == "왼쪽"
@@ -464,6 +507,8 @@ def main() -> None:
                 host, app, panel.store.directory, panel.chrome_path_provider, panel.apply_images,
                 workflow=panel.workflow, article_provider=app._v2_article_source)
             assert restarted_panel._text_position_defaults == expected_defaults
+            assert restarted_panel._font_size_defaults == font_sizes
+            assert {key: int(value.get()) for key, value in restarted_panel.font_size_vars.items()} == font_sizes
             assert restarted_panel.text_position_menus["text_horizontal"].get() == "중앙"
             assert restarted_panel.text_position_menus["text_vertical"].get() == "중앙"
             restarted_panel.destroy()
@@ -482,6 +527,7 @@ def main() -> None:
                     break
             assert not panel.busy
             assert panel.deck["id"] != saved_deck_id
+            assert all(slide["font_sizes"] == font_sizes for slide in panel.deck["slides"])
             assert all(slide["text_horizontal"] == "오른쪽" and slide["text_vertical"] == "아래" for slide in panel.deck["slides"])
             assert previous_deck_path.read_bytes() == previous_bytes
             # Reset uses this deck's initial defaults, not another task's style.
@@ -618,6 +664,11 @@ def main() -> None:
                 app.geometry(geometry)
                 settle(250)
                 assert app.writing_page.winfo_ismapped()
+                assert int(panel.font_size_panel.grid_info()["row"]) < int(panel.photo_menu.grid_info()["row"])
+                for entry in panel.font_size_entries.values():
+                    header = entry.master
+                    right = max(child.winfo_x() + child.winfo_width() for child in header.winfo_children())
+                    assert right <= header.winfo_width() + 1, (geometry, right, header.winfo_width())
                 assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
             with patch.object(app_module.messagebox, "showinfo"):
                 app._switch_page("writing")

@@ -29,6 +29,48 @@ SLIDE_WIDTH_RANGE = (300, 2400)
 SLIDE_HEIGHT_RANGE = (150, 2400)
 TEXT_HORIZONTAL_POSITIONS = ("왼쪽", "중앙", "오른쪽")
 TEXT_VERTICAL_POSITIONS = ("기본", "위", "중앙", "아래")
+SLIDE_FONT_SIZE_RANGE = (6, 96)
+SLIDE_FONT_SIZES = {"eyebrow": 10, "title": 26, "summary": 15, "bullets": 14}
+
+
+def validate_slide_font_size(value) -> int:
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]{1,3}", str(value).strip()):
+        raise ValueError("글자 크기는 6~96 사이의 정수로 입력해 주세요.")
+    number = int(str(value).strip())
+    if not SLIDE_FONT_SIZE_RANGE[0] <= number <= SLIDE_FONT_SIZE_RANGE[1]:
+        raise ValueError("글자 크기는 6~96 사이의 정수로 입력해 주세요.")
+    return number
+
+
+def slide_font_size_overrides(value) -> dict[str, int]:
+    """Ignore invalid legacy/user-edited metadata without changing its text."""
+    result = {}
+    if isinstance(value, dict):
+        for key in SLIDE_FONT_SIZES:
+            try:
+                result[key] = validate_slide_font_size(value[key])
+            except (ValueError, KeyError, TypeError):
+                pass
+    return result
+
+
+def slide_has_photo(slide: dict, index=1) -> bool:
+    asset = slide.get("image") or {}
+    return index <= 2 and slide.get("layout") != "공통 스타일" and Path(str(asset.get("path") or "")).is_file()
+
+
+def slide_font_sizes(slide: dict, index=1) -> dict[str, int]:
+    defaults = {**SLIDE_FONT_SIZES, "title": 24 if slide_has_photo(slide, index) else 26}
+    return {**defaults, **slide_font_size_overrides(slide.get("font_sizes"))}
+
+
+def apply_slide_font_sizes(slides: list[dict], sizes: dict) -> None:
+    values = slide_font_size_overrides(sizes)
+    if not isinstance(sizes, dict) or len(values) != len(sizes):
+        raise ValueError("올바른 항목별 글자 크기를 입력해 주세요.")
+    for slide in slides:
+        if values:
+            slide["font_sizes"] = dict(values)
 
 
 def text_position_defaults(values: dict) -> dict[str, str]:
@@ -191,12 +233,15 @@ class V2Store:
         except ValueError:
             size = SLIDE_SIZE
         positions = self.slide_position_defaults()
+        font_sizes = slide_font_size_overrides(self.preferences().get("font_size_defaults"))
         slides = build_slides(title or keyword, body, count)
         apply_text_positions(slides, positions["text_horizontal"], positions["text_vertical"])
+        apply_slide_font_sizes(slides, font_sizes)
         deck = {"id": deck_id, "keyword": keyword, "title": title or keyword,
                 "body": body, "theme": theme,
                 "slide_size": list(size),
                 "text_position_defaults": positions,
+                "font_size_defaults": font_sizes,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 "slides": slides, "images": []}
         assign_deck_themes(deck)
@@ -494,6 +539,47 @@ def _draw_positioned_text(draw, items, dots, text_x, text_width, top, bottom,
         draw.text((x, y + y_shift), text, font=font, fill=color)
 
 
+def _sized_slide_text(slide, eyebrow, font_sizes, font, px, text_x, text_width, top, bottom, ink, accent):
+    """Lay out custom sizes using actual glyph bounds; never invade the footer."""
+    items, dots = [], []
+    y = top
+
+    def block(text, key, max_lines, *, bullet=False):
+        nonlocal y
+        face = font(font_sizes[key], key in {"eyebrow", "title"})
+        sample = face.getbbox("가Ag")
+        line_height = max(px(1), sample[3] - min(0, sample[1]))
+        gap = px(5 if key == "title" else 4)
+        available = max(0, int((bottom - y + gap) // (line_height + gap)))
+        if not available:
+            return
+        indent = px(15) if bullet else 0
+        first_line = True
+        for line in wrap_text(text, face, text_width - indent, min(max_lines, available)):
+            bounds = face.getbbox(line)
+            # The drawing API uses baseline-relative y offsets, not ink-top.
+            items.append((text_x + indent, y - bounds[1], line, face,
+                          accent if key == "eyebrow" else ink, bullet))
+            if bullet and first_line:
+                radius = px(5)
+                dot_y = y + max(0, (bounds[3] - bounds[1] - radius) / 2)
+                dots.append((text_x, dot_y, text_x + radius, dot_y + radius))
+            first_line = False
+            y += line_height + gap
+
+    block(eyebrow, "eyebrow", 1)
+    y += px(9)
+    block(slide.get("title", ""), "title", 2)
+    y += px(10)
+    bullets = slide.get("bullets") or []
+    block(slide.get("summary", ""), "summary", 2 if bullets else 5)
+    y += px(8)
+    for item in bullets[:3]:
+        block(item, "bullets", 2, bullet=True)
+        y += px(5)
+    return items, dots
+
+
 def render_slide(slide: dict, theme: str = "스카이", index: int = 1, total: int = 1,
                  show_numbers: bool = True, size=SLIDE_SIZE) -> Image.Image:
     width, height = slide_output_size(slide, size)
@@ -513,7 +599,7 @@ def render_slide(slide: dict, theme: str = "스카이", index: int = 1, total: i
     text_items, bullet_dots = [], []
     asset = slide.get("image") or {}
     photo_path = Path(str(asset.get("path") or ""))
-    has_photo = index <= 2 and slide.get("layout") != "공통 스타일" and photo_path.is_file()
+    has_photo = slide_has_photo(slide, index)
     left_photo = slide.get("layout") == "사진 왼쪽"
     panel_width = round(width * .35)
     photo_x = 0 if left_photo else width - panel_width
@@ -571,6 +657,11 @@ def render_slide(slide: dict, theme: str = "스카이", index: int = 1, total: i
             text_items.append((text_x + px(15), y, line, font(14), ink, True))
             y += px(21)
         y += px(7)
+    if slide_font_size_overrides(slide.get("font_sizes")):
+        text_items, bullet_dots = _sized_slide_text(
+            slide, eyebrow_text, slide_font_sizes(slide, index), font, px, text_x, text_width,
+            vertical_offset + px(25 if has_photo else 37), height - px(40), ink, accent,
+        )
     _draw_positioned_text(draw, text_items, bullet_dots, text_x, text_width,
                           px(25 if has_photo else 37), height - px(40),
                           slide.get("text_horizontal", "왼쪽"), slide.get("text_vertical", "기본"), px(15), accent)

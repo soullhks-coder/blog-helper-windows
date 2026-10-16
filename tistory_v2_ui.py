@@ -19,7 +19,8 @@ from tistory_v2 import (COPYRIGHT_NOTE, THEME_CHOICES, TEXT_HORIZONTAL_POSITIONS
                         Cancelled, V2Store, collect_wiki_images,
                         SLIDE_SIZE, apply_text_positions, assign_deck_themes, assign_slide_images, build_slides, deck_slide_size,
                         deck_slide_sizes, export_deck, plain_text, render_slide, slide_output_size,
-                        text_position_defaults, validate_slide_size)
+                        text_position_defaults, validate_slide_size, SLIDE_FONT_SIZE_RANGE, SLIDE_FONT_SIZES,
+                        apply_slide_font_sizes, slide_font_sizes, slide_font_size_overrides, validate_slide_font_size)
 from tistory_v2_summary import build_summary_slides
 
 filedialog = DimmedDialogApi(filedialog)
@@ -52,6 +53,8 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self._poll_job = self._edit_job = self._resize_job = None
+        self._font_preview_job = None
+        self._syncing_font_sizes = False
         self._closed = False
         self._controls = []
         self._preview_image = None
@@ -61,6 +64,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.grid_rowconfigure(1, weight=1)
         values = self.store.preferences()
         self._text_position_defaults = self.store.slide_position_defaults()
+        self._font_size_defaults = slide_font_size_overrides(values.get("font_size_defaults"))
         try:
             self._output_size = deck_slide_size(values)
         except ValueError:
@@ -121,6 +125,31 @@ class TistoryV2Panel(ctk.CTkFrame):
         box.grid(row=row, column=0, padx=18, sticky="ew")
         self._controls.append(box)
         return box
+
+    def _font_size_control(self, parent, label, row, column, key):
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.grid(row=row, column=column, padx=8, pady=5, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text=label, anchor="w", text_color=self.palette["text"],
+                     font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="w")
+        slider = ctk.CTkSlider(
+            header, from_=SLIDE_FONT_SIZE_RANGE[0], to=SLIDE_FONT_SIZE_RANGE[1], number_of_steps=90,
+            width=76, height=16, command=lambda value, field=key: self.font_size_vars[field].set(str(round(value))),
+        )
+        slider.grid(row=0, column=1, padx=(4, 7), sticky="e")
+        variable = tk.StringVar(value=str(self._font_size_defaults.get(key, SLIDE_FONT_SIZES[key])))
+        entry = ctk.CTkEntry(header, width=44, height=28, textvariable=variable, justify="center",
+                             fg_color=self.palette["input"], border_color=self.palette["border"],
+                             text_color=self.palette["text"], font=ctk.CTkFont(size=12))
+        entry.grid(row=0, column=2, sticky="e")
+        ctk.CTkLabel(header, text="px", width=18, text_color=self.palette["muted"],
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=3, padx=(3, 0))
+        self.font_size_vars[key], self.font_size_sliders[key], self.font_size_entries[key] = variable, slider, entry
+        slider.set(int(variable.get()))
+        variable.trace_add("write", lambda *_args, field=key: self._font_size_changed(field))
+        entry.bind("<Return>", lambda _event, field=key: self._finish_font_size_input(field), add="+")
+        entry.bind("<FocusOut>", lambda _event, field=key: self._finish_font_size_input(field), add="+")
+        self._controls.extend((slider, entry))
 
     def _build(self, values):
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -258,8 +287,21 @@ class TistoryV2Panel(ctk.CTkFrame):
         self._button(actions, "텍스트 복사", self._copy_text, 0)
         self._button(actions, "크게 보기", self._enlarge, 0, 1)
         self._button(actions, "이 장 초기화", self._reset_slide, 0, 2)
+        self.font_size_panel = ctk.CTkFrame(self.editor_card, fg_color=self.palette["input"],
+                                           border_width=1, border_color=self.palette["border"], corner_radius=12)
+        self.font_size_panel.grid(row=4, column=0, padx=18, pady=(8, 0), sticky="ew")
+        self.font_size_panel.grid_columnconfigure((0, 1), weight=1, uniform="font-sizes")
+        self.font_size_vars, self.font_size_sliders, self.font_size_entries = {}, {}, {}
+        for index, (key, label) in enumerate((("eyebrow", "소제목"), ("title", "제목"),
+                                              ("summary", "설명"), ("bullets", "핵심 내용"))):
+            self._font_size_control(self.font_size_panel, label, index // 2, index % 2, key)
+        font_actions = ctk.CTkFrame(self.font_size_panel, fg_color="transparent")
+        font_actions.grid(row=2, column=0, columnspan=2, padx=3, pady=(0, 3), sticky="ew")
+        font_actions.grid_columnconfigure((0, 1), weight=1)
+        self.font_size_all_button = self._button(font_actions, "글자 크기 전체 적용", self._apply_font_sizes_to_all, 0, primary=True)
+        self.font_size_reset_button = self._button(font_actions, "이 장 크기 초기화", self._reset_font_sizes, 0, 1)
         positions = ctk.CTkFrame(self.editor_card, fg_color="transparent")
-        positions.grid(row=4, column=0, padx=5, pady=(0, 10), sticky="ew")
+        positions.grid(row=5, column=0, padx=5, pady=(0, 10), sticky="ew")
         positions.grid_columnconfigure((0, 1), weight=1, uniform="text-position")
         self.text_position_menus = {}
         for column, (key, label, values) in enumerate((
@@ -299,27 +341,27 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.slide_size_apply_button.grid_configure(sticky="sew", padx=0, pady=0)
         self.slide_size_common_button = self._button(single_size, "이 장만 공통 크기로", self._use_common_slide_size, 1)
         self.slide_size_common_button.grid_configure(columnspan=3, padx=0)
-        self._label(self.editor_card, "이 장의 사진", 5)
-        self.photo_menu = self._menu(self.editor_card, 6, ["사진 없음"], command=self._choose_photo)
+        self._label(self.editor_card, "이 장의 사진", 6)
+        self.photo_menu = self._menu(self.editor_card, 7, ["사진 없음"], command=self._choose_photo)
         photo_actions = ctk.CTkFrame(self.editor_card, fg_color="transparent")
-        photo_actions.grid(row=7, column=0, padx=13, sticky="ew")
+        photo_actions.grid(row=8, column=0, padx=13, sticky="ew")
         photo_actions.grid_columnconfigure((0, 1), weight=1)
         self._button(photo_actions, "내 이미지 넣기", self._local_photo, 0)
         self._button(photo_actions, "원본 출처 보기", self._open_source, 0, 1)
-        self._label(self.editor_card, "사진 위치", 8)
-        self.layout_menu = self._menu(self.editor_card, 9, ["사진 오른쪽", "사진 왼쪽", "공통 스타일"], command=self._edited)
+        self._label(self.editor_card, "사진 위치", 9)
+        self.layout_menu = self._menu(self.editor_card, 10, ["사진 오른쪽", "사진 왼쪽", "공통 스타일"], command=self._edited)
         self.source_label = ctk.CTkLabel(self.editor_card, text="", width=1, text_color=self.palette["muted"], wraplength=300, justify="left", anchor="w", font=ctk.CTkFont(size=12))
-        self.source_label.grid(row=10, column=0, padx=18, pady=10, sticky="ew")
-        self._label(self.editor_card, "소제목", 11)
-        self.eyebrow_entry = self._entry(self.editor_card, 12)
-        self._label(self.editor_card, "제목", 13)
-        self.slide_title_box = self._textbox(self.editor_card, 14, 90)
-        self._label(self.editor_card, "설명", 15)
-        self.summary_box = self._textbox(self.editor_card, 16, 90)
-        self._label(self.editor_card, "핵심 내용 · 한 줄에 한 항목", 17)
-        self.bullets_box = self._textbox(self.editor_card, 18, 120)
-        ctk.CTkLabel(self.editor_card, text="편집 내용은 자동 저장됩니다. 긴 문구는 이미지에서 말줄임표로 표시됩니다.\n변경 후 PNG 저장을 눌러 최종 이미지에 반영하세요.",
-                     wraplength=500, text_color=self.palette["muted"], font=ctk.CTkFont(size=12)).grid(row=19, column=0, padx=18, pady=18, sticky="ew")
+        self.source_label.grid(row=11, column=0, padx=18, pady=10, sticky="ew")
+        self._label(self.editor_card, "소제목", 12)
+        self.eyebrow_entry = self._entry(self.editor_card, 13)
+        self._label(self.editor_card, "제목", 14)
+        self.slide_title_box = self._textbox(self.editor_card, 15, 90)
+        self._label(self.editor_card, "설명", 16)
+        self.summary_box = self._textbox(self.editor_card, 17, 90)
+        self._label(self.editor_card, "핵심 내용 · 한 줄에 한 항목", 18)
+        self.bullets_box = self._textbox(self.editor_card, 19, 120)
+        ctk.CTkLabel(self.editor_card, text="글자 크기 6~96px · 600×300 기준이며 이미지 크기에 비례합니다.\n크기 변경은 미리보기에 바로 반영되고 자동 저장됩니다. 핵심 내용은 한 줄에 한 항목씩 입력하세요.\n큰 글씨·긴 문구는 일부가 생략될 수 있습니다. PNG 저장 또는 업로드 시 같은 설정을 사용합니다.",
+                     width=1, wraplength=360, justify="left", text_color=self.palette["muted"], font=ctk.CTkFont(size=12)).grid(row=20, column=0, padx=18, pady=18, sticky="ew")
         for widget in (self.eyebrow_entry, self.slide_title_box, self.summary_box, self.bullets_box):
             widget.bind("<KeyRelease>", self._edited, add="+")
         for widget in (self.keyword_entry, self.title_entry, self.body_box):
@@ -436,6 +478,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.store.save_preferences({**latest, **connection, "mode": self.mode.get(), "theme": self.theme.get(), "count": "10",
                                      "slide_size": list(self._output_size),
                                      "text_position_defaults": dict(self._text_position_defaults),
+                                     "font_size_defaults": dict(self._font_size_defaults),
                                      "show_browser": self.show_browser.get(), "show_numbers": self.show_numbers.get(),
                                      "keyword": self.keyword_entry.get(),
                                      "title": self.title_entry.get(), "body": self.body_box.get("1.0", "end").strip(),
@@ -453,6 +496,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         assign_deck_themes(self.deck, self.theme.get())
         self.deck["show_numbers"] = self.show_numbers.get()
         self.deck["slide_size"] = list(self._output_size)
+        self.deck["font_size_defaults"] = dict(self._font_size_defaults)
         if not self.embedded:
             self.deck["title"] = self.title_entry.get().strip() or self.deck.get("title", "")
             self.deck["body"] = self.body_box.get("1.0", "end").strip()
@@ -608,9 +652,92 @@ class TistoryV2Panel(ctk.CTkFrame):
             self.after_cancel(self._edit_job)
         self._edit_job = self.after(350, self._update_edit)
 
+    def _sync_slide_font_sizes(self):
+        slide = self.deck["slides"][self.slide_index] if self.deck and self.deck.get("slides") else {"font_sizes": self._font_size_defaults}
+        self._syncing_font_sizes = True
+        try:
+            for key, value in slide_font_sizes(slide, self.slide_index + 1).items():
+                self.font_size_vars[key].set(str(value))
+                self.font_size_sliders[key].set(value)
+                self.font_size_entries[key].configure(border_color=self.palette["border"])
+        finally:
+            self._syncing_font_sizes = False
+
+    def _font_size_changed(self, key):
+        if self._syncing_font_sizes or self.busy or self._publishing():
+            return
+        try:
+            value = validate_slide_font_size(self.font_size_vars[key].get())
+        except ValueError:
+            self.font_size_entries[key].configure(border_color="#ef4444")
+            return
+        self.font_size_entries[key].configure(border_color=self.palette["border"])
+        self.font_size_sliders[key].set(value)
+        self._font_size_defaults[key] = value
+        if self.deck and self.deck.get("slides"):
+            slide = self.deck["slides"][self.slide_index]
+            slide["font_sizes"] = {**slide_font_size_overrides(slide.get("font_sizes")), key: value}
+        self._edited()
+        if self._font_preview_job:
+            self.after_cancel(self._font_preview_job)
+        self._font_preview_job = self.after(40, self._preview_font_size)
+
+    def _preview_font_size(self):
+        self._font_preview_job = None
+        self._draw_preview()
+
+    def _finish_font_size_input(self, key):
+        if self._closed or self._syncing_font_sizes or self.busy or self._publishing():
+            return
+        try:
+            validate_slide_font_size(self.font_size_vars[key].get())
+        except ValueError:
+            self._sync_slide_font_sizes()
+            self.status.configure(text="글자 크기는 6~96 사이의 정수로 입력해 주세요. 이전 크기를 유지했습니다.")
+
+    def _apply_font_sizes_to_all(self):
+        if self.busy or self._publishing():
+            return False
+        if not self.deck or not self.deck.get("slides"):
+            messagebox.showinfo("슬라이드 없음", "슬라이드를 먼저 만들어 주세요.", parent=self.app)
+            return False
+        try:
+            sizes = {key: validate_slide_font_size(value.get()) for key, value in self.font_size_vars.items()}
+        except ValueError as exc:
+            self.status.configure(text=str(exc))
+            return False
+        if self._edit_job:
+            self.after_cancel(self._edit_job)
+            self._edit_job = None
+        self._flush_slide()
+        apply_slide_font_sizes(self.deck["slides"], sizes)
+        self._font_size_defaults = dict(sizes)
+        self.deck["font_size_defaults"] = dict(sizes)
+        self.store.save_deck(self.deck)
+        self._save_preferences()
+        self._draw_preview()
+        self.status.configure(text=f"전체 {len(self.deck['slides'])}장 글자 크기 저장 완료 · 각 장은 다시 개별 수정할 수 있습니다.")
+        return True
+
+    def _reset_font_sizes(self):
+        if self.busy or self._publishing():
+            return
+        if self._edit_job:
+            self.after_cancel(self._edit_job)
+            self._edit_job = None
+        if self.deck and self.deck.get("slides"):
+            self.deck["slides"][self.slide_index].pop("font_sizes", None)
+        self._font_size_defaults = {}
+        self._sync_slide_font_sizes()
+        self._update_edit()
+        self._save_preferences()
+
     def _update_edit(self):
         self._edit_job = None
         self._flush_slide()
+        if not self.deck:
+            self._save_preferences()
+        self._sync_slide_font_sizes()
         self._draw_preview()
         if self.deck:
             self.status.configure(text="편집 내용 저장 완료 · PNG 저장을 누르면 최종 이미지가 갱신됩니다.")
@@ -696,6 +823,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         if not slides:
             self.page_label.configure(text="0 / 0")
             self._draw_preview()
+            self._sync_slide_font_sizes()
             return
         slide = slides[self.slide_index]
         self._sync_slide_size_entries()
@@ -707,6 +835,7 @@ class TistoryV2Panel(ctk.CTkFrame):
             value = "\n".join(slide.get(key, [])) if key == "bullets" else slide.get(key, "")
             widget.insert(start, value)
         self.layout_menu.set(slide.get("layout", "사진 오른쪽"))
+        self._sync_slide_font_sizes()
         for key, choices in (("text_horizontal", TEXT_HORIZONTAL_POSITIONS), ("text_vertical", TEXT_VERTICAL_POSITIONS)):
             value = slide.get(key, choices[0])
             self.text_position_menus[key].set(value if value in choices else choices[0])
@@ -770,7 +899,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         positions = text_position_defaults(self.deck)
         apply_text_positions(restored, positions["text_horizontal"], positions["text_vertical"])
         assign_slide_images(restored, self.deck.get("images", []))
-        for key in ("color_theme", "slide_size"):
+        for key in ("color_theme", "slide_size", "font_sizes"):
             if key in self.deck["slides"][self.slide_index]:
                 restored[self.slide_index][key] = copy.deepcopy(self.deck["slides"][self.slide_index][key])
         self.deck["slides"][self.slide_index] = restored[self.slide_index]
@@ -893,6 +1022,9 @@ class TistoryV2Panel(ctk.CTkFrame):
         if self._edit_job:
             self.after_cancel(self._edit_job)
             self._edit_job = None
+        if self._font_preview_job:
+            self.after_cancel(self._font_preview_job)
+            self._font_preview_job = None
         self.events = queue.Queue()
         self.worker = None
         self._publish_locked = False
@@ -911,6 +1043,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.saved_menu.set("저장한 작업 선택" if self._deck_labels else "저장한 작업 없음")
         self._update_size_labels()
         self._sync_slide_size_entries()
+        self._sync_slide_font_sizes()
         self._draw_preview()
         self._save_preferences()
         preferences = self.store.preferences()
@@ -982,6 +1115,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         deck["slide_size"] = list(self._output_size)
         if operation == "create":
             deck["text_position_defaults"] = dict(self._text_position_defaults)
+            deck["font_size_defaults"] = dict(self._font_size_defaults)
         visible = self.show_browser.get()
         self.cancel = threading.Event()
         cancel, events, store, provider = self.cancel, self.events, self.store, self.chrome_path_provider
@@ -1006,6 +1140,7 @@ class TistoryV2Panel(ctk.CTkFrame):
                     deck["slides"] = build_summary_slides(deck["title"], deck["body"], summary_rows)
                     positions = text_position_defaults(deck)
                     apply_text_positions(deck["slides"], positions["text_horizontal"], positions["text_vertical"])
+                    apply_slide_font_sizes(deck["slides"], deck.get("font_size_defaults", {}))
                     assign_deck_themes(deck)
                 if operation == "collect" or (operation == "create" and automatic):
                     try:
@@ -1132,7 +1267,7 @@ class TistoryV2Panel(ctk.CTkFrame):
             self._save_preferences()
             self._closed = True
             self.cancel.set()
-            for job in (self._poll_job, self._edit_job, self._resize_job):
+            for job in (self._poll_job, self._edit_job, self._resize_job, self._font_preview_job):
                 if job:
                     self.after_cancel(job)
         super().destroy()
