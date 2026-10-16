@@ -239,6 +239,7 @@ class V2Store:
         apply_slide_font_sizes(slides, font_sizes)
         deck = {"id": deck_id, "keyword": keyword, "title": title or keyword,
                 "body": body, "theme": theme,
+                "show_photo_sources": bool(self.preferences().get("show_photo_sources", True)),
                 "slide_size": list(size),
                 "text_position_defaults": positions,
                 "font_size_defaults": font_sizes,
@@ -581,7 +582,7 @@ def _sized_slide_text(slide, eyebrow, font_sizes, font, px, text_x, text_width, 
 
 
 def render_slide(slide: dict, theme: str = "스카이", index: int = 1, total: int = 1,
-                 show_numbers: bool = True, size=SLIDE_SIZE) -> Image.Image:
+                 show_numbers: bool = True, size=SLIDE_SIZE, *, show_photo_sources: bool = True) -> Image.Image:
     width, height = slide_output_size(slide, size)
     # Draw at the requested resolution, scaling type and spacing uniformly.
     # Wider/taller canvases get extra room; neither text nor photos are stretched.
@@ -665,7 +666,7 @@ def render_slide(slide: dict, theme: str = "스카이", index: int = 1, total: i
     _draw_positioned_text(draw, text_items, bullet_dots, text_x, text_width,
                           px(25 if has_photo else 37), height - px(40),
                           slide.get("text_horizontal", "왼쪽"), slide.get("text_vertical", "기본"), px(15), accent)
-    if has_photo and asset.get("source"):
+    if show_photo_sources and has_photo and asset.get("source"):
         caption = f"사진: {asset['source']} · {asset.get('title', '')}"
         draw.text((photo_x + px(12), height - px(20)),
                   wrap_text(caption, font(8), panel_width - px(24), 1)[0], font=font(8), fill=ink)
@@ -696,15 +697,19 @@ def export_deck(store: V2Store, deck: dict, cancel=None, progress=lambda message
             progress(f"슬라이드 {index}/{len(slides)} 이미지 저장 중...")
             path = directory / f"slide-{index:02d}.png"
             render_slide(slide, deck.get("theme", "스카이"), index, len(slides),
-                         deck.get("show_numbers", True), size).save(staging / path.name, "PNG")
+                         deck.get("show_numbers", True), size,
+                         show_photo_sources=deck.get("show_photo_sources", True)).save(staging / path.name, "PNG")
             paths.append(path)
             asset = (slide.get("image") or {}) if index <= 2 and slide.get("layout") != "공통 스타일" else {}
             credit = ""
-            if asset.get("source_page"):
+            if deck.get("show_photo_sources", True) and asset.get("source_page"):
                 credit = f'<figcaption>사진 출처: <a href="{escape(asset["source_page"], quote=True)}">{escape(asset.get("source", ""))}</a> · 이용 조건 확인 필요</figcaption>'
             figures.append(f'<figure><img src="{path.name}" alt="{escape(slide.get("title", ""), quote=True)}" style="width:100%;height:auto">{credit}</figure>')
         check_cancel(cancel)
-        preview = collage_preview_body(str(deck.get("body") or ""), figures)
+        # Runtime import: publishing already depends on the renderer. Reuse its
+        # lossless cleanup so an older generated credit/figure cannot leak back.
+        from tistory_v2_publish import _without_generated_figures
+        preview = collage_preview_body(_without_generated_figures(str(deck.get("body") or "")), figures)
         document = ('<!doctype html><html lang="ko"><meta charset="utf-8"><title>' + escape(deck.get("title", ""))
                     + '</title><style>body{max-width:1200px;margin:32px auto;padding:0 20px;font-family:sans-serif;line-height:1.7}'
                     + '.v2-collage{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:24px 0}'

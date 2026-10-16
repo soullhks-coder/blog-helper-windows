@@ -44,6 +44,7 @@ class _GeneratedFigures(HTMLParser):
         self.line_starts = [0]
         self.line_starts.extend(index + 1 for index, char in enumerate(source) if char == "\n")
         self.figures = []
+        self.credit_starts = []
         self.ranges = []
 
     def _offset(self):
@@ -51,16 +52,20 @@ class _GeneratedFigures(HTMLParser):
         return self.line_starts[line - 1] + column
 
     def handle_starttag(self, tag, attrs):
-        if tag != "figure":
-            return
         attributes = dict(attrs)
         classes = set(str(attributes.get("class") or "").split())
+        if tag == "p" and "blog-helper-tistory-v2-credits" in classes:
+            self.credit_starts.append(self._offset())
+        if tag != "figure":
+            return
         generated = bool(classes & {"blog-helper-cardnews-image", "blog-helper-tistory-v2-image"})
         generated = generated or any(name in attributes for name in (
             "data-blog-helper-cardnews-index", "data-blog-helper-v2-pair"))
         self.figures.append((self._offset(), generated))
 
     def handle_endtag(self, tag):
+        if tag == "p" and self.credit_starts:
+            self.ranges.append((self.credit_starts.pop(), self.source.find(">", self._offset()) + 1))
         if tag == "figure" and self.figures:
             start, generated = self.figures.pop()
             end = self.source.find(">", self._offset()) + 1
@@ -87,6 +92,8 @@ def _without_generated_figures(article_html: str) -> str:
 def _source_credits(slides: list[dict]) -> str:
     credits = {}
     for slide in slides[:2]:
+        if slide.get("layout") == "공통 스타일":
+            continue
         asset = slide.get("image") or {}
         url = str(asset.get("source_page") or "")
         try:
@@ -101,6 +108,10 @@ def _source_credits(slides: list[dict]) -> str:
     if not credits:
         return ""
     return '<p class="blog-helper-tistory-v2-credits">사진 출처: ' + " · ".join(credits.values()) + '</p>'
+
+
+def source_credits_html(deck: dict) -> str:
+    return _source_credits(deck.get("slides", [])) if deck.get("show_photo_sources", True) else ""
 
 
 def deck_matches_article(deck: dict | None, title: str, article_html: str, keyword: str, slide_summaries=None) -> bool:
@@ -139,7 +150,7 @@ def export_edited_slide_deck(deck: dict, title: str, article_html: str, keyword:
             image.verify()
     check_writing_cancelled(cancel_event)
     return {"deck": deck, "paths": paths, "slide_size": list(size), "slide_sizes": [list(s) for s in sizes], "article_html": body,
-            "source_credits_html": _source_credits(deck["slides"]), "warnings": []}
+            "source_credits_html": source_credits_html(deck), "warnings": []}
 
 
 def prepare_slide_deck(
@@ -209,4 +220,4 @@ def prepare_slide_deck(
     report("티스토리 V2 슬라이드 10장 준비 완료 · 2장씩 콜라주 5개로 입력합니다.")
     check_writing_cancelled(cancel_event)
     return {"deck": deck, "paths": paths, "slide_size": list(size), "slide_sizes": [list(s) for s in sizes], "article_html": body,
-            "source_credits_html": _source_credits(deck["slides"]), "warnings": warnings}
+            "source_credits_html": source_credits_html(deck), "warnings": warnings}

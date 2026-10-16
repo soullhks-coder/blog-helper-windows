@@ -74,6 +74,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.count = tk.StringVar(value="10")
         self.show_browser = tk.BooleanVar(value=bool(values.get("show_browser", True)))
         self.show_numbers = tk.BooleanVar(value=bool(values.get("show_numbers", True)))
+        self.show_photo_sources = tk.BooleanVar(value=bool(values.get("show_photo_sources", True)))
         self._build(values)
         self.refresh_connections(values)
         self._refresh_deck_menu()
@@ -242,9 +243,14 @@ class TistoryV2Panel(ctk.CTkFrame):
                                           text_color=self.palette["text"], command=self._number_display_changed)
         self.number_check.grid(row=1, column=0, pady=(0, 12), sticky="w")
         self._controls.append(self.number_check)
+        self.photo_sources_check = ctk.CTkCheckBox(
+            display_options, text="사진출처 표시", variable=self.show_photo_sources,
+            text_color=self.palette["text"], command=self._photo_sources_changed)
+        self.photo_sources_check.grid(row=2, column=0, pady=(0, 12), sticky="w")
+        self._controls.append(self.photo_sources_check)
         self.browser_check = ctk.CTkCheckBox(display_options, text="수집 중 Chrome 보기", variable=self.show_browser,
                                            text_color=self.palette["text"], command=self._save_preferences)
-        self.browser_check.grid(row=2, column=0, sticky="w")
+        self.browser_check.grid(row=3, column=0, sticky="w")
         self._controls.append(self.browser_check)
         self.collect_button = self._button(self.controls_card, "위키백과·나무위키 사진 수집", lambda: self._start("collect"), 14)
         self.create_button = self._button(self.controls_card, "사진 수집 + 슬라이드 만들기", lambda: self._start("create"), 15, primary=True)
@@ -480,6 +486,7 @@ class TistoryV2Panel(ctk.CTkFrame):
                                      "text_position_defaults": dict(self._text_position_defaults),
                                      "font_size_defaults": dict(self._font_size_defaults),
                                      "show_browser": self.show_browser.get(), "show_numbers": self.show_numbers.get(),
+                                     "show_photo_sources": self.show_photo_sources.get(),
                                      "keyword": self.keyword_entry.get(),
                                      "title": self.title_entry.get(), "body": self.body_box.get("1.0", "end").strip(),
                                      "deck_id": self.deck.get("id", "") if self.deck else ""})
@@ -495,6 +502,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         slide.update({key: menu.get() for key, menu in self.text_position_menus.items()})
         assign_deck_themes(self.deck, self.theme.get())
         self.deck["show_numbers"] = self.show_numbers.get()
+        self.deck["show_photo_sources"] = self.show_photo_sources.get()
         self.deck["slide_size"] = list(self._output_size)
         self.deck["font_size_defaults"] = dict(self._font_size_defaults)
         if not self.embedded:
@@ -597,6 +605,14 @@ class TistoryV2Panel(ctk.CTkFrame):
         self._save_preferences()
         self._draw_preview()
         self.status.configure(text="번호 표시 설정 저장 완료 · PNG 저장 또는 업로드 시 모든 슬라이드에 반영됩니다.")
+
+    def _photo_sources_changed(self):
+        if self.busy or self._publishing():
+            return
+        self._flush_slide()
+        self._save_preferences()
+        self._draw_preview()
+        self.status.configure(text="사진출처 표시 설정 저장 완료 · 미리보기와 PNG 저장·본문·업로드에 동일하게 적용됩니다.")
 
     def _theme_changed(self, _value=None):
         if self.busy or self._publishing():
@@ -758,7 +774,8 @@ class TistoryV2Panel(ctk.CTkFrame):
             self.preview.create_text(width // 2, height // 2, text="PPT 스타일 슬라이드 미리보기", fill=self.palette["muted"])
             return
         rendered = render_slide(self.deck["slides"][self.slide_index], self.theme.get(), self.slide_index + 1,
-                                len(self.deck["slides"]), self.show_numbers.get(), self._output_size)
+                                len(self.deck["slides"]), self.show_numbers.get(), self._output_size,
+                                show_photo_sources=self.show_photo_sources.get())
         rendered.thumbnail((width, height))
         self._preview_image = ImageTk.PhotoImage(rendered, master=self.preview)
         self.preview.create_image(width // 2, height // 2, image=self._preview_image)
@@ -803,6 +820,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.body_box.insert("1.0", deck.get("body", ""))
         self.theme.set(deck.get("theme", "스카이"))
         self.show_numbers.set(bool(deck.get("show_numbers", self.show_numbers.get())))
+        self.show_photo_sources.set(bool(deck.get("show_photo_sources", self.show_photo_sources.get())))
         if deck.get("selection"):
             self.refresh_connections({**deck["selection"], "blog_preferences": self._connection_preferences})
         self.deck_title.configure(text=deck.get("title", "새 작업"))
@@ -1112,6 +1130,7 @@ class TistoryV2Panel(ctk.CTkFrame):
             deck = copy.deepcopy(self.deck)
         deck["selection"] = {key: value for key, value in selection.items() if key != "blog_preferences"}
         deck["show_numbers"] = self.show_numbers.get()
+        deck["show_photo_sources"] = self.show_photo_sources.get()
         deck["slide_size"] = list(self._output_size)
         if operation == "create":
             deck["text_position_defaults"] = dict(self._text_position_defaults)
@@ -1247,7 +1266,8 @@ class TistoryV2Panel(ctk.CTkFrame):
         canvas = tk.Canvas(dialog, highlightthickness=0, background=self.palette["panel"])
         canvas.pack(fill="both", expand=True, padx=18, pady=(18, 5))
         rendered = render_slide(self.deck["slides"][self.slide_index], self.theme.get(), self.slide_index + 1,
-                                len(self.deck["slides"]), self.show_numbers.get(), self._output_size)
+                                len(self.deck["slides"]), self.show_numbers.get(), self._output_size,
+                                show_photo_sources=self.show_photo_sources.get())
         rendered.thumbnail((round((width - 48) * self._get_widget_scaling()), round((height - 90) * self._get_widget_scaling())))
         canvas._v2_photo = ImageTk.PhotoImage(rendered, master=canvas)
         canvas.create_image(0, 0, anchor="nw", image=canvas._v2_photo)

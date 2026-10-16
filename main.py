@@ -48432,6 +48432,7 @@ class KeywordApp(ctk.CTk):
                 figure = build_tistory_reference_image_figure(
                     {"path": str(path), "source_url": asset["source_page"], "source": asset.get("source", ""), "license": "이용 조건 확인 필요"},
                     deck.get("title", "티스토리 V2"), index,
+                    show_source_attribution=bool(deck.get("show_photo_sources", True)),
                 )
             else:
                 figure = build_inline_image_placeholder_figure(path, deck.get("title", "티스토리 V2"), index)

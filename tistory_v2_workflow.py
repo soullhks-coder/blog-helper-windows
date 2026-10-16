@@ -8,7 +8,6 @@ from __future__ import annotations
 import copy
 import json
 import re
-from html import escape
 from pathlib import Path
 
 from tistory_v2 import Cancelled, check_cancel, plain_text
@@ -133,22 +132,15 @@ class TistoryV2Workflow:
         api = self.api
         if len(paths) != 10 or len(deck.get("slides", [])) != 10:
             raise ValueError("티스토리 입력에는 슬라이드 10장이 필요합니다. 글에서 슬라이드를 다시 만들어 주세요.")
-        body = str(deck.get("body") or "").strip()
+        from tistory_v2_publish import _without_generated_figures, source_credits_html
+        body = _without_generated_figures(str(deck.get("body") or "").strip())
         if not plain_text(body):
             raise ValueError("티스토리에 입력할 본문이 없습니다.")
         title = str(deck.get("title") or deck.get("keyword") or "").strip()
         body, tags = api.extract_tistory_prompt_tags(api.normalize_generated_article_html(body))
         if not tags:
             _, tags = api.build_focus_keyword_and_tags(deck.get("keyword", title), title, body)
-        # Keep the two source credits attached to the article as well as the PNGs.
-        credits = []
-        for slide in deck["slides"][:2]:
-            asset = slide.get("image") or {}
-            url = str(asset.get("source_page") or "")
-            if url.startswith(("https://ko.wikipedia.org/", "https://namu.wiki/")):
-                credits.append(f'<a href="{escape(url, quote=True)}">{escape(asset.get("source", "사진 출처"))}</a>')
-        if credits:
-            body += '<p>사진 출처: ' + " · ".join(dict.fromkeys(credits)) + '</p>'
+        body += source_credits_html(deck)
         profile = snapshot["profile"]
         scope = profile["profile_scope"]
         spec = snapshot["thumbnail"]

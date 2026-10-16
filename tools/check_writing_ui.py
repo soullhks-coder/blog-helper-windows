@@ -394,7 +394,8 @@ def main() -> None:
             from PIL import Image
             photo_path = Path(directory) / "v2-chosen-photo.png"
             Image.new("RGB", (200, 100), "#bfd6ff").save(photo_path)
-            asset = {"path": str(photo_path), "source": "테스트 사진", "title": "직접 선택한 사진"}
+            asset = {"path": str(photo_path), "source": "테스트 사진", "title": "직접 선택한 사진",
+                     "source_page": "https://ko.wikipedia.org/wiki/서울"}
             panel.mode.set("자동 모드")
             with patch.object(slide_ui, "collect_wiki_images", return_value=([asset, dict(asset)], [])) as collect, \
                  patch.object(panel, "chrome_path_provider", return_value=Path("/fake/chrome")):
@@ -411,6 +412,20 @@ def main() -> None:
             assert panel.store.load_deck(original_deck_id)["body"] == panel.deck["body"]
             assert all(slide["image"] is not None for slide in panel.deck["slides"][:2])
             assert all(slide["image"] is None for slide in panel.deck["slides"][2:])
+            from PIL import ImageTk
+            assert panel.photo_sources_check.cget("text") == "사진출처 표시"
+            assert int(panel.photo_sources_check.grid_info()["row"]) == int(panel.number_check.grid_info()["row"]) + 1
+            assert panel.show_photo_sources.get()
+            preview_with_credit = ImageTk.getimage(panel._preview_image).tobytes()
+            panel.photo_sources_check.toggle()
+            assert not panel.show_photo_sources.get()
+            assert not panel.show_numbers.get()  # independent display controls
+            assert ImageTk.getimage(panel._preview_image).tobytes() != preview_with_credit
+            assert not panel.store.preferences()["show_photo_sources"]
+            panel._load_deck(panel.store.load_deck(panel.deck["id"]))
+            assert not panel.show_photo_sources.get()
+            assert not panel.snapshot_for_publish()["show_photo_sources"]
+            print(f"{sys.platform} {args.theme}: photo-source checkbox, live preview, persistence and upload snapshot passed", flush=True)
             panel._choose_photo("사진 없음")
             assert panel.deck["slides"][0]["image"] is None
             panel._choose_photo(next(iter(panel._image_labels)))
@@ -521,6 +536,7 @@ def main() -> None:
                 assert options["settings"].tistory_active_profile == "티스토리 2"
                 assert options["tistory_v2_deck"]["id"] == saved_deck_id
                 assert options["tistory_v2_deck"]["slide_size"] == [1200, 600]
+                assert not options["tistory_v2_deck"]["show_photo_sources"]
                 assert options["tistory_v2_deck"]["slides"][0]["title"] == "편집한 슬라이드 제목 유지"
                 assert options["tistory_v2_deck"]["slides"][0]["image"]["path"] == str(photo_path)
                 assert options["tistory_v2_deck"]["slides"][0]["layout"] == "사진 왼쪽"
@@ -568,6 +584,7 @@ def main() -> None:
                 workflow=panel.workflow, article_provider=app._v2_article_source)
             assert restarted_panel._text_position_defaults == expected_defaults
             assert restarted_panel._font_size_defaults == font_sizes
+            assert not restarted_panel.show_photo_sources.get()
             assert {key: int(value.get()) for key, value in restarted_panel.font_size_vars.items()} == font_sizes
             assert restarted_panel.text_position_menus["text_horizontal"].get() == "중앙"
             assert restarted_panel.text_position_menus["text_vertical"].get() == "중앙"
