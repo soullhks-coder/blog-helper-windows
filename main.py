@@ -51,6 +51,8 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog
 from modal_backdrop import DimmedDialogApi, modal_dimmer
+from writing_run import (ScopedWritingQueue, WritingCancelled, active_writing_event,
+                         check_writing_cancelled)
 
 messagebox = DimmedDialogApi(messagebox)
 filedialog = DimmedDialogApi(filedialog)
@@ -3369,9 +3371,11 @@ def wait_for_manual_publish_completion(
     profile_scope: str,
     page,
     result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Keep the editor open until the user confirms their manual public publish."""
 
+    check_writing_cancelled(cancel_event)
     event = ManualPublishCompletionStore.begin(platform, profile_scope)
     platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(platform, platform)
     result_queue.put(
@@ -3391,6 +3395,7 @@ def wait_for_manual_publish_completion(
     )
     try:
         while not event.wait(0.5):
+            check_writing_cancelled(cancel_event)
             try:
                 if page.is_closed():
                     raise RuntimeError(
@@ -3400,6 +3405,7 @@ def wait_for_manual_publish_completion(
                 raise
             except Exception:
                 pass
+        check_writing_cancelled(cancel_event)
         if ManualPublishCompletionStore.decision(platform, profile_scope) == "cancel":
             result_queue.put(
                 (
@@ -12127,12 +12133,14 @@ def enter_tistory_tags_native(
 def click_tistory_complete_native(
     page,
     result_queue: queue.Queue | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> bool:
     """Open the publish sheet only after native tag registration is complete."""
     if result_queue:
         result_queue.put(("tistory_progress", "태그 등록을 마치고 티스토리 '완료' 버튼을 누르는 중입니다..."))
 
     for _attempt in range(30):
+        check_writing_cancelled(cancel_event)
         candidates = page.get_by_role("button", name=re.compile(r"^\s*완료\s*$"))
         visible_candidates: list[tuple[float, float, object]] = []
         try:
@@ -12158,6 +12166,7 @@ def click_tistory_complete_native(
                 reverse=True,
             )[0][2]
             candidate.scroll_into_view_if_needed()
+            check_writing_cancelled(cancel_event)
             candidate.click()
             append_runtime_log("TISTORY", "태그 등록 후 완료 버튼 네이티브 클릭")
         else:
@@ -12170,10 +12179,12 @@ def click_tistory_complete_native(
             if not rect:
                 page.wait_for_timeout(300)
                 continue
+            check_writing_cancelled(cancel_event)
             page.mouse.click(rect["x"], rect["y"])
             append_runtime_log("TISTORY", "태그 등록 후 완료 버튼 좌표 클릭")
 
         for _ in range(24):
+            check_writing_cancelled(cancel_event)
             page.wait_for_timeout(250)
             if find_tistory_public_publish_button_rect(page):
                 return True
@@ -12211,7 +12222,9 @@ def is_tistory_draft_save_confirmed(page) -> bool:
 def click_tistory_draft_save_native(
     page,
     result_queue: queue.Queue | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> bool:
+    check_writing_cancelled(cancel_event)
     if result_queue:
         result_queue.put(
             (
@@ -12221,10 +12234,12 @@ def click_tistory_draft_save_native(
         )
     page.wait_for_timeout(700)
     for _attempt in range(30):
+        check_writing_cancelled(cancel_event)
         rect = find_tistory_draft_save_button_rect(page)
         if rect:
             page.mouse.move(rect["x"], rect["y"])
             page.wait_for_timeout(100)
+            check_writing_cancelled(cancel_event)
             page.mouse.down()
             page.wait_for_timeout(100)
             page.mouse.up()
@@ -12234,6 +12249,7 @@ def click_tistory_draft_save_native(
             )
             confirmation_deadline = time.time() + 12
             while time.time() < confirmation_deadline:
+                check_writing_cancelled(cancel_event)
                 page.wait_for_timeout(150)
                 if not is_tistory_draft_save_confirmed(page):
                     continue
@@ -12539,11 +12555,16 @@ def find_tistory_published_entry_url(
     return find_tistory_entry_url_in_values(values, effective_base_url)
 
 
-def click_tistory_publish_now_native(page, result_queue: queue.Queue | None = None) -> bool:
+def click_tistory_publish_now_native(
+    page, result_queue: queue.Queue | None = None,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    check_writing_cancelled(cancel_event)
     if result_queue:
         result_queue.put(("tistory_progress", "티스토리 발행일을 '예약'이 아닌 '현재'로 강제 선택 중입니다..."))
     page.wait_for_timeout(700)
     for _ in range(20):
+        check_writing_cancelled(cancel_event)
         rect = find_visible_text_rect(page, [r"^현재$", r"현재\\s*발행", r"^즉시$", r"바로\\s*발행"], min_top=80, max_left_ratio=0.75)
         if rect:
             break
@@ -12561,6 +12582,7 @@ def click_tistory_publish_now_native(page, result_queue: queue.Queue | None = No
     clicked = False
     for _attempt in range(3):
         for x, y in click_points:
+            check_writing_cancelled(cancel_event)
             if x < 1 or y < 1:
                 continue
             page.mouse.move(x, y)
@@ -12570,20 +12592,27 @@ def click_tistory_publish_now_native(page, result_queue: queue.Queue | None = No
             page.wait_for_timeout(260)
             clicked = True
         # 선택 상태를 확정하기 위해 현재 텍스트를 한 번 더 정확히 클릭합니다.
+        check_writing_cancelled(cancel_event)
         page.mouse.click(rect["x"], rect["y"])
         page.wait_for_timeout(450)
     return clicked
 
 
-def click_tistory_public_publish_native(page, result_queue: queue.Queue | None = None) -> bool:
+def click_tistory_public_publish_native(
+    page, result_queue: queue.Queue | None = None,
+    cancel_event: threading.Event | None = None,
+    on_public_publish_clicked: Callable[[], None] | None = None,
+) -> bool:
+    check_writing_cancelled(cancel_event)
     if result_queue:
         result_queue.put(("tistory_progress", "티스토리 공개발행 버튼을 실제 클릭으로 누르는 중입니다..."))
-    click_tistory_publish_now_native(page, result_queue)
+    click_tistory_publish_now_native(page, result_queue, cancel_event=cancel_event)
     page.wait_for_timeout(1200)
     for attempt in range(30):
+        check_writing_cancelled(cancel_event)
         # 현재 선택 직후 버튼이 비활성화되어 있다가 늦게 활성화되는 경우가 있어 반복 대기합니다.
         if attempt in {6, 14, 22}:
-            click_tistory_publish_now_native(page, result_queue)
+            click_tistory_publish_now_native(page, result_queue, cancel_event=cancel_event)
             page.wait_for_timeout(500)
         rect = find_tistory_public_publish_button_rect(page)
         if not rect:
@@ -12593,6 +12622,13 @@ def click_tistory_public_publish_native(page, result_queue: queue.Queue | None =
                 result_queue.put(("tistory_progress", f"티스토리 '{rect.get('text') or '공개 발행'}' 버튼을 클릭합니다..."))
             page.mouse.move(rect["x"], rect["y"])
             page.wait_for_timeout(120)
+            # Keep this final gate next to the physical click, not just before
+            # this helper's potentially long publish-sheet retries.
+            check_writing_cancelled(cancel_event)
+            if on_public_publish_clicked is not None:
+                # An interrupted mouse.up may already have submitted the post.
+                # Keep its quota slot held from this irreversible boundary.
+                on_public_publish_clicked()
             page.mouse.down()
             page.wait_for_timeout(120)
             page.mouse.up()
@@ -18672,7 +18708,10 @@ def upload_tistory_image_file(
     image_path: str,
     result_queue: queue.Queue,
     excluded_urls: set[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
+    cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
+    check_writing_cancelled(cancel_event)
     path = Path(image_path).expanduser().resolve()
     if not path.exists() or not path.is_file():
         raise RuntimeError(f"티스토리에 첨부할 이미지 파일을 찾지 못했습니다: {path.name}")
@@ -18707,8 +18746,12 @@ def upload_tistory_image_file(
             with page.expect_file_chooser(timeout=5000) as chooser_info:
                 photo_item.click(force=True)
             response_urls.clear()
+            check_writing_cancelled(cancel_event)
             chooser_info.value.set_files(str(path))
             file_input = True
+    except WritingCancelled:
+        page.remove_listener("response", capture_image_response)
+        raise
     except Exception:
         file_input = None
 
@@ -18746,6 +18789,7 @@ def upload_tistory_image_file(
             '.mce-i-image',
         ]
         for selector in toolbar_selectors:
+            check_writing_cancelled(cancel_event)
             button = page.locator(selector).first
             try:
                 if not button.count():
@@ -18753,9 +18797,13 @@ def upload_tistory_image_file(
                 with page.expect_file_chooser(timeout=2500) as chooser_info:
                     button.click(force=True)
                 response_urls.clear()
+                check_writing_cancelled(cancel_event)
                 chooser_info.value.set_files(str(path))
                 file_input = True
                 break
+            except WritingCancelled:
+                page.remove_listener("response", capture_image_response)
+                raise
             except Exception:
                 continue
         if file_input is None:
@@ -18775,8 +18823,12 @@ def upload_tistory_image_file(
                 with page.expect_file_chooser(timeout=2500) as chooser_info:
                     photo_button.click(force=True)
                 response_urls.clear()
+                check_writing_cancelled(cancel_event)
                 chooser_info.value.set_files(str(path))
                 file_input = True
+            except WritingCancelled:
+                page.remove_listener("response", capture_image_response)
+                raise
             except Exception:
                 pass
 
@@ -18789,17 +18841,20 @@ def upload_tistory_image_file(
             "티스토리 사진 첨부 입력창을 찾지 못했습니다. 편집기 상단의 사진 버튼 구조가 변경되었는지 확인해 주세요."
         )
     try:
+        check_writing_cancelled(cancel_event)
         if file_input is not True:
             try:
                 file_input.set_input_files([])
             except Exception:
                 pass
             response_urls.clear()
+            check_writing_cancelled(cancel_event)
             file_input.set_input_files(str(path))
 
         result_queue.put(("tistory_progress", f"'{path.name}' 파일을 티스토리에 첨부하고 있습니다..."))
         deadline = time.time() + 40
         while time.time() < deadline:
+            check_writing_cancelled(cancel_event)
             page.wait_for_timeout(500)
             observed_urls = [*response_urls, *collect_tistory_hosted_image_urls(page)]
             uploaded_url = choose_fresh_tistory_image_url(before_urls, observed_urls)
@@ -18820,17 +18875,21 @@ def upload_tistory_native_images(
     page,
     native_image_files: dict[str, str],
     result_queue: queue.Queue,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, str]:
+    cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
     uploaded_urls: dict[str, str] = {}
     used_urls: set[str] = set()
     total = len(native_image_files)
     for index, (token, image_path) in enumerate(native_image_files.items(), start=1):
+        check_writing_cancelled(cancel_event)
         result_queue.put(("tistory_progress", f"티스토리 이미지 파일 첨부 중 ({index}/{total})..."))
         uploaded_url = upload_tistory_image_file(
             page,
             image_path,
             result_queue,
             excluded_urls=used_urls,
+            cancel_event=cancel_event,
         )
         if uploaded_url in used_urls:
             raise RuntimeError(
@@ -19204,7 +19263,10 @@ def run_tistory_playwright_automation(
     tistory_v2_ads: dict | None = None,
     tistory_v2_slide_size: list[int] | tuple[int, int] | None = None,
     tistory_v2_slide_sizes: list[list[int]] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bool, str | dict[str, object]]:
+    cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
+    check_writing_cancelled(cancel_event)
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -19213,15 +19275,27 @@ def run_tistory_playwright_automation(
             "Playwright가 설치되어 있지 않습니다. 터미널에서 `python3 -m pip install playwright`를 실행해 주세요."
         ) from exc
 
+    stop_options = {"cancel_event": cancel_event} if cancel_event is not None else {}
+    public_click_reported = False
+
+    def report_public_click() -> None:
+        nonlocal public_click_reported
+        if not public_click_reported:
+            public_click_reported = True
+            if on_public_publish_clicked is not None:
+                on_public_publish_clicked()
+
     if not write_url:
         raise RuntimeError("티스토리 글쓰기 URL이 비어 있습니다.")
     if tistory_v2_slide_paths is not None and len(tistory_v2_slide_paths) != 10:
         raise ValueError("티스토리 V2 발행에는 본문 슬라이드 10장이 필요합니다.")
 
     with sync_playwright() as playwright:
+        check_writing_cancelled(cancel_event)
         context = launch_tistory_persistent_context(playwright, profile_scope)
         page = None
         try:
+            check_writing_cancelled(cancel_event)
             saved_state = load_tistory_storage_state(profile_scope)
             saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
             if saved_cookies:
@@ -19249,6 +19323,7 @@ def run_tistory_playwright_automation(
                 )
             )
             page.goto(write_url, wait_until="domcontentloaded")
+            check_writing_cancelled(cancel_event)
 
             page, _chosen_account = wait_for_tistory_editor(
                 context,
@@ -19256,20 +19331,27 @@ def run_tistory_playwright_automation(
                 write_url,
                 result_queue,
                 timeout_seconds=login_timeout_seconds,
+                check_cancel=lambda: check_writing_cancelled(cancel_event),
             )
+            check_writing_cancelled(cancel_event)
             if "/manage/newpost" not in (page.url or ""):
                 page.goto(write_url, wait_until="domcontentloaded")
 
             save_tistory_storage_state(context, profile_scope)
             result_queue.put(("tistory_progress", "로그인 확인 완료. 프롬프트 순서에 따라 제목·본문·이미지를 자동 입력하고 있습니다..."))
             page.wait_for_timeout(1800)
+            check_writing_cancelled(cancel_event)
             page.evaluate("window.onbeforeunload = null")
             if native_image_files:
-                uploaded_urls = upload_tistory_native_images(page, native_image_files, result_queue)
+                uploaded_urls = upload_tistory_native_images(
+                    page, native_image_files, result_queue, cancel_event=cancel_event)
+                check_writing_cancelled(cancel_event)
                 for token, uploaded_url in uploaded_urls.items():
                     script = script.replace(token, uploaded_url)
                 result_queue.put(("tistory_progress", f"이미지 {len(uploaded_urls)}장을 티스토리 파일로 첨부했습니다."))
+            check_writing_cancelled(cancel_event)
             result = page.evaluate(script)
+            check_writing_cancelled(cancel_event)
             page.wait_for_timeout(1600)
             result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
             try:
@@ -19288,9 +19370,12 @@ def run_tistory_playwright_automation(
                 used_urls = set(collect_tistory_hosted_image_urls(page))
 
                 def upload_v2_slide(path: str) -> str:
+                    check_writing_cancelled(cancel_event)
                     uploaded_url = upload_tistory_image_file(
                         page, path, result_queue, excluded_urls=used_urls,
+                        cancel_event=cancel_event,
                     )
+                    check_writing_cancelled(cancel_event)
                     if not uploaded_url or uploaded_url in used_urls:
                         raise RuntimeError("슬라이드의 새 이미지 업로드 주소를 확인하지 못했습니다.")
                     used_urls.add(uploaded_url)
@@ -19305,9 +19390,11 @@ def run_tistory_playwright_automation(
                 slide_result = insert_native_slide_pairs(
                     page, tistory_v2_slide_paths, "", upload_v2_slide,
                     report_v2_progress,
+                    cancel=cancel_event,
                     expected_size=tistory_v2_slide_size,
                     expected_sizes=tistory_v2_slide_sizes,
                 )
+                check_writing_cancelled(cancel_event)
                 if not slide_result.get("ok") or slide_result.get("slide_count") != 10 or slide_result.get("collage_count") != 5:
                     raise RuntimeError("슬라이드 10장과 티스토리 콜라주 5개를 확인하지 못해 발행을 중단했습니다.")
                 if tistory_v2_ads:
@@ -19346,7 +19433,9 @@ def run_tistory_playwright_automation(
                 )
             )
             if not result_payload.get("modeOnly"):
+                check_writing_cancelled(cancel_event)
                 enter_tistory_tags_native(page, tag_names, result_queue)
+                check_writing_cancelled(cancel_event)
             if not auto_publish and not result_payload.get("modeOnly"):
                 result_queue.put(
                     (
@@ -19359,7 +19448,9 @@ def run_tistory_playwright_automation(
                     profile_scope,
                     page,
                     result_queue,
+                    cancel_event=cancel_event,
                 )
+                check_writing_cancelled(cancel_event)
                 mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
                 return True, {
                     "message": (
@@ -19371,16 +19462,19 @@ def run_tistory_playwright_automation(
                     "manual_completed": True,
                 }
             if publish_after_input:
-                if not click_tistory_complete_native(page, result_queue):
+                check_writing_cancelled(cancel_event)
+                if not click_tistory_complete_native(page, result_queue, **stop_options):
                     raise RuntimeError(
                         "티스토리 태그 입력 후 '완료' 버튼을 누르지 못했거나 발행 설정 화면을 확인하지 못했습니다."
                     )
                 if representative_image_path:
+                    check_writing_cancelled(cancel_event)
                     attach_tistory_representative_image_file(
                         page,
                         representative_image_path,
                         result_queue,
                     )
+                    check_writing_cancelled(cancel_event)
                 published_url = ""
                 publish_response_values: list[str] = []
 
@@ -19406,11 +19500,14 @@ def run_tistory_playwright_automation(
                 try:
                     if before_public_publish is not None:
                         before_public_publish()
-                    published = click_tistory_public_publish_native(page, result_queue)
+                    check_writing_cancelled(cancel_event)
+                    published = click_tistory_public_publish_native(
+                        page, result_queue, cancel_event=cancel_event,
+                        on_public_publish_clicked=report_public_click,
+                    )
                     if not published:
                         raise RuntimeError("티스토리 발행일 '현재' 선택 또는 공개발행 버튼을 누르지 못했습니다. 화면 구조를 확인해 주세요.")
-                    if on_public_publish_clicked is not None:
-                        on_public_publish_clicked()
+                    report_public_click()
                     quick_deadline = time.time() + 18
                     manual_deadline = time.time() + TISTORY_MANUAL_PUBLISH_WAIT_SECONDS
                     captcha_notice_sent = False
@@ -19418,6 +19515,7 @@ def run_tistory_playwright_automation(
                     manual_wait_notice_sent = False
                     last_rss_check = 0.0
                     while time.time() < manual_deadline:
+                        check_writing_cancelled(cancel_event)
                         page.wait_for_timeout(500)
                         captcha_visible = is_tistory_captcha_visible(page)
                         if captcha_visible:
@@ -19505,6 +19603,7 @@ def run_tistory_playwright_automation(
                         pass
 
                 if not published_url and _tistory_public_origin(public_blog_url):
+                    check_writing_cancelled(cancel_event)
                     lookup_page = None
                     try:
                         result_queue.put(("tistory_progress", "발행된 글의 정식 주소를 공개 블로그에서 확인하고 있습니다..."))
@@ -19521,6 +19620,7 @@ def run_tistory_playwright_automation(
                             expected_title,
                         )
                     except Exception:
+                        check_writing_cancelled(cancel_event)
                         pass
                     finally:
                         if lookup_page is not None:
@@ -19530,8 +19630,10 @@ def run_tistory_playwright_automation(
                                 pass
 
                 if not published_url and _tistory_public_origin(public_blog_url):
+                    check_writing_cancelled(cancel_event)
                     result_queue.put(("tistory_progress", "티스토리 RSS에서 실제 공개 글 주소를 확인하고 있습니다..."))
                     for attempt in range(4):
+                        check_writing_cancelled(cancel_event)
                         try:
                             published_url = fetch_tistory_entry_url_from_rss(
                                 public_blog_url,
@@ -19568,7 +19670,8 @@ def run_tistory_playwright_automation(
                     "save_mode": TISTORY_SAVE_MODE_PUBLISH,
                 }
             if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
-                if not click_tistory_draft_save_native(page, result_queue):
+                check_writing_cancelled(cancel_event)
+                if not click_tistory_draft_save_native(page, result_queue, **stop_options):
                     raise RuntimeError(
                         "티스토리 편집기 하단의 '임시저장' 버튼을 누르지 못했거나 "
                         "'작성 중인 글이 저장되었습니다.' 문구를 확인하지 못했습니다. "
@@ -19583,6 +19686,9 @@ def run_tistory_playwright_automation(
             mode_label = result_payload.get("inputMode") or TEXT_INPUT_MODE_FAST
             return True, f"Playwright {mode_label} 모드로 티스토리 제목·본문 자동입력을 완료했습니다."
         except Exception as exc:
+            # A cooperative stop must not become the failed-editor attention
+            # dialog (which deliberately keeps Chrome open for inspection).
+            check_writing_cancelled(cancel_event)
             error = (RuntimeError(f"티스토리 화면 응답 시간이 초과되었습니다: {exc}")
                      if isinstance(exc, PlaywrightTimeoutError) else exc)
             if tistory_v2_slide_paths is not None and not isinstance(exc, ManualPublishCancelled):
@@ -19591,13 +19697,22 @@ def run_tistory_playwright_automation(
                     from tistory_v2_editor import wait_for_failed_editor
 
                     result_queue.put(("tistory_editor_attention", str(error)))
-                    wait_for_failed_editor(page)
+                    if cancel_event is None:
+                        wait_for_failed_editor(page)
+                    else:
+                        try:
+                            wait_for_failed_editor(page, cancel=cancel_event)
+                        except Exception:
+                            check_writing_cancelled(cancel_event)
+                            raise
             if error is not exc:
                 raise error from exc
             raise
         finally:
-            save_tistory_storage_state(context, profile_scope)
-            context.close()
+            try:
+                save_tistory_storage_state(context, profile_scope)
+            finally:
+                context.close()
 
 
 def close_active_browser_tab(browser_name: str) -> None:
@@ -25450,6 +25565,7 @@ class TistoryAutomationWorker(threading.Thread):
         tistory_v2_source_credits: str = "",
         tistory_v2_slide_size: list[int] | tuple[int, int] | None = None,
         tistory_v2_slide_sizes: list[list[int]] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -25494,6 +25610,12 @@ class TistoryAutomationWorker(threading.Thread):
         self.tistory_v2_source_credits = str(tistory_v2_source_credits or "")
         self.tistory_v2_slide_size = None if tistory_v2_slide_size is None else tuple(tistory_v2_slide_size)
         self.tistory_v2_slide_sizes = None if tistory_v2_slide_sizes is None else [list(size) for size in tistory_v2_slide_sizes]
+        self.cancel_event = cancel_event or getattr(result_queue, "cancel_event", None) or threading.Event()
+        self.public_publish_clicked = False
+
+    def cancel(self) -> None:
+        """Request cooperative shutdown on this worker's Playwright thread."""
+        self.cancel_event.set()
 
     def run(self) -> None:
         reference_image_paths: list[str] = []
@@ -25506,20 +25628,25 @@ class TistoryAutomationWorker(threading.Thread):
         def mark_public_publish_clicked() -> None:
             nonlocal public_publish_clicked
             public_publish_clicked = True
+            self.public_publish_clicked = True
 
         def refresh_shared_reservation_before_publish() -> None:
             nonlocal shared_reservation_id, shared_reservation_date
+            check_writing_cancelled(self.cancel_event)
             if shared_client is None or not shared_reservation_id:
                 return
             current = shared_client.status()
+            check_writing_cancelled(self.cancel_event)
             if current.get("date") == shared_reservation_date:
                 return
             shared_client.cancel(shared_reservation_id, shared_reservation_date)
             replacement = shared_client.reserve()
             shared_reservation_id = str(replacement["reservationId"])
             shared_reservation_date = str(replacement["date"])
+            check_writing_cancelled(self.cancel_event)
 
         try:
+            check_writing_cancelled(self.cancel_event)
             if self.tistory_v2_slide_paths is not None and len(self.tistory_v2_slide_paths) != 10:
                 raise ValueError("티스토리 V2 발행에는 본문 슬라이드 10장이 필요합니다.")
             daily_account = self.public_blog_url or self.write_url
@@ -25546,6 +25673,7 @@ class TistoryAutomationWorker(threading.Thread):
                         daily_account,
                         self.daily_publish_limit,
                     )
+            check_writing_cancelled(self.cancel_event)
             thumbnail_data_url = ""
             thumbnail_content_url = ""
             native_image_files: dict[str, str] = {}
@@ -25554,6 +25682,7 @@ class TistoryAutomationWorker(threading.Thread):
                 thumbnail_data_url = image_file_to_data_url(self.thumbnail_path)
                 thumbnail_content_url = "__BLOG_HELPER_TISTORY_NATIVE_THUMBNAIL__"
                 native_image_files[thumbnail_content_url] = self.thumbnail_path
+            check_writing_cancelled(self.cancel_event)
 
             article_html, prompt_tag_names = extract_tistory_prompt_tags(
                 self.article_html
@@ -25686,6 +25815,7 @@ class TistoryAutomationWorker(threading.Thread):
                 article_html,
                 self.title,
             )
+            check_writing_cancelled(self.cancel_event)
             final_ad_unit_count = len(
                 re.findall(
                     r"<ins\b[^>]*\badsbygoogle\b",
@@ -25717,6 +25847,7 @@ class TistoryAutomationWorker(threading.Thread):
                 save_mode=self.save_mode,
                 close_after_publish=self.close_after_publish,
             )
+            check_writing_cancelled(self.cancel_event)
             success, message = run_tistory_playwright_automation(
                 self.write_url,
                 script,
@@ -25740,7 +25871,9 @@ class TistoryAutomationWorker(threading.Thread):
                      "position": self.ads_position, "count": self.ads_count}
                     if self.tistory_v2_slide_paths is not None and self.ads_enabled else None
                 ),
+                cancel_event=self.cancel_event,
             )
+            check_writing_cancelled(self.cancel_event)
             if success:
                 if isinstance(message, dict):
                     done_payload = {
@@ -25794,6 +25927,7 @@ class TistoryAutomationWorker(threading.Thread):
                             )
                         )
                         reservation_key = ""
+                check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("tistory_automation_done", done_payload))
             else:
                 if public_publish_clicked and shared_reservation_id:
@@ -25803,9 +25937,15 @@ class TistoryAutomationWorker(threading.Thread):
                         "티스토리 관리 화면에서 실제 발행 여부를 확인해 주세요."
                     )
                 self.result_queue.put(("tistory_automation_error", message))
+        except WritingCancelled:
+            append_runtime_log("TISTORY V2" if self.tistory_v2_slide_paths is not None else "TISTORY",
+                               "사용자가 발행 작업을 중단했습니다.")
         except ManualPublishCancelled:
             pass
         except Exception as exc:  # pragma: no cover - runtime handling
+            if self.cancel_event.is_set():
+                append_runtime_log("TISTORY", f"발행 중단 후 브라우저 정리: {type(exc).__name__}: {exc}")
+                return
             error_message = str(exc)
             if public_publish_clicked and shared_reservation_id:
                 error_message += (
@@ -25816,6 +25956,17 @@ class TistoryAutomationWorker(threading.Thread):
                                f"자동입력 실패: {type(exc).__name__}: {error_message}")
             self.result_queue.put(("tistory_automation_error", error_message))
         finally:
+            if self.cancel_event.is_set() and public_publish_clicked and reservation_key:
+                # The external click cannot be undone by resetting our UI.
+                # Consume the uncertain slot conservatively; if writing the
+                # count fails, leave the in-process reservation held instead.
+                uncertain_key, reservation_key = reservation_key, ""
+                try:
+                    DailyPublishLimitStore.record_success(
+                        "tistory", self.public_blog_url or self.write_url)
+                    DailyPublishLimitStore.cancel_reservation(uncertain_key)
+                except Exception as exc:
+                    append_runtime_log("TISTORY", f"중단된 공개발행 횟수 보수적 기록 실패: {exc}")
             DailyPublishLimitStore.cancel_reservation(reservation_key)
             if shared_client is not None and shared_reservation_id:
                 if public_publish_clicked:
@@ -25829,7 +25980,8 @@ class TistoryAutomationWorker(threading.Thread):
                     except Exception as exc:
                         append_runtime_log("TISTORY", f"공유 발행 예약 반환 실패: {exc}")
             cleanup_generated_upload_images(reference_image_paths)
-            cleanup_tistory_automation_files()
+            if not self.cancel_event.is_set():
+                cleanup_tistory_automation_files()
 
 
 class ArticleGenerationWorker(threading.Thread):
@@ -26052,6 +26204,7 @@ class PublishPipelineWorker(threading.Thread):
         tistory_v2: bool = False,
         tistory_v2_keyword: str = "",
         tistory_v2_deck: dict | None = None,
+        cancel_event=None,
     ) -> None:
         super().__init__(daemon=True)
         self.settings = settings
@@ -26063,6 +26216,9 @@ class PublishPipelineWorker(threading.Thread):
         self.slug = slug
         self.meta_description = meta_description
         self.result_queue = result_queue
+        self.cancel_event = cancel_event if cancel_event is not None else getattr(result_queue, "cancel_event", None)
+        if self.cancel_event is None:
+            self.cancel_event = threading.Event()
         self.tistory_v2 = bool(tistory_v2)
         self.tistory_v2_keyword = str(tistory_v2_keyword or "").strip()
         self.tistory_v2_deck = copy.deepcopy(tistory_v2_deck)
@@ -26072,11 +26228,18 @@ class PublishPipelineWorker(threading.Thread):
             if isinstance(article, dict)
         ]
 
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
     def run(self) -> None:
+        from writing_run import WritingCancelled, check_writing_cancelled
+
+        cleanup_paths: list[str] = []
         try:
+            check_writing_cancelled(self.cancel_event)
             wordpress_result = None
             prepared_article_html = hydrate_inline_image_placeholders(self.article_html, self.title)
-            cleanup_paths: list[str] = []
+            check_writing_cancelled(self.cancel_event)
             if self.thumbnail_path:
                 cleanup_paths.append(self.thumbnail_path)
             cleanup_paths.extend(extract_inline_image_paths(self.article_html))
@@ -26112,6 +26275,7 @@ class PublishPipelineWorker(threading.Thread):
                     self.settings.tistory_daily_publish_limit,
                 )
             if "wordpress" in target_platforms and self.settings.blog_url and self.settings.username and self.settings.app_password:
+                check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.15, "썸네일 파일을 준비하고 있습니다...")))
                 wordpress_client = WordPressClient(self.settings)
                 featured_media_id = None
@@ -26120,8 +26284,10 @@ class PublishPipelineWorker(threading.Thread):
                 content = ensure_focus_keyword_in_content(prepared_article_html, self.focus_keyword)
                 inline_image_count = 0
                 if self.thumbnail_path:
+                    check_writing_cancelled(self.cancel_event)
                     self.result_queue.put(("publish_progress", (0.28, "워드프레스에 썸네일 이미지를 업로드하고 있습니다...")))
                     media_result = wordpress_client.upload_media(Path(self.thumbnail_path), wordpress_title)
+                    check_writing_cancelled(self.cancel_event)
                     featured_media_id = media_result.get("id")
                     media_url = media_result.get("source_url", "")
                     if media_url:
@@ -26137,6 +26303,7 @@ class PublishPipelineWorker(threading.Thread):
                     wordpress_title,
                     self.result_queue,
                 )
+                check_writing_cancelled(self.cancel_event)
 
                 cardnews_urls: list[str] = []
                 if self.settings.cardnews_enabled and not self.settings.inline_images_enabled:
@@ -26144,6 +26311,7 @@ class PublishPipelineWorker(threading.Thread):
                         cardnews_count = max(1, min(int(self.settings.cardnews_count or 2), 4))
                         imagen_client = ImagenClient(self.settings.imagen_api_key)
                         for index in range(1, cardnews_count + 1):
+                            check_writing_cancelled(self.cancel_event)
                             progress = 0.34 + (0.22 * (index / cardnews_count))
                             self.result_queue.put(
                                 ("publish_progress", (progress, f"Imagen 4 Fast로 카드뉴스 {index}/{cardnews_count} 생성 중..."))
@@ -26157,11 +26325,13 @@ class PublishPipelineWorker(threading.Thread):
                             )
                             image_path = DATA_DIR / f"{CARDNEWS_IMAGE_PREFIX}-{index}.png"
                             imagen_client.generate_image(self.settings.imagen_model, prompt, image_path)
+                            check_writing_cancelled(self.cancel_event)
                             cleanup_paths.append(str(image_path))
                             self.result_queue.put(
                                 ("publish_progress", (progress + 0.03, f"카드뉴스 {index}/{cardnews_count} 워드프레스 업로드 중..."))
                             )
                             cardnews_media = wordpress_client.upload_media(image_path, f"{wordpress_title} 카드뉴스 {index}")
+                            check_writing_cancelled(self.cancel_event)
                             cardnews_url = cardnews_media.get("source_url", "")
                             if cardnews_url:
                                 cardnews_urls.append(cardnews_url)
@@ -26172,6 +26342,7 @@ class PublishPipelineWorker(threading.Thread):
 
                 self.result_queue.put(("publish_progress", (0.64, "태그를 정리하고 워드프레스에 등록하고 있습니다...")))
                 tag_ids = wordpress_client.ensure_tag_ids(self.tag_names)
+                check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.82, "글과 대표 이미지, 카드뉴스를 워드프레스에 등록하고 있습니다...")))
                 wordpress_result = wordpress_client.publish_post(
                     title=wordpress_title,
@@ -26209,6 +26380,7 @@ class PublishPipelineWorker(threading.Thread):
             if wordpress_result:
                 wordpress_url = str(wordpress_result.get("link") or wordpress_result.get("post_url") or "").strip()
             if "tistory" in target_platforms:
+                check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.88, "티스토리 글쓰기 화면용 초안을 준비하고 있습니다...")))
                 tistory_article_html = prepared_article_html
                 tistory_v2_slide_paths = None
@@ -26219,19 +26391,24 @@ class PublishPipelineWorker(threading.Thread):
                     if self.tistory_v2_deck is not None:
                         prepared_slides = export_edited_slide_deck(
                             self.tistory_v2_deck, self.title, prepared_article_html,
-                            self.tistory_v2_keyword or self.focus_keyword, DATA_DIR / "Tistory V2", slide_progress)
+                            self.tistory_v2_keyword or self.focus_keyword, DATA_DIR / "Tistory V2", slide_progress,
+                            cancel_event=self.cancel_event)
                     else:
                         prepared_slides = prepare_slide_deck(
                             self.title, prepared_article_html,
                             self.tistory_v2_keyword or self.focus_keyword,
-                            DATA_DIR / "Tistory V2", require_google_chrome_executable(), progress=slide_progress)
+                            DATA_DIR / "Tistory V2", require_google_chrome_executable(), progress=slide_progress,
+                            cancel_event=self.cancel_event)
+                    check_writing_cancelled(self.cancel_event)
                     tistory_v2_slide_paths = [str(path) for path in prepared_slides["paths"]]
                     if len(tistory_v2_slide_paths) != 10 or len(set(tistory_v2_slide_paths)) != 10:
                         raise RuntimeError("티스토리 V2 슬라이드 10장을 준비하지 못해 업로드를 중단했습니다.")
                     tistory_article_html = prepared_slides["article_html"]
                 write_url = build_tistory_write_url(self.settings.tistory_blog_url, self.settings.tistory_write_url)
                 draft_html = build_tistory_draft_document(self.title, tistory_article_html, self.thumbnail_path)
+                check_writing_cancelled(self.cancel_event)
                 TISTORY_DRAFT_FILE.write_text(draft_html, encoding="utf-8")
+                check_writing_cancelled(self.cancel_event)
                 tistory_result = {
                     "status": "ready",
                     "message": "티스토리 글쓰기 화면을 열고 제목/본문/태그/대표이미지/공개발행 자동입력을 준비했습니다.",
@@ -26273,6 +26450,7 @@ class PublishPipelineWorker(threading.Thread):
 
             blogspot_result = None
             if "blogspot" in target_platforms:
+                check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.92, "블로그스팟 Playwright 발행을 준비하고 있습니다...")))
                 blogspot_result = run_blogspot_playwright_automation(
                     title=self.title,
@@ -26298,9 +26476,11 @@ class PublishPipelineWorker(threading.Thread):
                         or BLOGSPOT_PROFILE_SCOPES[0]
                     ),
                 )
+                check_writing_cancelled(self.cancel_event)
 
             threads_result = None
             if self.settings.threads_auto_publish:
+                check_writing_cancelled(self.cancel_event)
                 published_url = wordpress_url
                 if not published_url and blogspot_result:
                     published_url = str(blogspot_result.get("link") or "").strip()
@@ -26319,18 +26499,22 @@ class PublishPipelineWorker(threading.Thread):
                             self.meta_description,
                             self.focus_keyword,
                         )
+                        check_writing_cancelled(self.cancel_event)
                         threads_result = run_threads_playwright_publish(
                             threads_text,
                             self.result_queue,
                         )
                         threads_result["blog_url"] = published_url
                         threads_result["message"] = "Threads 자동 게시 완료"
+                    except WritingCancelled:
+                        raise
                     except Exception as threads_exc:
                         threads_result = {
                             "error": str(threads_exc),
                             "message": "Threads 자동 게시 실패",
                             "blog_url": published_url,
                         }
+            check_writing_cancelled(self.cancel_event)
             self.result_queue.put(
                 (
                     "publish_pipeline_done",
@@ -26343,10 +26527,15 @@ class PublishPipelineWorker(threading.Thread):
                     },
                 )
             )
+        except WritingCancelled:
+            append_runtime_log("PUBLISH", "사용자가 발행 준비 작업을 중단했습니다.")
         except ManualPublishCancelled:
             append_runtime_log("PUBLISH", "사용자가 수동 발행 작업을 취소했습니다.")
             cleanup_generated_upload_images(cleanup_paths)
         except Exception as exc:  # pragma: no cover - runtime handling
+            if self.cancel_event.is_set():
+                append_runtime_log("PUBLISH", "발행 준비 중단 후 도착한 작업 결과를 무시했습니다.")
+                return
             append_runtime_log(
                 "PUBLISH",
                 f"업로드 파이프라인 실패: {exc}\n{traceback.format_exc()}",
@@ -26712,6 +26901,8 @@ class KeywordApp(ctk.CTk):
         self.naver_kin_complete_url = ""
 
         self.result_queue: queue.Queue = queue.Queue()
+        self._writing_run_queue = None
+        self._stopped_writing_workers = []
         self.remote_agent_store = RemoteAgentConfigStore(DATA_DIR)
         self.remote_agent_config = self.remote_agent_store.load()
         self.shared_tistory_usage: dict = {}
@@ -33161,7 +33352,7 @@ class KeywordApp(ctk.CTk):
             f"{source_label}를 바탕으로 글 작성을 자동 진행합니다.",
             0.0,
         )
-        self.after(
+        self._after_writing(
             260,
             lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword),
         )
@@ -33176,7 +33367,7 @@ class KeywordApp(ctk.CTk):
         self.writing_auto_stage = "publish"
         self._refresh_writing_auto_progress_ui()
         self._go_to_thumbnail_section()
-        self.after(450, self._auto_publish_current_article)
+        self._after_writing(450, self._auto_publish_current_article)
 
     def _auto_publish_current_article(self) -> None:
         if not self.writing_auto_run_active or not self.writing_auto_progress_var.get():
@@ -44811,6 +45002,22 @@ class KeywordApp(ctk.CTk):
         self.publish_progress_bar = ctk.CTkProgressBar(publish_card, height=14, corner_radius=10)
         self.publish_progress_bar.grid(row=5, column=0, padx=18, pady=(0, 20), sticky="ew")
         self.publish_progress_bar.set(0)
+        self.writing_v2_stop_row = ctk.CTkFrame(publish_card, fg_color="transparent")
+        self.writing_v2_stop_row.grid(row=6, column=0, padx=18, pady=(0, 20), sticky="ew")
+        self.writing_v2_stop_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self.writing_v2_stop_row,
+            text="현재 작업을 중단하고 처음으로 돌아갑니다. 저장된 설정·슬라이드는 유지됩니다.",
+            text_color=self._theme_palette()["muted"],
+            font=ctk.CTkFont(size=12), anchor="w", wraplength=420,
+        ).grid(row=0, column=0, pady=(0, 8), sticky="w")
+        self.writing_v2_stop_button = ctk.CTkButton(
+            self.writing_v2_stop_row, text="발행 중단", height=40, corner_radius=12,
+            fg_color="#c73545", hover_color="#ac2938", text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold"), command=self._stop_tistory_v2_publishing,
+        )
+        self.writing_v2_stop_button.grid(row=1, column=0, sticky="ew")
+        self.writing_v2_stop_row.grid_remove()
         self._generate_thumbnail_preview()
 
     def _build_analysis_card(self, parent: ctk.CTkFrame) -> None:
@@ -46018,7 +46225,8 @@ class KeywordApp(ctk.CTk):
             text="Codex CLI가 썸네일 콘셉트를 설계하고 Imagen이 배경 이미지를 생성합니다.",
             text_color="#6dadff",
         )
-        self.thumbnail_ai_worker = ThumbnailAIWorker(settings, title, keyword, article_html, self.result_queue)
+        result_queue = self._writing_result_queue() if self.current_page == "tistory_v2" else self.result_queue
+        self.thumbnail_ai_worker = ThumbnailAIWorker(settings, title, keyword, article_html, result_queue)
         self.thumbnail_ai_worker.start()
 
     def _handle_thumbnail_ai_success(self, payload: dict) -> None:
@@ -47768,6 +47976,121 @@ class KeywordApp(ctk.CTk):
     def _is_tistory_v2_writing(self) -> bool:
         return self.__dict__.get("writing_variant", "writing") == "tistory_v2"
 
+    def _writing_result_queue(self):
+        if not self._is_tistory_v2_writing():
+            return self.result_queue
+        current = self.__dict__.get("_writing_run_queue")
+        if current is None or current.cancel_event.is_set():
+            current = self._writing_run_queue = ScopedWritingQueue(self.result_queue)
+        return current
+
+    def _after_writing(self, delay, callback, *args):
+        if not self._is_tistory_v2_writing():
+            return self.after(delay, callback, *args)
+        scope = self._writing_result_queue()
+
+        def continue_current_run():
+            if self._is_tistory_v2_writing() and scope is self.__dict__.get("_writing_run_queue") and not scope.cancel_event.is_set():
+                callback(*args)
+
+        return self.after(delay, continue_current_run)
+
+    def _stop_tistory_v2_publishing(self) -> None:
+        if not self._is_tistory_v2_writing():
+            return
+        scope = self.__dict__.get("_writing_run_queue")
+        if scope is not None:
+            scope.cancel()
+        self._writing_run_queue = None
+        self._stop_writing_auto_progress()
+        self.writing_v2_publish_pending = False
+        self.writing_v2_pending_auto = False
+        self.writing_v2_run_settings = None
+        self._tistory_v2_attention_reported = False
+        stopped = list(self.__dict__.get("_stopped_writing_workers", []))
+        own_tistory_scopes = set()
+        for name in (
+            "analysis_worker", "daum_worker", "signal_worker", "newneek_worker",
+            "loword_keyword_worker", "naver_creator_worker", "benchmark_worker",
+            "reference_collection_worker", "article_worker", "pipeline_worker", "tistory_automation_worker", "thumbnail_ai_worker",
+        ):
+            worker = self.__dict__.get(name)
+            if worker is None or scope is None or getattr(worker, "result_queue", None) is not scope:
+                continue
+            if name == "tistory_automation_worker":
+                own_tistory_scopes.add(getattr(worker, "profile_scope", ""))
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            stopped.append(worker)
+            setattr(self, name, None)
+        panel = self.__dict__.get("tistory_v2_panel")
+        if panel is not None:
+            worker = panel.reset_for_new_article()
+            if worker is not None:
+                stopped.append(worker)
+        self._stopped_writing_workers = [worker for worker in stopped if worker.is_alive()]
+        for dialog_name in ("writing_complete_dialog", "reference_collection_dialog", "manual_publish_dialog"):
+            if dialog_name == "manual_publish_dialog" and not (
+                self.manual_publish_dialog_platform == "tistory"
+                and self.manual_publish_dialog_profile_scope in own_tistory_scopes
+            ):
+                continue
+            dialog = self.__dict__.get(dialog_name)
+            if dialog is not None and dialog.winfo_exists():
+                dialog.grab_release()
+                dialog.destroy()
+                setattr(self, dialog_name, None)
+                if dialog_name == "manual_publish_dialog":
+                    self.manual_publish_dialog_platform = ""
+                    self.manual_publish_dialog_profile_scope = ""
+        self.home_reference_launch_context = None
+        self.pending_reference_keyword = ""
+        self._finish_direct_keyword_start()
+        self.current_keyword = self.current_keyword_source = self.accepted_recommended_keyword = ""
+        self.current_insights = []
+        for name in ("daum_reference_map", "signal_reference_map", "newneek_reference_map",
+                     "loword_reference_map", "naver_creator_reference_map", "collected_reference_map"):
+            setattr(self, name, {})
+        self.selected_keyword_var.set("")
+        for entry in (self.topic_entry, self.manual_keyword_entry, self.article_title_entry, self.benchmark_url_entry):
+            entry.configure(state="normal")
+            entry.delete(0, "end")
+        self.reference_textbox.delete("1.0", "end")
+        self._update_reference_count()
+        self.generated_article_title = self.generated_article_html = ""
+        self.article_editor.delete("1.0", "end")
+        self._clear_keyword_choices()
+        self._clear_result_cards()
+        for bar in (self.progress_bar, self.article_progress_bar, self.publish_progress_bar):
+            bar.stop()
+            bar.configure(mode="determinate")
+            bar.set(0)
+        self.find_keywords_button.configure(text="검색")
+        self.benchmark_button.configure(text="벤치마킹")
+        self._on_benchmark_mode_changed(save=False)
+        self.collect_reference_button.configure(state="normal", text="수집하기")
+        self.generate_article_button.configure(state="normal", text="다음: 글 작성")
+        self.publish_pipeline_button.configure(state="normal", text="썸네일 완료 후 업로드")
+        if self.thumbnail_ai_worker is None:
+            self.thumbnail_ai_button.configure(state="normal", text="Codex+Imagen 배경 생성")
+        self.article_progress_label.configure(text="키워드를 선택한 뒤 글 작성 버튼을 눌러 주세요.")
+        self.article_summary_label.configure(text="새 글을 작성하려면 ①에서 키워드를 입력해 주세요.")
+        self.publish_status_label.configure(text="발행을 중단했습니다. 저장된 슬라이드와 설정은 유지됩니다.", text_color=self._theme_palette()["muted"])
+        self.keyword_status_label.configure(text="티스토리 V2 작업을 초기화했습니다. 새 키워드를 입력해 주세요.")
+        self.writing_completion_platforms = []
+        if not self.active_automation_upload_item_id:
+            self.pending_upload_cleanup_paths = []
+            self.last_published_url = ""
+            self.last_published_urls = {}
+            self.open_published_post_button.configure(state="disabled")
+        self._clear_festival_writing_context()
+        self._clear_welfare_writing_context()
+        self._reset_writing_accordion_state()
+        self._set_writing_progress(1, "발행을 중단하고 처음으로 돌아왔습니다. 이미 발행된 글은 삭제되지 않습니다.", 0, state="idle")
+        self._save_ui_state()
+        (self.benchmark_url_entry if self.benchmark_mode_var.get() else self.topic_entry).focus_set()
+
     def _v2_article_source(self) -> dict:
         title = self.article_title_entry.get().strip() or self.generated_article_title or self._selected_or_manual_keyword()
         body = self._get_current_article_html()
@@ -47805,8 +48128,9 @@ class KeywordApp(ctk.CTk):
         if previous != variant:
             active = self._sidebar_activity_map()
             with self.result_queue.mutex:
-                queued = any(str(event[0]).startswith(("article_", "reference_collect_", "publish_", "tistory_automation_", "daum_", "signal_", "loword_", "newneek_", "analysis_", "benchmark_"))
-                             for event in self.result_queue.queue)
+                queued = any(str(current[0]).startswith(("article_", "reference_collect_", "publish_", "tistory_automation_", "daum_", "signal_", "loword_", "newneek_", "analysis_", "benchmark_"))
+                             for event in self.result_queue.queue
+                             if (current := active_writing_event(event, self.__dict__.get("_writing_run_queue"))) is not None)
             if active.get("writing") or active.get("tistory_v2") or queued:
                 messagebox.showinfo("글쓰기 진행 중", "현재 글쓰기 작업을 마친 뒤 일반 글쓰기와 티스토리 V2를 전환해 주세요.", parent=self)
                 return False
@@ -47826,6 +48150,7 @@ class KeywordApp(ctk.CTk):
             self._tag_mousewheel_descendants(self.tistory_v2_panel)
         self.writing_page_title.configure(text="티스토리 V2" if is_v2 else "블로그글쓰기")
         if is_v2:
+            self.writing_v2_stop_row.grid()
             self.writing_target_row.grid_remove()
             self.writing_selector_row.grid_remove()
             self.writing_prompt_menu.grid_remove()
@@ -47840,6 +48165,7 @@ class KeywordApp(ctk.CTk):
                 self._writing_standard_thumbnail_index = self.active_thumbnail_preset_index
                 self._switch_thumbnail_preset(self.tistory_v2_controls.selection()["thumbnail"] or 0, save=False)
         else:
+            self.writing_v2_stop_row.grid_remove()
             controls = self.__dict__.get("tistory_v2_controls")
             if controls is not None:
                 controls.grid_remove()
@@ -51242,7 +51568,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self._save_ui_state()
 
-        self.analysis_worker = AnalysisWorker(keyword, self.result_queue)
+        self.analysis_worker = AnalysisWorker(keyword, self._writing_result_queue())
         self.analysis_worker.start()
 
     def start_direct_keyword_writing(self) -> None:
@@ -51336,7 +51662,7 @@ class KeywordApp(ctk.CTk):
     def _schedule_direct_keyword_article(self, keyword: str) -> bool:
         if keyword != self.direct_keyword_start_keyword:
             return False
-        self.after(
+        self._after_writing(
             260,
             lambda current_keyword=keyword: self._continue_direct_keyword_after_reference(current_keyword),
         )
@@ -51395,7 +51721,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self.daum_keywords_button.configure(text="불러오는 중...")
         self.find_keywords_button.configure(state="disabled")
-        self.daum_worker = DaumRealtimeKeywordWorker(self.result_queue)
+        self.daum_worker = DaumRealtimeKeywordWorker(self._writing_result_queue())
         self.daum_worker.start()
 
     def load_signal_keywords(self) -> None:
@@ -51438,7 +51764,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self.signal_keywords_button.configure(text="불러오는 중...")
         self.find_keywords_button.configure(state="disabled")
-        self.signal_worker = SignalKeywordWorker(self.result_queue)
+        self.signal_worker = SignalKeywordWorker(self._writing_result_queue())
         self.signal_worker.start()
 
     def load_newneek_keywords(self) -> None:
@@ -51481,7 +51807,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self.newneek_keywords_button.configure(text="불러오는 중...")
         self.find_keywords_button.configure(state="disabled")
-        self.newneek_worker = NewneekKeywordWorker(self.result_queue)
+        self.newneek_worker = NewneekKeywordWorker(self._writing_result_queue())
         self.newneek_worker.start()
 
     def load_naver_creator_keywords(self) -> None:
@@ -51528,7 +51854,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self.naver_creator_keywords_button.configure(text="불러오는 중...")
         self.find_keywords_button.configure(state="disabled")
-        self.naver_creator_worker = NaverCreatorAdvisorKeywordWorker(self.result_queue)
+        self.naver_creator_worker = NaverCreatorAdvisorKeywordWorker(self._writing_result_queue())
         self.naver_creator_worker.start()
 
     def load_loword_keywords(self) -> None:
@@ -51571,7 +51897,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self.loword_keywords_button.configure(text="불러오는 중...")
         self.find_keywords_button.configure(state="disabled")
-        self.loword_keyword_worker = LowordKeywordWorker(self.result_queue)
+        self.loword_keyword_worker = LowordKeywordWorker(self._writing_result_queue())
         self.loword_keyword_worker.start()
 
     def start_benchmark_blog(self) -> None:
@@ -51610,7 +51936,7 @@ class KeywordApp(ctk.CTk):
         self._set_trend_keyword_buttons_state("disabled")
         self.find_keywords_button.configure(state="disabled")
         self._save_ui_state()
-        self.benchmark_worker = BenchmarkBlogWorker(url, self.result_queue)
+        self.benchmark_worker = BenchmarkBlogWorker(url, self._writing_result_queue())
         self.benchmark_worker.start()
 
     def _clear_keyword_choices(self) -> None:
@@ -51716,7 +52042,7 @@ class KeywordApp(ctk.CTk):
         self._save_ui_state()
         if selected_keyword:
             self.pending_reference_keyword = selected_keyword
-            self.after(120, lambda keyword=selected_keyword: self._auto_collect_reference_for_keyword(keyword))
+            self._after_writing(120, lambda keyword=selected_keyword: self._auto_collect_reference_for_keyword(keyword))
 
     def _writing_keyword_selection_locked(self) -> bool:
         panel = self.__dict__.get("tistory_v2_panel")
@@ -51777,7 +52103,7 @@ class KeywordApp(ctk.CTk):
         source_url = self._source_url_for_keyword(selected_keyword)
         self.reference_collection_worker = ReferenceCollectionWorker(
             selected_keyword,
-            self.result_queue,
+            self._writing_result_queue(),
             source_url=source_url,
         )
         self.reference_collection_worker.start()
@@ -51809,7 +52135,7 @@ class KeywordApp(ctk.CTk):
         if not keyword or keyword != self.selected_keyword_var.get().strip():
             return
         if self.reference_collection_worker and self.reference_collection_worker.is_alive():
-            self.after(180, self._start_pending_reference_collection)
+            self._after_writing(180, self._start_pending_reference_collection)
             return
         self.pending_reference_keyword = ""
         self._collect_reference_for_selected_keyword(silent=True)
@@ -51879,7 +52205,7 @@ class KeywordApp(ctk.CTk):
             topic,
             keyword,
             reference_text,
-            self.result_queue,
+            self._writing_result_queue(),
             tistory_v2_slides=self._is_tistory_v2_writing(),
         )
         self.article_worker.start()
@@ -52876,6 +53202,11 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("미리보기 실패", str(exc))
 
     def _run_publish_pipeline(self) -> None:
+        if self._is_tistory_v2_writing():
+            self._stopped_writing_workers = [worker for worker in self.__dict__.get("_stopped_writing_workers", []) if worker.is_alive()]
+            if self._stopped_writing_workers:
+                messagebox.showinfo("중단 처리 중", "이전 작업의 브라우저를 정리하고 있습니다. 잠시 후 업로드를 다시 눌러 주세요.", parent=self)
+                return
         if not self._ensure_cardnews_ready_for_publish():
             messagebox.showerror(
                 "카드뉴스 준비 실패",
@@ -52988,7 +53319,7 @@ class KeywordApp(ctk.CTk):
             tag_names=tag_names,
             slug=slug,
             meta_description=meta_description,
-            result_queue=self.result_queue,
+            result_queue=self._writing_result_queue(),
             reference_articles=self._current_reference_article_sources(),
             tistory_v2=self._is_tistory_v2_writing(),
             tistory_v2_keyword=self._v2_article_source()["keyword"] if v2_deck is not None else self._selected_or_manual_keyword() or self.current_keyword,
@@ -52997,6 +53328,9 @@ class KeywordApp(ctk.CTk):
         self.pipeline_worker.start()
 
     def _retry_tistory_automation(self) -> None:
+        if self._is_tistory_v2_writing() and any(worker.is_alive() for worker in self.__dict__.get("_stopped_writing_workers", [])):
+            messagebox.showinfo("중단 처리 중", "이전 작업의 브라우저를 정리하고 있습니다. 잠시 후 다시 눌러 주세요.", parent=self)
+            return
         if self._is_tistory_v2_writing():
             self._run_publish_pipeline()
             return
@@ -53072,7 +53406,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_automation_worker = TistoryAutomationWorker(
             title=title,
             article_html=article_html,
-            result_queue=self.result_queue,
+            result_queue=self._writing_result_queue(),
             delay_seconds=3.0,
             mode_only=False,
             thumbnail_path=str(thumbnail_path),
@@ -53246,8 +53580,12 @@ class KeywordApp(ctk.CTk):
         current_event_type = ""
         try:
             while processed_events < 24:
-                event_type, payload = self.result_queue.get_nowait()
+                event = self.result_queue.get_nowait()
                 processed_events += 1
+                event = active_writing_event(event, self.__dict__.get("_writing_run_queue"))
+                if event is None:
+                    continue
+                event_type, payload = event
                 current_event_type = str(event_type)
                 if event_type == "naver_kin_cancelled":
                     self._handle_naver_kin_cancelled(payload)
@@ -53847,13 +54185,13 @@ class KeywordApp(ctk.CTk):
                         keyword,
                         f"'{keyword}' 자료 수집 완료 · 블로그글쓰기 3단계로 이동했습니다.",
                     )
-                    self.after(180, self._start_pending_reference_collection)
+                    self._after_writing(180, self._start_pending_reference_collection)
                     if self._schedule_direct_keyword_article(keyword):
                         pass
                     elif self.writing_auto_run_active:
-                        self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
+                        self._after_writing(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                     elif keyword == self._selected_or_manual_keyword():
-                        self.after(
+                        self._after_writing(
                             120,
                             lambda current_keyword=keyword, count=collected_count: (
                                 self._show_reference_collection_complete_dialog(current_keyword, count)
@@ -53877,9 +54215,9 @@ class KeywordApp(ctk.CTk):
                         keyword,
                         f"'{keyword}' 기본 참고자료로 블로그글쓰기 3단계를 시작합니다.",
                     )
-                    self.after(180, self._start_pending_reference_collection)
+                    self._after_writing(180, self._start_pending_reference_collection)
                     if not self._schedule_direct_keyword_article(keyword):
-                        self.after(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
+                        self._after_writing(260, lambda current_keyword=keyword: self._auto_continue_after_reference(current_keyword))
                 elif event_type == "reference_collect_error":
                     self.article_progress_bar.stop()
                     self.article_progress_bar.configure(mode="determinate")
@@ -53918,8 +54256,8 @@ class KeywordApp(ctk.CTk):
                         home_keyword,
                         f"'{home_keyword}' 기존 참고자료로 블로그글쓰기 3단계를 시작합니다.",
                     )
-                    self.after(180, self._start_pending_reference_collection)
-                    self.after(260, self._auto_continue_after_reference)
+                    self._after_writing(180, self._start_pending_reference_collection)
+                    self._after_writing(260, self._auto_continue_after_reference)
                 elif event_type == "benchmark_progress":
                     self.keyword_status_label.configure(text=payload)
                     self.article_progress_label.configure(text=payload)
@@ -53981,7 +54319,7 @@ class KeywordApp(ctk.CTk):
                     self._handle_article_generation_success(payload)
                     if self.direct_keyword_start_keyword:
                         self._finish_direct_keyword_start()
-                    self.after(300, self._auto_continue_after_article)
+                    self._after_writing(300, self._auto_continue_after_article)
                 elif event_type == "article_error":
                     self._stop_writing_auto_progress()
                     if self.direct_keyword_start_keyword:
@@ -54920,7 +55258,7 @@ class KeywordApp(ctk.CTk):
                     self.tistory_automation_worker = TistoryAutomationWorker(
                         title=tistory.get("title", ""),
                         article_html=tistory.get("html", ""),
-                        result_queue=self.result_queue,
+                        result_queue=self._writing_result_queue(),
                         thumbnail_path=tistory.get("thumbnail_path", ""),
                         automation_prompt=self._current_tistory_automation_prompt(),
                         tag_names=list(tistory.get("tag_names") or []),

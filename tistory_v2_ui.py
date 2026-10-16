@@ -885,6 +885,42 @@ class TistoryV2Panel(ctk.CTkFrame):
         self.cancel_button.configure(state="disabled")
         self.status.configure(text="취소 요청을 보냈습니다. 현재 처리 중인 작업이 끝나면 중단합니다.")
 
+    def reset_for_new_article(self):
+        """Detach this run's late events; retain saved decks and design defaults."""
+        self.cancel.set()
+        old_worker = self.worker
+        self._flush_slide()
+        if self._edit_job:
+            self.after_cancel(self._edit_job)
+            self._edit_job = None
+        self.events = queue.Queue()
+        self.worker = None
+        self._publish_locked = False
+        self._set_busy(False)
+        self.deck, self.slide_index = None, 0
+        for entry in (self.keyword_entry, self.title_entry, self.eyebrow_entry):
+            entry.delete(0, "end")
+        for box in (self.body_box, self.slide_title_box, self.summary_box, self.bullets_box):
+            box.delete("1.0", "end")
+        self.deck_title.configure(text="새 슬라이드 작업")
+        self.page_label.configure(text="0 / 0")
+        self.source_label.configure(text="사진 없음")
+        self._refresh_photo_menu()
+        self.photo_menu.set("사진 없음")
+        self._refresh_deck_menu()
+        self.saved_menu.set("저장한 작업 선택" if self._deck_labels else "저장한 작업 없음")
+        self._update_size_labels()
+        self._sync_slide_size_entries()
+        self._draw_preview()
+        self._save_preferences()
+        preferences = self.store.preferences()
+        preferences.pop("article_summary_plan", None)
+        self.store.save_preferences(preferences)
+        if self.embedded:
+            self.article_source_label.configure(text="원본 글: ③에서 새 글을 완성해 주세요.")
+        self.status.configure(text="현재 작업을 중단했습니다. 저장한 슬라이드는 목록에서 다시 불러올 수 있습니다.")
+        return old_worker
+
     def _start(self, operation, destination=None, source=None):
         if self.busy or self._publishing():
             return

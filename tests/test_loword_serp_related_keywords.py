@@ -126,7 +126,7 @@ class LowordSerpRelatedKeywordTests(unittest.TestCase):
 
         self.assertIn("로워드 SERP(네이버 기준)", build_source)
         self.assertNotIn("최소 1개의 분석 소스", start_source)
-        self.assertIn("AnalysisWorker(keyword, self.result_queue)", start_source)
+        self.assertIn("AnalysisWorker(keyword, self._writing_result_queue())", start_source)
         render_source = inspect.getsource(main.KeywordApp._render_keyword_choices)
         self.assertIn("keyword_insight_choice_text(insight, index)", render_source)
 

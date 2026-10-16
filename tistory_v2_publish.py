@@ -18,6 +18,21 @@ from PIL import Image
 from tistory_v2 import (Cancelled, V2Store, assign_slide_images,
                         collect_wiki_images, deck_slide_size, deck_slide_sizes, export_deck, plain_text,
                         wiki_document_url)
+from writing_run import WritingCancelled, check_writing_cancelled
+
+
+def _export_cancellable(store, deck, cancel_event, report):
+    """Translate the renderer's cancellation into the shared writing signal."""
+    check_writing_cancelled(cancel_event)
+    try:
+        paths = export_deck(store, deck, cancel=cancel_event, progress=report)
+    except WritingCancelled:
+        raise
+    except Cancelled:
+        check_writing_cancelled(cancel_event)
+        raise
+    check_writing_cancelled(cancel_event)
+    return paths
 
 
 class _GeneratedFigures(HTMLParser):
@@ -98,8 +113,9 @@ def deck_matches_article(deck: dict | None, title: str, article_html: str, keywo
 
 
 def export_edited_slide_deck(deck: dict, title: str, article_html: str, keyword: str,
-                           directory: Path, progress=None) -> dict:
+                           directory: Path, progress=None, cancel_event=None) -> dict:
     """Render the editor snapshot, never recreate slides or recollect photos."""
+    check_writing_cancelled(cancel_event)
     if not deck_matches_article(deck, title, article_html, keyword):
         raise ValueError("슬라이드 원본과 현재 글이 다릅니다. ④ 단계에서 최신 본문으로 슬라이드를 다시 만들어 주세요.")
     deck = copy.deepcopy(deck)
@@ -112,14 +128,16 @@ def export_edited_slide_deck(deck: dict, title: str, article_html: str, keyword:
         raise ValueError("슬라이드로 만들 본문이 없습니다.")
     store = V2Store(Path(directory).expanduser().resolve())
     report = progress if progress is not None else lambda message: None
-    paths = [Path(path).resolve() for path in export_deck(store, deck, progress=report)]
+    paths = [Path(path).resolve() for path in _export_cancellable(store, deck, cancel_event, report)]
     if len(paths) != 10 or len(set(paths)) != 10:
         raise ValueError("티스토리 V2 이미지 10장을 모두 저장하지 못했습니다.")
     for path, expected in zip(paths, sizes):
+        check_writing_cancelled(cancel_event)
         with Image.open(path) as image:
             if image.format != "PNG" or image.size != expected:
                 raise ValueError(f"티스토리 V2 이미지는 {expected[0]}×{expected[1]} PNG여야 합니다: {path.name}")
             image.verify()
+    check_writing_cancelled(cancel_event)
     return {"deck": deck, "paths": paths, "slide_size": list(size), "slide_sizes": [list(s) for s in sizes], "article_html": body,
             "source_credits_html": _source_credits(deck["slides"]), "warnings": []}
 
@@ -131,6 +149,7 @@ def prepare_slide_deck(
     directory: Path,
     chrome_path: Path | str,
     progress: Callable[[str], None] | None = None,
+    cancel_event=None,
 ) -> dict:
     """Return ten configured-size PNG Paths and the unchanged, cleaned final article.
 
@@ -138,6 +157,7 @@ def prepare_slide_deck(
     credits are returned separately so the caller can append them *after* its
     existing trailing-tag extraction, without changing tag detection.
     """
+    check_writing_cancelled(cancel_event)
     report = progress if progress is not None else lambda message: None
     body = _without_generated_figures(article_html)
     if not plain_text(body).strip():
@@ -146,6 +166,7 @@ def prepare_slide_deck(
     wiki_document_url("wikipedia", keyword)
     store = V2Store(Path(directory).expanduser().resolve())
     report("최종 편집 본문으로 티스토리 V2 슬라이드 10장을 준비합니다...")
+    check_writing_cancelled(cancel_event)
     deck = store.new_deck(keyword, title, body, 10, store.preferences().get("theme", "스카이"))
     size = deck_slide_size(deck)
     sizes = deck_slide_sizes(deck)
@@ -153,13 +174,21 @@ def prepare_slide_deck(
         raise ValueError("티스토리 V2 슬라이드는 정확히 10장이어야 합니다.")
     try:
         images, warnings = collect_wiki_images(
-            keyword, store.deck_directory(deck) / "images", Path(chrome_path), progress=report,
+            keyword, store.deck_directory(deck) / "images", Path(chrome_path),
+            cancel=cancel_event, progress=report,
         )
-    except (Cancelled, MemoryError):
+    except WritingCancelled:
+        raise
+    except Cancelled:
+        check_writing_cancelled(cancel_event)
+        raise
+    except MemoryError:
         raise
     except Exception as exc:
+        check_writing_cancelled(cancel_event)
         images = []
         warnings = [f"위키 사진 수집 실패: {str(exc)[:220]} · 공통 스타일로 계속합니다."]
+    check_writing_cancelled(cancel_event)
     warnings = [str(warning) for warning in warnings]
     for warning in warnings:
         report(warning)
@@ -167,14 +196,17 @@ def prepare_slide_deck(
     assign_slide_images(deck["slides"], deck["images"])
     # Rendering and validation errors must reach the publisher: no partial deck
     # should accidentally proceed to native uploads or publication.
-    paths = [Path(path).resolve() for path in export_deck(store, deck, progress=report)]
+    paths = [Path(path).resolve() for path in _export_cancellable(store, deck, cancel_event, report)]
     if len(paths) != 10 or len(set(paths)) != 10:
         raise ValueError("티스토리 V2 이미지 10장을 모두 저장하지 못했습니다.")
     for path, expected in zip(paths, sizes):
+        check_writing_cancelled(cancel_event)
         with Image.open(path) as image:
             if image.format != "PNG" or image.size != expected:
                 raise ValueError(f"티스토리 V2 이미지는 {expected[0]}×{expected[1]} PNG여야 합니다: {path.name}")
             image.verify()
+    check_writing_cancelled(cancel_event)
     report("티스토리 V2 슬라이드 10장 준비 완료 · 2장씩 콜라주 5개로 입력합니다.")
+    check_writing_cancelled(cancel_event)
     return {"deck": deck, "paths": paths, "slide_size": list(size), "slide_sizes": [list(s) for s in sizes], "article_html": body,
             "source_credits_html": _source_credits(deck["slides"]), "warnings": warnings}

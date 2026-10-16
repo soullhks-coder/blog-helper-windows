@@ -628,6 +628,88 @@ def main() -> None:
             assert edited_body in app.article_editor.get("1.0", "end")
             assert app.wordpress_settings.home_target_platform == original_target
             assert app.default_thumbnail_preset_index == original_default
+            assert not app.writing_v2_stop_row.winfo_ismapped()
+            app._switch_page("tistory_v2")
+            app._open_writing_section("publish")
+            settle(160)
+            assert app.writing_v2_stop_row.winfo_ismapped()
+            assert app.writing_v2_stop_button.cget("text") == "발행 중단"
+            assert int(app.writing_v2_stop_row.grid_info()["row"]) > int(app.publish_progress_bar.grid_info()["row"])
+            saved_id = panel.deck["id"]
+            selection_before_stop = controls.selection()
+            design_before_stop = app_module.copy.deepcopy(app.thumbnail_presets)
+            old_scope = app._writing_result_queue()
+            old_panel_events = panel.events
+            old_panel_cancel = panel.cancel
+            simulated_worker = Mock()
+            simulated_worker.result_queue = old_scope
+            simulated_worker.is_alive.return_value = True
+            app.pipeline_worker = simulated_worker
+            panel.worker = Mock()
+            panel.worker.is_alive.return_value = True
+            app.writing_auto_run_active = True
+            app.writing_v2_publish_pending = True
+            app.writing_v2_pending_auto = True
+            app._tistory_v2_attention_reported = True
+            app.reference_textbox.insert("1.0", "중단할 참고자료")
+            app.topic_entry.delete(0, "end")
+            app.topic_entry.insert(0, "중단할 키워드")
+            stale_callback = Mock()
+            app._after_writing(80, stale_callback)
+            old_scope.put(("publish_pipeline_done", {"tistory": {"write_url": "https://never-publish.tistory.com/manage/newpost"}}))
+            old_scope.put(("article_done", {"title": "이전 작업", "html": "이전 본문"}))
+            old_panel_events.put(("error", "중단된 슬라이드 작업의 늦은 오류"))
+            unrelated_dialog = Mock()
+            app.manual_publish_dialog = unrelated_dialog
+            app.manual_publish_dialog_platform = "blogspot"
+            app.manual_publish_dialog_profile_scope = "other-profile"
+            with patch.object(app, "_handle_publish_pipeline_success") as publish_done, \
+                 patch.object(app_module.messagebox, "showerror") as popup, \
+                 patch.object(app, "_handle_remote_agent_status") as unrelated_status:
+                app.writing_v2_stop_button.invoke()
+                app.result_queue.put(("remote_agent_status", {"status": "ready", "message": "unrelated preserved"}))
+                poll_result_queue(app)
+                settle(220)
+                publish_done.assert_not_called()
+                popup.assert_not_called()
+                stale_callback.assert_not_called()
+                unrelated_status.assert_called_once_with("ready", "unrelated preserved")
+            simulated_worker.cancel.assert_called_once()
+            assert old_scope.cancel_event.is_set() and old_panel_cancel.is_set()
+            assert app._writing_run_queue is None
+            assert app.pipeline_worker is None
+            assert not app.writing_auto_run_active and not app.writing_v2_publish_pending
+            assert not app._tistory_v2_attention_reported
+            assert app.current_page == "tistory_v2" and app.active_writing_section == "topic"
+            assert app.writing_progress_stage == 1 and app.writing_progress_fraction == 0
+            assert not app.writing_completed_sections
+            assert not app.topic_entry.get() and not app.manual_keyword_entry.get()
+            assert not app.reference_textbox.get("1.0", "end").strip()
+            assert not app.article_title_entry.get() and not app.article_editor.get("1.0", "end").strip()
+            assert panel.deck is None and panel.events is not old_panel_events
+            assert not panel.busy and not panel.store.preferences()["deck_id"]
+            assert saved_id in [deck["id"] for deck in panel.store.list_decks()]
+            assert controls.selection() == selection_before_stop
+            assert app.thumbnail_presets == design_before_stop
+            assert panel.store.preferences()["theme"] == "랜덤"
+            assert app.manual_publish_dialog is unrelated_dialog
+            unrelated_dialog.destroy.assert_not_called()
+            app.manual_publish_dialog = None
+            app.manual_publish_dialog_platform = app.manual_publish_dialog_profile_scope = ""
+            app._stopped_writing_workers = []
+            new_scope = app._writing_result_queue()
+            assert new_scope is not old_scope and not new_scope.cancel_event.is_set()
+            app.benchmark_mode_var.set(True)
+            app._on_benchmark_mode_changed(save=False)
+            app.benchmark_button.configure(state="disabled", text="가져오는 중...")
+            app._stop_tistory_v2_publishing()
+            assert app.benchmark_button.cget("state") == "normal"
+            assert app.benchmark_button.cget("text") == "벤치마킹"
+            app.benchmark_mode_var.set(False)
+            app._on_benchmark_mode_changed(save=False)
+            app._switch_page("writing")
+            assert not app.writing_v2_stop_row.winfo_ismapped()
+            print(f"{sys.platform} {args.theme}: V2 stop/reset fences late work, returns to stage1, preserves saved designs and unrelated jobs", flush=True)
             app.article_editor.delete("1.0", "end")
             app.article_editor.insert("1.0", original_article.strip())
             app.geometry("1500x1000+30+35")

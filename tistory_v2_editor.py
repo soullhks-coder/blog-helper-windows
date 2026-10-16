@@ -182,16 +182,18 @@ def _wait(page, condition, cancel, timeout: float, message: str):
     raise RuntimeError(message)
 
 
-def wait_for_failed_editor(page) -> None:
+def wait_for_failed_editor(page, cancel=None) -> None:
     """Keep the failed native editor visible until the user closes it.
 
     No retry, rewrite, save or publication is performed here. The caller keeps
     ownership of the context/profile and reports the error before entering.
     """
+    check_cancel(cancel)
     if page.is_closed():
         return
     page.bring_to_front()
     while not page.is_closed():
+        check_cancel(cancel)
         try:
             page.wait_for_timeout(400)
         except Exception:
