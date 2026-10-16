@@ -6,6 +6,8 @@ import queue
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +27,7 @@ from app_updater import (
     platform_asset_name,
     version_key,
 )
+import app_updater
 from tools.build_delta_patch import build_macos_patch, build_windows_patch
 
 import bsdiff4
@@ -391,6 +394,7 @@ class AppUpdaterTests(unittest.TestCase):
                 "BlogHelper.app/Contents/Resources/assets/tistory-logo.png": b"tistory-png",
                 "BlogHelper.app/Contents/Resources/assets/blogspot-logo.png": b"blogspot-png",
             }
+            resources["BlogHelper.app/Contents/Resources/assets/fonts/test.ttf"] = b"\x00\x01\x00\x00font-data"
             for path, executable in (
                 (previous, b"mac-runtime-v1"),
                 (current, b"mac-runtime-v2"),
@@ -430,6 +434,44 @@ class AppUpdaterTests(unittest.TestCase):
                         archive.read(replacements[target]),
                         resources[f"BlogHelper.app/{target}"],
                     )
+
+    def test_macos_delta_restores_fonts_and_licenses_missing_from_installed_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "installed" / "BlogHelper.app"
+            binary = app / "Contents/MacOS/BlogHelper"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"old-binary")
+            binary.chmod(0o755)
+            previous, current, output = (root / name for name in ("old.zip", "new.zip", "patch.zip"))
+            resources = {
+                "BlogHelper.app/Contents/Info.plist": b"plist-v2",
+                "BlogHelper.app/Contents/Resources/version.json": b'{"version":"1.2.4"}',
+                **{f"BlogHelper.app/Contents/Resources/assets/{name}-logo.png": b"logo" for name in ("wordpress", "tistory", "blogspot")},
+            }
+            font_names = ("NanumGothic.ttf", "NanumGothicBold.ttf", "NanumGothic-OFL.txt",
+                          "NanumSquareNeo-bRg.ttf", "NanumSquareNeo-cBd.ttf", "NanumSquareNeo-OFL.txt")
+            for name in font_names:
+                resources[f"BlogHelper.app/Contents/Resources/assets/fonts/{name}"] = (
+                    b"\x00\x01\x00\x00" + name.encode() if name.endswith(".ttf") else b"SIL OPEN FONT LICENSE"
+                )
+            for path, content in ((previous, b"old-binary"), (current, b"new-binary")):
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("BlogHelper.app/Contents/MacOS/BlogHelper", content)
+                    for name, data in resources.items():
+                        archive.writestr(name, data)
+            build_macos_patch(SimpleNamespace(previous=previous, current=current, output=output,
+                                              from_version="1.2.3", to_version="1.2.4"))
+            with (patch.object(app_updater, "os", SimpleNamespace(name="posix")),
+                  patch.object(app_updater, "sys", SimpleNamespace(platform="darwin")),
+                  patch.object(app_updater, "APP_VERSION", "1.2.3"),
+                  patch.object(app_updater.subprocess, "run")):
+                staged = app_updater.prepare_delta_update(output, root / "staging", current_target=app)
+            self.assertEqual((staged / "Contents/MacOS/BlogHelper").read_bytes(), b"new-binary")
+            for name in font_names:
+                target = f"Contents/Resources/assets/fonts/{name}"
+                self.assertEqual((staged / target).read_bytes(), resources[f"BlogHelper.app/{target}"])
+            self.assertFalse((app / "Contents/Resources/assets/fonts").exists())
 
 
 if __name__ == "__main__":

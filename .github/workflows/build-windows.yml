@@ -73,6 +73,7 @@ jobs:
           python -m unittest discover -s tests -p test_windows_runtime.py -q
           python -m unittest discover -s tests -p test_windows_fonts.py -q
           python -m unittest discover -s tests -p test_app_fonts.py -q
+          python -m unittest discover -s tests -p test_app_updater.py -q
           python -m unittest discover -s tests -p test_modal_backdrop.py -q
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
@@ -174,6 +175,7 @@ jobs:
           python -m py_compile main.py
           python -m py_compile app_updater.py
           python -m unittest discover -s tests -p test_app_fonts.py -q
+          python -m unittest discover -s tests -p test_app_updater.py -q
           python -m unittest discover -s tests -p test_tistory_v2.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
