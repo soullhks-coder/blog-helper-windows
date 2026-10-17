@@ -6912,6 +6912,9 @@ class GoogleImageCollageCollector:
         keyword: str,
         article_sources: list[dict[str, str]],
         count: int = 1,
+        *,
+        image_limit: int = 2,
+        check_cancel: Callable[[], None] | None = None,
     ) -> list[dict[str, str]]:
         """Open collected article URLs and return only their representative images."""
         normalized_sources = [
@@ -6928,7 +6931,7 @@ class GoogleImageCollageCollector:
         ]
         if not normalized_sources:
             return []
-        target_count = max(1, min(int(count or 1), 2))
+        target_count = max(1, min(int(count or 1), max(1, min(image_limit, 10))))
         results: list[dict[str, str]] = []
         seen_images: set[str] = set()
         try:
@@ -6964,6 +6967,8 @@ class GoogleImageCollageCollector:
                     page.set_default_timeout(12_000)
                     page.set_default_navigation_timeout(35_000)
                     for article in normalized_sources:
+                        if check_cancel:
+                            check_cancel()
                         if len(results) >= target_count:
                             break
                         article_url = article["url"]
@@ -6972,6 +6977,8 @@ class GoogleImageCollageCollector:
                             page.wait_for_timeout(900)
                             metadata = self._extract_article_image_metadata(page)
                         except Exception:
+                            if check_cancel:
+                                check_cancel()
                             continue
                         article_title = str(metadata.get("title") or "").strip()
                         if not self._article_title_is_relevant(
@@ -7012,6 +7019,8 @@ class GoogleImageCollageCollector:
                 finally:
                     browser.close()
         except Exception:
+            if check_cancel:
+                check_cancel()
             return []
         return results[:target_count]
 
@@ -7256,7 +7265,7 @@ class GoogleImageCollageCollector:
                 {
                     "image_url": image_url,
                     "source_url": str(metadata.get("purl") or search_url).strip(),
-                    "title": str(metadata.get("t") or keyword).strip(),
+                    "title": str(metadata.get("t") or "").strip(),
                 }
             )
         ranked = self._rank_web_image_candidates(keyword, candidates)
@@ -7838,6 +7847,101 @@ class GoogleImageCollageCollector:
             if query and query not in deduped:
                 deduped.append(query)
         return deduped[:3]
+
+
+class NaverBlogImageCollector(GoogleImageCollageCollector):
+    """NBlog must fail closed instead of padding a quota with unrelated photos.
+
+    The legacy web collector can label arbitrary image URLs with the query and
+    accept zero-match captions in its relaxed/fallback paths. Never use those
+    paths as evidence. Match the original topic against real article/result
+    metadata, independent of account cookies, generated title or shorter query.
+    """
+
+    def __init__(self, topic: str, cancel_event=None) -> None:
+        super().__init__()
+        self.topic = re.sub(r"\s+", " ", str(topic or "")).strip()
+        ignored = self.WEB_IMAGE_GENERIC_TOKENS | {
+            "관련", "글쓰기", "알아보기", "연예인", "배우", "가수",
+        }
+        tokens = self._keyword_tokens(self.topic)
+        self.topic_tokens = list(dict.fromkeys(
+            token[:-1] if len(token) >= 4 and token.endswith("의") else token
+            for token in tokens if token not in ignored
+        ))
+        self.cancel_event = cancel_event
+
+    def _check_cancel(self) -> None:
+        _raise_if_naver_blog_cancelled(self.cancel_event)
+
+    def _is_relevant_text(self, keyword: str, candidate_text: str) -> bool:
+        # Spacing differences such as '암 투병' should not discard a good photo.
+        text = re.sub(r"[^0-9a-z가-힣]", "", self._normalize_for_match(candidate_text))
+        return bool(self.topic_tokens) and all(token in text for token in self.topic_tokens)
+
+    def _article_title_is_relevant(self, keyword, article_title, reference_title="") -> bool:
+        # The live document's title is required; the saved reference or query
+        # cannot vouch for a redirect to an unrelated page.
+        return self._is_relevant_text(self.topic, article_title)
+
+    def _rank_web_image_candidates(self, keyword, candidates):
+        verified = [candidate for candidate in candidates
+                    if self._is_relevant_text(self.topic, str(candidate.get("title") or ""))
+                    and is_probable_news_article_url(str(candidate.get("source_url") or ""))]
+        rejected = len(candidates) - len(verified)
+        if rejected:
+            append_runtime_log("NBlog 이미지", f"원래 주제·실제 출처 불일치 후보 {rejected}개 제외: {self.topic}")
+        return super()._rank_web_image_candidates(self.topic, verified)
+
+    def _extract_article_image_metadata(self, page):
+        metadata = super()._extract_article_image_metadata(page)
+        metadata["images"] = [image for image in metadata.get("images", [])
+                              if image.get("kind") in {"og", "twitter"}
+                              or self._is_relevant_text(self.topic, str(image.get("alt") or ""))]
+        return metadata
+
+    def collect_verified(self, article_sources, count: int) -> list[dict[str, str]]:
+        self._check_cancel()
+        count = max(1, min(int(count or 2), 10))
+        selected, seen = [], set()
+
+        def append_verified(found, evidence):
+            self._check_cancel()
+            for candidate in found:
+                self._check_cancel()
+                if len(selected) >= count:
+                    break
+                image_url = str(candidate.get("image_url") or "")
+                source_url = str(candidate.get("source_url") or "")
+                caption = str(candidate.get("article_title") or candidate.get("title") or "")
+                if (not image_url or image_url in seen or not candidate.get("data_url")
+                        or not is_probable_news_article_url(source_url)
+                        or not self._is_relevant_text(self.topic, caption)):
+                    continue
+                seen.add(image_url)
+                selected.append({**candidate, "verification": evidence,
+                                 "matched_topic": self.topic})
+
+        sources = [source for source in article_sources
+                   if self._is_relevant_text(self.topic, str(source.get("title") or ""))]
+        if sources:
+            append_verified(self.collect_article_reference_images(
+                self.topic, sources, count, image_limit=10, check_cancel=self._check_cancel,
+            ), "article_title_and_representative_image")
+        # Only structured results carrying their own title + source page qualify.
+        # Do not call collect_web, URL-only Google/Naver extraction, relaxed news,
+        # browser screenshots or generic licensed/Commons fallback to fill gaps.
+        for query in self._web_search_queries(self.topic)[:3]:
+            if len(selected) >= count:
+                break
+            self._check_cancel()
+            append_verified(self._collect_naver_news_images(query, count - len(selected), relaxed=False),
+                            "news_caption_and_article_url")
+            if len(selected) < count:
+                self._check_cancel()
+                append_verified(self._collect_bing_images(query, count - len(selected)),
+                                "image_caption_and_source_url")
+        return selected
 
 
 def build_tistory_reference_image_query(title: str, tag_names: list[str] | None = None) -> str:
@@ -24360,9 +24464,10 @@ def _naver_blog_work_directory(work_folder: str, topic: str) -> Path:
     root = Path(work_folder).expanduser() if str(work_folder or "").strip() else DATA_DIR / "Naver Blog Work"
     safe_topic = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", re.sub(r"\s+", "_", topic.strip())).strip(" ._")
     safe_topic = safe_topic[:70] or "naver-blog"
-    work_dir = root / f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_topic}"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    return work_dir
+    root.mkdir(parents=True, exist_ok=True)
+    # Different account/app runs started in the same second must never share
+    # image_1.png etc. mkdtemp allocates the folder atomically across processes.
+    return Path(tempfile.mkdtemp(prefix=f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_topic}-", dir=root))
 
 
 def generate_naver_blog_article(
@@ -24440,22 +24545,20 @@ def collect_naver_blog_image_files(
     work_dir: Path,
     result_queue: queue.Queue,
     cancel_event: threading.Event | None = None,
+    *,
+    article_sources: list[dict[str, str]] | None = None,
+    image_sources: list[dict[str, str]] | None = None,
 ) -> list[str]:
     _raise_if_naver_blog_cancelled(cancel_event)
     target_count = max(1, min(int(count or 2), 10))
-    collector = GoogleImageCollageCollector()
-    query = f"{topic} {title} 관련 최신 사진"
-    result_queue.put(("naver_blog_progress", f"'{topic}' 관련 이미지를 검색해 {target_count}개 저장하는 중..."))
-    candidates = collector.collect_web(query, count=max(target_count * 4, 10))
+    collector = NaverBlogImageCollector(topic, cancel_event)
+    result_queue.put(("naver_blog_progress", f"'{topic}' 실제 기사·사진 설명을 검증해 최대 {target_count}개 저장하는 중..."))
+    candidates = collector.collect_verified(article_sources or [], target_count)
     _raise_if_naver_blog_cancelled(cancel_event)
-    if len(candidates) < target_count:
-        try:
-            candidates.extend(collector.collect_licensed(query, count=target_count * 3))
-        except Exception:
-            pass
 
     image_paths: list[str] = []
     seen: set[str] = set()
+    seen_pixels: set[str] = set()
     for candidate in candidates:
         _raise_if_naver_blog_cancelled(cancel_event)
         fingerprint = str(candidate.get("image_url") or candidate.get("source_url") or candidate.get("data_url") or "")
@@ -24464,16 +24567,27 @@ def collect_naver_blog_image_files(
         seen.add(fingerprint)
         destination = work_dir / f"image_{len(image_paths) + 1}.png"
         data_url = str(candidate.get("data_url") or "")
-        if _save_reference_image_with_pillow(data_url, destination) or capture_reference_image_region(
-            data_url,
-            destination,
-        ):
+        if _save_reference_image_with_pillow(data_url, destination):
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            if digest in seen_pixels:
+                destination.unlink(missing_ok=True)
+                continue
+            seen_pixels.add(digest)
             image_paths.append(str(destination))
+            audit = {key: str(candidate.get(key) or "") for key in (
+                "image_url", "source_url", "source", "title", "license", "verification", "matched_topic")}
+            audit.update(path=str(destination), sha256=digest)
+            if image_sources is not None:
+                image_sources.append(audit)
+            append_runtime_log("NBlog 이미지", f"선택 검증: {json.dumps(audit, ensure_ascii=False)}")
         if len(image_paths) >= target_count:
             break
     if not image_paths:
-        raise RuntimeError("주제와 관련된 첨부 이미지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.")
-    result_queue.put(("naver_blog_progress", f"관련 이미지 {len(image_paths)}개를 작업 폴더에 저장했습니다."))
+        raise RuntimeError("주제와 출처가 일치하는 사진을 확인하지 못해 자동화를 멈췄습니다. 이미지 수동 모드에서 직접 선택해 주세요.")
+    message = f"주제·출처가 확인된 이미지 {len(image_paths)}개를 저장했습니다."
+    if len(image_paths) < target_count:
+        message += f" 요청한 {target_count}개를 채우기 위해 관련 없는 사진을 추가하지 않습니다."
+    result_queue.put(("naver_blog_progress", message))
     return image_paths
 
 
@@ -24680,6 +24794,11 @@ def build_naver_blog_workflow_payload(
     tag_names = tag_names[:10]
     work_dir = _naver_blog_work_directory(work_folder, topic)
     image_mode = normalize_naver_blog_image_mode(image_mode)
+    image_sources: list[dict[str, str]] = []
+    # Retain the paid generation result even if no safe photo can be found.
+    for name, contents in (("title.txt", title), ("body.txt", body_text),
+                           ("body.html", article_html), ("reference.txt", reference_text)):
+        (work_dir / name).write_text(contents, encoding="utf-8")
     try:
         if image_mode == NAVER_BLOG_IMAGE_MODE_MANUAL:
             image_paths = prepare_naver_blog_manual_image_files(
@@ -24697,15 +24816,16 @@ def build_naver_blog_workflow_payload(
                 work_dir,
                 result_queue,
                 cancel_event=cancel_event,
+                article_sources=extract_reference_article_sources(reference_text),
+                image_sources=image_sources,
             )
         _raise_if_naver_blog_cancelled(cancel_event)
     except NaverBlogAutomationCancelled:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
-    (work_dir / "title.txt").write_text(title, encoding="utf-8")
-    (work_dir / "body.txt").write_text(body_text, encoding="utf-8")
-    (work_dir / "body.html").write_text(article_html, encoding="utf-8")
-    (work_dir / "reference.txt").write_text(reference_text, encoding="utf-8")
+    except Exception as exc:
+        append_runtime_log("NBlog 이미지", f"사진 검증 중단 · 작성한 글 보존: {work_dir}")
+        raise RuntimeError(f"{exc}\n작성한 글과 참고자료는 다음 폴더에 보존했습니다: {work_dir}") from exc
     payload = {
         "topic": topic,
         "title": title,
@@ -24714,6 +24834,7 @@ def build_naver_blog_workflow_payload(
         "reference_text": reference_text,
         "image_paths": image_paths,
         "image_count": len(image_paths),
+        "image_sources": image_sources,
         "image_mode": image_mode,
         "provider": provider_name,
         "work_dir": str(work_dir),

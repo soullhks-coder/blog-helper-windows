@@ -87,6 +87,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_review_publish.py -q
           python -m unittest discover -s tests -p test_tistory_v2_publish.py -q
           python -m unittest discover -s tests -p test_manual_publish_mode.py -q
+          python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -199,6 +200,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_review_publish.py -q
           python -m unittest discover -s tests -p test_tistory_v2_publish.py -q
           python -m unittest discover -s tests -p test_manual_publish_mode.py -q
+          python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 
       - name: Check writing UI in dark and light themes
