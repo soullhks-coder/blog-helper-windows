@@ -85,6 +85,9 @@ def main() -> None:
             while pending:
                 widget = pending.pop()
                 pending.extend(widget.winfo_children())
+                if sys.platform == 'darwin' and app._is_text_input_widget(widget) and app.focus_get() is widget:
+                    from macos_ime import IME_BINDTAG
+                    assert IME_BINDTAG in widget.bindtags(), (str(widget), 'focused editor lacks IME guard')
                 if (isinstance(widget, app_module.ctk.CTkBaseClass) and widget.winfo_ismapped()
                         and not app_module.modal_dimmer(app).active):
                     from modal_backdrop import dim_color
@@ -1633,7 +1636,11 @@ def main() -> None:
             )
             assert app.naver_kin_fixed_progress_panel.winfo_ismapped()
             reference_native_textbox = app.naver_kin_reference_textbox._textbox
-            assert reference_native_textbox.bindtags()[0] == app_module.TEXT_EDITING_SHORTCUT_BINDTAG
+            reference_tags = reference_native_textbox.bindtags()
+            assert reference_tags.index(app_module.TEXT_EDITING_SHORTCUT_BINDTAG) < reference_tags.index('Text')
+            if sys.platform == 'darwin':
+                from macos_ime import IME_BINDTAG
+                assert reference_tags[0] == IME_BINDTAG
             reference_shortcut_text = "한글 모드 전체 선택 확인"
             reference_native_textbox.delete("1.0", "end")
             reference_native_textbox.insert("1.0", reference_shortcut_text)

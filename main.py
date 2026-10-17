@@ -28002,6 +28002,9 @@ class KeywordApp(ctk.CTk):
             )
         self.bind_all("<FocusIn>", self._on_text_input_focus, add="+")
         self._tag_text_input_descendants(self)
+        if sys.platform == "darwin":
+            from macos_ime import MacOSIMEGuard
+            self._macos_ime_guard = MacOSIMEGuard(self)
 
     def _handle_text_editing_shortcut(self, event=None):
         widget = getattr(event, "widget", None)
@@ -28073,6 +28076,9 @@ class KeywordApp(ctk.CTk):
             AppStateStore.update_fields(window_geometry=safe_geometry)
 
     def _on_app_close(self) -> None:
+        ime_guard = getattr(self, "_macos_ime_guard", None)
+        if ime_guard is not None:
+            ime_guard.finish()
         self._app_closing = True
         self._cancel_update_probe()
         if self.remote_agent is not None:
