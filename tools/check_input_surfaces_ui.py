@@ -1,16 +1,24 @@
 """Native input layout matrix: fractional DPI, themes, fonts, short fields."""
+import argparse
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import customtkinter as ctk
+from customtkinter.windows.widgets.core_rendering import DrawEngine
 
 from app_fonts import FONT_OPTIONS, configure_app_fonts, ui_font_family
 from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, InputTextbox
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--renderer', choices=('polygon_shapes', 'font_shapes'),
+                        help='Exercise another CTk drawing path; does not emulate native OS font metrics.')
+    args = parser.parse_args()
+    if args.renderer:
+        DrawEngine.preferred_drawing_method = args.renderer
     families = []
     for font in FONT_OPTIONS:
         assert configure_app_fonts(ctk, Path(__file__).resolve().parents[1], font)
@@ -85,7 +93,7 @@ def main():
         box.configure(border_width=1)
         assert box.cget('border_width') == 2
         assert box.get('1.0', 'end-1c') == 'first line\nsecond line'
-        print(f'{sys.platform}: {checked} native entry/dropdown layouts, three fonts, both themes and multiline editing passed', flush=True)
+        print(f'{sys.platform} {DrawEngine.preferred_drawing_method}: {checked} native entry/dropdown layouts, three fonts, both themes and multiline editing passed', flush=True)
     finally:
         root.destroy()
 

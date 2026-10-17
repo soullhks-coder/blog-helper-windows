@@ -114,11 +114,14 @@ class InputOptionMenu(ctk.CTkOptionMenu):
                 ("inner_parts_right", self._button_color),
             ):
                 color = self._apply_appearance_mode(color)
-                self._canvas.itemconfigure(tag, outline=color, fill=color)
+                # CTkCanvas.itemconfig strips unsupported outline options
+                # from Windows' antialiased font circles. Tk's itemconfigure
+                # alias bypasses that adapter and fails only on Windows.
+                self._canvas.itemconfig(tag, outline=color, fill=color)
             text = self._text_color_disabled if self._state == tk.DISABLED else self._text_color
             self._text_label.configure(bg=self._apply_appearance_mode(self._fg_color),
                                        fg=self._apply_appearance_mode(text))
-            self._canvas.itemconfigure("dropdown_arrow", fill=self._apply_appearance_mode(text))
+            self._canvas.itemconfig("dropdown_arrow", fill=self._apply_appearance_mode(text))
         self._canvas.update_idletasks()
 
     def configure(self, require_redraw=False, **kwargs):
@@ -159,7 +162,7 @@ class InputComboBox(ctk.CTkComboBox):
 
     def _draw_arrow_outline(self):
         color = self._apply_appearance_mode(self._border_color)
-        self._canvas.itemconfigure("border_parts_right", outline=color, fill=color)
+        self._canvas.itemconfig("border_parts_right", outline=color, fill=color)
 
     def _on_enter(self, event=0):
         super()._on_enter(event)

@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-17",
-        "version": "v1.2.14",
+        "version": "v1.2.15",
         "category": "UI",
         "title": "썸네일·본문 카드뉴스 및 전체 드롭다운 테두리 통일",
         "request": "썸네일 관리의 본문 카드뉴스 등 테두리가 빠진 설정을 전체 점검하고 테두리를 추가해달라는 요청",

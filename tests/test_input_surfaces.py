@@ -64,6 +64,32 @@ class InputSurfaceTests(unittest.TestCase):
             grid.assert_called_once()
             native.grid_configure.assert_called_once_with(pady=(3, 3))
 
+    def test_dropdown_colors_use_windows_antialiased_canvas_adapter(self):
+        menu = object.__new__(InputOptionMenu)
+        menu._canvas = Mock()
+        menu._draw_engine = Mock()
+        menu._text_label = Mock()
+        menu._apply_widget_scaling = lambda value: value
+        menu._apply_appearance_mode = lambda value: value
+        menu._current_width, menu._current_height = 140, 28
+        menu._corner_radius, menu._border_width = 12, 2
+        menu._state = 'normal'
+        for name in ('border_color', 'bg_color', 'fg_color', 'button_color',
+                     'text_color', 'text_color_disabled'):
+            setattr(menu, '_' + name, '#123456')
+        with patch.object(ctk.CTkBaseClass, '_draw'):
+            menu._draw()
+        menu._canvas.itemconfigure.assert_not_called()
+        self.assertIn('border_parts_right', [call.args[0] for call in menu._canvas.itemconfig.call_args_list])
+        combo = object.__new__(InputComboBox)
+        combo._canvas = Mock()
+        combo._border_color = '#123456'
+        combo._apply_appearance_mode = lambda value: value
+        with patch.object(ctk.CTkComboBox, '_draw'):
+            combo._draw()
+        combo._canvas.itemconfigure.assert_not_called()
+        combo._canvas.itemconfig.assert_called_once_with('border_parts_right', outline='#123456', fill='#123456')
+
 
 if __name__ == '__main__':
     unittest.main()
