@@ -12,7 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from input_surfaces import InputEntry, InputTextbox
+from input_surfaces import InputEntry, InputOptionMenu, InputTextbox
 from PIL import Image, ImageOps, ImageTk
 
 from modal_backdrop import DimmedDialogApi
@@ -102,7 +102,7 @@ class TistoryV2Panel(ctk.CTkFrame):
         return entry
 
     def _menu(self, parent, row, values, variable=None, command=None):
-        menu = ctk.CTkOptionMenu(parent, values=values, variable=variable, height=34,
+        menu = InputOptionMenu(parent, values=values, variable=variable, height=34,
                                  fg_color=self.palette["button"], button_color=self.palette["button"],
                                  button_hover_color=self.palette["button_hover"], text_color=self.palette["text"],
                                  dropdown_fg_color=self.palette["panel"], dropdown_hover_color=self.palette["hover"],

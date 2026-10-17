@@ -46,7 +46,7 @@ from startup_guard import acquire_windows_single_instance, release_windows_singl
 _WINDOWS_SINGLE_INSTANCE_MUTEX = acquire_windows_single_instance()
 
 import customtkinter as ctk
-from input_surfaces import InputEntry, InputTextbox
+from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, InputTextbox
 import certifi
 import tkinter as tk
 import tkinter.font as tkfont
@@ -28394,7 +28394,7 @@ class KeywordApp(ctk.CTk):
                 continue
             if child in self._theme_painted_widgets:
                 self._apply_white_widget_polish(child, palette)
-                if isinstance(child, (InputEntry, InputTextbox)):
+                if isinstance(child, (InputEntry, InputTextbox, InputOptionMenu, InputComboBox)):
                     child._draw()
                 else:
                     self._retint_widget_tree(child, palette)
@@ -28456,7 +28456,7 @@ class KeywordApp(ctk.CTk):
                 except Exception:
                     pass
             self._apply_white_widget_polish(child, palette)
-            if isinstance(child, (InputEntry, InputTextbox)):
+            if isinstance(child, (InputEntry, InputTextbox, InputOptionMenu, InputComboBox)):
                 # The composite input owns its native editor/canvas colors.
                 # Retinting those children independently overwrites placeholder
                 # styling and can repaint over the rounded outline.
@@ -29341,7 +29341,7 @@ class KeywordApp(ctk.CTk):
             )
             logo_label.grid(row=0, column=1, padx=(0, 4), sticky="w")
             self.home_target_logo_labels[platform] = logo_label
-            blog_menu = ctk.CTkOptionMenu(
+            blog_menu = InputOptionMenu(
                 group,
                 values=["블로그 미등록"],
                 width=112,
@@ -29370,7 +29370,7 @@ class KeywordApp(ctk.CTk):
         )
         self.home_thumbnail_label.grid(row=0, column=0, padx=(0, 5), sticky="e")
         thumbnail_values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
-        self.home_thumbnail_menu = ctk.CTkOptionMenu(
+        self.home_thumbnail_menu = InputOptionMenu(
             prompt_frame,
             values=thumbnail_values,
             width=116,
@@ -29396,7 +29396,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=11, weight="bold"),
         )
         self.home_prompt_label.grid(row=0, column=2, padx=(0, 5), sticky="e")
-        self.home_prompt_menu = ctk.CTkOptionMenu(
+        self.home_prompt_menu = InputOptionMenu(
             prompt_frame,
             values=self._prompt_set_menu_values(),
             width=165,
@@ -31076,7 +31076,7 @@ class KeywordApp(ctk.CTk):
         self.history_search_entry.grid(row=0, column=0, padx=(16, 8), pady=16, sticky="ew")
         self.history_search_entry.bind("<KeyRelease>", self._schedule_history_render)
 
-        self.history_date_menu = ctk.CTkOptionMenu(
+        self.history_date_menu = InputOptionMenu(
             filters,
             values=["전체 날짜", *history_dates()],
             width=150,
@@ -31093,7 +31093,7 @@ class KeywordApp(ctk.CTk):
         self.history_date_menu.grid(row=0, column=1, padx=8, pady=16, sticky="e")
         self.history_date_menu.set("전체 날짜")
 
-        self.history_category_menu = ctk.CTkOptionMenu(
+        self.history_category_menu = InputOptionMenu(
             filters,
             values=["전체 분류", *history_categories()],
             width=176,
@@ -31333,6 +31333,8 @@ class KeywordApp(ctk.CTk):
                         )
                     elif isinstance(child, ctk.CTkOptionMenu):
                         child.configure(
+                            border_width=2,
+                            border_color=palette["border"],
                             fg_color=palette["input"],
                             button_color=palette["button"],
                             button_hover_color=palette["button_hover"],
@@ -31466,7 +31468,7 @@ class KeywordApp(ctk.CTk):
         self.default_writing_model_var = tk.StringVar(
             value=writing_model_label(self.wordpress_settings.preferred_ai_provider)
         )
-        self.default_writing_model_menu = ctk.CTkOptionMenu(
+        self.default_writing_model_menu = InputOptionMenu(
             writing_model_card,
             values=list(WRITING_MODEL_OPTIONS),
             variable=self.default_writing_model_var,
@@ -31715,7 +31717,7 @@ class KeywordApp(ctk.CTk):
             text_color=palette["text"],
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=3, column=0, padx=22, pady=(0, 7), sticky="w")
-        self.version_choice_menu = ctk.CTkOptionMenu(
+        self.version_choice_menu = InputOptionMenu(
             card,
             values=[f"v{APP_VERSION}"],
             height=42,
@@ -32259,7 +32261,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
         ).grid(row=2, column=0, padx=(28, 16), pady=(0, 16), sticky="w")
 
-        self.theme_menu = ctk.CTkOptionMenu(
+        self.theme_menu = InputOptionMenu(
             card,
             values=["블랙테마", "화이트테마"],
             height=44,
@@ -32307,7 +32309,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(
             card, text="글꼴", text_color="#cbd6e6", font=ctk.CTkFont(size=16, weight="bold"),
         ).grid(row=2, column=0, padx=(28, 16), pady=(0, 16), sticky="w")
-        self.font_menu = ctk.CTkOptionMenu(
+        self.font_menu = InputOptionMenu(
             card, values=list(FONT_OPTIONS), height=44, corner_radius=14,
             fg_color="#0b1220", button_color="#314761", button_hover_color="#3f5c7f",
             dropdown_fg_color="#0b1220", dropdown_hover_color="#111826",
@@ -32428,7 +32430,7 @@ class KeywordApp(ctk.CTk):
             icon_label = bootstrap_icon_input_display(saved_icons[page_name])
             icon_var = tk.StringVar(value=icon_label)
             self.sidebar_menu_icon_vars[page_name] = icon_var
-            icon_menu = ctk.CTkComboBox(
+            icon_menu = InputComboBox(
                 card,
                 variable=icon_var,
                 values=list(BOOTSTRAP_ICON_OPTIONS),
@@ -33124,7 +33126,7 @@ class KeywordApp(ctk.CTk):
                 width=22,
                 height=22,
             ).grid(row=0, column=1, padx=(0, 4), sticky="w")
-            blog_menu = ctk.CTkOptionMenu(
+            blog_menu = InputOptionMenu(
                 group,
                 values=["블로그 미등록"],
                 width=100,
@@ -33147,7 +33149,7 @@ class KeywordApp(ctk.CTk):
         self.writing_selector_row = selectors
         ctk.CTkLabel(selectors, text="썸네일", text_color=palette["muted"], font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=0, padx=(0, 5))
         thumbnail_values = [f"썸네일·카드{index + 1}" for index in range(THUMBNAIL_PRESET_COUNT)]
-        self.writing_thumbnail_menu = ctk.CTkOptionMenu(
+        self.writing_thumbnail_menu = InputOptionMenu(
             selectors, values=thumbnail_values, width=106, height=27, corner_radius=10,
             fg_color=palette["button"], button_color=palette["button"],
             button_hover_color=palette["button_hover"], dropdown_fg_color=palette["panel"],
@@ -33156,7 +33158,7 @@ class KeywordApp(ctk.CTk):
         )
         self.writing_thumbnail_menu.grid(row=0, column=1, padx=(0, 6))
         ctk.CTkLabel(selectors, text="프롬프트", text_color=palette["muted"], font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=2, padx=(0, 5))
-        self.writing_header_prompt_menu = ctk.CTkOptionMenu(
+        self.writing_header_prompt_menu = InputOptionMenu(
             selectors, values=self._prompt_set_menu_values(), width=150, height=27,
             corner_radius=10, fg_color=palette["button"], button_color=palette["button"],
             button_hover_color=palette["button_hover"], dropdown_fg_color=palette["panel"],
@@ -33929,7 +33931,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_kin_sort_menu = ctk.CTkOptionMenu(
+        self.naver_kin_sort_menu = InputOptionMenu(
             setup_card,
             values=["최신순", "추천순"],
             height=40,
@@ -33976,7 +33978,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=2, column=0, padx=18, pady=8, sticky="w")
-        self.naver_kin_wordpress_prompt_menu = ctk.CTkOptionMenu(
+        self.naver_kin_wordpress_prompt_menu = InputOptionMenu(
             setup_card,
             values=["워드프레스 · 기본"],
             height=40,
@@ -34194,7 +34196,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=0, padx=(18, 8), pady=(0, 12), sticky="w")
-        self.naver_kin_collect_count_menu = ctk.CTkOptionMenu(
+        self.naver_kin_collect_count_menu = InputOptionMenu(
             schedule_card,
             values=[f"{count}개" for count in range(1, 11)],
             width=90,
@@ -34218,7 +34220,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=2, padx=(0, 8), pady=(0, 12), sticky="w")
-        self.naver_kin_collect_interval_menu = ctk.CTkOptionMenu(
+        self.naver_kin_collect_interval_menu = InputOptionMenu(
             schedule_card,
             values=["5분", "10분", "15분", "20분", "30분", "1시간", "2시간", "4시간", "6시간", "12시간", "24시간"],
             width=120,
@@ -34242,7 +34244,7 @@ class KeywordApp(ctk.CTk):
             text_color="#dce6f3",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=4, padx=(0, 8), pady=(0, 12), sticky="w")
-        self.naver_kin_answer_interval_menu = ctk.CTkOptionMenu(
+        self.naver_kin_answer_interval_menu = InputOptionMenu(
             schedule_card,
             values=["5분", "10분", "30분", "40분", "50분", "1시간", "2시간", "3시간", "4시간"],
             width=120,
@@ -34496,7 +34498,7 @@ class KeywordApp(ctk.CTk):
         palette = self._theme_palette()
         prompt_panel = self._naver_panel(parent, "N블로그 프롬프트", 0)
         ctk.CTkLabel(prompt_panel, text="N블로그 프롬프트", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=1, column=0, padx=18, pady=8, sticky="w")
-        self.naver_blog_prompt_type_menu = ctk.CTkOptionMenu(
+        self.naver_blog_prompt_type_menu = InputOptionMenu(
             prompt_panel,
             values=self._naver_blog_prompt_menu_values(),
             width=220,
@@ -34522,7 +34524,7 @@ class KeywordApp(ctk.CTk):
         ).grid(row=1, column=3, padx=(0, 18), pady=8)
 
         ctk.CTkLabel(prompt_panel, text="주제 카테고리", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=18, pady=(8, 16), sticky="w")
-        self.naver_blog_topic_category_menu = ctk.CTkOptionMenu(
+        self.naver_blog_topic_category_menu = InputOptionMenu(
             prompt_panel,
             values=["선택안함", "여행", "건강", "이슈", "공연/행사", "생활정보", "상품리뷰"],
             width=160,
@@ -34990,7 +34992,7 @@ class KeywordApp(ctk.CTk):
         self.naver_blog_run_count_entry.grid(row=2, column=1, padx=(0, 10), pady=8, sticky="w")
         self.naver_blog_run_count_entry.insert(0, str(self.wordpress_settings.naver_blog_run_count))
         ctk.CTkLabel(posting_panel, text="첨부 이미지 수", text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, padx=18, pady=(8, 16), sticky="w")
-        self.naver_blog_image_count_menu = ctk.CTkOptionMenu(
+        self.naver_blog_image_count_menu = InputOptionMenu(
             posting_panel,
             values=[f"{count}개" for count in range(1, 11)],
             width=130,
@@ -38248,7 +38250,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         ).grid(row=0, column=0, padx=(18, 10), pady=16, sticky="w")
 
-        self.automation_interval_menu = ctk.CTkOptionMenu(
+        self.automation_interval_menu = InputOptionMenu(
             control_card,
             values=["1시간", "2시간", "4시간", "6시간", "12시간", "24시간"],
             width=110,
@@ -38459,7 +38461,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=3, padx=(18, 8), sticky="w")
 
-        self.automation_publish_interval_menu = ctk.CTkOptionMenu(
+        self.automation_publish_interval_menu = InputOptionMenu(
             management_row,
             values=["3분", "5분", "10분", "20분", "30분", "40분", "50분", "60분"],
             width=92,
@@ -38870,7 +38872,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(control_card, text="종류", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=2, column=0, padx=(18, 10), pady=8, sticky="w"
         )
-        self.public_data_type_menu = ctk.CTkOptionMenu(
+        self.public_data_type_menu = InputOptionMenu(
             control_card,
             values=["행사/축제", "공연/전시", "교육/체험", "전체"],
             height=38,
@@ -39220,7 +39222,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, pady=(0, 5), sticky="ew")
-        menu = ctk.CTkOptionMenu(
+        menu = InputOptionMenu(
             frame,
             values=["전체"],
             height=38,
@@ -39885,7 +39887,7 @@ class KeywordApp(ctk.CTk):
         ctk.CTkLabel(frame, text=label, font=ctk.CTkFont(size=13, weight="bold"), anchor="w").grid(
             row=0, column=0, pady=(0, 5), sticky="ew"
         )
-        menu = ctk.CTkOptionMenu(
+        menu = InputOptionMenu(
             frame,
             values=values,
             height=38,
@@ -40753,7 +40755,7 @@ class KeywordApp(ctk.CTk):
             self._bind_prompt_save_shortcut(name_entry)
             self.prompt_name_entries[platform] = name_entry
 
-            menu = ctk.CTkOptionMenu(
+            menu = InputOptionMenu(
                 control_row,
                 values=["기본"],
                 width=0,
@@ -42384,7 +42386,7 @@ class KeywordApp(ctk.CTk):
         )
         enabled_checkbox.grid(row=0, column=0, sticky="w")
 
-        self.cardnews_count_menu = ctk.CTkOptionMenu(
+        self.cardnews_count_menu = InputOptionMenu(
             option_row,
             values=["2", "1", "3", "4"],
             height=46,
@@ -42418,7 +42420,7 @@ class KeywordApp(ctk.CTk):
         )
         inline_checkbox.grid(row=0, column=0, padx=16, pady=14, sticky="w")
 
-        self.inline_images_count_menu = ctk.CTkOptionMenu(
+        self.inline_images_count_menu = InputOptionMenu(
             inline_row,
             values=["2", "1", "3", "4"],
             height=40,
@@ -42431,7 +42433,7 @@ class KeywordApp(ctk.CTk):
         )
         self.inline_images_count_menu.grid(row=0, column=1, padx=(10, 0), pady=14, sticky="ew")
 
-        self.inline_images_provider_menu = ctk.CTkOptionMenu(
+        self.inline_images_provider_menu = InputOptionMenu(
             inline_row,
             values=list(INLINE_IMAGES_PROVIDERS),
             height=40,
@@ -42524,7 +42526,7 @@ class KeywordApp(ctk.CTk):
         top_row.grid_columnconfigure(1, weight=1)
         top_row.grid_columnconfigure(2, weight=1)
 
-        self.codex_purpose_menu = ctk.CTkOptionMenu(
+        self.codex_purpose_menu = InputOptionMenu(
             top_row,
             values=["이미지 생성 프롬프트 설계", "글쓰기 보조", "전체 사용"],
             height=44,
@@ -42550,7 +42552,7 @@ class KeywordApp(ctk.CTk):
         )
         self.codex_cli_enabled_checkbox.grid(row=0, column=1, sticky="w")
 
-        self.codex_speed_menu = ctk.CTkOptionMenu(
+        self.codex_speed_menu = InputOptionMenu(
             top_row,
             values=["기본", "빠름", "고품질"],
             height=44,
@@ -42608,7 +42610,7 @@ class KeywordApp(ctk.CTk):
         model_grid.grid_columnconfigure(1, weight=1)
         model_grid.grid_columnconfigure(2, weight=1)
 
-        self.codex_cli_model_entry = ctk.CTkComboBox(
+        self.codex_cli_model_entry = InputComboBox(
             model_grid,
             values=list(CODEX_MODEL_OPTIONS),
             height=46,
@@ -43276,7 +43278,7 @@ class KeywordApp(ctk.CTk):
             text="광고 위치",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=0, padx=(0, 10), sticky="w")
-        self.tistory_ads_position_menu = ctk.CTkOptionMenu(
+        self.tistory_ads_position_menu = InputOptionMenu(
             placement_frame,
             values=list(TISTORY_AD_POSITION_OPTIONS),
             height=38,
@@ -43294,7 +43296,7 @@ class KeywordApp(ctk.CTk):
             text="삽입 개수",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=2, padx=(0, 10), sticky="w")
-        self.tistory_ads_count_menu = ctk.CTkOptionMenu(
+        self.tistory_ads_count_menu = InputOptionMenu(
             placement_frame,
             values=[str(value) for value in range(1, 11)],
             height=38,
@@ -43791,7 +43793,7 @@ class KeywordApp(ctk.CTk):
         options_row.grid(row=4, column=0, padx=24, pady=(0, 12), sticky="ew")
         options_row.grid_columnconfigure(0, weight=1)
 
-        self.ai_provider_menu = ctk.CTkOptionMenu(
+        self.ai_provider_menu = InputOptionMenu(
             options_row,
             values=list(WRITING_MODEL_OPTIONS),
             height=44,
@@ -43996,7 +43998,7 @@ class KeywordApp(ctk.CTk):
         )
         self.clear_reference_button.grid(row=0, column=1, padx=(0, 8), sticky="e")
 
-        self.writing_prompt_menu = ctk.CTkOptionMenu(
+        self.writing_prompt_menu = InputOptionMenu(
             reference_header,
             values=["워드프레스 · 기본"],
             width=210,
@@ -44080,7 +44082,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         ).grid(row=1, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="ew")
 
-        self.writing_inline_images_count_menu = ctk.CTkOptionMenu(
+        self.writing_inline_images_count_menu = InputOptionMenu(
             inline_image_card,
             values=["2", "1", "3", "4"],
             height=38,
@@ -44093,7 +44095,7 @@ class KeywordApp(ctk.CTk):
         )
         self.writing_inline_images_count_menu.grid(row=0, column=1, padx=(10, 0), pady=(14, 4), sticky="ew")
 
-        self.writing_inline_images_provider_menu = ctk.CTkOptionMenu(
+        self.writing_inline_images_provider_menu = InputOptionMenu(
             inline_image_card,
             values=list(INLINE_IMAGES_PROVIDERS),
             height=38,
@@ -44578,7 +44580,7 @@ class KeywordApp(ctk.CTk):
         )
         image_delete_button.grid(row=0, column=0, padx=(0, 8), sticky="ew")
 
-        self.thumbnail_image_position_menu = ctk.CTkOptionMenu(
+        self.thumbnail_image_position_menu = InputOptionMenu(
             image_action_row,
             values=["가운데", "왼쪽상단", "오른쪽상단", "왼쪽하단", "오른쪽하단"],
             height=38,
@@ -44717,7 +44719,7 @@ class KeywordApp(ctk.CTk):
 
         shadow_label = ctk.CTkLabel(text_effect_row, text="그림자", font=ctk.CTkFont(size=14, weight="bold"))
         shadow_label.grid(row=0, column=2, padx=(0, 8), sticky="w")
-        self.thumbnail_shadow_menu = ctk.CTkOptionMenu(text_effect_row, values=["없음", "약한 그림자", "강한 그림자"], height=40, corner_radius=12, fg_color="#111826", button_color="#111826", button_hover_color="#1d2940", dropdown_fg_color="#273142", dropdown_hover_color="#3468e8", font=ctk.CTkFont(size=14, weight="bold"), command=lambda _value: self._on_thumbnail_control_changed())
+        self.thumbnail_shadow_menu = InputOptionMenu(text_effect_row, values=["없음", "약한 그림자", "강한 그림자"], height=40, corner_radius=12, fg_color="#111826", button_color="#111826", button_hover_color="#1d2940", dropdown_fg_color="#273142", dropdown_hover_color="#3468e8", font=ctk.CTkFont(size=14, weight="bold"), command=lambda _value: self._on_thumbnail_control_changed())
         self.thumbnail_shadow_menu.grid(row=0, column=3, sticky="ew")
         self.thumbnail_shadow_menu.set("강한 그림자")
 
@@ -44892,7 +44894,7 @@ class KeywordApp(ctk.CTk):
             command=self._clear_cardnews_background_image,
         ).grid(row=0, column=1, padx=(0, 8), sticky="ew")
 
-        self.cardnews_image_position_menu = ctk.CTkOptionMenu(
+        self.cardnews_image_position_menu = InputOptionMenu(
             cardnews_image_row,
             values=["가운데", "왼쪽상단", "오른쪽상단", "왼쪽하단", "오른쪽하단"],
             height=38,
@@ -45011,7 +45013,7 @@ class KeywordApp(ctk.CTk):
         self.cardnews_font_size_entry.insert(0, "78")
         self.cardnews_font_size_entry.bind("<KeyRelease>", self._schedule_cardnews_control_update)
         ctk.CTkLabel(cardnews_text_effect_row, text="그림자", font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=2, padx=(0, 8), sticky="w")
-        self.cardnews_shadow_menu = ctk.CTkOptionMenu(
+        self.cardnews_shadow_menu = InputOptionMenu(
             cardnews_text_effect_row,
             values=["없음", "약한 그림자", "강한 그림자"],
             height=38,
@@ -45646,6 +45648,7 @@ class KeywordApp(ctk.CTk):
                     )
                 elif isinstance(child, ctk.CTkOptionMenu):
                     child.configure(
+                        border_width=2, border_color=palette["border"],
                         height=40, corner_radius=12, fg_color=palette["input"],
                         button_color=palette["button"], button_hover_color=palette["button_hover"],
                         dropdown_fg_color=palette["panel"], dropdown_hover_color=palette["selected"],
@@ -45705,7 +45708,7 @@ class KeywordApp(ctk.CTk):
         )
         label.grid(row=0, column=0, padx=4, pady=(0, 6), sticky="w")
 
-        menu = ctk.CTkOptionMenu(
+        menu = InputOptionMenu(
             card,
             values=values,
             height=42,
@@ -47806,7 +47809,7 @@ class KeywordApp(ctk.CTk):
         )
         label_widget.grid(row=row, column=0, padx=24, pady=(0 if row == 8 else 18, 8), sticky="w")
 
-        menu = ctk.CTkOptionMenu(
+        menu = InputOptionMenu(
             parent,
             values=values,
             height=50,
@@ -49347,7 +49350,7 @@ class KeywordApp(ctk.CTk):
         )
         full_width_checkbox.grid(row=0, column=3, padx=(0, 8), pady=10, sticky="e")
 
-        position_menu = ctk.CTkOptionMenu(
+        position_menu = InputOptionMenu(
             row_frame,
             values=LINK_POSITION_OPTIONS,
             width=112,

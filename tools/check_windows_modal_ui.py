@@ -14,6 +14,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from modal_backdrop import ModalDimmer, dim_color
+from input_surfaces import InputOptionMenu
 from windows_fonts import configure_windows_fonts, configure_windows_named_fonts
 
 
@@ -32,7 +33,7 @@ def check_theme(theme):
     card.pack(fill="both", expand=True, padx=20, pady=20)
     button = ctk.CTkButton(card, text="메뉴 · 완료 팝업 테스트", hover=False)
     button.pack(pady=8)
-    menu = ctk.CTkOptionMenu(card, values=["나눔고딕 테스트", "다른 항목"])
+    menu = InputOptionMenu(card, values=["나눔고딕 테스트", "다른 항목"])
     menu.pack(pady=8)
     progress = ctk.CTkProgressBar(card)
     progress.pack(pady=8)

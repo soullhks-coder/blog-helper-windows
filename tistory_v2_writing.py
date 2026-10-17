@@ -5,6 +5,7 @@ import copy
 from pathlib import Path
 
 import customtkinter as ctk
+from input_surfaces import InputOptionMenu
 
 from tistory_v2 import V2Store
 from tistory_v2_workflow import TistoryV2Workflow
@@ -27,7 +28,7 @@ class TistoryV2WritingControls(ctk.CTkFrame):
             if label:
                 ctk.CTkLabel(self, text=label, text_color=palette["muted"],
                              font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=column, padx=(8, 5))
-            menu = ctk.CTkOptionMenu(
+            menu = InputOptionMenu(
                 self, values=["불러오는 중"], width=140 if key != "thumbnail" else 106,
                 height=27, corner_radius=10, fg_color=palette["button"],
                 button_color=palette["button"], button_hover_color=palette["button_hover"],

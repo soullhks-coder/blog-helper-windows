@@ -95,6 +95,19 @@ def main() -> None:
                     if isinstance(widget, app_module.ctk.CTkOptionMenu):
                         assert widget._canvas.cget("bg") == background, str(widget)
                         assert widget._text_label.cget("bg") == widget._apply_appearance_mode(widget.cget("fg_color")), str(widget)
+                if isinstance(widget, (app_module.ctk.CTkOptionMenu, app_module.ctk.CTkComboBox)):
+                    assert isinstance(widget, (app_module.InputOptionMenu, app_module.InputComboBox)), str(widget)
+                    assert widget.cget('border_width') >= 2, str(widget)
+                    if widget.winfo_ismapped() and widget.winfo_height() >= 8:
+                        outline = widget._apply_appearance_mode(widget.cget('border_color'))
+                        for tag in ('border_parts_left', 'border_parts_right'):
+                            items = widget._canvas.find_withtag(tag)
+                            assert items and all(widget._canvas.itemcget(item, 'fill') == outline for item in items), (str(widget), tag)
+                        native = widget._text_label if isinstance(widget, app_module.InputOptionMenu) else widget._entry
+                        border = round(widget._apply_widget_scaling(widget.cget('border_width')))
+                        assert native.winfo_y() >= border, str(widget)
+                        assert native.winfo_y() + native.winfo_height() <= widget.winfo_height() - border - 1, str(widget)
+                    count += 1
                 if not isinstance(widget, (app_module.InputEntry, app_module.InputTextbox)):
                     continue
                 assert widget.cget("border_width") >= 2, str(widget)
@@ -1827,7 +1840,8 @@ def main() -> None:
                 for button in app.thumbnail_manager_preset_buttons.values():
                     assert button.winfo_rootx() + button.winfo_width() <= app.thumbnails_scroll._parent_canvas.winfo_rootx() + app.thumbnails_scroll._parent_canvas.winfo_width() + 2
             for name, editor in (("thumbnail-manager-inputs", app.thumbnail_prompt_preview),
-                                 ("cardnews-manager-inputs", app.cardnews_heading_entry)):
+                                 ("cardnews-manager-inputs", app.cardnews_heading_entry),
+                                 ("cardnews-manager-design-controls", app.cardnews_background_mode_menu)):
                 viewport = app.thumbnails_scroll._parent_canvas
                 viewport.yview_moveto(0)
                 settle(80)

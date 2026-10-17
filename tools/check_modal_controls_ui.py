@@ -6,6 +6,7 @@ import tkinter as tk
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import customtkinter as ctk
 from modal_backdrop import ModalDimmer
+from input_surfaces import InputOptionMenu
 
 
 def check(theme, platform):
@@ -20,11 +21,11 @@ def check(theme, platform):
     native_row.pack(fill='x', padx=20, pady=20)
     transparent = ctk.CTkFrame(native_row, fg_color='transparent')
     transparent.pack(fill='x')
-    baseline = ctk.CTkOptionMenu(transparent, values=['first', 'second'], height=27,
+    baseline = InputOptionMenu(transparent, values=['first', 'second'], height=27,
                                fg_color=fill, button_color=fill)
     baseline.pack()
     old_hidden_parent = ctk.CTkFrame(transparent, fg_color='transparent')
-    old_hidden = ctk.CTkOptionMenu(old_hidden_parent, values=['previously hidden'], fg_color=fill)
+    old_hidden = InputOptionMenu(old_hidden_parent, values=['previously hidden'], fg_color=fill)
     old_hidden.pack()
     root.update()
     dimmer = ModalDimmer(root, platform_name=platform)
@@ -39,10 +40,10 @@ def check(theme, platform):
             parent.pack(fill='x')
             label = ctk.CTkLabel(parent, text='Thumbnail / prompt')
             label.pack(side='left')
-            menu = ctk.CTkOptionMenu(parent, values=['one', 'two'], height=27,
+            menu = InputOptionMenu(parent, values=['one', 'two'], height=27,
                                    fg_color=fill, button_color=fill)
             menu.pack(side='left')
-            hidden = ctk.CTkOptionMenu(parent, values=['hidden'], fg_color=fill)
+            hidden = InputOptionMenu(parent, values=['hidden'], fg_color=fill)
             root.update_idletasks()
             for _ in range(3 if refresh else 0):
                 baseline.configure(state='disabled')
@@ -64,6 +65,11 @@ def check(theme, platform):
             assert menu._text_label.cget('bg') == fill
             assert baseline._text_label.cget('bg') == fill
             assert label._label.cget('bg') == color
+            for control in (menu, hidden, baseline, old_hidden):
+                outline = control._apply_appearance_mode(control.cget('border_color'))
+                for tag in ('border_parts_left', 'border_parts_right'):
+                    assert all(control._canvas.itemcget(item, 'fill') == outline
+                               for item in control._canvas.find_withtag(tag))
             assert not dimmer.active and not dimmer._windows_saved
             parent.destroy()
             old_hidden_parent.pack_forget()

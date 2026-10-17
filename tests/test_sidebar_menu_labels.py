@@ -192,7 +192,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
         self.assertIn("SIDEBAR_MENU_DEFAULT_LABELS.items()", menu_source)
         self.assertIn("_on_sidebar_menu_label_changed", menu_source)
         self.assertIn("BOOTSTRAP_ICON_OPTIONS", menu_source)
-        self.assertIn("ctk.CTkComboBox", menu_source)
+        self.assertIn("InputComboBox", menu_source)
         self.assertIn('"<Return>"', menu_source)
         self.assertIn('"<FocusOut>"', menu_source)
         self.assertIn("_on_sidebar_menu_icon_changed", menu_source)
