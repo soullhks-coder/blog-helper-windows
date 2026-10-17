@@ -20,11 +20,21 @@ class TistoryV2WritingControls(ctk.CTkFrame):
         self.values = self.store.preferences()
         self.menus, self.choices = {}, {}
         palette = app._theme_palette()
-        self.grid_columnconfigure(2, weight=1)
+        self.grid_columnconfigure(3, weight=1)
+        self.review_publish_var = ctk.BooleanVar(value=bool(self.values.get("review_publish", False)))
+        self.review_publish_switch = ctk.CTkSwitch(
+            self, text="검토 발행 OFF", variable=self.review_publish_var,
+            onvalue=True, offvalue=False, switch_width=50, switch_height=26,
+            corner_radius=13, progress_color="#1faa55",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self._on_review_publish_toggled,
+        )
+        self.review_publish_switch.grid(row=0, column=0, padx=(0, 12), sticky="w")
+        self._refresh_review_publish_ui()
         logo = app._home_platform_compact_logo("tistory")
         ctk.CTkLabel(self, text="" if logo else "티스토리", image=logo,
-                     width=22, height=22).grid(row=0, column=0, padx=(0, 5))
-        for column, key, label in ((1, "profile", ""), (3, "thumbnail", "썸네일"), (5, "prompt_id", "프롬프트")):
+                     width=22, height=22).grid(row=0, column=1, padx=(0, 5))
+        for column, key, label in ((2, "profile", ""), (4, "thumbnail", "썸네일"), (6, "prompt_id", "프롬프트")):
             if label:
                 ctk.CTkLabel(self, text=label, text_color=palette["muted"],
                              font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=column, padx=(8, 5))
@@ -39,8 +49,20 @@ class TistoryV2WritingControls(ctk.CTkFrame):
             )
             menu.grid(row=0, column=column + (1 if label else 0), sticky="e")
             self.menus[key] = menu
-        # Column 2 is the expanding spacer after the blog selector.
+        # Column 3 is the expanding spacer after the blog selector.
         self.refresh()
+
+    def _refresh_review_publish_ui(self):
+        self.review_publish_switch.configure(
+            text=f"검토 발행 {'ON' if self.review_publish_var.get() else 'OFF'}")
+
+    def _on_review_publish_toggled(self):
+        # Merge current slide preferences instead of overwriting the editor's
+        # newer deck/theme changes with this header's cached values.
+        self.values = {**self.values, **self.store.preferences(),
+                       "review_publish": bool(self.review_publish_var.get())}
+        self.store.save_preferences(self.values)
+        self._refresh_review_publish_ui()
 
     def refresh(self):
         options = self.workflow.options()
@@ -106,6 +128,13 @@ class TistoryV2WritingControls(ctk.CTkFrame):
                       "save_mode", "reference_image_protection_mode", "ads_enabled", "ads_code",
                       "ads_slot_id", "ads_position", "ads_count"):
             setattr(settings, "tistory_" + field, profile[field])
+        if self.review_publish_var.get():
+            # Reuse the existing native manual-review boundary: input the
+            # thumbnail/body/collages/tags, then keep Chrome open waiting for
+            # the user's publish + completion confirmation. Never change the
+            # shared blog profile or normal-writing auto-publish preference.
+            settings.tistory_auto_publish = False
+            settings.tistory_save_mode = self.api.TISTORY_SAVE_MODE_PUBLISH
         return settings
 
     def export_thumbnail(self, title, destination: Path):

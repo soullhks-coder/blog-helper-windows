@@ -384,6 +384,37 @@ def main() -> None:
             assert execution.inline_images_enabled is False
             assert app.wordpress_settings.home_target_platform == original_target
             assert app.default_thumbnail_preset_index == original_default
+            assert not controls.review_publish_var.get()
+            assert controls.review_publish_switch.cget("text") == "검토 발행 OFF"
+            settle(100)
+            review_toggle = controls.review_publish_switch
+            assert review_toggle.winfo_rootx() >= (app.writing_auto_progress_switch.winfo_rootx()
+                                                   + app.writing_auto_progress_switch.winfo_width())
+            assert abs(review_toggle.winfo_rooty() - app.writing_auto_progress_switch.winfo_rooty()) < 5
+            saved_auto_publish = app.wordpress_settings.tistory_auto_publish
+            saved_profiles = [dict(profile) for profile in app.wordpress_settings.tistory_profiles]
+            controls.review_publish_switch.toggle()
+            assert controls.review_publish_var.get()
+            assert controls.review_publish_switch.cget("text") == "검토 발행 ON"
+            assert controls.store.preferences()["review_publish"]
+            assert not app.writing_auto_progress_var.get()  # Independent of automatic progression.
+            assert not controls.execution_settings(app.wordpress_settings).tistory_auto_publish
+            assert app.wordpress_settings.tistory_auto_publish == saved_auto_publish
+            assert app.wordpress_settings.tistory_profiles == saved_profiles
+            from tistory_v2_writing import TistoryV2WritingControls
+            restored_controls = TistoryV2WritingControls(app.writing_control_row, app, app_module)
+            assert restored_controls.review_publish_var.get()
+            assert restored_controls.review_publish_switch.cget("text") == "검토 발행 ON"
+            restored_controls.destroy()
+            app._switch_page("writing")
+            settle(100)
+            assert not controls.review_publish_switch.winfo_ismapped()
+            app._switch_page("tistory_v2")
+            settle(100)
+            assert controls.review_publish_switch.winfo_ismapped()
+            assert controls.review_publish_var.get()
+            screenshot("v2-review-publish-on")
+            print(f"{sys.platform} {args.theme}: V2 review toggle placement, isolation and restart persistence passed", flush=True)
 
             # Same generation worker receives the actual collected references.
             with patch.object(app_module, "ArticleGenerationWorker") as worker, \
@@ -650,6 +681,9 @@ def main() -> None:
                 assert edited_body in options["article_html"]
                 assert options["settings"].target_platforms == ["tistory"]
                 assert options["settings"].tistory_active_profile == "티스토리 2"
+                assert not options["settings"].tistory_auto_publish
+                assert options["settings"].tistory_save_mode == app_module.TISTORY_SAVE_MODE_PUBLISH
+                assert controls.store.preferences()["review_publish"]  # Slide editing must preserve this flag.
                 assert options["tistory_v2_deck"]["id"] == saved_deck_id
                 assert options["tistory_v2_deck"]["slide_size"] == [1200, 600]
                 assert options["tistory_v2_deck"]["wiki_keyword"] == "별도 위키 검색어"
@@ -665,6 +699,16 @@ def main() -> None:
                 assert options["tistory_v2_deck"]["slides"][2]["text_vertical"] == "위"
                 assert panel._edit_job is None
                 publisher.return_value.start.assert_called_once()
+                # Automatic progression must use the very same review boundary,
+                # rather than bypassing it on the stage-3 -> upload callback.
+                publisher.reset_mock()
+                app.writing_auto_progress_var.set(True)
+                app.writing_auto_run_active = True
+                app._auto_publish_current_article()
+                publisher.return_value.start.assert_called_once()
+                assert not publisher.call_args.kwargs["settings"].tistory_auto_publish
+                assert controls.review_publish_var.get()
+                app.writing_auto_progress_var.set(False)
             app.pipeline_worker = None
             app.publish_progress_bar.stop()
             app.writing_auto_run_active = False

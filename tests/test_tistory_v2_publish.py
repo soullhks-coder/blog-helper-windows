@@ -198,7 +198,7 @@ class OriginalPipelineTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["tag_names"], ["서울", "여행"])
             self.assertEqual(run.call_args.kwargs["tistory_v2_slide_paths"], paths)
 
-    def _editor_run(self, *, collage_ok=True, ads=False):
+    def _editor_run(self, *, collage_ok=True, ads=False, review=False):
         order = []
         page, context = MagicMock(), MagicMock()
         page.url = "https://example.tistory.com/manage/newpost"
@@ -226,17 +226,34 @@ class OriginalPipelineTests(unittest.TestCase):
             stack.enter_context(patch("tistory_v2_editor.insert_native_slide_pairs", side_effect=collage))
             stack.enter_context(patch.object(main, "enter_tistory_tags_native", side_effect=lambda *args: order.append("tags")))
             draft = stack.enter_context(patch.object(main, "click_tistory_draft_save_native", side_effect=lambda *args: order.append("draft") or True))
+            complete = stack.enter_context(patch.object(main, "click_tistory_complete_native"))
             publish = stack.enter_context(patch.object(main, "click_tistory_public_publish_native"))
+            def manual_wait(*args, **kwargs):
+                order.append("review")
+                self.assertEqual(args[:2], ("tistory", main.TISTORY_PROFILE_SCOPES[0]))
+                self.assertIs(args[2], page)
+                context.close.assert_not_called()  # Editor stays available for the user.
+                complete.assert_not_called()
+                publish.assert_not_called()
+                draft.assert_not_called()
+            wait = stack.enter_context(patch.object(main, "wait_for_manual_publish_completion", side_effect=manual_wait))
             def run():
                 return main.run_tistory_playwright_automation(page.url, "body-script", queue.Queue(),
-                    save_mode=main.TISTORY_SAVE_MODE_DRAFT, tistory_v2_slide_paths=[f"/{i}.png" for i in range(10)],
+                    auto_publish=not review,
+                    save_mode=main.TISTORY_SAVE_MODE_PUBLISH if review else main.TISTORY_SAVE_MODE_DRAFT,
+                    tistory_v2_slide_paths=[f"/{i}.png" for i in range(10)],
                     tistory_v2_slide_size=[900, 600],
                     tistory_v2_slide_sizes=[[900, 600], [600, 900]] * 5,
                     tistory_v2_ads={"code": '<ins class="adsbygoogle"></ins>', "count": 2} if ads else None)
             if collage_ok:
-                success, _ = run()
+                success, result = run()
                 self.assertTrue(success)
-                self.assertEqual(order, ["body", "collage", "tags", "draft"])
+                self.assertEqual(order, ["body", "collage", "tags", "review" if review else "draft"])
+                if review:
+                    wait.assert_called_once()
+                    self.assertTrue(result["manual_completed"])
+                else:
+                    wait.assert_not_called()
                 attention_wait.assert_not_called()
             else:
                 with self.assertRaisesRegex(RuntimeError, "콜라주"):
@@ -245,6 +262,7 @@ class OriginalPipelineTests(unittest.TestCase):
                 draft.assert_not_called()
                 attention_wait.assert_called_once_with(page)
             publish.assert_not_called()
+            complete.assert_not_called()
             context.close.assert_called_once()
 
     def test_native_collages_finish_before_tags_and_draft(self):
@@ -255,6 +273,9 @@ class OriginalPipelineTests(unittest.TestCase):
 
     def test_ads_keep_native_groups_before_draft(self):
         self._editor_run(ads=True)
+
+    def test_review_finishes_body_collages_and_tags_without_any_save_or_publish_click(self):
+        self._editor_run(review=True, ads=True)
 
 
 if __name__ == "__main__":
