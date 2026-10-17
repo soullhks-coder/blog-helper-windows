@@ -1875,6 +1875,11 @@ def main() -> None:
                     assert resolved_color(sidebar_button, "bg_color") == app._theme_palette()["sidebar"]
                     assert resolved_color(sidebar_button, "fg_color") == expected_fill
                 assert_white_button_contrast(page_frame)
+            if args.theme == "light":
+                with patch.object(app.shell_frame, "configure", wraps=app.shell_frame.configure) as repaint:
+                    app._finish_theme_paint(force=True)
+                    repaint.assert_not_called()
+                print(f"{sys.platform} {args.theme}: unchanged shell theme avoids recursive whole-app redraw", flush=True)
             app._switch_page("automation")
             settle(220)
             assert tuple(app.automation_keyword_source_buttons) == (

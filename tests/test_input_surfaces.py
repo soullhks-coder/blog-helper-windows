@@ -5,10 +5,18 @@ from unittest.mock import Mock, patch
 
 import customtkinter as ctk
 
-from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, entry_vertical_inset, outline_width
+from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, configure_changed, entry_vertical_inset, outline_width
 
 
 class InputSurfaceTests(unittest.TestCase):
+    def test_unchanged_parent_theme_values_do_not_trigger_recursive_redraw(self):
+        parent = Mock()
+        parent.cget.side_effect = {'fg_color': '#ffffff', 'text': 'current'}.get
+        self.assertFalse(configure_changed(parent, fg_color='#ffffff', text='current'))
+        parent.configure.assert_not_called()
+        self.assertTrue(configure_changed(parent, fg_color='#ffffff', text='changed'))
+        parent.configure.assert_called_once_with(text='changed')
+
     def test_flat_or_thin_legacy_inputs_keep_a_visible_outline(self):
         for value in (None, 0, 1, 1.5, 2):
             self.assertEqual(outline_width(value), 2)
@@ -80,6 +88,7 @@ class InputSurfaceTests(unittest.TestCase):
         with patch.object(ctk.CTkBaseClass, '_draw'):
             menu._draw()
         menu._canvas.itemconfigure.assert_not_called()
+        menu._canvas.update_idletasks.assert_not_called()
         self.assertIn('border_parts_right', [call.args[0] for call in menu._canvas.itemconfig.call_args_list])
         combo = object.__new__(InputComboBox)
         combo._canvas = Mock()

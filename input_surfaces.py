@@ -30,6 +30,21 @@ def entry_vertical_inset(border_width, scale):
     return max(2, math.ceil(border_width * scale) + 1)
 
 
+def configure_changed(widget, **values):
+    """Avoid CTk's recursive child redraw when a theme value is unchanged."""
+    changes = {}
+    for option, value in values.items():
+        try:
+            unchanged = widget.cget(option) == value
+        except (tk.TclError, ValueError):
+            unchanged = False
+        if not unchanged:
+            changes[option] = value
+    if changes:
+        widget.configure(**changes)
+    return bool(changes)
+
+
 class InputEntry(ctk.CTkEntry):
     def __init__(self, master, **kwargs):
         kwargs["border_width"] = outline_width(kwargs.get("border_width"))
@@ -122,7 +137,9 @@ class InputOptionMenu(ctk.CTkOptionMenu):
             self._text_label.configure(bg=self._apply_appearance_mode(self._fg_color),
                                        fg=self._apply_appearance_mode(text))
             self._canvas.itemconfig("dropdown_arrow", fill=self._apply_appearance_mode(text))
-        self._canvas.update_idletasks()
+        # Let Tk's normal event loop present the drawing. Synchronously
+        # draining idle jobs from each dropdown can re-enter a theme/modal
+        # update while its parent is still being repainted.
 
     def configure(self, require_redraw=False, **kwargs):
         if "border_width" in kwargs:

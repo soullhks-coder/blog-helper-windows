@@ -46,7 +46,7 @@ from startup_guard import acquire_windows_single_instance, release_windows_singl
 _WINDOWS_SINGLE_INSTANCE_MUTEX = acquire_windows_single_instance()
 
 import customtkinter as ctk
-from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, InputTextbox
+from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, InputTextbox, configure_changed
 import certifi
 import tkinter as tk
 import tkinter.font as tkfont
@@ -28311,7 +28311,7 @@ class KeywordApp(ctk.CTk):
             return
         try:
             if isinstance(widget, ctk.CTkButton):
-                widget.configure(corner_radius=22)
+                configure_changed(widget, corner_radius=22)
                 fg_color = widget.cget("fg_color")
                 sidebar_buttons = {
                     "home": getattr(self, "home_nav_button", None),
@@ -28332,7 +28332,7 @@ class KeywordApp(ctk.CTk):
                     # 선택된 사이드 메뉴는 아이콘과 동일한 테마 강조색을
                     # 유지한다. 밝은 선택 배경용 일반 보정이 파란 글자를
                     # 검정으로 다시 덮어쓰지 않도록 먼저 처리한다.
-                    widget.configure(
+                    configure_changed(widget,
                         text_color=palette["accent"],
                         text_color_disabled=palette["accent"],
                     )
@@ -28340,18 +28340,18 @@ class KeywordApp(ctk.CTk):
                     fg_color,
                     {"#ffffff", "#edf2f8", "#e6eefc", "#f7f9fc", "#d7e3f4", "#dce7f7", "#c5d6ef"},
                 ):
-                    widget.configure(text_color=palette["text"])
+                    configure_changed(widget, text_color=palette["text"])
                 elif self._is_dark_button_fill(fg_color):
-                    widget.configure(
+                    configure_changed(widget,
                         text_color="#ffffff",
                         text_color_disabled="#ffffff",
                     )
             elif isinstance(widget, ctk.CTkOptionMenu):
-                widget.configure(corner_radius=22)
+                configure_changed(widget, corner_radius=22)
             elif isinstance(widget, ctk.CTkEntry):
-                widget.configure(corner_radius=16)
+                configure_changed(widget, corner_radius=16)
             elif isinstance(widget, ctk.CTkTextbox):
-                widget.configure(corner_radius=16)
+                configure_changed(widget, corner_radius=16)
         except Exception:
             pass
 
@@ -28395,7 +28395,10 @@ class KeywordApp(ctk.CTk):
             if child in self._theme_painted_widgets:
                 self._apply_white_widget_polish(child, palette)
                 if isinstance(child, (InputEntry, InputTextbox, InputOptionMenu, InputComboBox)):
-                    child._draw()
+                    # Their configure()/parent background propagation already
+                    # owns the native redraw. Repainting again here is both
+                    # redundant and expensive for Windows font-shaped borders.
+                    continue
                 else:
                     self._retint_widget_tree(child, palette)
                 continue
@@ -28555,19 +28558,19 @@ class KeywordApp(ctk.CTk):
         self._theme_paint_last_run = now
         palette = self._theme_palette()
         try:
-            self.configure(fg_color=palette["shell"])
-            self.shell_frame.configure(fg_color=palette["shell"])
-            self.sidebar_frame.configure(fg_color=palette["sidebar"])
-            self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
-            self.sidebar_version_label.configure(text_color=palette["muted"])
+            configure_changed(self, fg_color=palette["shell"])
+            configure_changed(self.shell_frame, fg_color=palette["shell"])
+            configure_changed(self.sidebar_frame, fg_color=palette["sidebar"])
+            configure_changed(self.sidebar_title, text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
+            configure_changed(self.sidebar_version_label, text_color=palette["muted"])
             self._retint_widget_tree(self.sidebar_frame, palette)
             active_page = self._current_page_frame()
             if active_page is not None:
                 self._retint_widget_tree(active_page, palette)
-            self.shell_frame.configure(fg_color=palette["shell"])
-            self.sidebar_frame.configure(fg_color=palette["sidebar"])
-            self.sidebar_title.configure(text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
-            self.sidebar_version_label.configure(text_color=palette["muted"])
+            configure_changed(self.shell_frame, fg_color=palette["shell"])
+            configure_changed(self.sidebar_frame, fg_color=palette["sidebar"])
+            configure_changed(self.sidebar_title, text=self.wordpress_settings.app_title or "현기쿠", text_color=palette["accent"])
+            configure_changed(self.sidebar_version_label, text_color=palette["muted"])
             self._refresh_sidebar_navigation_styles()
             scroll_names_by_page = {
                 "home": ("home_scroll",),
@@ -28604,21 +28607,21 @@ class KeywordApp(ctk.CTk):
 
     def _paint_scrollable_background(self, scroll_frame, color: str) -> None:
         try:
-            scroll_frame.configure(fg_color=color)
+            configure_changed(scroll_frame, fg_color=color)
         except Exception:
             pass
         for attribute in ("_parent_canvas", "_canvas"):
             target = getattr(scroll_frame, attribute, None)
             if target is not None:
                 try:
-                    target.configure(bg=color, highlightthickness=0)
+                    configure_changed(target, bg=color, highlightthickness=0)
                 except Exception:
                     pass
         for attribute in ("_parent_frame", "_scrollable_frame"):
             target = getattr(scroll_frame, attribute, None)
             if target is not None:
                 try:
-                    target.configure(fg_color=color, bg_color=color)
+                    configure_changed(target, fg_color=color, bg_color=color)
                 except Exception:
                     try:
                         target.configure(bg=color)
