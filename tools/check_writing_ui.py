@@ -260,6 +260,22 @@ def main() -> None:
             app.update()
             settle(900)
             assert app.tistory_v2_panel is None  # no separate workflow/startup work
+            assert app.tistory_upload_webp_var.get()
+            assert app.tistory_upload_webp_switch.cget("text") == "WebP로 변환해 업로드 ON"
+            app.tistory_upload_webp_switch.toggle()
+            assert not app.wordpress_settings.tistory_upload_webp
+            assert app.tistory_upload_webp_switch.cget("text") == "WebP로 변환해 업로드 OFF"
+            app.tistory_active_profile_var.set("티스토리 2")
+            app._on_tistory_profile_selected()
+            assert app.tistory_upload_webp_var.get()
+            app.tistory_active_profile_var.set("티스토리 1")
+            app._on_tistory_profile_selected()
+            assert not app.tistory_upload_webp_var.get()
+            upload_settings = app._read_wordpress_settings(include_prompts=False)
+            assert not upload_settings.tistory_upload_webp
+            assert not upload_settings.tistory_profiles[0]["upload_webp"]
+            assert upload_settings.tistory_profiles[1]["upload_webp"]
+            print(f"{sys.platform} {args.theme}: Tistory WebP toggle, per-profile restoration and persistence passed", flush=True)
             original_article = app.article_editor.get("1.0", "end")
             original_target = app.wordpress_settings.home_target_platform
             original_default = app.default_thumbnail_preset_index
@@ -381,6 +397,8 @@ def main() -> None:
             assert execution.target_platforms == ["tistory"]
             assert execution.tistory_active_profile == "티스토리 2"
             assert execution.tistory_blog_url == "https://v2-second.tistory.com"
+            assert execution.tistory_upload_webp
+            assert not app.wordpress_settings.tistory_upload_webp  # V2 follows its own selected profile.
             assert execution.inline_images_enabled is False
             assert app.wordpress_settings.home_target_platform == original_target
             assert app.default_thumbnail_preset_index == original_default
@@ -1156,6 +1174,28 @@ def main() -> None:
             app.theme_menu.configure(state="normal")
             print(f"{sys.platform} {args.theme}: font settings placement, persistence and restart callback passed", flush=True)
             app._switch_settings_section("ai")
+            app._switch_settings_tab("tistory")
+            # Tk/macOS may unmap canvas child windows while another native
+            # window occludes the app. Inspect the foreground settings view.
+            app.lift()
+            app.focus_force()
+            app.update()
+            settings_canvas = app.settings_scroll._parent_canvas
+            settings_canvas.yview_moveto(0)
+            settle()
+            option_y = (app.tistory_upload_webp_switch.winfo_rooty()
+                        - app.settings_scroll.winfo_rooty())
+            settings_canvas.yview_moveto(max(0, (option_y - settings_canvas.winfo_height() / 2)
+                                             / max(1, app.settings_scroll.winfo_height())))
+            settle()
+            screenshot("tistory-webp-setting")
+            assert app.tistory_upload_webp_switch.winfo_ismapped(), [
+                (type(widget).__name__, widget.winfo_ismapped(), widget.winfo_geometry(), widget.winfo_manager())
+                for widget in (app.tistory_upload_webp_switch, app.tistory_upload_webp_switch.master,
+                               app.tistory_card, app.settings_scroll, app.settings_scroll._parent_canvas,
+                               app.settings_scroll._parent_frame, app.settings_page, app)
+            ]
+            assert int(app.tistory_upload_webp_switch.grid_info()["row"]) == 6
             app._switch_settings_tab("adsense")
             app.update()
             settle()

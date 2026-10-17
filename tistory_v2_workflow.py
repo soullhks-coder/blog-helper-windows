@@ -185,7 +185,8 @@ class TistoryV2Workflow:
 
                 def upload(path):
                     check_cancel(cancel)
-                    url = api.upload_tistory_image_file(page, str(path), events, excluded_urls=used_urls)
+                    url = api.upload_tistory_image_file(page, str(path), events, excluded_urls=used_urls,
+                                                       upload_webp=bool(profile.get("upload_webp", True)))
                     if url in used_urls:
                         raise RuntimeError("같은 이미지 업로드 주소가 중복되었습니다.")
                     used_urls.add(url)

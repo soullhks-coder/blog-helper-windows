@@ -88,6 +88,9 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_publish.py -q
           python -m unittest discover -s tests -p test_manual_publish_mode.py -q
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
+          python -m unittest discover -s tests -p test_image_uploads.py -q
+          python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
+          python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -110,6 +113,7 @@ jobs:
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
           python tools/check_modal_controls_ui.py
+          python tools/check_webp_uploads.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.exe
@@ -201,6 +205,9 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_publish.py -q
           python -m unittest discover -s tests -p test_manual_publish_mode.py -q
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
+          python -m unittest discover -s tests -p test_image_uploads.py -q
+          python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
+          python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 
       - name: Check writing UI in dark and light themes
@@ -209,6 +216,7 @@ jobs:
           python tools/check_input_surfaces_ui.py
           python tools/check_macos_ime_ui.py
           python tools/check_modal_controls_ui.py
+          python tools/check_webp_uploads.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.app

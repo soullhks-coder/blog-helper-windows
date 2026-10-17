@@ -124,7 +124,7 @@ class TistoryV2WritingControls(ctk.CTkFrame):
         settings.article_prompt_template = prompt["article_prompt"]
         settings.inline_images_enabled = False
         settings.tistory_active_profile = profile["name"]
-        for field in ("blog_url", "write_url", "daily_publish_limit", "input_mode", "auto_publish",
+        for field in ("blog_url", "write_url", "daily_publish_limit", "input_mode", "auto_publish", "upload_webp",
                       "save_mode", "reference_image_protection_mode", "ads_enabled", "ads_code",
                       "ads_slot_id", "ads_position", "ads_count"):
             setattr(settings, "tistory_" + field, profile[field])

@@ -358,7 +358,10 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         html_switch_source = inspect.getsource(main.open_blogspot_html_editor)
         view_switch_source = inspect.getsource(main._open_blogspot_view_option)
         html_fill_source = inspect.getsource(main.fill_blogspot_html_editor)
-        upload_source = inspect.getsource(main.upload_blogspot_images)
+        upload_wrapper = inspect.getsource(main.upload_blogspot_images)
+        self.assertIn("webp_upload_files", upload_wrapper)
+        self.assertIn("_upload_blogspot_webp_files", upload_wrapper)
+        upload_source = inspect.getsource(main._upload_blogspot_webp_files)
         image_button_source = inspect.getsource(
             main.find_blogspot_image_insert_button
         )

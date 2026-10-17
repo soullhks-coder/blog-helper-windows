@@ -47,6 +47,7 @@ _WINDOWS_SINGLE_INSTANCE_MUTEX = acquire_windows_single_instance()
 
 import customtkinter as ctk
 from input_surfaces import InputComboBox, InputEntry, InputOptionMenu, InputTextbox, configure_changed
+from image_uploads import encode_webp_upload, webp_upload_files
 import certifi
 import tkinter as tk
 import tkinter.font as tkfont
@@ -3514,6 +3515,7 @@ class WordPressSettings:
     tistory_daily_publish_limit: int = 0
     tistory_input_mode: str = TEXT_INPUT_MODE_FAST
     tistory_auto_publish: bool = True
+    tistory_upload_webp: bool = True
     tistory_save_mode: str = TISTORY_SAVE_MODE_PUBLISH
     tistory_reference_image_protection_mode: bool = False
     tistory_ads_enabled: bool = True
@@ -4235,6 +4237,7 @@ class AppStateStore:
                 "daily_publish_limit": payload.get("tistory_daily_publish_limit", 0),
                 "input_mode": payload.get("tistory_input_mode", TEXT_INPUT_MODE_FAST),
                 "auto_publish": payload.get("tistory_auto_publish", True),
+                "upload_webp": payload.get("tistory_upload_webp", True),
                 "save_mode": payload.get("tistory_save_mode", TISTORY_SAVE_MODE_PUBLISH),
                 "reference_image_protection_mode": payload.get(
                     "tistory_reference_image_protection_mode", False
@@ -4366,6 +4369,7 @@ class AppStateStore:
                 else TEXT_INPUT_MODE_FAST
             ),
             tistory_auto_publish=bool(active_tistory.get("auto_publish", True)),
+            tistory_upload_webp=bool(active_tistory.get("upload_webp", True)),
             tistory_save_mode=normalize_tistory_save_mode(
                 str(active_tistory.get("save_mode", TISTORY_SAVE_MODE_PUBLISH))
             ),
@@ -4819,13 +4823,13 @@ class WordPressClient:
         }
 
     def upload_media(self, image_path: Path, title: str) -> dict:
-        file_name = build_wordpress_media_filename(image_path, title)
-        image_bytes = image_path.read_bytes()
-        content_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+        image_path = Path(image_path)
+        file_name = build_wordpress_media_filename(image_path.with_suffix(".webp"), title)
+        image_bytes = encode_webp_upload(image_path)
         headers = {
             "Authorization": self._build_auth_header(),
             "User-Agent": "BlogHelper/1.0",
-            "Content-Type": content_type,
+            "Content-Type": "image/webp",
             "Content-Disposition": f'attachment; filename="{file_name}"',
         }
         request = Request(
@@ -9923,6 +9927,15 @@ def find_blogspot_image_insert_button(page):
 
 
 def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Queue) -> int:
+    """All Blogger flows upload WebP copies, leaving shared/Tistory inputs intact."""
+    originals = [Path(path).expanduser().resolve() for path in image_paths if Path(path).expanduser().is_file()]
+    if not originals:
+        return 0
+    with webp_upload_files(originals) as webp_paths:
+        return _upload_blogspot_webp_files(page, webp_paths, result_queue)
+
+
+def _upload_blogspot_webp_files(page, image_paths: list[str], result_queue: queue.Queue) -> int:
     valid_paths = [str(Path(path).expanduser().resolve()) for path in image_paths if Path(path).expanduser().is_file()]
     if not valid_paths:
         return 0
@@ -10968,6 +10981,7 @@ def normalize_tistory_profiles(
                     str(profile.get("input_mode") or TEXT_INPUT_MODE_FAST)
                 ),
                 "auto_publish": bool(profile.get("auto_publish", True)),
+                "upload_webp": bool(profile.get("upload_webp", True)),
                 "save_mode": normalize_tistory_save_mode(
                     str(profile.get("save_mode") or TISTORY_SAVE_MODE_PUBLISH)
                 ),
@@ -18824,6 +18838,22 @@ def upload_tistory_image_file(
     result_queue: queue.Queue,
     excluded_urls: set[str] | None = None,
     cancel_event: threading.Event | None = None,
+    *,
+    upload_webp: bool = False,
+) -> str:
+    check_writing_cancelled(cancel_event or getattr(result_queue, "cancel_event", None))
+    if upload_webp:
+        with webp_upload_files([image_path]) as paths:
+            return _upload_tistory_image_file(page, paths[0], result_queue, excluded_urls, cancel_event)
+    return _upload_tistory_image_file(page, image_path, result_queue, excluded_urls, cancel_event)
+
+
+def _upload_tistory_image_file(
+    page,
+    image_path: str,
+    result_queue: queue.Queue,
+    excluded_urls: set[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
     check_writing_cancelled(cancel_event)
@@ -18991,6 +19021,8 @@ def upload_tistory_native_images(
     native_image_files: dict[str, str],
     result_queue: queue.Queue,
     cancel_event: threading.Event | None = None,
+    *,
+    upload_webp: bool = False,
 ) -> dict[str, str]:
     cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
     uploaded_urls: dict[str, str] = {}
@@ -19005,6 +19037,7 @@ def upload_tistory_native_images(
             result_queue,
             excluded_urls=used_urls,
             cancel_event=cancel_event,
+            upload_webp=upload_webp,
         )
         if uploaded_url in used_urls:
             raise RuntimeError(
@@ -19089,6 +19122,19 @@ def wait_for_tistory_publish_panel(page, timeout_ms: int = 20_000) -> bool:
 
 
 def attach_tistory_representative_image_file(
+    page,
+    image_path: str,
+    result_queue: queue.Queue,
+    *,
+    upload_webp: bool = False,
+) -> bool:
+    if upload_webp:
+        with webp_upload_files([image_path]) as paths:
+            return _attach_tistory_representative_image_file(page, paths[0], result_queue)
+    return _attach_tistory_representative_image_file(page, image_path, result_queue)
+
+
+def _attach_tistory_representative_image_file(
     page,
     image_path: str,
     result_queue: queue.Queue,
@@ -19379,6 +19425,7 @@ def run_tistory_playwright_automation(
     tistory_v2_slide_size: list[int] | tuple[int, int] | None = None,
     tistory_v2_slide_sizes: list[list[int]] | None = None,
     cancel_event: threading.Event | None = None,
+    upload_webp: bool = True,
 ) -> tuple[bool, str | dict[str, object]]:
     cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
     check_writing_cancelled(cancel_event)
@@ -19459,7 +19506,8 @@ def run_tistory_playwright_automation(
             page.evaluate("window.onbeforeunload = null")
             if native_image_files:
                 uploaded_urls = upload_tistory_native_images(
-                    page, native_image_files, result_queue, cancel_event=cancel_event)
+                    page, native_image_files, result_queue, cancel_event=cancel_event,
+                    upload_webp=upload_webp)
                 check_writing_cancelled(cancel_event)
                 for token, uploaded_url in uploaded_urls.items():
                     script = script.replace(token, uploaded_url)
@@ -19489,6 +19537,7 @@ def run_tistory_playwright_automation(
                     uploaded_url = upload_tistory_image_file(
                         page, path, result_queue, excluded_urls=used_urls,
                         cancel_event=cancel_event,
+                        upload_webp=upload_webp,
                     )
                     check_writing_cancelled(cancel_event)
                     if not uploaded_url or uploaded_url in used_urls:
@@ -19588,6 +19637,7 @@ def run_tistory_playwright_automation(
                         page,
                         representative_image_path,
                         result_queue,
+                        upload_webp=upload_webp,
                     )
                     check_writing_cancelled(cancel_event)
                 published_url = ""
@@ -25698,6 +25748,7 @@ class TistoryAutomationWorker(threading.Thread):
         tistory_v2_slide_size: list[int] | tuple[int, int] | None = None,
         tistory_v2_slide_sizes: list[list[int]] | None = None,
         cancel_event: threading.Event | None = None,
+        upload_webp: bool = True,
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
@@ -25706,6 +25757,7 @@ class TistoryAutomationWorker(threading.Thread):
         self.delay_seconds = delay_seconds
         self.mode_only = mode_only
         self.thumbnail_path = thumbnail_path
+        self.upload_webp = bool(upload_webp)
         self.automation_prompt = automation_prompt
         self.tag_names = tag_names or []
         self.save_mode = normalize_tistory_save_mode(
@@ -25811,7 +25863,10 @@ class TistoryAutomationWorker(threading.Thread):
             native_image_files: dict[str, str] = {}
             if self.thumbnail_path:
                 self.result_queue.put(("tistory_progress", "썸네일 이미지를 티스토리 파일 첨부용으로 준비 중입니다..."))
-                thumbnail_data_url = image_file_to_data_url(self.thumbnail_path)
+                thumbnail_data_url = (
+                    image_bytes_to_data_url(encode_webp_upload(self.thumbnail_path), "image/webp")
+                    if self.upload_webp else image_file_to_data_url(self.thumbnail_path)
+                )
                 thumbnail_content_url = "__BLOG_HELPER_TISTORY_NATIVE_THUMBNAIL__"
                 native_image_files[thumbnail_content_url] = self.thumbnail_path
             check_writing_cancelled(self.cancel_event)
@@ -25974,7 +26029,9 @@ class TistoryAutomationWorker(threading.Thread):
                 collage_images=[],
                 automation_actions=parse_tistory_automation_prompt(self.automation_prompt),
                 tag_names=self.tag_names,
-                thumbnail_file_name=Path(self.thumbnail_path).name if self.thumbnail_path else "blog-helper-thumbnail.png",
+                thumbnail_file_name=(Path(self.thumbnail_path).with_suffix(".webp").name
+                                     if self.thumbnail_path and self.upload_webp else
+                                     Path(self.thumbnail_path).name if self.thumbnail_path else "blog-helper-thumbnail.png"),
                 publish_after_input=self.publish_after_input,
                 save_mode=self.save_mode,
                 close_after_publish=self.close_after_publish,
@@ -25993,6 +26050,7 @@ class TistoryAutomationWorker(threading.Thread):
                 save_mode=self.save_mode,
                 profile_scope=self.profile_scope,
                 auto_publish=self.auto_publish,
+                upload_webp=self.upload_webp,
                 on_public_publish_clicked=mark_public_publish_clicked,
                 before_public_publish=refresh_shared_reservation_before_publish,
                 tistory_v2_slide_paths=self.tistory_v2_slide_paths,
@@ -26564,6 +26622,7 @@ class PublishPipelineWorker(threading.Thread):
                         or TISTORY_PROFILE_SCOPES[0]
                     ),
                     "auto_publish": bool(self.settings.tistory_auto_publish),
+                    "upload_webp": bool(self.settings.tistory_upload_webp),
                     "save_mode": self.settings.tistory_save_mode,
                     "reference_image_protection_mode": self.settings.tistory_reference_image_protection_mode,
                     "input_mode": self.settings.tistory_input_mode,
@@ -43309,6 +43368,22 @@ class KeywordApp(ctk.CTk):
             sticky="ew",
         )
 
+        self.tistory_upload_webp_var = tk.BooleanVar(value=True)
+        self.tistory_upload_webp_switch = ctk.CTkSwitch(
+            input_mode_frame, text="WebP로 변환해 업로드 ON",
+            variable=self.tistory_upload_webp_var, onvalue=True, offvalue=False,
+            switch_width=48, switch_height=24,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._on_tistory_upload_webp_changed,
+        )
+        self.tistory_upload_webp_switch.grid(row=6, column=0, columnspan=2, padx=16, pady=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            input_mode_frame,
+            text="썸네일·본문·V2 슬라이드·대표이미지에 적용합니다.\n원본 파일은 보존하며 OFF이면 기존 형식으로 첨부합니다.",
+            anchor="w", justify="left", wraplength=600,
+            text_color=("#607089", "#9aa7bb"), font=ctk.CTkFont(size=13),
+        ).grid(row=7, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
+
         ads_frame = ctk.CTkFrame(
             self.tistory_card,
             corner_radius=16,
@@ -48035,6 +48110,7 @@ class KeywordApp(ctk.CTk):
                 "daily_publish_limit": self.wordpress_settings.tistory_daily_publish_limit,
                 "input_mode": self.wordpress_settings.tistory_input_mode,
                 "auto_publish": self.wordpress_settings.tistory_auto_publish,
+                "upload_webp": self.wordpress_settings.tistory_upload_webp,
                 "save_mode": self.wordpress_settings.tistory_save_mode,
                 "reference_image_protection_mode": self.wordpress_settings.tistory_reference_image_protection_mode,
                 "ads_enabled": self.wordpress_settings.tistory_ads_enabled,
@@ -49816,6 +49892,7 @@ class KeywordApp(ctk.CTk):
                 self.tistory_input_mode_var.get()
             ),
             tistory_auto_publish=bool(self.tistory_auto_publish_var.get()),
+            tistory_upload_webp=bool(self.tistory_upload_webp_var.get()),
             tistory_save_mode=normalize_tistory_save_mode(
                 self.tistory_save_mode_var.get()
             ),
@@ -50493,6 +50570,7 @@ class KeywordApp(ctk.CTk):
                     self.tistory_input_mode_var.get()
                 ),
                 "auto_publish": bool(self.tistory_auto_publish_var.get()),
+                "upload_webp": bool(self.tistory_upload_webp_var.get()),
                 "save_mode": normalize_tistory_save_mode(
                     self.tistory_save_mode_var.get()
                 ),
@@ -50586,6 +50664,7 @@ class KeywordApp(ctk.CTk):
             normalize_text_input_mode(str(profile.get("input_mode") or ""))
         )
         self.tistory_auto_publish_var.set(bool(profile.get("auto_publish", True)))
+        self.tistory_upload_webp_var.set(bool(profile.get("upload_webp", True)))
         self.tistory_save_mode_var.set(
             normalize_tistory_save_mode(str(profile.get("save_mode") or ""))
         )
@@ -50605,6 +50684,7 @@ class KeywordApp(ctk.CTk):
         )
         self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_auto_publish_changed(save=False)
+        self._on_tistory_upload_webp_changed(save=False)
         self._on_tistory_save_mode_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
@@ -50661,6 +50741,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_auto_publish = bool(
             profile.get("auto_publish", True)
         )
+        self.wordpress_settings.tistory_upload_webp = bool(profile.get("upload_webp", True))
         self.wordpress_settings.tistory_save_mode = normalize_tistory_save_mode(
             str(profile.get("save_mode") or "")
         )
@@ -51168,6 +51249,13 @@ class KeywordApp(ctk.CTk):
         if save:
             self._save_ui_state()
 
+    def _on_tistory_upload_webp_changed(self, save: bool = True) -> None:
+        enabled = bool(self.tistory_upload_webp_var.get())
+        self.tistory_upload_webp_switch.configure(text=f"WebP로 변환해 업로드 {'ON' if enabled else 'OFF'}")
+        self.wordpress_settings.tistory_upload_webp = enabled
+        if save:
+            self._save_ui_state()
+
     def _on_tistory_ads_enabled_changed(self, save: bool = True) -> None:
         enabled = bool(self.tistory_ads_enabled_var.get())
         self.tistory_ads_enabled_switch.configure(
@@ -51224,6 +51312,7 @@ class KeywordApp(ctk.CTk):
         self.tistory_write_url_entry.delete(0, "end")
         self.tistory_input_mode_var.set(TEXT_INPUT_MODE_FAST)
         self.tistory_auto_publish_var.set(True)
+        self.tistory_upload_webp_var.set(True)
         self.tistory_save_mode_var.set(TISTORY_SAVE_MODE_PUBLISH)
         self.tistory_reference_image_protection_var.set(False)
         self.tistory_ads_enabled_var.set(True)
@@ -51239,6 +51328,7 @@ class KeywordApp(ctk.CTk):
         self.wordpress_settings.tistory_write_url = ""
         self.wordpress_settings.tistory_input_mode = TEXT_INPUT_MODE_FAST
         self.wordpress_settings.tistory_auto_publish = True
+        self.wordpress_settings.tistory_upload_webp = True
         self.wordpress_settings.tistory_save_mode = TISTORY_SAVE_MODE_PUBLISH
         self.wordpress_settings.tistory_reference_image_protection_mode = False
         self.wordpress_settings.tistory_ads_enabled = True
@@ -51263,6 +51353,7 @@ class KeywordApp(ctk.CTk):
         self._on_tistory_input_mode_changed(save=False)
         self._on_tistory_auto_publish_changed(save=False)
         self._on_tistory_save_mode_changed(save=False)
+        self._on_tistory_upload_webp_changed(save=False)
         self._on_tistory_reference_image_mode_changed(save=False)
         self._on_tistory_ads_enabled_changed(save=False)
         AppStateStore.save(self.wordpress_settings)
@@ -53754,6 +53845,7 @@ class KeywordApp(ctk.CTk):
                 and tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH
             ),
             auto_publish=settings.tistory_auto_publish,
+            upload_webp=settings.tistory_upload_webp,
             save_mode=tistory_save_mode,
             write_url=write_url,
             public_blog_url=settings.tistory_blog_url,
@@ -55615,6 +55707,7 @@ class KeywordApp(ctk.CTk):
                             )
                         ),
                         save_mode=tistory_save_mode,
+                        upload_webp=bool(tistory.get("upload_webp", self.wordpress_settings.tistory_upload_webp)),
                         close_after_publish=False,
                         write_url=write_url,
                         public_blog_url=str(
@@ -55773,6 +55866,7 @@ class KeywordApp(ctk.CTk):
                             )
                         ),
                         save_mode=tistory_save_mode,
+                        upload_webp=bool(tistory.get("upload_webp", self.wordpress_settings.tistory_upload_webp)),
                         close_after_publish=False,
                         write_url=write_url,
                         public_blog_url=str(
