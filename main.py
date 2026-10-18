@@ -2403,8 +2403,16 @@ def insert_tistory_ads_near_images(
     return content, insert_count
 
 
-def append_external_link_buttons(article_html: str, links: list[dict]) -> str:
+def append_external_link_buttons(article_html: str, links: list[dict], *, enabled: bool = True) -> str:
     article_html = (article_html or "").strip()
+    if not enabled:
+        # Remove only our own rendered buttons from reused/generated HTML.
+        # Ordinary links and the editable settings must remain untouched.
+        return re.sub(
+            rf"(?:<!--\s*{CUSTOM_LINK_BUTTON_MARKER}\s*-->\s*)?"
+            r"<p\b[^>]*\sclass\s*=\s*['\"](?:[^'\"]*\s)?blog-helper-link-button-wrap(?:\s[^'\"]*)?['\"][^>]*>.*?</p\s*>",
+            "", article_html, flags=re.I | re.S,
+        ).strip()
     if not article_html or CUSTOM_LINK_BUTTON_MARKER in article_html:
         return article_html
     grouped_links = {position: [] for position in LINK_POSITION_OPTIONS}
@@ -3604,6 +3612,7 @@ class WordPressSettings:
     writing_link_button_text: str = ""
     writing_link_url: str = ""
     writing_links: list[dict] = field(default_factory=list)
+    writing_links_enabled: bool = True
     writing_enabled_sources: list[str] = field(default_factory=lambda: ["youtube", "google", "naver"])
     writing_auto_progress: bool = False
     tistory_v2_auto_progress: bool = False
@@ -4109,6 +4118,8 @@ def normalize_blog_writing_preferences(value: object) -> dict[str, dict]:
         }
         if "writing_links" in raw:
             normalized[key]["writing_links"] = normalize_writing_links(raw["writing_links"])
+        if "writing_links_enabled" in raw:
+            normalized[key]["writing_links_enabled"] = bool(raw["writing_links_enabled"])
     return normalized
 
 
@@ -4545,6 +4556,7 @@ class AppStateStore:
             writing_link_button_text=payload.get("writing_link_button_text", ""),
             writing_link_url=payload.get("writing_link_url", ""),
             writing_links=writing_links,
+            writing_links_enabled=bool(payload.get("writing_links_enabled", True)),
             writing_enabled_sources=payload.get("writing_enabled_sources", ["youtube", "google", "naver"]),
             writing_auto_progress=payload.get("writing_auto_progress", False),
             tistory_v2_auto_progress=bool(payload.get("tistory_v2_auto_progress", False)),
@@ -49379,12 +49391,23 @@ class KeywordApp(ctk.CTk):
         self.link_header = ctk.CTkFrame(self.link_card, fg_color="transparent")
         self.link_header.grid(row=0, column=0, sticky="ew")
         self.link_header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            self.link_header,
+        self.link_title_group = ctk.CTkFrame(self.link_header, fg_color="transparent")
+        self.link_title_group.grid(row=0, column=0, sticky="w")
+        self.link_title_label = ctk.CTkLabel(
+            self.link_title_group,
             text="본문 링크 버튼",
             anchor="w",
             font=ctk.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self.link_title_label.grid(row=0, column=0, sticky="w")
+        self.writing_links_enabled_var = tk.BooleanVar(value=True)
+        self.writing_links_enabled_switch = ctk.CTkSwitch(
+            self.link_title_group, text="본문 노출 ON", variable=self.writing_links_enabled_var,
+            onvalue=True, offvalue=False, switch_width=42, switch_height=22,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_writing_links_enabled_changed,
+        )
+        self.writing_links_enabled_switch.grid(row=0, column=1, padx=(12, 0), sticky="w")
         self.add_link_button = ctk.CTkButton(
             self.link_header,
             text="+ 추가",
@@ -49410,6 +49433,22 @@ class KeywordApp(ctk.CTk):
         self.link_list_frame.grid(row=2, column=0, sticky="ew")
         self.link_list_frame.grid_columnconfigure(0, weight=1)
 
+    def _writing_links_are_enabled(self) -> bool:
+        variable = self.__dict__.get("writing_links_enabled_var")
+        return bool(variable.get() if variable is not None else self.wordpress_settings.writing_links_enabled)
+
+    def _on_writing_links_enabled_changed(self, save: bool = True) -> None:
+        enabled = self._writing_links_are_enabled()
+        self.wordpress_settings.writing_links_enabled = enabled
+        self.writing_links_enabled_switch.configure(text=f"본문 노출 {'ON' if enabled else 'OFF'}")
+        self.link_hint_label.configure(text=(
+            "선택한 블로그별로 저장됩니다. URL이 있는 항목만 본문상단·중간·하단에 버튼으로 삽입합니다."
+            if enabled else "본문 노출 OFF · 입력값은 블로그별로 저장되며, 본문에는 링크 버튼을 삽입하지 않습니다."
+        ))
+        if save:
+            self._remember_current_writing_links()
+            self._save_ui_state()
+
     def _remember_current_writing_links(self) -> None:
         identity = self.__dict__.get("_writing_links_identity")
         if not identity or self.__dict__.get("_loading_writing_links", False):
@@ -49425,6 +49464,7 @@ class KeywordApp(ctk.CTk):
             # delete handler saves again after removing it from link_rows.
             return
         current["writing_links"] = normalize_writing_links(links)
+        current["writing_links_enabled"] = self._writing_links_are_enabled()
         preferences[identity] = current
         self.wordpress_settings.blog_writing_preferences = preferences
 
@@ -49447,9 +49487,16 @@ class KeywordApp(ctk.CTk):
         links = preference.get(
             "writing_links", self.wordpress_settings.writing_links if not previous_identity else []
         )
+        enabled = bool(preference.get(
+            "writing_links_enabled", self.wordpress_settings.writing_links_enabled if not previous_identity else True
+        ))
         self._loading_writing_links = True
         try:
             self._writing_links_identity = identity
+            self.wordpress_settings.writing_links_enabled = enabled
+            if hasattr(self, "writing_links_enabled_var"):
+                self.writing_links_enabled_var.set(enabled)
+                self._on_writing_links_enabled_changed(save=False)
             self._load_link_rows(normalize_writing_links(links))
             self.wordpress_settings.writing_links = normalize_writing_links(links)
         finally:
@@ -50120,6 +50167,7 @@ class KeywordApp(ctk.CTk):
             writing_link_button_text=(current_writing_links[0]["button_text"] if current_writing_links else ""),
             writing_link_url=(current_writing_links[0]["url"] if current_writing_links else ""),
             writing_links=current_writing_links,
+            writing_links_enabled=self._writing_links_are_enabled(),
             writing_enabled_sources=[source for source, var in self.source_vars.items() if var.get()],
             writing_auto_progress=self.wordpress_settings.writing_auto_progress,
             tistory_v2_auto_progress=self.wordpress_settings.tistory_v2_auto_progress,
@@ -53874,7 +53922,8 @@ class KeywordApp(ctk.CTk):
             article_html,
             self.article_title_entry.get().strip() or self.generated_article_title,
         )
-        return append_external_link_buttons(article_html, self._current_writing_links())
+        return append_external_link_buttons(
+            article_html, self._current_writing_links(), enabled=self._writing_links_are_enabled())
 
     def _preview_current_article(self) -> None:
         title = self.article_title_entry.get().strip() or self.generated_article_title or "미리보기"

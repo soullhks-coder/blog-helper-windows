@@ -1252,11 +1252,34 @@ def main() -> None:
             screenshot("body-link-placeholders")
             app._remove_link_row(empty_row)
             app._add_link_row({"button_text": "WP 링크", "url": "https://example.com/wp", "position": "본문상단"})
+            settle()
+            toggle = app.writing_links_enabled_switch
+            title = app.link_title_label
+            assert toggle.master is title.master
+            assert toggle.winfo_rootx() >= title.winfo_rootx() + title.winfo_width()
+            assert toggle.winfo_rootx() - title.winfo_rootx() - title.winfo_width() <= 25
+            assert app.writing_links_enabled_var.get()
+            original_body = app.article_editor.get("1.0", "end")
+            assert "https://example.com/wp" in app._get_current_article_html()
+            toggle.toggle()
+            assert toggle.cget("text") == "본문 노출 OFF"
+            assert "https://example.com/wp" not in app._get_current_article_html()
+            assert app.article_editor.get("1.0", "end") == original_body
+            assert app.link_rows[0]["url_entry"].cget("state") == "normal"
+            off_settings = app._read_wordpress_settings(include_prompts=False)
+            assert not off_settings.writing_links_enabled
+            assert off_settings.writing_links[0]["url"] == "https://example.com/wp"
+            assert not off_settings.blog_writing_preferences["wordpress"]["writing_links_enabled"]
+            screenshot("body-link-off-preserves-inputs")
             app._on_writing_target_changed("tistory")
             assert app._current_writing_links() == []
+            assert app.writing_links_enabled_var.get()
             app._add_link_row({"button_text": "티스토리 링크", "url": "https://example.com/tistory", "position": "본문중간"})
             app._on_writing_target_changed("wordpress")
             assert app._current_writing_links()[0]["button_text"] == "WP 링크"
+            assert not app.writing_links_enabled_var.get()
+            app.writing_links_enabled_switch.toggle()
+            assert "https://example.com/wp" in app._get_current_article_html()
             app._on_writing_target_changed("tistory")
             assert app._current_writing_links()[0]["button_text"] == "티스토리 링크"
             app._remove_link_row(app.link_rows[0])
@@ -1374,7 +1397,7 @@ def main() -> None:
             app._on_home_prompt_selected("워드프레스 · 기본")
             assert app.wordpress_settings.blog_writing_preferences[
                 "tistory:tistory_2"
-            ] == {"thumbnail_preset": 0, "prompt_id": "wordpress-default", "writing_links": []}
+            ] == {"thumbnail_preset": 0, "prompt_id": "wordpress-default", "writing_links": [], "writing_links_enabled": True}
             app.wordpress_settings.tistory_active_profile = "티스토리 1"
             app._on_writing_target_changed("tistory")
             assert app.writing_thumbnail_menu.get() == "썸네일·카드3"

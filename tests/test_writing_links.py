@@ -5,6 +5,7 @@ import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -26,6 +27,7 @@ class LinkUIStub:
     _blog_writing_preference = main.KeywordApp._blog_writing_preference
     _remember_current_writing_links = main.KeywordApp._remember_current_writing_links
     _restore_writing_links_for_blog = main.KeywordApp._restore_writing_links_for_blog
+    _writing_links_are_enabled = main.KeywordApp._writing_links_are_enabled
 
     def __init__(self, settings=None):
         self.wordpress_settings = settings or main.WordPressSettings()
@@ -43,14 +45,78 @@ class LinkUIStub:
 
 
 class WritingLinksTests(unittest.TestCase):
+    def test_visibility_defaults_on_for_existing_settings(self):
+        self.assertTrue(main.WordPressSettings().writing_links_enabled)
+
+    def test_off_preserves_settings_and_restores_independently_per_blog(self):
+        app = LinkUIStub()
+        app._restore_writing_links_for_blog("wordpress")
+        app.links = [link("keep", width="320", full_width=True), {"button_text": "미완성", "url": ""}]
+        app.wordpress_settings.writing_links_enabled = False
+        app._remember_current_writing_links()
+        saved = copy.deepcopy(app.wordpress_settings.blog_writing_preferences["wordpress"])
+        self.assertFalse(saved["writing_links_enabled"])
+        self.assertEqual(saved["writing_links"][0], app.links[0])
+        self.assertEqual(saved["writing_links"][1]["button_text"], "미완성")
+        app._restore_writing_links_for_blog("tistory")
+        self.assertTrue(app._writing_links_are_enabled())
+        app.links = [link("tistory")]
+        app._restore_writing_links_for_blog("wordpress")
+        self.assertFalse(app._writing_links_are_enabled())
+        self.assertEqual(app.links, saved["writing_links"])
+        restarted = LinkUIStub(app.wordpress_settings)
+        restarted._restore_writing_links_for_blog("wordpress")
+        self.assertFalse(restarted._writing_links_are_enabled())
+        self.assertEqual(restarted.links, saved["writing_links"])
+
+    def test_legacy_visibility_only_applies_to_startup_blog(self):
+        app = LinkUIStub(main.WordPressSettings(writing_links=[link("legacy")], writing_links_enabled=False))
+        app._restore_writing_links_for_blog("wordpress")
+        self.assertFalse(app._writing_links_are_enabled())
+        app._restore_writing_links_for_blog("blogspot")
+        self.assertTrue(app._writing_links_are_enabled())
+        app._restore_writing_links_for_blog("wordpress")
+        self.assertFalse(app._writing_links_are_enabled())
+        self.assertEqual(app.links, [link("legacy")])
+
+    def test_enabled_inserts_all_positions_and_disabled_removes_only_managed_buttons(self):
+        body = ('<h1>본문</h1><p>설명</p><h2>소제목</h2><p><a href="https://ordinary.example">일반 링크</a></p>'
+                '<p class="not-blog-helper-link-button-wrap">일반 문단</p>')
+        links = [link(position, position=position) for position in main.LINK_POSITION_OPTIONS]
+        before = copy.deepcopy(links)
+        inserted = main.append_external_link_buttons(body, links)
+        self.assertEqual(inserted.count(main.CUSTOM_LINK_BUTTON_MARKER), 3)
+        self.assertEqual(main.append_external_link_buttons(inserted, links), inserted)
+        hidden = main.append_external_link_buttons(inserted, links, enabled=False)
+        self.assertNotIn(main.CUSTOM_LINK_BUTTON_MARKER, hidden)
+        self.assertIn('href="https://ordinary.example"', hidden)
+        self.assertIn('<p class="not-blog-helper-link-button-wrap">일반 문단</p>', hidden)
+        self.assertNotIn('class="blog-helper-link-button-wrap"', hidden)
+        self.assertEqual(main.append_external_link_buttons(body, links, enabled=False), body)
+        self.assertEqual(links, before)
+
+    def test_preview_and_publish_body_gate_does_not_change_editor_or_saved_inputs(self):
+        body = "<h2>원본 소제목</h2><p>원본 본문</p>"
+        app = LinkUIStub()
+        app.article_editor = SimpleNamespace(get=lambda *_: body)
+        app.article_title_entry = SimpleNamespace(get=lambda: "제목")
+        app.generated_article_title = ""
+        app.links = [link("keep")]
+        for enabled in (True, False, True):
+            app.wordpress_settings.writing_links_enabled = enabled
+            result = main.KeywordApp._get_current_article_html(app)
+            self.assertEqual(main.CUSTOM_LINK_BUTTON_MARKER in result, enabled)
+            self.assertEqual(app.article_editor.get("1.0", "end"), body)
+            self.assertEqual(app.links, [link("keep")])
+
     def test_preferences_round_trip_with_links_and_explicit_empty_list(self):
         preferences = {
-            "wordpress": {"thumbnail_preset": 1, "prompt_id": "wordpress-default", "writing_links": [link("wp")]},
+            "wordpress": {"thumbnail_preset": 1, "prompt_id": "wordpress-default", "writing_links": [link("wp")], "writing_links_enabled": False},
             "tistory:tistory_1": {"thumbnail_preset": 2, "prompt_id": "tistory-default", "writing_links": []},
             "blogspot:blogspot_2": {"thumbnail_preset": 0, "prompt_id": "blogspot-default", "writing_links": [link("blogger")]},
         }
         with tempfile.TemporaryDirectory() as directory:
-            settings = main.WordPressSettings(blog_writing_preferences=preferences)
+            settings = main.WordPressSettings(blog_writing_preferences=preferences, writing_links_enabled=False, writing_links=[link("wp")])
             with (
                 patch.object(main, "STATE_FILE", Path(directory) / "app_state.json"),
                 patch.object(main.PromptFileStore, "load_into", side_effect=lambda value: value),
@@ -59,6 +125,8 @@ class WritingLinksTests(unittest.TestCase):
                 main.AppStateStore.save(settings, save_secrets=False)
                 loaded = main.AppStateStore.load()
         self.assertEqual(loaded.blog_writing_preferences, preferences)
+        self.assertFalse(loaded.writing_links_enabled)
+        self.assertEqual(loaded.writing_links, [link("wp")])
 
     def test_links_are_isolated_between_platforms_and_profile_slots(self):
         app = LinkUIStub()
