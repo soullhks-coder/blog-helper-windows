@@ -33,7 +33,10 @@ def main():
                         assert result["titleOk"] and result["bodyOk"], result
                         assert page.locator("#post-title-inp").input_value() == raw
                         assert page.evaluate("window.published !== true")
-                        print(f"{mode}: numeric prefix preserved in real editor input: {raw}", flush=True)
+                        # Windows runners can use a non-Unicode console encoding.
+                        # Keep the exact Korean test data while making logs portable.
+                        print("Tistory numeric title input passed: " + json.dumps(
+                            {"mode": mode, "title": raw}, ensure_ascii=True), flush=True)
             finally:
                 browser.close()
 
