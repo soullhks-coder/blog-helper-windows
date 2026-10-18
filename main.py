@@ -44687,13 +44687,39 @@ class KeywordApp(ctk.CTk):
             panel.grid(row=0, column=column, padx=16, pady=16, sticky="n")
             ctk.CTkLabel(panel, text=title, font=ctk.CTkFont(size=16, weight="bold"),
                          text_color=self._theme_palette()["text"]).pack(pady=(0, 12))
-            canvas = tk.Canvas(panel, width=240, height=240, highlightthickness=0, bd=0, bg="#ffffff")
-            canvas.pack()
+            canvas_host = panel
+            if column == 1:
+                canvas_host = ctk.CTkFrame(panel, fg_color="transparent")
+                canvas_host.pack()
+            canvas = tk.Canvas(canvas_host, width=240, height=240, highlightthickness=0, bd=0, bg="#ffffff")
             self.writing_design_preview_panels.append(panel)
             if column == 0:
+                canvas.pack()
                 self.writing_thumbnail_preview_canvas = canvas
             else:
+                canvas.grid(row=0, column=1, padx=8)
                 self.writing_cardnews_preview_canvas = canvas
+                palette = self._theme_palette()
+                for direction, icon_name, fallback, nav_column, attribute in (
+                    (-1, "chevron-left", "<", 0, "writing_cardnews_prev_button"),
+                    (1, "chevron-right", ">", 2, "writing_cardnews_next_button"),
+                ):
+                    icon = self._bootstrap_sidebar_icon_image(icon_name, palette["muted"], 20)
+                    button = ctk.CTkButton(
+                        canvas_host, text="" if icon is not None else fallback, image=icon,
+                        width=36, height=40, corner_radius=12,
+                        fg_color=palette["button"], hover_color=palette["button_hover"],
+                        text_color=palette["text"], text_color_disabled=palette["muted"],
+                        font=ctk.CTkFont(size=20, weight="bold"), state="disabled",
+                        command=lambda step=direction: self._move_cardnews_slide(step),
+                    )
+                    button.grid(row=0, column=nav_column)
+                    setattr(self, attribute, button)
+                self.writing_cardnews_slide_label = ctk.CTkLabel(
+                    panel, text="이미지 없음", text_color=palette["muted"],
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                )
+                self.writing_cardnews_slide_label.pack(pady=(10, 0))
         preview_card.bind("<Configure>", lambda event: self._layout_publish_design_previews(preview_card, event.width), add="+")
         self.writing_v2_editor_host = publish_card
 
@@ -46019,7 +46045,13 @@ class KeywordApp(ctk.CTk):
 
     def _layout_publish_design_previews(self, host, width: int) -> None:
         is_v2 = self._is_tistory_v2_writing()
-        columns = 2 if not is_v2 and width / host._get_widget_scaling() >= 600 else 1
+        # Include the side arrows and physical-pixel Tk canvases at every DPI.
+        required_width = max(
+            600 * host._get_widget_scaling(),
+            sum(panel.winfo_reqwidth() + 32 * host._get_widget_scaling()
+                for panel in self.writing_design_preview_panels),
+        )
+        columns = 2 if not is_v2 and width >= required_width else 1
         if getattr(host, "_preview_columns", None) == (columns, is_v2):
             return
         host._preview_columns = (columns, is_v2)
@@ -47074,6 +47106,7 @@ class KeywordApp(ctk.CTk):
             )
 
     def _draw_body_cardnews_preview(self) -> None:
+        self._update_cardnews_preview_navigation()
         if not hasattr(self, "body_cardnews_preview_canvas"):
             return
         self._draw_body_cardnews_on_canvas(
@@ -47087,6 +47120,28 @@ class KeywordApp(ctk.CTk):
                 preview_limit=self._writing_design_preview_limit(),
                 photo_attr="writing_cardnews_preview_background_photo",
             )
+
+    def _update_cardnews_preview_navigation(self) -> None:
+        total = len(self.cardnews_specs)
+        index = max(0, min(self.active_cardnews_slide_index, total - 1))
+        palette = self._theme_palette()
+        for suffix, enabled, icon_name, fallback in (
+            ("prev", total > 1 and index > 0, "chevron-left", "<"),
+            ("next", total > 1 and index < total - 1, "chevron-right", ">"),
+        ):
+            state = "normal" if enabled else "disabled"
+            manager_button = getattr(self, f"cardnews_{suffix}_button", None)
+            if manager_button is not None:
+                manager_button.configure(state=state)
+            button = getattr(self, f"writing_cardnews_{suffix}_button", None)
+            if button is not None:
+                icon = self._bootstrap_sidebar_icon_image(
+                    icon_name, palette["text"] if enabled else palette["muted"], 20,
+                )
+                button.configure(state=state, image=icon, text="" if icon is not None else fallback)
+        label = getattr(self, "writing_cardnews_slide_label", None)
+        if label is not None:
+            label.configure(text=f"{index + 1} / {total}" if total else "이미지 없음")
 
     def _draw_body_cardnews_on_canvas(self, canvas: tk.Canvas, preview_limit: int, photo_attr: str) -> None:
         actual_width = max(400, self._safe_int(self.cardnews_width_entry.get(), 1024))

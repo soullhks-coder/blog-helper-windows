@@ -1530,6 +1530,33 @@ def main() -> None:
             assert app.active_cardnews_slide_index == 1
             app.cardnews_prev_button.invoke()
             assert app.active_cardnews_slide_index == 0
+            # The publish-step arrows share selection/styles with the manager.
+            # Browsing must not regenerate files or change the article body.
+            app._open_writing_section("publish")
+            app.writing_scroll._parent_canvas.yview_moveto(0)
+            settle()
+            assert app.writing_cardnews_prev_button.winfo_ismapped()
+            assert app.writing_cardnews_next_button.winfo_ismapped()
+            for button in (app.writing_cardnews_prev_button, app.writing_cardnews_next_button):
+                assert button.cget("image") is not None
+            assert app.writing_cardnews_slide_label.cget("text") == "1 / 2"
+            assert app.writing_cardnews_prev_button.cget("state") == "disabled"
+            saved_cardnews_paths = list(app.cardnews_image_paths)
+            app.writing_cardnews_next_button.invoke()
+            settle()
+            assert app.active_cardnews_slide_index == 1
+            assert app.cardnews_heading_entry.get() == "천천히 즐기는 풍경"
+            assert app.writing_cardnews_slide_label.cget("text") == "2 / 2"
+            assert app.writing_cardnews_next_button.cget("state") == "disabled"
+            assert any(app.writing_cardnews_preview_canvas.itemcget(item, "text") == "천천히 즐기는 풍경"
+                       for item in app.writing_cardnews_preview_canvas.find_all()
+                       if app.writing_cardnews_preview_canvas.type(item) == "text")
+            screenshot("cardnews-carousel")
+            app.writing_cardnews_prev_button.invoke()
+            assert app.active_cardnews_slide_index == 0
+            assert app.cardnews_image_paths == saved_cardnews_paths
+            assert app.article_editor.get("1.0", "end").strip() == article
+            print(f"{sys.platform} {args.theme}: publish cardnews chevrons, counter, preview and file/body preservation passed", flush=True)
             app._set_writing_section_completed("keyword")
             assert "✓" in app.writing_section_title_labels["keyword"].cget("text")
             app._set_writing_progress(3, "글 확인 중", 0.5)
@@ -1654,6 +1681,12 @@ def main() -> None:
                 assert int(app.set_default_thumbnail_button.grid_info()["row"]) == expected_default_row
                 app.writing_scroll._parent_canvas.yview_moveto(0)
                 settle()
+                app._open_writing_section("publish")
+                settle()
+                for button in (app.writing_cardnews_prev_button, app.writing_cardnews_next_button):
+                    host = app.writing_design_preview_card
+                    assert button.winfo_rootx() >= host.winfo_rootx(), geometry
+                    assert button.winfo_rootx() + button.winfo_width() <= host.winfo_rootx() + host.winfo_width(), geometry
                 canvas = app.writing_scroll._parent_canvas
                 app._switch_page("thumbnails")
                 settle()
