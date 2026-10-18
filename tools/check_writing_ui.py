@@ -1548,9 +1548,12 @@ def main() -> None:
             assert app.cardnews_heading_entry.get() == "천천히 즐기는 풍경"
             assert app.writing_cardnews_slide_label.cget("text") == "2 / 2"
             assert app.writing_cardnews_next_button.cget("state") == "disabled"
-            assert any(app.writing_cardnews_preview_canvas.itemcget(item, "text") == "천천히 즐기는 풍경"
-                       for item in app.writing_cardnews_preview_canvas.find_all()
-                       if app.writing_cardnews_preview_canvas.type(item) == "text")
+            preview_texts = [app.writing_cardnews_preview_canvas.itemcget(item, "text")
+                             for item in app.writing_cardnews_preview_canvas.find_all()
+                             if app.writing_cardnews_preview_canvas.type(item) == "text"]
+            # Native font metrics/DPI may wrap a title on Windows. Require
+            # the complete, correct title, independent of visual line breaks.
+            assert "천천히 즐기는 풍경" in [" ".join(text.split()) for text in preview_texts], preview_texts
             screenshot("cardnews-carousel")
             app.writing_cardnews_prev_button.invoke()
             assert app.active_cardnews_slide_index == 0

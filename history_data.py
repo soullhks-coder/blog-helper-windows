@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-18",
-        "version": "v1.2.24",
+        "version": "v1.2.25",
         "category": "기능",
         "title": "발행 단계 본문 카드뉴스 이미지 좌우 미리보기",
         "request": "블로그글쓰기 4번 썸네일·발행 단계에서 여러 카드뉴스 이미지를 좌우 화살표로 확인할 수 있게 해달라는 요청",
