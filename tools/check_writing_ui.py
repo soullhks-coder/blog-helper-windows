@@ -1289,6 +1289,52 @@ def main() -> None:
             assert app._current_writing_links() == []
             app._on_writing_target_changed("wordpress")
             screenshot("direct-topic-input")
+            assert app.writing_link_set_menu.cget("state") == "disabled"
+            saved_links = [
+                {"button_text": "신청 안내", "url": "https://example.com/apply", "width": "320",
+                 "full_width": False, "position": "본문상단"},
+                {"button_text": "자세히 보기", "url": "https://example.com/details", "width": "",
+                 "full_width": True, "position": "본문하단"},
+            ]
+            for value in saved_links:
+                app._add_link_row(value)
+            with patch.object(app_module.simpledialog, "askstring", return_value="안내 버튼 세트") as naming:
+                app.save_link_set_button.invoke()
+                assert naming.call_args.kwargs["parent"] is app
+            assert app.writing_link_set_menu.get() == "안내 버튼 세트"
+            assert app.wordpress_settings.writing_link_sets[0]["links"] == saved_links
+            with patch.object(app_module.simpledialog, "askstring", return_value=None):
+                app.save_link_set_button.invoke()
+            assert len(app.wordpress_settings.writing_link_sets) == 1
+            app.link_rows[0]["button_entry"].delete(0, "end")
+            app.link_rows[0]["button_entry"].insert(0, "다른 안내")
+            app.writing_links_enabled_switch.toggle()
+            long_set_name = "버튼세트" + "긴이름" * 25 + "용"
+            assert len(long_set_name) == 80
+            with patch.object(app_module.simpledialog, "askstring", return_value=long_set_name):
+                app.save_link_set_button.invoke()
+            settle()
+            assert app.writing_link_set_menu.get() == long_set_name
+            assert app.writing_link_set_menu.winfo_width() / app.writing_link_set_menu._get_widget_scaling() <= 170
+            assert len(app.wordpress_settings.writing_link_sets) == 2
+            app._add_link_row({"button_text": "자동 링크", "url": "https://example.com/generated",
+                               "transient": True, "source": "festival"})
+            generated_row = app.link_rows[-1]
+            # Invoke the actual native menu item, not a direct loading helper.
+            app.writing_link_set_menu._dropdown_menu.invoke(0)
+            settle()
+            assert app._current_writing_links(include_transient=False) == saved_links
+            assert app.writing_links_enabled_var.get()
+            assert generated_row in app.link_rows and generated_row["frame"].winfo_exists()
+            assert app.writing_link_set_menu.get() == "안내 버튼 세트"
+            saved_set_settings = app._read_wordpress_settings(include_prompts=False)
+            assert len(saved_set_settings.writing_link_sets) == 2
+            assert saved_set_settings.blog_writing_preferences["wordpress"]["writing_link_set_name"] == "안내 버튼 세트"
+            assert app.save_link_set_button.winfo_rootx() < app.writing_link_set_menu.winfo_rootx() < app.add_link_button.winfo_rootx()
+            screenshot("body-link-sets")
+            for row in list(app.link_rows):
+                app._remove_link_row(row)
+            print(f"{sys.platform} {args.theme}: named link-set save, cancel, native dropdown load, toggle and generated-link preservation passed", flush=True)
             app._on_inline_images_provider_changed(
                 app_module.INLINE_IMAGES_PROVIDER_MANUAL
             )
@@ -1675,6 +1721,13 @@ def main() -> None:
                     writing_canvas.xview_moveto(0)
                     settle()
                 assert app.writing_step_rail.winfo_width() <= app.writing_page.winfo_width()
+                app._open_writing_section("topic")
+                settle()
+                for control in (app.save_link_set_button, app.writing_link_set_menu, app.add_link_button):
+                    assert control.winfo_ismapped(), geometry
+                    assert control.winfo_rootx() >= app.link_header.winfo_rootx(), geometry
+                    assert control.winfo_rootx() + control.winfo_width() <= app.link_header.winfo_rootx() + app.link_header.winfo_width(), geometry
+                assert app.save_link_set_button.winfo_rootx() < app.writing_link_set_menu.winfo_rootx() < app.add_link_button.winfo_rootx()
                 selector_width = (
                     app.thumbnail_card_set_selector_host.winfo_width()
                     / app.thumbnail_card_set_selector_host._get_widget_scaling()

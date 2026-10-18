@@ -28,6 +28,7 @@ class LinkUIStub:
     _remember_current_writing_links = main.KeywordApp._remember_current_writing_links
     _restore_writing_links_for_blog = main.KeywordApp._restore_writing_links_for_blog
     _writing_links_are_enabled = main.KeywordApp._writing_links_are_enabled
+    _refresh_writing_link_set_menu = main.KeywordApp._refresh_writing_link_set_menu
 
     def __init__(self, settings=None):
         self.wordpress_settings = settings or main.WordPressSettings()

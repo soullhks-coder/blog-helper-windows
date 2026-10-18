@@ -3623,6 +3623,7 @@ class WordPressSettings:
     writing_link_url: str = ""
     writing_links: list[dict] = field(default_factory=list)
     writing_links_enabled: bool = True
+    writing_link_sets: list[dict] = field(default_factory=list)
     writing_enabled_sources: list[str] = field(default_factory=lambda: ["youtube", "google", "naver"])
     writing_auto_progress: bool = False
     tistory_v2_auto_progress: bool = False
@@ -4108,6 +4109,22 @@ def normalize_writing_links(value: object) -> list[dict]:
     return links
 
 
+def normalize_writing_link_sets(value: object) -> list[dict]:
+    """Named, reusable snapshots; keep editable fields and omit generated links."""
+    sets = []
+    names = set()
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        name = " ".join(str(raw.get("name") or "").split())
+        links = normalize_writing_links(raw.get("links"))
+        if not name or len(name) > 80 or name in names or not links:
+            continue
+        names.add(name)
+        sets.append({"name": name, "links": links, "enabled": bool(raw.get("enabled", True))})
+    return sets
+
+
 def normalize_blog_writing_preferences(value: object) -> dict[str, dict]:
     """Keep thumbnail/prompt/link choices isolated by service and profile slot."""
     source = value if isinstance(value, dict) else {}
@@ -4130,6 +4147,8 @@ def normalize_blog_writing_preferences(value: object) -> dict[str, dict]:
             normalized[key]["writing_links"] = normalize_writing_links(raw["writing_links"])
         if "writing_links_enabled" in raw:
             normalized[key]["writing_links_enabled"] = bool(raw["writing_links_enabled"])
+        if "writing_link_set_name" in raw:
+            normalized[key]["writing_link_set_name"] = str(raw["writing_link_set_name"] or "").strip()
     return normalized
 
 
@@ -4567,6 +4586,7 @@ class AppStateStore:
             writing_link_url=payload.get("writing_link_url", ""),
             writing_links=writing_links,
             writing_links_enabled=bool(payload.get("writing_links_enabled", True)),
+            writing_link_sets=normalize_writing_link_sets(payload.get("writing_link_sets", [])),
             writing_enabled_sources=payload.get("writing_enabled_sources", ["youtube", "google", "naver"]),
             writing_auto_progress=payload.get("writing_auto_progress", False),
             tistory_v2_auto_progress=bool(payload.get("tistory_v2_auto_progress", False)),
@@ -49473,8 +49493,29 @@ class KeywordApp(ctk.CTk):
             command=self._on_writing_links_enabled_changed,
         )
         self.writing_links_enabled_switch.grid(row=0, column=1, padx=(12, 0), sticky="w")
+        self.link_actions = ctk.CTkFrame(self.link_header, fg_color="transparent")
+        self.link_actions.grid(row=0, column=1, padx=(12, 0), sticky="e")
+        palette = self._theme_palette()
+        self.save_link_set_button = ctk.CTkButton(
+            self.link_actions, text="버튼 저장", width=90, height=34, corner_radius=12,
+            fg_color=palette["button"], hover_color=palette["button_hover"],
+            text_color=palette["text"], font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._save_writing_link_set,
+        )
+        self.save_link_set_button.grid(row=0, column=0, padx=(0, 8))
+        self.writing_link_set_menu = InputOptionMenu(
+            self.link_actions, values=["저장된 세트 없음"], width=160, height=34, corner_radius=12,
+            fg_color=palette["input"], button_color=palette["button"],
+            button_hover_color=palette["button_hover"], dropdown_fg_color=palette["panel"],
+            dropdown_hover_color=palette["selected"], dropdown_text_color=palette["text"],
+            text_color=palette["text"], text_color_disabled=palette["muted"],
+            font=ctk.CTkFont(size=13), dropdown_font=ctk.CTkFont(size=13),
+            dynamic_resizing=False, command=self._load_writing_link_set,
+        )
+        self.writing_link_set_menu.grid(row=0, column=1, padx=(0, 8))
+        self._refresh_writing_link_set_menu()
         self.add_link_button = ctk.CTkButton(
-            self.link_header,
+            self.link_actions,
             text="+ 추가",
             width=86,
             height=34,
@@ -49484,19 +49525,123 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._add_link_row,
         )
-        self.add_link_button.grid(row=0, column=1, sticky="e")
+        self.add_link_button.grid(row=0, column=2, sticky="e")
+        self.link_header.bind("<Configure>", self._layout_writing_link_header, add="+")
         self.link_hint_label = ctk.CTkLabel(
             self.link_card,
             text="선택한 블로그별로 저장됩니다. URL이 있는 항목만 본문상단·중간·하단에 버튼으로 삽입합니다.",
             anchor="w",
             text_color=("#64748b", "#9aa7bb"),
             font=ctk.CTkFont(size=13),
+            wraplength=560, justify="left",
         )
-        self.link_hint_label.grid(row=1, column=0, pady=8, sticky="w")
+        self.link_hint_label.grid(row=1, column=0, pady=8, sticky="ew")
         self.link_rows: list[dict] = []
         self.link_list_frame = ctk.CTkFrame(self.link_card, fg_color="transparent")
         self.link_list_frame.grid(row=2, column=0, sticky="ew")
         self.link_list_frame.grid_columnconfigure(0, weight=1)
+
+    def _layout_writing_link_header(self, event) -> None:
+        if hasattr(self, "link_hint_label"):
+            configure_changed(self.link_hint_label, wraplength=max(120, int(event.width / self.link_header._get_widget_scaling()) - 8))
+        required = (self.link_title_group.winfo_reqwidth() + self.link_actions.winfo_reqwidth()
+                    + 12 * self.link_header._get_widget_scaling())
+        compact = event.width < required
+        if self.__dict__.get("_link_header_compact") == compact:
+            return
+        self._link_header_compact = compact
+        self.link_actions.grid(row=1 if compact else 0, column=0 if compact else 1,
+                               padx=0 if compact else (12, 0), pady=(8, 0) if compact else 0, sticky="e")
+
+    def _refresh_writing_link_set_menu(self) -> None:
+        menu = self.__dict__.get("writing_link_set_menu")
+        if menu is None:
+            return
+        sets = normalize_writing_link_sets(self.wordpress_settings.writing_link_sets)
+        names = [item["name"] for item in sets]
+        selected = self.__dict__.get("_writing_link_set_name", "")
+        menu.configure(values=names or ["저장된 세트 없음"], state="normal" if names else "disabled")
+        menu.set(selected if selected in names else "세트 선택" if names else "저장된 세트 없음")
+
+    def _save_writing_link_set(self) -> bool:
+        if not normalize_writing_links(self._current_writing_links(include_transient=False)):
+            messagebox.showinfo("버튼 저장", "먼저 저장할 본문 링크 버튼을 입력해 주세요.", parent=self)
+            return False
+        name = simpledialog.askstring(
+            "버튼 저장", "현재 버튼 세트의 명칭을 입력해 주세요. (최대 80자)",
+            initialvalue=self.__dict__.get("_writing_link_set_name", ""), parent=self,
+        )
+        if name is None:
+            return False
+        name = " ".join(name.split())
+        if not name or len(name) > 80:
+            messagebox.showwarning("버튼 저장", "세트 명칭을 1~80자로 입력해 주세요.", parent=self)
+            return False
+        sets = normalize_writing_link_sets(self.wordpress_settings.writing_link_sets)
+        existing = next((i for i, item in enumerate(sets) if item["name"] == name), None)
+        if existing is not None and not messagebox.askyesno(
+            "버튼 세트 덮어쓰기", f"'{name}' 세트를 현재 버튼 설정으로 덮어쓸까요?", parent=self,
+        ):
+            return False
+        # Read again after the modal commits any in-progress text composition.
+        links = normalize_writing_links(self._current_writing_links(include_transient=False))
+        if not links:
+            return False
+        enabled = self._writing_links_are_enabled()
+        item = {"name": name, "links": links, "enabled": enabled}
+        if existing is None:
+            sets.append(item)
+        else:
+            sets[existing] = item
+        preferences = normalize_blog_writing_preferences(self.wordpress_settings.blog_writing_preferences)
+        identity = self.__dict__.get("_writing_links_identity")
+        if identity:
+            preferences.setdefault(identity, {}).update(
+                writing_links=links, writing_links_enabled=enabled, writing_link_set_name=name,
+            )
+        try:
+            AppStateStore.update_fields(writing_link_sets=sets, blog_writing_preferences=preferences,
+                                        writing_links=links, writing_links_enabled=enabled)
+        except OSError as exc:
+            messagebox.showerror("버튼 저장 실패", str(exc), parent=self)
+            return False
+        self.wordpress_settings.writing_link_sets = sets
+        self.wordpress_settings.blog_writing_preferences = preferences
+        self.wordpress_settings.writing_links = copy.deepcopy(links)
+        self.wordpress_settings.writing_links_enabled = enabled
+        self._writing_link_set_name = name
+        self._refresh_writing_link_set_menu()
+        self.link_hint_label.configure(text=f"'{name}' 버튼 세트를 저장했습니다. 저장된 세트는 다른 블로그에서도 불러올 수 있습니다.")
+        self._save_ui_state()
+        return True
+
+    def _load_writing_link_set(self, name: str) -> bool:
+        sets = normalize_writing_link_sets(self.wordpress_settings.writing_link_sets)
+        item = next((item for item in sets if item["name"] == name), None)
+        if item is None:
+            return False
+        self._loading_writing_links = True
+        try:
+            self._load_link_rows(item["links"], preserve_transient=True)
+            self._writing_link_set_name = item["name"]
+            self.wordpress_settings.writing_links = copy.deepcopy(item["links"])
+            self.wordpress_settings.writing_links_enabled = item["enabled"]
+            self.writing_links_enabled_var.set(item["enabled"])
+            self._on_writing_links_enabled_changed(save=False)
+        finally:
+            self._loading_writing_links = False
+        self._remember_current_writing_links()
+        self._refresh_writing_link_set_menu()
+        try:
+            AppStateStore.update_fields(
+                blog_writing_preferences=self.wordpress_settings.blog_writing_preferences,
+                writing_links=self.wordpress_settings.writing_links,
+                writing_links_enabled=self.wordpress_settings.writing_links_enabled,
+            )
+        except OSError as exc:
+            messagebox.showwarning("자동 저장 확인", f"세트는 불러왔지만 설정 저장에 실패했습니다.\n{exc}", parent=self)
+        self._save_ui_state()
+        return True
 
     def _writing_links_are_enabled(self) -> bool:
         variable = self.__dict__.get("writing_links_enabled_var")
@@ -49530,6 +49675,11 @@ class KeywordApp(ctk.CTk):
             return
         current["writing_links"] = normalize_writing_links(links)
         current["writing_links_enabled"] = self._writing_links_are_enabled()
+        if "_writing_link_set_name" in self.__dict__:
+            if self._writing_link_set_name:
+                current["writing_link_set_name"] = self._writing_link_set_name
+            else:
+                current.pop("writing_link_set_name", None)
         preferences[identity] = current
         self.wordpress_settings.blog_writing_preferences = preferences
 
@@ -49558,6 +49708,7 @@ class KeywordApp(ctk.CTk):
         self._loading_writing_links = True
         try:
             self._writing_links_identity = identity
+            self._writing_link_set_name = str(preference.get("writing_link_set_name") or "")
             self.wordpress_settings.writing_links_enabled = enabled
             if hasattr(self, "writing_links_enabled_var"):
                 self.writing_links_enabled_var.set(enabled)
@@ -49567,6 +49718,7 @@ class KeywordApp(ctk.CTk):
         finally:
             self._loading_writing_links = False
         self._remember_current_writing_links()
+        self._refresh_writing_link_set_menu()
 
     def _add_link_row(self, link: dict | None = None) -> None:
         if not hasattr(self, "link_list_frame"):
@@ -49764,14 +49916,18 @@ class KeywordApp(ctk.CTk):
             self.link_header.grid_configure(pady=(0, 0))
             self.link_card.grid_configure(pady=(0, 8))
 
-    def _load_link_rows(self, links: list[dict]) -> None:
+    def _load_link_rows(self, links: list[dict], preserve_transient: bool = False) -> None:
         if not hasattr(self, "link_list_frame"):
             return
+        retained = [row for row in self.link_rows if preserve_transient and row.get("transient")]
         for row_data in list(self.link_rows):
-            row_data["frame"].destroy()
-        self.link_rows = []
+            if row_data not in retained:
+                row_data["frame"].destroy()
+        self.link_rows = retained[:]
         for link in normalize_writing_links(links):
             self._add_link_row(link)
+        self.link_rows = self.link_rows[len(retained):] + retained
+        self._regrid_link_rows()
         self._update_add_link_button_state()
 
     def _current_writing_links(self, include_transient: bool = True) -> list[dict]:
@@ -50233,6 +50389,7 @@ class KeywordApp(ctk.CTk):
             writing_link_url=(current_writing_links[0]["url"] if current_writing_links else ""),
             writing_links=current_writing_links,
             writing_links_enabled=self._writing_links_are_enabled(),
+            writing_link_sets=normalize_writing_link_sets(self.wordpress_settings.writing_link_sets),
             writing_enabled_sources=[source for source, var in self.source_vars.items() if var.get()],
             writing_auto_progress=self.wordpress_settings.writing_auto_progress,
             tistory_v2_auto_progress=self.wordpress_settings.tistory_v2_auto_progress,

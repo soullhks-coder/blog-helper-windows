@@ -90,6 +90,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -m unittest discover -s tests -p test_image_uploads.py -q
           python -m unittest discover -s tests -p test_writing_links.py -q
+          python -m unittest discover -s tests -p test_writing_link_sets.py -q
           python -m unittest discover -s tests -p test_generated_titles.py -q
           python -m unittest discover -s tests -p test_cardnews_preview_navigation.py -q
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
@@ -211,6 +212,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -m unittest discover -s tests -p test_image_uploads.py -q
           python -m unittest discover -s tests -p test_writing_links.py -q
+          python -m unittest discover -s tests -p test_writing_link_sets.py -q
           python -m unittest discover -s tests -p test_generated_titles.py -q
           python -m unittest discover -s tests -p test_cardnews_preview_navigation.py -q
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
