@@ -90,6 +90,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -m unittest discover -s tests -p test_image_uploads.py -q
           python -m unittest discover -s tests -p test_writing_links.py -q
+          python -m unittest discover -s tests -p test_generated_titles.py -q
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
           python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
@@ -115,6 +116,7 @@ jobs:
           python tools/check_input_surfaces_ui.py
           python tools/check_modal_controls_ui.py
           python tools/check_webp_uploads.py
+          python tools/check_tistory_numeric_titles.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.exe
@@ -208,6 +210,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -m unittest discover -s tests -p test_image_uploads.py -q
           python -m unittest discover -s tests -p test_writing_links.py -q
+          python -m unittest discover -s tests -p test_generated_titles.py -q
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
           python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
@@ -219,6 +222,7 @@ jobs:
           python tools/check_macos_ime_ui.py
           python tools/check_modal_controls_ui.py
           python tools/check_webp_uploads.py
+          python tools/check_tistory_numeric_titles.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.app

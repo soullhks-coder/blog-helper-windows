@@ -2459,18 +2459,28 @@ def extract_title_from_article_html(article_html: str, fallback: str) -> str:
     return fallback
 
 
+def strip_generated_heading_prefix(value: str) -> str:
+    """Remove formatting, never arbitrary digits from years, dates or amounts."""
+    value = re.sub(r"^[#*\s\"'“”‘’]+", "", value)
+    value = re.sub(r"^[-•]\s+", "", value)
+    # Only short, delimited list markers. Keep ambiguous spaced numeric
+    # prefixes (e.g. 10. 18.) as well as decimals and four-digit years.
+    value = re.sub(r"^(?:\d{1,2}\)\s+|\d{1,2}\.\s+(?=[^\d\s]))", "", value)
+    return re.sub(r"^[#*\s\"'“”‘’]+", "", value)
+
+
 def clean_generated_title(title: str, fallback: str) -> str:
     title = normalize_generated_article_html(title)
     title = re.sub(r"<[^>]+>", " ", title)
     title = unescape(title)
-    title = re.sub(r"^[#\-\*\d\.\s\"'“”‘’]+", "", title)
+    title = strip_generated_heading_prefix(title)
     title = re.sub(r"[\"'“”‘’\s]+$", "", title)
     title = re.sub(r"\s+", " ", title).strip()
     if not title:
         return fallback
     for prefix in ("제목:", "블로그 제목:", "추천 제목:"):
         if title.startswith(prefix):
-            title = title[len(prefix):].strip()
+            title = strip_generated_heading_prefix(title[len(prefix):].strip())
     return title[:120] or fallback
 
 
@@ -2512,7 +2522,7 @@ def compact_naver_kin_blog_title(title: str, question_title: str, question_text:
 def derive_core_keyword(raw_keyword: str, context: str = "") -> str:
     """제목형 문장에서 태그 생성에 쓸 중심 키워드만 부드럽게 추출합니다."""
     keyword = " ".join((raw_keyword or "").split()).strip()
-    keyword = re.sub(r"^[#\-\*\d\.\s\"'“”‘’]+", "", keyword)
+    keyword = strip_generated_heading_prefix(keyword)
     keyword = re.sub(r"[\"'“”‘’\s]+$", "", keyword)
     keyword = re.sub(r"([가-힣]{2,})(사망|별세|부고|타계|영면)$", r"\1 \2", keyword)
     if not keyword:
