@@ -11,6 +11,7 @@ import bsdiff4
 
 
 MAC_EXECUTABLE = "BlogHelper.app/Contents/MacOS/BlogHelper"
+MAC_ASSET_PREFIX = "BlogHelper.app/Contents/Resources/assets/"
 MAC_FONT_PREFIX = "BlogHelper.app/Contents/Resources/assets/fonts/"
 MAC_REPLACEMENTS = (
     ("BlogHelper.app/Contents/Info.plist", "Contents/Info.plist"),
@@ -96,18 +97,22 @@ def build_macos_patch(args: argparse.Namespace) -> None:
                     "target_sha256": sha256_bytes(content),
                 }
             )
-        # The executable diff cannot carry new external data files. Always
-        # include current fonts/licenses, also repairing installations whose
-        # older incremental update omitted them despite a correct full ZIP.
-        font_names = sorted(name for name in current_zip.namelist()
-                            if name.startswith(MAC_FONT_PREFIX) and not name.endswith("/"))
-        if not font_names:
+        # The executable diff cannot carry external resources. Include every
+        # current app asset, not only fonts: new guide screenshots must arrive
+        # on incremental installs too, and missing resources must self-repair.
+        asset_names = sorted(name for name in current_zip.namelist()
+                             if name.startswith(MAC_ASSET_PREFIX) and not name.endswith("/"))
+        if not any(name.startswith(MAC_FONT_PREFIX) for name in asset_names):
             raise RuntimeError("Mac 업데이트에 포함할 글꼴 리소스를 찾지 못했습니다.")
-        for archive_name in font_names:
-            content = current_zip.read(archive_name)
-            if archive_name.lower().endswith((".ttf", ".otf")) and content[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"ttcf"):
-                raise RuntimeError(f"Mac 글꼴 리소스가 실제 글꼴 파일이 아닙니다: {archive_name}")
+        existing_targets = {item["target"] for item in replacements}
+        for archive_name in asset_names:
             target_name = archive_name.removeprefix("BlogHelper.app/")
+            if target_name in existing_targets:
+                continue
+            content = current_zip.read(archive_name)
+            if (archive_name.startswith(MAC_FONT_PREFIX) and archive_name.lower().endswith((".ttf", ".otf"))
+                    and content[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"ttcf")):
+                raise RuntimeError(f"Mac 글꼴 리소스가 실제 글꼴 파일이 아닙니다: {archive_name}")
             source_name = f"files/{target_name}"
             files[source_name] = content
             replacements.append({"target": target_name, "source": source_name,

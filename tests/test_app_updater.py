@@ -475,6 +475,54 @@ class AppUpdaterTests(unittest.TestCase):
                 self.assertEqual((staged / target).read_bytes(), resources[f"BlogHelper.app/{target}"])
             self.assertFalse((app / "Contents/Resources/assets/fonts").exists())
 
+    def test_macos_delta_installs_new_guides_and_all_external_app_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "installed" / "BlogHelper.app"
+            binary = app / "Contents/MacOS/BlogHelper"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"old-binary")
+            binary.chmod(0o755)
+            previous, current, output = (root / name for name in ("old.zip", "new.zip", "patch.zip"))
+            resources = {
+                "BlogHelper.app/Contents/Info.plist": b"plist-v2",
+                "BlogHelper.app/Contents/Resources/version.json": b'{"version":"1.2.28"}',
+                **{f"BlogHelper.app/Contents/Resources/assets/{name}-logo.png": b"logo"
+                   for name in ("wordpress", "tistory", "blogspot")},
+                "BlogHelper.app/Contents/Resources/assets/fonts/test.ttf": b"\x00\x01\x00\x00font-data",
+                "BlogHelper.app/Contents/Resources/assets/bootstrap-icons.woff": b"bootstrap-icon-font",
+                "BlogHelper.app/Contents/Resources/assets/future/nested/resource.json": b'{"new":true}',
+            }
+            guide_dir = Path(__file__).resolve().parents[1] / "assets" / "writing-guide"
+            guide_paths = sorted(guide_dir.glob("*.png"))
+            self.assertEqual(len(guide_paths), 11)
+            for path in guide_paths:
+                resources[f"BlogHelper.app/Contents/Resources/assets/writing-guide/{path.name}"] = path.read_bytes()
+            with zipfile.ZipFile(previous, "w") as archive:
+                archive.writestr("BlogHelper.app/Contents/MacOS/BlogHelper", b"old-binary")
+            with zipfile.ZipFile(current, "w") as archive:
+                archive.writestr("BlogHelper.app/Contents/MacOS/BlogHelper", b"new-binary")
+                for name, data in resources.items():
+                    archive.writestr(name, data)
+            build_macos_patch(SimpleNamespace(previous=previous, current=current, output=output,
+                                              from_version="1.2.26", to_version="1.2.28"))
+            with zipfile.ZipFile(output) as archive:
+                operations = json.loads(archive.read("patch-manifest.json"))["replacements"]
+                self.assertEqual(len(operations), len({item["target"] for item in operations}))
+                self.assertEqual({item["target"] for item in operations},
+                                 {name.removeprefix("BlogHelper.app/") for name in resources})
+                for item in operations:
+                    self.assertEqual(hashlib.sha256(archive.read(item["source"])).hexdigest(), item["target_sha256"])
+            with (patch.object(app_updater, "os", SimpleNamespace(name="posix")),
+                  patch.object(app_updater, "sys", SimpleNamespace(platform="darwin")),
+                  patch.object(app_updater, "APP_VERSION", "1.2.26"),
+                  patch.object(app_updater.subprocess, "run")):
+                staged = app_updater.prepare_delta_update(output, root / "staging", current_target=app)
+            self.assertEqual((staged / "Contents/MacOS/BlogHelper").read_bytes(), b"new-binary")
+            for name, data in resources.items():
+                self.assertEqual((staged / name.removeprefix("BlogHelper.app/")).read_bytes(), data)
+            self.assertFalse((app / "Contents/Resources/assets").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
