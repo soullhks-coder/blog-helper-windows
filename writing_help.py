@@ -125,11 +125,30 @@ WRITING_GUIDES = {
 }
 
 
-class WritingHelpDialog(ctk.CTkToplevel):
-    """One reusable, read-only guide window with an image and scrollable steps."""
+class WritingHelpButton(ctk.CTkButton):
+    """Round icon hit area without CTk's text-button corner padding."""
+
+    def _create_grid(self):
+        super()._create_grid()
+        self.grid_columnconfigure((0, 4), minsize=0)
+        if self._image_label is not None:
+            self._image_label.configure(padx=0, pady=0, borderwidth=0, highlightthickness=0)
+
+
+class WritingHelpDialog(ctk.CTkFrame):
+    """One read-only in-app popup, with no native window placement phase."""
 
     def __init__(self, parent, topic: str, *, resource_dir: Path, palette: dict):
-        super().__init__(parent)
+        super().__init__(getattr(parent, "main_area", parent), width=700, height=780,
+                         corner_radius=22, fg_color=palette["shell"],
+                         border_width=2, border_color=palette["border"])
+        self._owner = parent
+        self._uses_writing_design_theme = True
+        self.grid_propagate(False)
+        self._closing = False
+        self._shown = False
+        self._visibility_job = None
+        self._fit_job = None
         self._palette = palette
         self._resource_dir = Path(resource_dir)
         self._resize_job = None
@@ -137,14 +156,6 @@ class WritingHelpDialog(ctk.CTkToplevel):
         self._image_size = None
         self._photo = None
         self._text_labels = []
-        self.configure(fg_color=palette["shell"])
-        self.title("블로그글쓰기 이용 가이드")
-        self.transient(parent)
-        scale = self._get_window_scaling()
-        width = min(700, max(400, int((self.winfo_screenwidth() - 60) / scale)))
-        height = min(780, max(440, int((self.winfo_screenheight() - 100) / scale)))
-        self.geometry(f"{width}x{height}")
-        self.minsize(380, 420)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -165,26 +176,64 @@ class WritingHelpDialog(ctk.CTkToplevel):
         self.footer = ctk.CTkLabel(self, text="도움말은 입력값을 바꾸지 않으며, 진행 중인 작업을 중단하지 않습니다.",
                                   text_color=palette["muted"], font=ctk.CTkFont(size=12), wraplength=600)
         self.footer.grid(row=2, column=0, padx=24, pady=(4, 16), sticky="ew")
-        self.protocol("WM_DELETE_WINDOW", self.close)
-        self.bind("<Escape>", lambda _event: self.close())
-        self.bind("<Destroy>", self._cancel_jobs, add="+")
+        self._escape_tag = f"WritingHelpEscape:{id(self)}"
+        tk.Misc.bind_class(self, self._escape_tag, "<Escape>", lambda _event: self.close())
+        tk.Misc.bind(self, "<Destroy>", self._cancel_jobs, add="+")
+        tk.Misc.bind(self, "<Unmap>", self._on_unmap, add="+")
+        self._parent_configure_binding = tk.Misc.bind(self.master, "<Configure>", self._schedule_fit, add="+")
         self.show_topic(topic)
-        modal_dimmer(parent).attach(self)
-        self._activate_job = self.after(100, self._activate)
+        self._activate_job = self.after_idle(self._activate)
 
     def _activate(self):
         self._activate_job = None
-        if self.winfo_exists():
-            self.update_idletasks()
-            parent = self.master
-            x = max(0, min(parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2,
-                           self.winfo_screenwidth() - self.winfo_width()))
-            y = max(30, min(parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2,
-                            self.winfo_screenheight() - self.winfo_height() - 40))
-            self.geometry(f"+{x}+{y}")
+        if not self._closing and self.winfo_exists():
+            self._owner.update_idletasks()
+            if self._closing or not self.winfo_exists():
+                return
+            if not self.master.winfo_ismapped():
+                self._activate_job = self.after(100, self._activate)
+                return
+            self._fit_to_parent()
+            if self._resize_job is not None:
+                self.after_cancel(self._resize_job)
+            self._layout()
+            modal_dimmer(self._owner).attach(self)
+            self._shown = True
+            self.place(relx=0.5, rely=0.5, anchor="center")
             self.lift()
-            self.grab_set()
-            self.focus_set()
+            self.update_idletasks()
+            if not self._closing and self.winfo_exists():
+                self.grab_set()
+                self.focus_set()
+
+    def _fit_to_parent(self):
+        scale = self._get_widget_scaling()
+        width = max(280, min(700, int(self.master.winfo_width() / scale) - 32))
+        height = max(320, min(780, int(self.master.winfo_height() / scale) - 32))
+        configure_changed(self, width=width, height=height)
+
+    def _schedule_fit(self, event):
+        if event.widget is self.master and self._shown and not self._closing:
+            if self._fit_job is not None:
+                self.after_cancel(self._fit_job)
+            self._fit_job = self.after(30, self._apply_fit)
+
+    def _apply_fit(self):
+        self._fit_job = None
+        if not self._closing:
+            self._fit_to_parent()
+            self._schedule_layout()
+
+    def _on_unmap(self, event):
+        if event.widget is self and self._shown and not self._closing:
+            if self._visibility_job is not None:
+                self.after_cancel(self._visibility_job)
+            self._visibility_job = self.after(60, self._close_if_hidden)
+
+    def _close_if_hidden(self):
+        self._visibility_job = None
+        if not self._closing and self.winfo_exists() and not self.winfo_ismapped():
+            self.close()
 
     def show_topic(self, topic: str):
         guide = WRITING_GUIDES[topic]
@@ -222,6 +271,13 @@ class WritingHelpDialog(ctk.CTkToplevel):
             label(f"{index}. {title}", index * 2 + 2, bold=True)
             label(body, index * 2 + 3)
         label("알아두세요\n" + guide["note"], 10, color=palette["subtext"])
+        pending = [self]
+        while pending:
+            child = pending.pop()
+            tags = list(child.bindtags())
+            if self._escape_tag not in tags:
+                child.bindtags((self._escape_tag, *tags))
+            pending.extend(child.winfo_children())
         self.scroll._parent_canvas.yview_moveto(0)
         self._schedule_layout()
 
@@ -233,6 +289,8 @@ class WritingHelpDialog(ctk.CTkToplevel):
     def _layout(self):
         self._resize_job = None
         available = max(260, int(self.scroll.winfo_width() / self.scroll._get_widget_scaling()) - 32)
+        if not self.scroll.winfo_ismapped():
+            available = max(260, self.cget("width") - 84)
         for widget in self._text_labels:
             if widget.cget("wraplength") != available:
                 widget.configure(wraplength=available)
@@ -253,7 +311,7 @@ class WritingHelpDialog(ctk.CTkToplevel):
     def _cancel_jobs(self, event=None):
         if event is not None and event.widget is not self:
             return
-        for name in ("_activate_job", "_resize_job"):
+        for name in ("_activate_job", "_fit_job", "_resize_job", "_visibility_job"):
             job = getattr(self, name, None)
             if job is not None:
                 try:
@@ -261,11 +319,28 @@ class WritingHelpDialog(ctk.CTkToplevel):
                 except tk.TclError:
                     pass
                 setattr(self, name, None)
+        binding = getattr(self, "_parent_configure_binding", None)
+        if binding is not None:
+            try:
+                tk.Misc.unbind(self.master, "<Configure>", binding)
+            except tk.TclError:
+                pass
+            self._parent_configure_binding = None
+        try:
+            tk.Misc.unbind_class(self, self._escape_tag, "<Escape>")
+        except tk.TclError:
+            pass
 
     def close(self):
+        if self._closing:
+            return
+        self._closing = True
         self._cancel_jobs()
         try:
             self.grab_release()
         except tk.TclError:
             pass
         self.destroy()
+        dimmer = getattr(self._owner, "_modal_dimmer", None)
+        if dimmer is not None:
+            dimmer.detach(self)

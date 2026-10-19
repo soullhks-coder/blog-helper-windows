@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from unittest.mock import patch
+from PIL import Image
 
 
 def main():
@@ -32,20 +33,30 @@ def main():
             stack.enter_context(patch.object(app_module.KeywordApp, name, return_value=None))
         print("Constructing isolated guide demo", flush=True)
         app = app_module.KeywordApp()
+        scale = app._get_window_scaling()
+        width = min(1300, int((app.winfo_screenwidth() - 60) / scale))
+        height = min(1100, int((app.winfo_screenheight() - 100) / scale))
+        app.geometry(f"{width}x{height}+20+40")
         print("Guide demo constructed", flush=True)
         output = root / "assets" / "writing-guide"
         output.mkdir(parents=True, exist_ok=True)
         errors = []
         app.report_callback_exception = lambda *error: errors.append(error)
 
-        def settle():
-            app.after(200, app.quit)
+        def settle(delay=200):
+            app.after(delay, app.quit)
             app.mainloop()
             app.update_idletasks()
             assert not errors, errors
 
         def shot(topic, widgets):
             widgets = list(widgets)
+            # Reassert after mapping too: macOS can apply a saved native test
+            # window position late, outside the primary display's bounds.
+            app.geometry(f"{width}x{height}+20+40")
+            app.lift()
+            app.focus_force()
+            settle(350)
             canvas = app.writing_scroll._parent_canvas
             canvas.yview_moveto(0)
             settle()
@@ -60,12 +71,21 @@ def main():
             bottom = max(widget.winfo_rooty() + widget.winfo_height() for widget in widgets)
             assert top >= canvas.winfo_rooty(), (topic, top, canvas.winfo_rooty())
             assert bottom <= canvas.winfo_rooty() + canvas.winfo_height(), (topic, bottom, canvas.winfo_height())
-            destination = output / f"{topic}.png"
+            destination = Path(directory) / f"guide-{topic}.png"
             if sys.platform == "darwin":
                 subprocess.run(["screencapture", "-x", "-R", f"{left},{top},{right-left},{bottom-top}", str(destination)], check=True)
             else:
                 from PIL import ImageGrab
                 ImageGrab.grab(bbox=(left, top, right, bottom)).save(destination)
+            # Never replace a bundled example with an off-display, clipped or
+            # black desktop capture while monitors/windows are rearranged.
+            with Image.open(destination) as capture:
+                expected_width, expected_height = right-left, bottom-top
+                if (capture.width < expected_width or capture.height < expected_height
+                        or capture.width * expected_height != capture.height * expected_width
+                        or max(channel[1] for channel in capture.convert("RGB").getextrema()) < 80):
+                    raise RuntimeError(f"Invalid guide capture: {topic}, {capture.size}, expected {expected_width}x{expected_height}")
+            destination.replace(output / f"{topic}.png")
             print(f"Guide screenshot: {topic}", flush=True)
 
         try:
@@ -115,6 +135,10 @@ def main():
             app.thumbnail_auto_title_var.set(False)
             app.thumbnail_prompt_preview.delete("1.0", "end")
             app.thumbnail_prompt_preview.insert("1.0", "제주 여행\n준비 체크")
+            app.thumbnail_font_size_entry.delete(0, "end")
+            app.thumbnail_font_size_entry.insert(0, "40")
+            app.thumbnail_shadow_menu.set("없음")
+            app.thumbnail_text_stroke_menu.set("없음")
             app.cardnews_specs = [{"heading": "출발 전 준비", "summary": "예약 정보와 신분증을 확인하세요."},
                                   {"heading": "가방에 챙길 물건", "summary": "충전기와 개인 물품을 정리해요."}]
             app.active_cardnews_slide_index = 0

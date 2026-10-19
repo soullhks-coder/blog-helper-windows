@@ -55,6 +55,106 @@ class Widget:
 
 
 class ModalBackdropTests(unittest.TestCase):
+    def test_disappearing_widget_cannot_abort_refresh_and_leave_dim_stale(self):
+        class DestroyedWidget(Widget):
+            def winfo_ismapped(self):
+                raise modal_backdrop.tk.TclError('widget destroyed during UI refresh')
+
+        for platform in ('darwin', 'win32'):
+            root = Widget()
+            dimmer = ModalDimmer(root, platform_name=platform)
+            dimmer.begin()
+            root.children.append(DestroyedWidget())
+            dimmer.refresh()
+            self.assertTrue(dimmer.active)
+            dimmer.end()
+            self.assertFalse(dimmer.active)
+            self.assertFalse(dimmer._windows_saved)
+            self.assertEqual(root.cget('background'), '#ffffff')
+
+    def test_old_idle_close_cannot_release_new_dialog(self):
+        old, new = Widget(), Widget()
+        root = Widget(children=(old, new))
+        idle = []
+        root.after_idle = idle.append
+        dimmer = ModalDimmer(root)
+        dimmer.attach(old)
+        old.close()
+        dimmer.detach(old)
+        dimmer.attach(new)
+        idle.pop(0)()
+        self.assertEqual(dimmer._depth, 1)
+        self.assertEqual(root.cget('background'), '#737373')
+        new.close()
+        dimmer.detach(new)
+        self.assertFalse(dimmer.active)
+        self.assertEqual(root.cget('background'), '#ffffff')
+
+    def test_destroyed_descendant_does_not_abort_remaining_restoration(self):
+        class DestroyedWidget(Widget):
+            def cget(self, option):
+                raise modal_backdrop.tk.TclError('widget destroyed')
+
+            def winfo_children(self):
+                raise modal_backdrop.tk.TclError('widget destroyed')
+
+        root = Widget()
+        dimmer = ModalDimmer(root)
+        dimmer.begin()
+        root.children.append(DestroyedWidget())
+        dimmer.end()
+        self.assertFalse(dimmer.active)
+        self.assertFalse(dimmer._windows_saved)
+        self.assertEqual(root.cget('background'), '#ffffff')
+
+    def test_explicit_close_restores_before_navigation_and_idle_callback_is_idempotent(self):
+        dialog = Widget()
+        root = Widget(children=(dialog,))
+        idle = []
+        root.after_idle = idle.append
+        dimmer = ModalDimmer(root)
+        dimmer.attach(dialog)
+        dialog.close()
+        self.assertTrue(dimmer.active)
+        dimmer.detach(dialog)
+        self.assertFalse(dimmer.active)
+        self.assertFalse(dimmer._windows_saved)
+        self.assertFalse(dimmer._pending_closes)
+        self.assertEqual(root.cget('background'), '#ffffff')
+        idle.pop()()
+        dimmer.detach(dialog)
+        self.assertEqual(dimmer._depth, 0)
+
+    def test_explicit_close_only_releases_its_own_nested_modal(self):
+        first, guide = Widget(), Widget()
+        root = Widget(children=(first, guide))
+        idle = []
+        root.after_idle = idle.append
+        dimmer = ModalDimmer(root)
+        dimmer.attach(first)
+        dimmer.attach(guide)
+        guide.close()
+        dimmer.detach(guide)
+        self.assertEqual(dimmer._depth, 1)
+        self.assertEqual(root.cget('background'), '#737373')
+        self.assertTrue(first.grabbed)
+        idle.pop()()
+        self.assertEqual(dimmer._depth, 1)
+        first.close()
+        dimmer.detach(first)
+        self.assertFalse(dimmer.active)
+        self.assertEqual(root.cget('background'), '#ffffff')
+
+    def test_repeated_attach_does_not_leak_modal_depth(self):
+        dialog = Widget()
+        root = Widget(children=(dialog,))
+        dimmer = ModalDimmer(root)
+        dimmer.attach(dialog)
+        dimmer.attach(dialog)
+        self.assertEqual(dimmer._depth, 1)
+        dialog.close()
+        self.assertFalse(dimmer.active)
+
     def test_dialog_restoration_waits_until_native_destroy_event_finishes(self):
         dialog = Widget()
         root = Widget(children=(dialog,))

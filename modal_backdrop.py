@@ -41,6 +41,7 @@ class ModalDimmer:
     def __init__(self, root, *, platform_name=None):
         self.root = root
         self.dialogs = []
+        self._pending_closes = {}
         self._depth = 0
         self._refresh_job = None
         self._windows = (sys.platform if platform_name is None else platform_name) == "win32"
@@ -53,6 +54,8 @@ class ModalDimmer:
         return bool(self._depth)
 
     def attach(self, dialog):
+        if dialog in self.dialogs:
+            return
         self.dialogs.append(dialog)
         self.begin()
 
@@ -62,24 +65,15 @@ class ModalDimmer:
             if dialog in self.dialogs:
                 self.dialogs.remove(dialog)
 
-                def finish_close():
-                    self.end()
-                    if self.dialogs:
-                        # Keep the remaining dialog's modal input grab.
-                        try:
-                            self.dialogs[-1].lift()
-                            self.dialogs[-1].grab_set()
-                        except tk.TclError:
-                            pass
-
                 # Destroy fires before Tk has finished removing the dialog's
                 # children. CTk parent.configure() propagates into those dying
                 # controls and can raise before restoring its own background.
                 # Finish after destruction, not from inside that native event.
+                self._pending_closes[dialog] = None
                 if hasattr(self.root, "after_idle"):
-                    self.root.after_idle(finish_close)
+                    self._pending_closes[dialog] = self.root.after_idle(lambda: self.detach(dialog))
                 else:
-                    finish_close()
+                    self.detach(dialog)
 
         # CTkFrame.bind delegates to its internal drawing canvas. We need the
         # frame's own lifecycle event, not the canvas's earlier destruction.
@@ -87,6 +81,31 @@ class ModalDimmer:
             tk.Misc.bind(dialog, "<Destroy>", closed, add="+")
         else:
             dialog.bind("<Destroy>", closed, add="+")
+
+    def detach(self, dialog):
+        """Release only this dialog; explicit owners call after destroy returns.
+
+        Generic Destroy handlers still defer until idle. A close/navigation
+        action can finish restoration immediately after native destruction,
+        before another page inherits or redraws temporary dimmed colors.
+        """
+        if dialog not in self.dialogs and dialog not in self._pending_closes:
+            return
+        job = self._pending_closes.pop(dialog, None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        if dialog in self.dialogs:
+            self.dialogs.remove(dialog)
+        self.end()
+        if self.dialogs:
+            try:
+                self.dialogs[-1].lift()
+                self.dialogs[-1].grab_set()
+            except tk.TclError:
+                pass
 
     def begin(self):
         self._depth += 1
@@ -169,7 +188,11 @@ class ModalDimmer:
                 except (tk.TclError, ValueError):
                     pass
             owned = owned_ctk_children(widget) if is_ctk else set()
-            for child in widget.winfo_children():
+            try:
+                children = widget.winfo_children()
+            except tk.TclError:
+                return
+            for child in children:
                 if child not in owned:
                     visit(child, surface)
 
@@ -228,7 +251,11 @@ class ModalDimmer:
         def visit(widget):
             if widget in self.dialogs or isinstance(widget, (tk.Toplevel, ctk.CTkToplevel)):
                 return
-            if widget is not self.root and not widget.winfo_ismapped():
+            try:
+                mapped = widget is self.root or widget.winfo_ismapped()
+            except tk.TclError:
+                return
+            if not mapped:
                 return
             # CTk owns its internal canvas/label/entry colors; changing those
             # independently would leave stale native fills after a redraw.
@@ -289,7 +316,11 @@ class ModalDimmer:
                     pass
             elif isinstance(widget, tk.Canvas):
                 self._dim_canvas(widget, changes, unchanged)
-            for child in widget.winfo_children():
+            try:
+                children = widget.winfo_children()
+            except tk.TclError:
+                return
+            for child in children:
                 if is_ctk and child in owned_ctk_children(widget):
                     continue
                 visit(child)
@@ -326,7 +357,11 @@ class ModalDimmer:
         return ImageEnhance.Brightness(image).enhance(0.45) if image is not None else None
 
     def _dim_canvas(self, canvas, changes, unchanged):
-        for item in canvas.find_all():
+        try:
+            items = canvas.find_all()
+        except tk.TclError:
+            return
+        for item in items:
             for option in ("fill", "outline", "image"):
                 try:
                     original = canvas.itemcget(item, option)

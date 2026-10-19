@@ -44007,7 +44007,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_benchmark_mode_changed,
         )
         self.benchmark_checkbox.grid(row=0, column=0, sticky="w")
-        self._create_writing_help_button(self.benchmark_title_group, "benchmark").grid(row=0, column=1, padx=(1, 0))
+        self._create_writing_help_button(self.benchmark_title_group, "benchmark").grid(row=0, column=1)
 
         self.benchmark_url_entry = InputEntry(
             benchmark_card,
@@ -44211,7 +44211,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         manual_keyword_label.grid(row=0, column=0, sticky="w")
-        self._create_writing_help_button(manual_title_group, "manual").grid(row=0, column=1, padx=(1, 0))
+        self._create_writing_help_button(manual_title_group, "manual").grid(row=0, column=1)
 
         self.manual_keyword_entry = InputEntry(
             keyword_card,
@@ -44239,7 +44239,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         reference_label.grid(row=0, column=0, sticky="w")
-        self._create_writing_help_button(reference_title_group, "reference").grid(row=0, column=1, padx=(1, 0))
+        self._create_writing_help_button(reference_title_group, "reference").grid(row=0, column=1)
 
         self.clear_reference_button = ctk.CTkButton(
             reference_header,
@@ -44327,7 +44327,7 @@ class KeywordApp(ctk.CTk):
             command=self._on_inline_images_enabled_changed,
         )
         self.writing_inline_images_checkbox.grid(row=0, column=0, sticky="w")
-        self._create_writing_help_button(image_title_group, "images").grid(row=0, column=1, padx=(1, 0))
+        self._create_writing_help_button(image_title_group, "images").grid(row=0, column=1)
         self.writing_v2_image_note = ctk.CTkLabel(
             keyword_card, text="V2 본문 이미지: 최종 수정한 글로 슬라이드 10장을 만들고, 2장씩 콜라주 5개로 넣습니다.\n이미지 크기는 슬라이드 편집에서 설정합니다(기본 600×300). 첫 두 장만 위키 사진, 나머지는 공통 스타일입니다.",
             anchor="w", justify="left", wraplength=650, text_color=self._theme_palette()["muted"],
@@ -44721,7 +44721,7 @@ class KeywordApp(ctk.CTk):
             preview_title_group.pack(pady=(0, 12))
             ctk.CTkLabel(preview_title_group, text=title, font=ctk.CTkFont(size=16, weight="bold"),
                          text_color=self._theme_palette()["text"]).grid(row=0, column=0)
-            self._create_writing_help_button(preview_title_group, "thumbnail" if column == 0 else "cardnews").grid(row=0, column=1, padx=(1, 0))
+            self._create_writing_help_button(preview_title_group, "thumbnail" if column == 0 else "cardnews").grid(row=0, column=1)
             canvas_host = panel
             if column == 1:
                 canvas_host = ctk.CTkFrame(panel, fg_color="transparent")
@@ -45611,7 +45611,7 @@ class KeywordApp(ctk.CTk):
             column=0,
             sticky="w",
         )
-        self._create_writing_help_button(content_title_group, section_key).grid(row=0, column=1, padx=(1, 0))
+        self._create_writing_help_button(content_title_group, section_key).grid(row=0, column=1)
 
         if section_key == "publish":
             ctk.CTkButton(
@@ -45828,10 +45828,11 @@ class KeywordApp(ctk.CTk):
             button.configure(text="열기")
 
     def _create_writing_help_button(self, parent, topic: str):
+        from writing_help import WritingHelpButton
         palette = self._theme_palette()
         icon_color = "#9ca3af" if palette["shell"] == "#f6f8fc" else "#aab2bf"
         icon = self._bootstrap_sidebar_icon_image("question-circle", icon_color, 18)
-        button = ctk.CTkButton(
+        button = WritingHelpButton(
             parent, text="" if icon is not None else "?", image=icon,
             width=20, height=20, corner_radius=10, border_spacing=0, fg_color="transparent",
             hover_color=("#e9edf2", "#303946"), text_color=icon_color,
@@ -45852,10 +45853,13 @@ class KeywordApp(ctk.CTk):
             return
         dialog = self.__dict__.get("writing_help_dialog")
         if dialog is not None and dialog.winfo_exists():
-            dialog.show_topic(topic)
-            self._tag_mousewheel_descendants(dialog)
-            dialog.lift()
-            return
+            if getattr(dialog, "_shown", False) and not dialog.winfo_ismapped():
+                dialog.close()
+            else:
+                dialog.show_topic(topic)
+                self._tag_mousewheel_descendants(dialog)
+                dialog.lift()
+                return
         self.writing_help_dialog = WritingHelpDialog(
             self, topic, resource_dir=RESOURCE_DIR, palette=self._theme_palette(),
         )
@@ -48749,6 +48753,15 @@ class KeywordApp(ctk.CTk):
         return True
 
     def _switch_page(self, page_name: str) -> None:
+        if page_name != getattr(self, "current_page", None):
+            help_dialog = self.__dict__.get("writing_help_dialog")
+            if help_dialog is not None:
+                if help_dialog.winfo_exists():
+                    help_dialog.close()
+                else:
+                    dimmer = self.__dict__.get("_modal_dimmer")
+                    if dimmer is not None:
+                        dimmer.detach(help_dialog)
         if page_name not in self._page_frame_map():
             page_name = "home"
         if page_name in {"writing", "tistory_v2"} and not self._set_writing_variant(page_name):
@@ -49539,7 +49552,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         self.link_title_label.grid(row=0, column=0, sticky="w")
-        self._create_writing_help_button(self.link_title_group, "links").grid(row=0, column=1, padx=(1, 0))
+        self._create_writing_help_button(self.link_title_group, "links").grid(row=0, column=1)
         self.writing_links_enabled_var = tk.BooleanVar(value=True)
         self.writing_links_enabled_switch = ctk.CTkSwitch(
             self.link_title_group, text="본문 노출 ON", variable=self.writing_links_enabled_var,
