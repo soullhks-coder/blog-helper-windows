@@ -19,6 +19,7 @@ datas += [
     ("assets/bootstrap-icons.woff", "assets"),
     ("assets/bootstrap-icons.css", "assets"),
     ("assets/bootstrap-icons-LICENSE.txt", "assets"),
+    ("assets/writing-guide", "assets/writing-guide"),
     ("assets/fonts/NanumGothic.ttf", "assets/fonts"),
     ("assets/fonts/NanumGothicBold.ttf", "assets/fonts"),
     ("assets/fonts/NanumGothic-OFL.txt", "assets/fonts"),

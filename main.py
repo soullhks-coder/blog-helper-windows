@@ -43992,8 +43992,10 @@ class KeywordApp(ctk.CTk):
             self.tistory_v2_wiki_keyword_entry.configure(border_color=self._theme_palette()["border"]))
         self.tistory_v2_wiki_keyword_row.grid_remove()
 
+        self.benchmark_title_group = ctk.CTkFrame(benchmark_card, fg_color="transparent")
+        self.benchmark_title_group.grid(row=1, column=0, padx=14, pady=12, sticky="w")
         self.benchmark_checkbox = ctk.CTkCheckBox(
-            benchmark_card,
+            self.benchmark_title_group,
             text="다른사람글 벤치마킹",
             variable=self.benchmark_mode_var,
             onvalue=True,
@@ -44004,7 +44006,8 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._on_benchmark_mode_changed,
         )
-        self.benchmark_checkbox.grid(row=1, column=0, padx=14, pady=12, sticky="w")
+        self.benchmark_checkbox.grid(row=0, column=0, sticky="w")
+        self._create_writing_help_button(self.benchmark_title_group, "benchmark").grid(row=0, column=1, padx=(1, 0))
 
         self.benchmark_url_entry = InputEntry(
             benchmark_card,
@@ -44199,13 +44202,16 @@ class KeywordApp(ctk.CTk):
         self.keyword_choice_frame.grid_columnconfigure(0, weight=1)
         self._contain_child_scroll(self.writing_scroll, self.keyword_choice_frame)
 
+        manual_title_group = ctk.CTkFrame(keyword_card, fg_color="transparent")
+        manual_title_group.grid(row=1, column=0, padx=24, pady=(0, 8), sticky="w")
         manual_keyword_label = ctk.CTkLabel(
-            keyword_card,
+            manual_title_group,
             text="직접 키워드 입력",
             anchor="w",
             font=ctk.CTkFont(size=15, weight="bold"),
         )
-        manual_keyword_label.grid(row=1, column=0, padx=24, pady=(0, 8), sticky="w")
+        manual_keyword_label.grid(row=0, column=0, sticky="w")
+        self._create_writing_help_button(manual_title_group, "manual").grid(row=0, column=1, padx=(1, 0))
 
         self.manual_keyword_entry = InputEntry(
             keyword_card,
@@ -44224,13 +44230,16 @@ class KeywordApp(ctk.CTk):
         reference_header.grid(row=3, column=0, padx=24, pady=(0, 8), sticky="ew")
         reference_header.grid_columnconfigure(0, weight=1)
 
+        reference_title_group = ctk.CTkFrame(reference_header, fg_color="transparent")
+        reference_title_group.grid(row=0, column=0, sticky="w")
         reference_label = ctk.CTkLabel(
-            reference_header,
+            reference_title_group,
             text="참고내용",
             anchor="w",
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         reference_label.grid(row=0, column=0, sticky="w")
+        self._create_writing_help_button(reference_title_group, "reference").grid(row=0, column=1, padx=(1, 0))
 
         self.clear_reference_button = ctk.CTkButton(
             reference_header,
@@ -44303,8 +44312,10 @@ class KeywordApp(ctk.CTk):
         inline_image_card.grid_columnconfigure(1, weight=1)
         inline_image_card.grid_columnconfigure(2, weight=1)
 
+        image_title_group = ctk.CTkFrame(inline_image_card, fg_color="transparent")
+        image_title_group.grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
         self.writing_inline_images_checkbox = ctk.CTkCheckBox(
-            inline_image_card,
+            image_title_group,
             text="이미지 삽입",
             variable=self.inline_images_enabled_var,
             onvalue=True,
@@ -44315,7 +44326,8 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._on_inline_images_enabled_changed,
         )
-        self.writing_inline_images_checkbox.grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+        self.writing_inline_images_checkbox.grid(row=0, column=0, sticky="w")
+        self._create_writing_help_button(image_title_group, "images").grid(row=0, column=1, padx=(1, 0))
         self.writing_v2_image_note = ctk.CTkLabel(
             keyword_card, text="V2 본문 이미지: 최종 수정한 글로 슬라이드 10장을 만들고, 2장씩 콜라주 5개로 넣습니다.\n이미지 크기는 슬라이드 편집에서 설정합니다(기본 600×300). 첫 두 장만 위키 사진, 나머지는 공통 스타일입니다.",
             anchor="w", justify="left", wraplength=650, text_color=self._theme_palette()["muted"],
@@ -44705,8 +44717,11 @@ class KeywordApp(ctk.CTk):
         for column, title in enumerate(("발행할 썸네일", "본문 카드뉴스")):
             panel = ctk.CTkFrame(preview_card, fg_color="transparent")
             panel.grid(row=0, column=column, padx=16, pady=16, sticky="n")
-            ctk.CTkLabel(panel, text=title, font=ctk.CTkFont(size=16, weight="bold"),
-                         text_color=self._theme_palette()["text"]).pack(pady=(0, 12))
+            preview_title_group = ctk.CTkFrame(panel, fg_color="transparent")
+            preview_title_group.pack(pady=(0, 12))
+            ctk.CTkLabel(preview_title_group, text=title, font=ctk.CTkFont(size=16, weight="bold"),
+                         text_color=self._theme_palette()["text"]).grid(row=0, column=0)
+            self._create_writing_help_button(preview_title_group, "thumbnail" if column == 0 else "cardnews").grid(row=0, column=1, padx=(1, 0))
             canvas_host = panel
             if column == 1:
                 canvas_host = ctk.CTkFrame(panel, fg_color="transparent")
@@ -45584,8 +45599,10 @@ class KeywordApp(ctk.CTk):
         )
         content_header.grid_columnconfigure(0, weight=1)
 
+        content_title_group = ctk.CTkFrame(content_header, fg_color="transparent")
+        content_title_group.grid(row=0, column=0, sticky="w")
         content_title_label = ctk.CTkLabel(
-            content_header, text=title, text_color=palette["text"],
+            content_title_group, text=title, text_color=palette["text"],
             image=self._bootstrap_sidebar_icon_image(f"{row + 1}-circle", palette["accent"], 24),
             compound="left", font=ctk.CTkFont(size=20, weight="bold"),
         )
@@ -45594,6 +45611,7 @@ class KeywordApp(ctk.CTk):
             column=0,
             sticky="w",
         )
+        self._create_writing_help_button(content_title_group, section_key).grid(row=0, column=1, padx=(1, 0))
 
         if section_key == "publish":
             ctk.CTkButton(
@@ -45808,6 +45826,40 @@ class KeywordApp(ctk.CTk):
             body.grid_remove()
             self.writing_section_cards[section_key].grid_remove()
             button.configure(text="열기")
+
+    def _create_writing_help_button(self, parent, topic: str):
+        palette = self._theme_palette()
+        icon_color = "#9ca3af" if palette["shell"] == "#f6f8fc" else "#aab2bf"
+        icon = self._bootstrap_sidebar_icon_image("question-circle", icon_color, 18)
+        button = ctk.CTkButton(
+            parent, text="" if icon is not None else "?", image=icon,
+            width=20, height=20, corner_radius=10, border_spacing=0, fg_color="transparent",
+            hover_color=("#e9edf2", "#303946"), text_color=icon_color,
+            border_width=0 if icon is not None else 1, border_color=icon_color,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda key=topic: self._open_writing_help(key),
+        )
+        button._uses_writing_design_theme = True
+        button._canvas.configure(takefocus=True)
+        button._canvas.bind("<Return>", lambda _event, key=topic: self._open_writing_help(key))
+        button._canvas.bind("<space>", lambda _event, key=topic: self._open_writing_help(key))
+        self.__dict__.setdefault("writing_help_buttons", {})[topic] = button
+        return button
+
+    def _open_writing_help(self, topic: str) -> None:
+        from writing_help import WRITING_GUIDES, WritingHelpDialog
+        if topic not in WRITING_GUIDES:
+            return
+        dialog = self.__dict__.get("writing_help_dialog")
+        if dialog is not None and dialog.winfo_exists():
+            dialog.show_topic(topic)
+            self._tag_mousewheel_descendants(dialog)
+            dialog.lift()
+            return
+        self.writing_help_dialog = WritingHelpDialog(
+            self, topic, resource_dir=RESOURCE_DIR, palette=self._theme_palette(),
+        )
+        self._tag_mousewheel_descendants(self.writing_help_dialog)
 
     def _create_writing_design_workspace(self, parent, row: int, title: str, subtitle: str):
         palette = self._theme_palette()
@@ -48641,6 +48693,8 @@ class KeywordApp(ctk.CTk):
             self._restore_writing_keyword_inputs(variant)
             self._save_ui_state()
         is_v2 = variant == "tistory_v2"
+        for button in self.__dict__.get("writing_help_buttons", {}).values():
+            button.grid_remove() if is_v2 else button.grid()
         if is_v2 and self.__dict__.get("tistory_v2_controls") is None:
             from tistory_v2_writing import TistoryV2WritingControls
             self.tistory_v2_controls = TistoryV2WritingControls(self.writing_control_row, self, sys.modules[__name__])
@@ -49485,6 +49539,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
         )
         self.link_title_label.grid(row=0, column=0, sticky="w")
+        self._create_writing_help_button(self.link_title_group, "links").grid(row=0, column=1, padx=(1, 0))
         self.writing_links_enabled_var = tk.BooleanVar(value=True)
         self.writing_links_enabled_switch = ctk.CTkSwitch(
             self.link_title_group, text="본문 노출 ON", variable=self.writing_links_enabled_var,
@@ -49492,7 +49547,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._on_writing_links_enabled_changed,
         )
-        self.writing_links_enabled_switch.grid(row=0, column=1, padx=(12, 0), sticky="w")
+        self.writing_links_enabled_switch.grid(row=0, column=2, padx=(8, 0), sticky="w")
         self.link_actions = ctk.CTkFrame(self.link_header, fg_color="transparent")
         self.link_actions.grid(row=0, column=1, padx=(12, 0), sticky="e")
         palette = self._theme_palette()

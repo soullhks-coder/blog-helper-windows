@@ -31,6 +31,7 @@ tistory-automation*.js
 !assets/wordpress-logo.png
 !assets/tistory-logo.png
 !assets/blogspot-logo.png
+!assets/writing-guide/*.png
 *.jpg
 *.jpeg
 *.webp

@@ -1256,8 +1256,12 @@ def main() -> None:
             toggle = app.writing_links_enabled_switch
             title = app.link_title_label
             assert toggle.master is title.master
-            assert toggle.winfo_rootx() >= title.winfo_rootx() + title.winfo_width()
-            assert toggle.winfo_rootx() - title.winfo_rootx() - title.winfo_width() <= 25
+            link_help = app.writing_help_buttons["links"]
+            assert link_help.master is title.master
+            assert link_help.winfo_rootx() >= title.winfo_rootx() + title.winfo_width()
+            assert link_help.winfo_rootx() - title.winfo_rootx() - title.winfo_width() <= 12
+            assert toggle.winfo_rootx() >= link_help.winfo_rootx() + link_help.winfo_width()
+            assert toggle.winfo_rootx() - link_help.winfo_rootx() - link_help.winfo_width() <= 16
             assert app.writing_links_enabled_var.get()
             original_body = app.article_editor.get("1.0", "end")
             assert "https://example.com/wp" in app._get_current_article_html()
@@ -1748,7 +1752,9 @@ def main() -> None:
                 settle()
                 canvas = app.thumbnails_scroll._parent_canvas
                 for workspace in (app.thumbnail_design_workspace, app.cardnews_design_workspace):
-                    assert workspace.winfo_rootx() + workspace.winfo_width() <= canvas.winfo_rootx() + canvas.winfo_width() + 2
+                    assert workspace.winfo_rootx() + workspace.winfo_width() <= canvas.winfo_rootx() + canvas.winfo_width() + 2, (
+                        geometry, str(workspace), workspace.winfo_rootx(), workspace.winfo_width(),
+                        canvas.winfo_rootx(), canvas.winfo_width())
                     assert workspace._design_columns == (2 if workspace.winfo_width() / workspace._get_widget_scaling() >= 960 else 1)
                     pending = list(workspace.winfo_children())
                     while pending:
@@ -2230,7 +2236,8 @@ def main() -> None:
             original_article = article_box.get("1.0", "end-1c")
             app.prompt_expand_buttons[("wordpress", "title")].invoke()
             settle(140)
-            assert app.prompt_expanded_box.get("1.0", "end-1c") == original_title
+            assert app.prompt_expanded_box.get("1.0", "end-1c") == original_title, (
+                original_title, app.prompt_expanded_box.get("1.0", "end-1c"))
             app.prompt_expanded_box.delete("1.0", "end")
             app.prompt_expanded_box.insert("1.0", "취소할 편집 내용")
             app._close_expanded_prompt_editor()
