@@ -495,7 +495,8 @@ class AppUpdaterTests(unittest.TestCase):
             }
             guide_dir = Path(__file__).resolve().parents[1] / "assets" / "writing-guide"
             guide_paths = sorted(guide_dir.glob("*.png"))
-            self.assertEqual(len(guide_paths), 11)
+            from writing_help import ALL_GUIDES
+            self.assertEqual({path.stem for path in guide_paths}, set(ALL_GUIDES))
             for path in guide_paths:
                 resources[f"BlogHelper.app/Contents/Resources/assets/writing-guide/{path.name}"] = path.read_bytes()
             with zipfile.ZipFile(previous, "w") as archive:

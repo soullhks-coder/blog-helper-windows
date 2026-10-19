@@ -92,6 +92,7 @@ jobs:
           python -m unittest discover -s tests -p test_writing_links.py -q
           python -m unittest discover -s tests -p test_writing_link_sets.py -q
           python -m unittest discover -s tests -p test_writing_help.py -q
+          python -m unittest discover -s tests -p test_menu_help.py -q
           python -m unittest discover -s tests -p test_generated_titles.py -q
           python -m unittest discover -s tests -p test_cardnews_preview_navigation.py -q
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
@@ -121,6 +122,7 @@ jobs:
           python tools/check_webp_uploads.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
+          python tools/check_menu_help_ui.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.exe
@@ -216,6 +218,7 @@ jobs:
           python -m unittest discover -s tests -p test_writing_links.py -q
           python -m unittest discover -s tests -p test_writing_link_sets.py -q
           python -m unittest discover -s tests -p test_writing_help.py -q
+          python -m unittest discover -s tests -p test_menu_help.py -q
           python -m unittest discover -s tests -p test_generated_titles.py -q
           python -m unittest discover -s tests -p test_cardnews_preview_navigation.py -q
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
@@ -231,6 +234,7 @@ jobs:
           python tools/check_webp_uploads.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
+          python tools/check_menu_help_ui.py
           python tools/check_writing_ui.py
 
       - name: Build BlogHelper.app

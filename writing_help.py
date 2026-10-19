@@ -9,6 +9,7 @@ from PIL import Image
 
 from input_surfaces import configure_changed
 from modal_backdrop import modal_dimmer
+from menu_help import MENU_GUIDES
 
 
 WRITING_GUIDES = {
@@ -124,6 +125,8 @@ WRITING_GUIDES = {
     },
 }
 
+ALL_GUIDES = {**WRITING_GUIDES, **MENU_GUIDES}
+
 
 class WritingHelpButton(ctk.CTkButton):
     """Round icon hit area without CTk's text-button corner padding."""
@@ -236,7 +239,7 @@ class WritingHelpDialog(ctk.CTkFrame):
             self.close()
 
     def show_topic(self, topic: str):
-        guide = WRITING_GUIDES[topic]
+        guide = ALL_GUIDES[topic]
         self.topic = topic
         self.heading.configure(text=guide["title"])
         for child in self.scroll.winfo_children():

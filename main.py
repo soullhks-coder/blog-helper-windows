@@ -29359,6 +29359,7 @@ class KeywordApp(ctk.CTk):
         _update_packaged_startup_splash("8/8 프롬프트 준비 중...")
         self._build_prompts_page()
 
+        self._install_menu_help()
         self._switch_page("home")
 
     def _layout_sidebar_navigation(self, _event=None) -> None:
@@ -45827,7 +45828,40 @@ class KeywordApp(ctk.CTk):
             self.writing_section_cards[section_key].grid_remove()
             button.configure(text="열기")
 
-    def _create_writing_help_button(self, parent, topic: str):
+    def _install_menu_help(self, page_name=None, root=None) -> None:
+        """One-time, offline decoration of known section headings, not fields."""
+        from menu_help import MENU_SECTIONS, attach_heading_help
+        pages = {page_name: root} if root is not None else self._page_frame_map()
+        registry = self.__dict__.setdefault("menu_help_buttons", {})
+        service_cards = {f"settings.{key}": self.__dict__.get(name) for key, name in (
+            ("wordpress", "wp_card"), ("tistory", "tistory_card"),
+            ("blogspot", "blogspot_card"), ("gpt", "gpt_card"),
+            ("gemini", "gemini_card"), ("imagen", "imagen_card"),
+            ("codex", "codex_card"), ("adsense", "adsense_card"), ("threads", "threads_card"))}
+        for page, page_root in pages.items():
+            headings = {heading: topic for target, topic, titles in MENU_SECTIONS
+                        if target == page for heading in titles}
+            if not headings or page_root is None:
+                continue
+            pending = [page_root]
+            while pending:
+                widget = pending.pop()
+                pending.extend(widget.winfo_children())
+                if not isinstance(widget, ctk.CTkLabel):
+                    continue
+                if widget is self.__dict__.get("quick_status_label"):
+                    continue
+                topic = headings.get(widget.cget("text"))
+                if topic is None:
+                    continue
+                if topic in service_cards and widget.master is not service_cards[topic]:
+                    continue  # Do not decorate a changing quick-status value.
+                button = attach_heading_help(widget, lambda parent, key=topic:
+                    self._create_writing_help_button(parent, key, register=False))
+                if button is not None:
+                    registry.setdefault(topic, []).append(button)
+
+    def _create_writing_help_button(self, parent, topic: str, *, register=True):
         from writing_help import WritingHelpButton
         palette = self._theme_palette()
         icon_color = "#9ca3af" if palette["shell"] == "#f6f8fc" else "#aab2bf"
@@ -45844,12 +45878,15 @@ class KeywordApp(ctk.CTk):
         button._canvas.configure(takefocus=True)
         button._canvas.bind("<Return>", lambda _event, key=topic: self._open_writing_help(key))
         button._canvas.bind("<space>", lambda _event, key=topic: self._open_writing_help(key))
-        self.__dict__.setdefault("writing_help_buttons", {})[topic] = button
+        if register:
+            self.__dict__.setdefault("writing_help_buttons", {})[topic] = button
         return button
 
     def _open_writing_help(self, topic: str) -> None:
-        from writing_help import WRITING_GUIDES, WritingHelpDialog
-        if topic not in WRITING_GUIDES:
+        from writing_help import ALL_GUIDES, WritingHelpDialog
+        if topic == "publish" and self.__dict__.get("writing_variant") == "tistory_v2":
+            topic = "v2.publish"
+        if topic not in ALL_GUIDES:
             return
         dialog = self.__dict__.get("writing_help_dialog")
         if dialog is not None and dialog.winfo_exists():
@@ -48697,8 +48734,6 @@ class KeywordApp(ctk.CTk):
             self._restore_writing_keyword_inputs(variant)
             self._save_ui_state()
         is_v2 = variant == "tistory_v2"
-        for button in self.__dict__.get("writing_help_buttons", {}).values():
-            button.grid_remove() if is_v2 else button.grid()
         if is_v2 and self.__dict__.get("tistory_v2_controls") is None:
             from tistory_v2_writing import TistoryV2WritingControls
             self.tistory_v2_controls = TistoryV2WritingControls(self.writing_control_row, self, sys.modules[__name__])
@@ -48711,6 +48746,14 @@ class KeywordApp(ctk.CTk):
                 workflow=self.tistory_v2_controls.workflow,
                 article_provider=self._v2_article_source, on_finished=self._v2_slide_editor_finished)
             self._tag_mousewheel_descendants(self.tistory_v2_panel)
+            self._install_menu_help("tistory_v2", self.writing_page)
+            from menu_help import attach_heading_help
+            review_help = attach_heading_help(self.tistory_v2_controls.review_publish_switch,
+                lambda parent: self._create_writing_help_button(parent, "v2.review", register=False))
+            if review_help is not None:
+                self.menu_help_buttons.setdefault("v2.review", []).append(review_help)
+            self._tag_mousewheel_descendants(self.tistory_v2_panel)
+            self._tag_mousewheel_descendants(self.tistory_v2_controls)
         self.writing_page_title.configure(text="티스토리 V2" if is_v2 else "블로그글쓰기")
         if is_v2:
             self.tistory_v2_wiki_keyword_row.grid()

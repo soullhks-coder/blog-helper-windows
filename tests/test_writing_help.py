@@ -71,6 +71,8 @@ class WritingHelpTests(unittest.TestCase):
         for call in ast.walk(tree):
             if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
                     and call.func.attr == "_create_writing_help_button"
+                    and not any(k.arg == "register" and isinstance(k.value, ast.Constant)
+                                and k.value.value is False for k in call.keywords)
                     and len(call.args) >= 2 and isinstance(call.args[1], ast.Constant)):
                 topics.add(call.args[1].value)
         topics.update(("topic", "keyword", "article", "publish", "thumbnail", "cardnews"))
