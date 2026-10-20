@@ -7,6 +7,7 @@ the normal writing/publishing stages, including native two-image collages.
 from __future__ import annotations
 
 import copy
+import re
 from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -112,6 +113,56 @@ def _source_credits(slides: list[dict]) -> str:
 
 def source_credits_html(deck: dict) -> str:
     return _source_credits(deck.get("slides", [])) if deck.get("show_photo_sources", True) else ""
+
+
+def prepare_blogspot_collages(prepared: dict, directory: Path, title: str, cancel_event=None) -> dict:
+    """Join the ten rendered slides into five portable, ordered image pairs.
+
+    Unlike Tistory's editor groups these are single files. Preserve every
+    pixel (no crop or stretch), vertically center unequal sizes on white, and
+    never modify the editable slide originals. The caller owns this temporary
+    directory until browser input/manual review finishes.
+    """
+    paths = list(prepared["paths"])
+    if len(paths) != 10 or len({str(p) for p in paths}) != 10:
+        raise ValueError("블로그스팟 콜라주에는 서로 다른 슬라이드 10장이 필요합니다.")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    pairs = []
+    for index in range(0, 10, 2):
+        check_writing_cancelled(cancel_event)
+        with Image.open(paths[index]) as left, Image.open(paths[index + 1]) as right:
+            if left.format != "PNG" or right.format != "PNG":
+                raise ValueError("슬라이드 원본은 PNG 이미지여야 합니다.")
+            width, height = left.width + right.width, max(left.height, right.height)
+            with Image.new("RGB", (width, height), "white") as pair:
+                for source, x in ((left, 0), (right, left.width)):
+                    with source.convert("RGBA") as image:
+                        pair.paste(image, (x, (height - image.height) // 2), image)
+                output = directory / f"v2-collage-{index // 2 + 1}.png"
+                pair.save(output, "PNG")
+            pairs.append(output)
+    check_writing_cancelled(cancel_event)
+    figures = [
+        f'<figure class="blog-helper-inline-image blog-helper-tistory-v2-image" '
+        f'data-blog-helper-v2-pair="{i}" data-blog-helper-inline-image-path="{escape(str(path), quote=True)}">'
+        f'<img src="{escape(str(path), quote=True)}" alt="{escape(title, quote=True)} 슬라이드 {2*i-1}·{2*i}" '
+        f'style="max-width:100%;height:auto;" /></figure>'
+        for i, path in enumerate(pairs, 1)]
+    body = _without_generated_figures(prepared["article_html"])
+    # Calculate all anchors in the original body, so inserted figures cannot
+    # change subsequent positions or reverse the slide-pair sequence.
+    anchors = list(re.finditer(r"</(?:p|h2|h3|ul|ol|table)>", body, flags=re.I))
+    insertions = {}
+    for i, figure in enumerate(figures, 1):
+        position = anchors[min(len(anchors) - 1, (len(anchors) * i) // 6)].end() if anchors else len(body)
+        insertions.setdefault(position, []).append(figure)
+    for position, items in sorted(insertions.items(), reverse=True):
+        body = body[:position] + "\n" + "\n".join(items) + "\n" + body[position:]
+    # Prompt labels must remain the final paragraph for Blogger's existing
+    # label extraction. The browser adapter appends credits after extraction.
+    return {"article_html": body, "paths": pairs,
+            "source_credits_html": prepared.get("source_credits_html", "")}
 
 
 def deck_matches_article(deck: dict | None, title: str, article_html: str, keyword: str, slide_summaries=None,

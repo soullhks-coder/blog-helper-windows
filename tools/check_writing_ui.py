@@ -53,6 +53,8 @@ def main() -> None:
             window_geometry="1500x1000",
             target_platforms=["wordpress", "tistory", "blogspot"],
             tistory_profiles=[{"blog_url": "https://v2-first.tistory.com"}, {"blog_url": "https://v2-second.tistory.com"}],
+            blogspot_profiles=[{"blog_url": "https://v2-first.example.com", "blog_id": "111"},
+                               {"blog_url": "https://v2-second.example.com", "blog_id": "222", "daily_publish_limit": 15}],
             writing_topic="일반 저장 주제", writing_selected_keyword="일반 저장 선택",
             tistory_v2_topic="V2 저장 주제", tistory_v2_selected_keyword="V2 저장 선택",
             writing_auto_progress=False, tistory_v2_auto_progress=True,
@@ -434,6 +436,48 @@ def main() -> None:
             screenshot("v2-review-publish-on")
             print(f"{sys.platform} {args.theme}: V2 review toggle placement, isolation and restart persistence passed", flush=True)
 
+            # Both blog selectors stay on one row, using V2-only per-blog
+            # prompt/thumbnail preferences without changing home/normal targets.
+            before_blogger = app.wordpress_settings.blogspot_active_profile
+            before_blogger_url = app.wordpress_settings.blogspot_blog_url
+            tistory_selection = dict(controls.selection())
+            controls.platform_buttons["blogspot"].invoke()
+            settle(90)
+            assert app._selected_writing_targets() == ["blogspot"]
+            assert controls.menus["prompt_id"].get().startswith("블로그스팟 ·")
+            assert controls.menus["blogspot_profile"].winfo_rootx() > controls.menus["profile"].winfo_rootx()
+            assert abs(controls.menus["profile"].winfo_rooty() - controls.menus["blogspot_profile"].winfo_rooty()) < 5
+            assert app.tistory_retry_button.cget("text") == "블로그스팟 자동입력"
+            controls.select_thumbnail(4)
+            first_blogger_prompt = controls.selection()["prompt_id"]
+            controls.menus["blogspot_profile"].set("v2-second.example.com")
+            controls.changed("blogspot_profile")
+            controls.select_thumbnail(2)
+            blogger_run = controls.execution_settings(app.wordpress_settings)
+            assert blogger_run.target_platforms == ["blogspot"]
+            assert blogger_run.blogspot_blog_id == "222"
+            assert blogger_run.blogspot_blog_url == "https://v2-second.example.com"
+            assert blogger_run.blogspot_daily_publish_limit == 15
+            assert not blogger_run.blogspot_auto_publish  # Shared review toggle.
+            controls.menus["blogspot_profile"].set("v2-first.example.com")
+            controls.changed("blogspot_profile")
+            assert controls.selection()["thumbnail"] == 4
+            assert controls.selection()["prompt_id"] == first_blogger_prompt
+            controls.menus["blogspot_profile"].set("v2-second.example.com")
+            controls.changed("blogspot_profile")
+            assert controls.selection()["thumbnail"] == 2
+            restored_controls = TistoryV2WritingControls(app.writing_control_row, app, app_module)
+            assert restored_controls.selection() == controls.selection()
+            restored_controls.destroy()
+            controls.platform_buttons["tistory"].invoke()
+            assert controls.selection() == tistory_selection
+            assert app.wordpress_settings.blogspot_active_profile == before_blogger
+            assert app.wordpress_settings.blogspot_blog_url == before_blogger_url
+            assert app.wordpress_settings.home_target_platform == original_target
+            assert app.default_thumbnail_preset_index == original_default
+            assert app.tistory_retry_button.cget("text") == "티스토리 자동입력"
+            print(f"{sys.platform} {args.theme}: V2 Tistory/Blogger radios, per-blog defaults, review and restart isolation passed", flush=True)
+
             # Same generation worker receives the actual collected references.
             with patch.object(app_module, "ArticleGenerationWorker") as worker, \
                  patch.object(app_module, "writing_model_validation_error", return_value=""):
@@ -731,6 +775,25 @@ def main() -> None:
             app.publish_progress_bar.stop()
             app.writing_auto_run_active = False
             app.direct_keyword_start_keyword = ""
+            controls.platform_buttons["blogspot"].invoke()
+            controls.menus["blogspot_profile"].set("v2-second.example.com")
+            controls.changed("blogspot_profile")
+            with patch.object(app_module, "PublishPipelineWorker") as publisher, \
+                 patch.object(controls, "export_thumbnail", return_value=Path(directory) / "thumbnail.png"):
+                publisher.return_value.is_alive.return_value = False
+                app._run_publish_pipeline()
+                options = publisher.call_args.kwargs
+                assert options["settings"].target_platforms == ["blogspot"]
+                assert options["settings"].blogspot_blog_id == "222"
+                assert options["settings"].blogspot_active_profile == "블로그스팟 2"
+                assert not options["settings"].blogspot_auto_publish
+                assert options["tistory_v2_deck"]["id"] == saved_deck_id
+                assert not options["tistory_v2_deck"]["show_photo_sources"]
+                assert options["tistory_v2_deck"]["slides"][0]["title"] == "편집한 슬라이드 제목 유지"
+                publisher.return_value.start.assert_called_once()
+            app.pipeline_worker = None
+            app.publish_progress_bar.stop()
+            controls.platform_buttons["tistory"].invoke()
             app.article_editor.insert("end", "본문이 바뀜")
             with patch.object(app_module, "PublishPipelineWorker") as publisher, \
                  patch.object(app_module.messagebox, "showwarning") as warning:

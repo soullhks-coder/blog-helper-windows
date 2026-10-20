@@ -115,6 +115,31 @@ def main():
                     assert all(not path.exists() for path in staged_paths)
                     print("Blogger: native Chrome chooser, multipart MIME/bytes, ordered files and cleanup passed", flush=True)
 
+                    # The V2 route supplies one thumbnail followed by five
+                    # joined pairs. Verify their real native chooser payloads,
+                    # not only file extensions or mocked image counts.
+                    from tistory_v2_publish import prepare_blogspot_collages
+                    slide_paths = []
+                    for index in range(10):
+                        slide_path = Path(directory) / f"v2-slide-{index + 1}.png"
+                        Image.new("RGB", (600, 300), (index * 20, 80, 120)).save(slide_path)
+                        slide_paths.append(slide_path)
+                    pairs = prepare_blogspot_collages({"paths": slide_paths,
+                        "article_html": "<h2>V2 본문</h2><p>검토한 내용</p>"}, Path(directory) / "pairs", "검토할 글")
+                    _, ordered_images = app.prepare_blogspot_html_and_images(pairs["article_html"], str(paths[0]))
+                    assert ordered_images == [str(paths[0]), *map(str, pairs["paths"])]
+                    with patch.object(app, "_upload_blogspot_webp_files", side_effect=picker_upload):
+                        assert app.upload_blogspot_images(page, ordered_images, queue.Queue()) == 6
+                    parts = received[-1][1]
+                    for index, part in enumerate(parts[1:]):
+                        with Image.open(io.BytesIO(part["data"])) as image:
+                            assert image.size == (1200, 300)
+                            assert image.getpixel((10, 10)) == (index * 40, 80, 120)
+                            assert image.getpixel((610, 10)) == (index * 40 + 20, 80, 120)
+                    assert all(not path.exists() for path in staged_paths)
+                    assert all(path.exists() for path in slide_paths + pairs["paths"])
+                    print("Blogger V2: thumbnail + five ordered lossless WebP collages, Chrome chooser/HTTP and original preservation passed", flush=True)
+
                     for enabled in (False, True):
                         page.goto(origin)
                         result = app.upload_tistory_image_file(page, str(paths[0]), queue.Queue(), upload_webp=enabled)

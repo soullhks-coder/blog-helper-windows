@@ -34,16 +34,19 @@ class TistoryV2Workflow:
     def __init__(self, app, services):
         self.app, self.api = app, services
 
-    def options(self):
+    def options(self, platform="tistory"):
         api, app = self.api, self.app
         settings = app.wordpress_settings
-        prompts = [copy.deepcopy(item) for item in app._prompt_sets() if item.get("platform") == "tistory"]
-        profiles = api.normalize_tistory_profiles(settings.tistory_profiles)
-        labels = dict(api.home_blog_choices("tistory", settings))
+        if platform not in {"tistory", "blogspot"}:
+            raise ValueError("V2에서 지원하지 않는 블로그입니다.")
+        prompts = [copy.deepcopy(item) for item in app._prompt_sets() if item.get("platform") == platform]
+        normalize = api.normalize_blogspot_profiles if platform == "blogspot" else api.normalize_tistory_profiles
+        profiles = normalize(getattr(settings, platform + "_profiles"))
+        labels = dict(api.home_blog_choices(platform, settings))
         return {
             "prompts": [{"id": p["id"], "label": app._prompt_set_label(p)} for p in prompts],
             "profiles": [{"id": p["name"], "label": labels[p["name"]]} for p in profiles if p["name"] in labels],
-            "active_profile": settings.tistory_active_profile,
+            "active_profile": getattr(settings, platform + "_active_profile"),
             "thumbnail": api.normalize_thumbnail_preset_index(settings.thumbnail_default_preset),
             "thumbnails": [f"썸네일·카드{i + 1}" for i in range(api.THUMBNAIL_PRESET_COUNT)],
             "models": list(api.WRITING_MODEL_OPTIONS),
@@ -54,24 +57,35 @@ class TistoryV2Workflow:
         """Called on the UI thread; never persist secrets in the deck manifest."""
         api, app = self.api, self.app
         settings = copy.deepcopy(app.wordpress_settings)
+        platform = selection.get("platform", "tistory")
+        if platform not in {"tistory", "blogspot"}:
+            raise ValueError("V2에서 지원하지 않는 블로그입니다.")
+        label = "블로그스팟" if platform == "blogspot" else "티스토리"
         prompt = next((item for item in app._prompt_sets()
-                       if item.get("id") == selection.get("prompt_id") and item.get("platform") == "tistory"), None)
+                       if item.get("id") == selection.get("prompt_id") and item.get("platform") == platform), None)
         if generation and not prompt:
-            raise ValueError("사용할 티스토리 글쓰기 프롬프트를 선택해 주세요.")
+            raise ValueError(f"사용할 {label} 글쓰기 프롬프트를 선택해 주세요.")
         if prompt:
             settings.title_prompt_template = str(prompt["title_prompt"])
             settings.article_prompt_template = str(prompt["article_prompt"])
         settings.preferred_ai_provider = api.normalize_writing_model(selection.get("model", settings.preferred_ai_provider))
         settings.inline_images_enabled = False
+        settings.target_platforms = [platform]
+        settings.writing_prompt_active_target = platform
         if generation:
             error = api.writing_model_validation_error(settings)
             if error:
                 raise ValueError(error)
-        profile = next((p for p in api.normalize_tistory_profiles(settings.tistory_profiles)
+        normalize = api.normalize_blogspot_profiles if platform == "blogspot" else api.normalize_tistory_profiles
+        profile = next((p for p in normalize(getattr(settings, platform + "_profiles"))
                         if p["name"] == selection.get("profile")), None)
         thumbnail = api.normalize_thumbnail_preset_index(selection.get("thumbnail", 0))
         result = {"settings": settings, "profile": copy.deepcopy(profile), "selection": copy.deepcopy(selection)}
         if editor:
+            # This legacy standalone action is Tistory-only. The embedded V2
+            # screen uses the shared publishing pipeline for either platform.
+            if platform != "tistory":
+                raise ValueError("블로그스팟 업로드는 ④ 단계의 업로드·발행 버튼을 이용해 주세요.")
             if not profile:
                 raise ValueError("환경설정에 등록한 티스토리 블로그를 선택해 주세요.")
             write_url = api.build_tistory_write_url(profile["blog_url"], profile["write_url"])

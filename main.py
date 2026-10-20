@@ -10402,6 +10402,8 @@ def run_blogspot_playwright_automation(
     reference_image_protection_mode: bool = False,
     profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
     auto_publish: bool = True,
+    tistory_v2: bool = False,
+    source_credits_html: str = "",
 ) -> dict[str, object]:
     cancel_event = getattr(result_queue, "cancel_event", None)
     check_writing_cancelled(cancel_event)
@@ -10444,7 +10446,8 @@ def run_blogspot_playwright_automation(
                 else "본문 마지막에서 Blogger 라벨용 주요 태그를 찾지 못했습니다."
             ),
         )
-        if GOOGLE_IMAGE_COLLAGE_ENABLED:
+        blogspot_article_html += source_credits_html
+        if GOOGLE_IMAGE_COLLAGE_ENABLED and not tistory_v2:
             mode_message = (
                 "블로그스팟용 재사용 허용 참고 이미지를 찾고 있습니다..."
                 if reference_image_protection_mode
@@ -10490,6 +10493,8 @@ def run_blogspot_playwright_automation(
             thumbnail_path,
         )
         check_writing_cancelled(cancel_event)
+        if tistory_v2 and len(image_paths) != 6:
+            raise RuntimeError("V2 썸네일 1장과 슬라이드 콜라주 5개를 모두 준비하지 못해 업로드를 중단했습니다.")
         thumbnail_candidate = Path(thumbnail_path).expanduser()
         thumbnail_at_top = bool(
             str(thumbnail_path or "").strip()
@@ -10586,6 +10591,8 @@ def run_blogspot_playwright_automation(
                 )
                 if BLOGSPOT_IMAGE_SLOT_PREFIX in final_html:
                     raise RuntimeError("블로그스팟 본문 이미지 배치 표시를 모두 제거하지 못했습니다.")
+                if tistory_v2 and attached_count != 6:
+                    raise RuntimeError("V2 이미지 6개(썸네일 1장·콜라주 5개)의 업로드를 확인하지 못해 발행을 중단했습니다.")
                 append_runtime_log(
                     "BLOGSPOT",
                     f"본문 이미지 배치 완료: attached={attached_count}",
@@ -26581,8 +26588,8 @@ class PublishPipelineWorker(threading.Thread):
             cleanup_paths.extend(extract_inline_image_paths(self.article_html))
             cleanup_paths.extend(extract_inline_image_paths(prepared_article_html))
             target_platforms = set(self.settings.target_platforms or ["wordpress"])
-            if self.tistory_v2 and target_platforms != {"tistory"}:
-                raise ValueError("티스토리 V2는 티스토리 블로그 한 곳에만 발행할 수 있습니다.")
+            if self.tistory_v2 and target_platforms not in ({"tistory"}, {"blogspot"}):
+                raise ValueError("V2는 티스토리 또는 블로그스팟 블로그 한 곳을 선택해 주세요.")
             is_public_post = self.settings.post_mode != "임시저장"
             if is_public_post and "wordpress" in target_platforms:
                 DailyPublishLimitStore.ensure_can_publish(
@@ -26717,31 +26724,31 @@ class PublishPipelineWorker(threading.Thread):
             wordpress_url = ""
             if wordpress_result:
                 wordpress_url = str(wordpress_result.get("link") or wordpress_result.get("post_url") or "").strip()
+            prepared_slides = None
+            if self.tistory_v2:
+                from tistory_v2_publish import export_edited_slide_deck, prepare_slide_deck
+
+                slide_progress = lambda message: self.result_queue.put(("publish_progress", (0.88, message)))
+                if self.tistory_v2_deck is not None:
+                    prepared_slides = export_edited_slide_deck(
+                        self.tistory_v2_deck, self.title, prepared_article_html,
+                        self.tistory_v2_keyword or self.focus_keyword, DATA_DIR / "Tistory V2", slide_progress,
+                        cancel_event=self.cancel_event, wiki_keyword=self.settings.tistory_v2_wiki_keyword)
+                else:
+                    prepared_slides = prepare_slide_deck(
+                        self.title, prepared_article_html,
+                        self.tistory_v2_keyword or self.focus_keyword,
+                        DATA_DIR / "Tistory V2", require_google_chrome_executable(), progress=slide_progress,
+                        cancel_event=self.cancel_event, wiki_keyword=self.settings.tistory_v2_wiki_keyword)
+                check_writing_cancelled(self.cancel_event)
+                slide_paths = [str(path) for path in prepared_slides["paths"]]
+                if len(slide_paths) != 10 or len(set(slide_paths)) != 10:
+                    raise RuntimeError("V2 슬라이드 10장을 준비하지 못해 업로드를 중단했습니다.")
             if "tistory" in target_platforms:
                 check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.88, "티스토리 글쓰기 화면용 초안을 준비하고 있습니다...")))
-                tistory_article_html = prepared_article_html
-                tistory_v2_slide_paths = None
-                if self.tistory_v2:
-                    from tistory_v2_publish import export_edited_slide_deck, prepare_slide_deck
-
-                    slide_progress = lambda message: self.result_queue.put(("publish_progress", (0.88, message)))
-                    if self.tistory_v2_deck is not None:
-                        prepared_slides = export_edited_slide_deck(
-                            self.tistory_v2_deck, self.title, prepared_article_html,
-                            self.tistory_v2_keyword or self.focus_keyword, DATA_DIR / "Tistory V2", slide_progress,
-                            cancel_event=self.cancel_event, wiki_keyword=self.settings.tistory_v2_wiki_keyword)
-                    else:
-                        prepared_slides = prepare_slide_deck(
-                            self.title, prepared_article_html,
-                            self.tistory_v2_keyword or self.focus_keyword,
-                            DATA_DIR / "Tistory V2", require_google_chrome_executable(), progress=slide_progress,
-                            cancel_event=self.cancel_event, wiki_keyword=self.settings.tistory_v2_wiki_keyword)
-                    check_writing_cancelled(self.cancel_event)
-                    tistory_v2_slide_paths = [str(path) for path in prepared_slides["paths"]]
-                    if len(tistory_v2_slide_paths) != 10 or len(set(tistory_v2_slide_paths)) != 10:
-                        raise RuntimeError("티스토리 V2 슬라이드 10장을 준비하지 못해 업로드를 중단했습니다.")
-                    tistory_article_html = prepared_slides["article_html"]
+                tistory_article_html = prepared_slides["article_html"] if prepared_slides is not None else prepared_article_html
+                tistory_v2_slide_paths = slide_paths if prepared_slides is not None else None
                 write_url = build_tistory_write_url(self.settings.tistory_blog_url, self.settings.tistory_write_url)
                 draft_html = build_tistory_draft_document(self.title, tistory_article_html, self.thumbnail_path)
                 check_writing_cancelled(self.cancel_event)
@@ -26791,30 +26798,41 @@ class PublishPipelineWorker(threading.Thread):
             if "blogspot" in target_platforms:
                 check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.92, "블로그스팟 Playwright 발행을 준비하고 있습니다...")))
-                blogspot_result = run_blogspot_playwright_automation(
-                    title=self.title,
-                    article_html=prepared_article_html,
-                    tag_names=self.tag_names,
-                    result_queue=self.result_queue,
-                    blog_id=self.settings.blogspot_blog_id,
-                    blog_url=self.settings.blogspot_blog_url,
-                    save_mode=self.settings.blogspot_save_mode,
-                    thumbnail_path=self.thumbnail_path,
-                    daily_publish_limit=self.settings.blogspot_daily_publish_limit,
-                    reference_image_protection_mode=(
-                        self.settings.blogspot_reference_image_protection_mode
-                    ),
-                    auto_publish=bool(self.settings.blogspot_auto_publish),
-                    profile_scope=str(
-                        service_profile_by_name(
-                            normalize_blogspot_profiles(
-                                self.settings.blogspot_profiles
-                            ),
+                # Keep pair files alive through upload and manual review; on
+                # completion/failure/stop remove only these temporary copies.
+                with tempfile.TemporaryDirectory(prefix="v2-blogspot-", dir=DATA_DIR) as collage_directory:
+                    blogspot_html = prepared_article_html
+                    v2_options = {}
+                    if prepared_slides is not None:
+                        from tistory_v2_publish import prepare_blogspot_collages
+                        # Extract labels before inserting figures, including
+                        # short articles whose last paragraph is a label list.
+                        clean_body, prompt_labels = extract_blogspot_prompt_labels(prepared_slides["article_html"])
+                        collages = prepare_blogspot_collages({**prepared_slides, "article_html": clean_body},
+                            Path(collage_directory), self.title, self.cancel_event)
+                        blogspot_html = collages["article_html"]
+                        if prompt_labels:
+                            blogspot_html += "\n<p>주요 태그: " + escape(", ".join(prompt_labels)) + "</p>"
+                        v2_options = {"tistory_v2": True, "source_credits_html": collages["source_credits_html"]}
+                        self.result_queue.put(("publish_progress", (0.93, "블로그스팟용 슬라이드 10장 → 좌우 콜라주 5개 준비 완료")))
+                    blogspot_result = run_blogspot_playwright_automation(
+                        title=self.title,
+                        article_html=blogspot_html,
+                        tag_names=self.tag_names,
+                        result_queue=self.result_queue,
+                        blog_id=self.settings.blogspot_blog_id,
+                        blog_url=self.settings.blogspot_blog_url,
+                        save_mode=self.settings.blogspot_save_mode,
+                        thumbnail_path=self.thumbnail_path,
+                        daily_publish_limit=self.settings.blogspot_daily_publish_limit,
+                        reference_image_protection_mode=self.settings.blogspot_reference_image_protection_mode,
+                        auto_publish=bool(self.settings.blogspot_auto_publish),
+                        profile_scope=str(service_profile_by_name(
+                            normalize_blogspot_profiles(self.settings.blogspot_profiles),
                             self.settings.blogspot_active_profile,
-                        ).get("profile_scope")
-                        or BLOGSPOT_PROFILE_SCOPES[0]
-                    ),
-                )
+                        ).get("profile_scope") or BLOGSPOT_PROFILE_SCOPES[0]),
+                        **v2_options,
+                    )
                 check_writing_cancelled(self.cancel_event)
 
             threads_result = None
@@ -28143,6 +28161,7 @@ class KeywordApp(ctk.CTk):
         v2_run = self.__dict__.get("writing_v2_run_settings")
         if v2_run is not None:
             configurations["tistory"] = ("티스토리", v2_run.tistory_daily_publish_limit)
+            configurations["blogspot"] = ("블로그스팟", v2_run.blogspot_daily_publish_limit)
         rows: list[tuple[str, str, int | None]] = []
         seen: set[str] = set()
         for platform in platforms:
@@ -28153,6 +28172,8 @@ class KeywordApp(ctk.CTk):
             account = self._daily_publish_account(platform)
             if platform == "tistory" and v2_run is not None:
                 account = v2_run.tistory_blog_url or v2_run.tistory_write_url
+            if platform == "blogspot" and v2_run is not None:
+                account = v2_run.blogspot_blog_url or v2_run.blogspot_blog_id
             if platform == "tistory" and is_shared_tistory_blog(account):
                 usage = self._current_shared_tistory_usage(account)
                 if not usage or usage.get("error"):
@@ -33794,7 +33815,8 @@ class KeywordApp(ctk.CTk):
 
     def _selected_writing_targets(self) -> list[str]:
         if self._is_tistory_v2_writing():
-            return ["tistory"]
+            controls = self.__dict__.get("tistory_v2_controls")
+            return [controls.selection().get("platform", "tistory")] if controls else ["tistory"]
         return [platform for platform, variable in self.target_platform_vars.items() if variable.get()]
 
     def _arm_writing_auto_progress(self) -> bool:
@@ -48776,7 +48798,7 @@ class KeywordApp(ctk.CTk):
                 continue
             if name == "tistory_automation_worker":
                 own_manual_scopes.add(("tistory", getattr(worker, "profile_scope", "")))
-            if name == "pipeline_worker" and not is_v2:
+            if name == "pipeline_worker":
                 settings = getattr(worker, "settings", None)
                 if isinstance(settings, WordPressSettings) and "blogspot" in (settings.target_platforms or []):
                     profile = service_profile_by_name(normalize_blogspot_profiles(settings.blogspot_profiles), settings.blogspot_active_profile)
@@ -48977,6 +48999,8 @@ class KeywordApp(ctk.CTk):
         actions = self.open_published_post_button.master
         self._layout_writing_publish_actions(actions, actions.winfo_width())
         self._refresh_thumbnail_preset_buttons()
+        self.tistory_retry_button.configure(text=("블로그스팟 자동입력" if is_v2 and
+            self.tistory_v2_controls.selection().get("platform") == "blogspot" else "티스토리 자동입력"))
         self._layout_writing_control_row()
         return True
 
