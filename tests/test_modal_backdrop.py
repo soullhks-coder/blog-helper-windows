@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import modal_backdrop
 from modal_backdrop import DimmedDialogApi, ModalDimmer, dim_color
@@ -55,6 +55,23 @@ class Widget:
 
 
 class ModalBackdropTests(unittest.TestCase):
+    def test_basic_container_paint_does_not_propagate_into_hidden_children(self):
+        class Frame:
+            def __init__(self):
+                self._fg_color = '#ffffff'
+                self._bg_color = '#ffffff'
+                self._border_color = '#abcdef'
+                self._draw = Mock()
+                self.configure = Mock(side_effect=AssertionError('recursive public container setter'))
+
+        widget = Frame()
+        with patch.object(modal_backdrop.ctk, 'CTkFrame', Frame):
+            ModalDimmer._configure_colors(widget, dict(fg_color='#737373', bg_color='#737373', border_color='#4d5c6c'))
+        self.assertEqual(widget._fg_color, '#737373')
+        self.assertEqual(widget._bg_color, '#737373')
+        self.assertEqual(widget._border_color, '#4d5c6c')
+        widget._draw.assert_called_once_with()
+
     def test_composite_colors_and_image_use_one_redraw_and_skip_unchanged_values(self):
         class Composite(Widget):
             pass

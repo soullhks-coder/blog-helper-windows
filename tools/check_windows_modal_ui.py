@@ -31,6 +31,9 @@ def check_theme(theme):
     root.configure(fg_color=color)
     card = ctk.CTkFrame(root, fg_color=color)
     card.pack(fill="both", expand=True, padx=20, pady=20)
+    hidden_page = ctk.CTkFrame(card, fg_color="transparent")
+    hidden_control = InputOptionMenu(hidden_page, values=["hidden page"], fg_color=color)
+    hidden_control.pack()
     button = ctk.CTkButton(card, text="메뉴 · 완료 팝업 테스트", hover=False)
     button.pack(pady=8)
     menu = InputOptionMenu(card, values=["나눔고딕 테스트", "다른 항목"])
@@ -72,7 +75,10 @@ def check_theme(theme):
                 assert font.actual("weight") == weight
             assert ctk.CTkFont().cget("family") == "NanumGothic"
         settle()
-        dimmer.attach(dialog)
+        with patch.object(hidden_control, "configure", wraps=hidden_control.configure) as hidden_writes:
+            dimmer.attach(dialog)
+            hidden_writes.assert_not_called()
+        assert hidden_control.cget('bg_color') == color
         settle(100)
         dark_image = preview.cget("image")
         dark_canvas_image = canvas.itemcget(canvas_image, "image")
@@ -132,6 +138,9 @@ def check_theme(theme):
         assert not dimmer._windows_saved
         assert dimmer._refresh_job is None
         assert card.cget("fg_color") == "#102030"
+        # Only the explicit live card.configure above is allowed to change
+        # hidden child backgrounds; scrim painting/restoration must not cascade.
+        assert hidden_control.cget('fg_color') == color
         assert child.cget("bg_color") == "#abcdef"
         assert progress.cget("progress_color") == "#00ff00"
         assert canvas.itemcget(rectangle, "fill") == "#00ff00"

@@ -1,5 +1,7 @@
 import inspect
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import main
 from history_data import (
@@ -83,6 +85,77 @@ class HistorySettingsSourceTests(unittest.TestCase):
         self.assertIn('"history": self.settings_history_section_button', switch_source)
         self.assertIn("self.history_scroll.grid", switch_source)
         self.assertIn("self._render_history_cards()", switch_source)
+
+
+class HistoryPaginationTests(unittest.TestCase):
+    def make_app(self):
+        app = SimpleNamespace(history_page=0, _history_render_job=None, history_scroll=Mock(),
+            history_cards_frame=Mock(), history_search_entry=Mock(), history_date_menu=Mock(),
+            history_category_menu=Mock(), history_result_label=Mock(), history_page_label=Mock(),
+            history_prev_button=Mock(), history_next_button=Mock(), after_cancel=Mock(),
+            _tag_mousewheel_descendants=Mock(), _theme_palette=lambda: {
+                key: '#ffffff' for key in ('panel', 'border', 'text', 'muted', 'accent', 'selected', 'subtext', 'input')})
+        app.history_cards_frame.winfo_children.return_value = [Mock(), Mock()]
+        app.history_search_entry.get.return_value = ''
+        app.history_date_menu.get.return_value = '전체 날짜'
+        app.history_category_menu.get.return_value = '전체 분류'
+        return app
+
+    def render(self, app, **kwargs):
+        with patch.object(main.ctk, 'CTkFrame'), patch.object(main.ctk, 'CTkFont'), \
+             patch.object(main.ctk, 'CTkLabel') as labels:
+            main.KeywordApp._render_history_cards(app, **kwargs)
+        titles = {entry['title'] for entry in BLOG_HELPER_HISTORY}
+        return [call.kwargs['text'] for call in labels.call_args_list if call.kwargs.get('text') in titles]
+
+    def test_all_records_are_accessible_in_order_with_at_most_ten_retained_cards(self):
+        app = self.make_app()
+        displayed = []
+        for page in range((len(BLOG_HELPER_HISTORY) + 9) // 10):
+            app.history_page = page
+            titles = self.render(app, reset_page=False)
+            self.assertLessEqual(len(titles), 10)
+            displayed.extend(titles)
+        self.assertEqual(displayed, [entry['title'] for entry in search_history()])
+        app.history_next_button.configure.assert_called_with(state='disabled')
+        for old_card in app.history_cards_frame.winfo_children():
+            self.assertEqual(old_card.destroy.call_count, (len(BLOG_HELPER_HISTORY) + 9) // 10)
+
+    def test_query_filters_search_the_entire_catalog_and_reset_the_page(self):
+        app = self.make_app()
+        app.history_page = 8
+        app.history_search_entry.get.return_value = '60px'
+        self.assertEqual(self.render(app), [entry['title'] for entry in search_history('60px')])
+        self.assertEqual(app.history_page, 0)
+        app.history_prev_button.configure.assert_called_with(state='disabled')
+        app.history_next_button.configure.assert_called_with(state='disabled')
+        app.history_search_entry.get.return_value = '히스토리'
+        app.history_date_menu.get.return_value = '2026-09-25'
+        app.history_category_menu.get.return_value = '프로그램 관리'
+        self.assertEqual(self.render(app), [entry['title'] for entry in search_history('히스토리', '2026-09-25', '프로그램 관리')])
+
+    def test_page_edges_empty_results_and_pending_search_are_safe(self):
+        app = self.make_app()
+        app.history_page = -1
+        self.assertEqual(self.render(app, reset_page=False), [entry['title'] for entry in search_history()[:10]])
+        app.history_page = 1000
+        self.render(app, reset_page=False)
+        self.assertEqual(app.history_page, (len(BLOG_HELPER_HISTORY) - 1) // 10)
+        app.history_search_entry.get.return_value = '없는 검색어'
+        app._history_render_job = 'pending'
+        self.assertEqual(self.render(app), [])
+        app.after_cancel.assert_called_once_with('pending')
+        self.assertIsNone(app._history_render_job)
+        app.history_page_label.configure.assert_called_with(text='1 / 1')
+        app.history_next_button.configure.assert_called_with(state='disabled')
+
+    def test_navigation_preserves_filters_and_returns_to_the_top(self):
+        app = self.make_app()
+        app._render_history_cards = Mock()
+        main.KeywordApp._move_history_page(app, 1)
+        self.assertEqual(app.history_page, 1)
+        app._render_history_cards.assert_called_once_with(reset_page=False)
+        app.history_scroll._parent_canvas.yview_moveto.assert_called_once_with(0)
 
 
 if __name__ == "__main__":

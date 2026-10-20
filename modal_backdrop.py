@@ -58,6 +58,10 @@ class ModalDimmer:
             return
         self.dialogs.append(dialog)
         self.begin()
+        if isinstance(dialog, ctk.CTkBaseClass):
+            # Only the rounded-corner background follows its painted parent;
+            # the dialog's foreground/content remains undimmed.
+            dialog.configure(bg_color=dialog._detect_color_of_master())
 
         def closed(event):
             if event.widget is not dialog:
@@ -241,13 +245,32 @@ class ModalDimmer:
                 continue
             widget = changed[0][0][0]
             try:
-                if len(changed) > 1:
-                    widget.configure(**{key[1]: target for key, _setter, target in changed})
+                if len(changed[0][0]) == 2 and isinstance(widget, (ctk.CTk, ctk.CTkBaseClass)):
+                    ModalDimmer._configure_colors(widget, {key[1]: target for key, _setter, target in changed})
                 else:
                     _key, setter, target = changed[0]
                     setter(target)
             except (tk.TclError, ValueError):
                 pass
+
+    @staticmethod
+    def _configure_colors(widget, values):
+        # Dimming is a temporary visual paint, NOT a theme change. CTk's
+        # public frame/root color setters recursively reconfigure ALL children,
+        # including hidden pages and the dialog itself. We already snapshot
+        # and paint each visible control explicitly, so those cascades are
+        # both redundant and harmful. Update only the basic container's own
+        # paint state; composite controls/subclasses keep their public API.
+        if isinstance(widget, ctk.CTk) and set(values) == {'fg_color'}:
+            widget._fg_color = values['fg_color']
+            tk.Tk.configure(widget, bg=widget._apply_appearance_mode(widget._fg_color))
+        elif (type(widget) is ctk.CTkFrame and set(values) <= {'fg_color', 'bg_color', 'border_color'}
+              and all(hasattr(widget, '_' + option) for option in values)):
+            for option, value in values.items():
+                setattr(widget, '_' + option, value)
+            widget._draw()
+        else:
+            widget.configure(**values)
 
     def refresh(self):
         if self._refresh_job:

@@ -1214,19 +1214,39 @@ def main() -> None:
             assert app.history_scroll.winfo_ismapped()
             assert not app.settings_ai_tabs_header.winfo_ismapped()
             assert app.history_rendered
-            assert len(app.history_cards_frame.winfo_children()) == len(
-                app_module.BLOG_HELPER_HISTORY
-            )
+            titles = {str(entry['title']) for entry in app_module.BLOG_HELPER_HISTORY}
+            seen = []
+            pages = (len(app_module.BLOG_HELPER_HISTORY) + 9) // 10
+            for page in range(pages):
+                assert app.history_page == page
+                cards = app.history_cards_frame.winfo_children()
+                assert len(cards) == min(10, len(app_module.BLOG_HELPER_HISTORY) - page * 10)
+                for card in cards:
+                    seen.extend(widget.cget('text') for widget in card.winfo_children()
+                                if isinstance(widget, app_module.ctk.CTkLabel) and widget.cget('text') in titles)
+                assert app.history_page_label.cget('text') == f'{page + 1} / {pages}'
+                if page < pages - 1:
+                    assert app.history_next_button.cget('state') == 'normal'
+                    app.history_next_button.invoke()
+                    settle(80)
+            assert seen == [entry['title'] for entry in app_module.BLOG_HELPER_HISTORY]
+            assert app.history_next_button.cget('state') == 'disabled'
+            app.history_prev_button.invoke()
+            assert app.history_page == pages - 2
             app.history_search_entry.insert(0, "60px")
             app._render_history_cards()
             settle(120)
             assert len(app.history_cards_frame.winfo_children()) == 1
             assert "검색 결과 1개" in app.history_result_label.cget("text")
+            assert app.history_page == 0
+            assert app.history_prev_button.cget('state') == 'disabled'
+            assert app.history_next_button.cget('state') == 'disabled'
             app._clear_history_filters()
             settle(120)
-            assert len(app.history_cards_frame.winfo_children()) == len(
-                app_module.BLOG_HELPER_HISTORY
-            )
+            assert len(app.history_cards_frame.winfo_children()) == 10
+            assert app.history_page == 0
+            assert f'검색 결과 {len(app_module.BLOG_HELPER_HISTORY)}개' in app.history_result_label.cget('text')
+            print(f'{sys.platform} {args.theme}: bounded history cards, every record accessible, page edges, global search and reset passed', flush=True)
 
             app._switch_page("writing")
             # Initialize the native window before scheduling the quit timer.

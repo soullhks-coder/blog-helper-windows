@@ -31269,6 +31269,7 @@ class KeywordApp(ctk.CTk):
         palette = self._theme_palette()
         self.history_rendered = False
         self._history_render_job = None
+        self.history_page = 0
 
         hero = ctk.CTkFrame(
             self.history_scroll,
@@ -31385,14 +31386,31 @@ class KeywordApp(ctk.CTk):
         )
         self.history_clear_button.grid(row=0, column=3, padx=(8, 16), pady=16, sticky="e")
 
+        navigation = ctk.CTkFrame(self.history_scroll, fg_color="transparent")
+        navigation.grid(row=2, column=0, pady=(2, 9), sticky="ew")
+        navigation.grid_columnconfigure(0, weight=1)
         self.history_result_label = ctk.CTkLabel(
-            self.history_scroll,
-            text="히스토리를 열면 전체 기록을 표시합니다.",
+            navigation,
+            text="전체 기록을 검색하고 10개씩 표시합니다.",
             text_color=palette["muted"],
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
         )
-        self.history_result_label.grid(row=2, column=0, padx=4, pady=(2, 9), sticky="ew")
+        self.history_result_label.grid(row=0, column=0, padx=4, sticky="ew")
+        for name, column, text, direction in (
+            ("history_prev_button", 1, "‹ 이전", -1),
+            ("history_next_button", 3, "다음 ›", 1),
+        ):
+            button = ctk.CTkButton(
+                navigation, text=text, width=72, height=30, corner_radius=12,
+                fg_color=palette["selected"], hover_color=palette["hover"],
+                text_color=palette["text"],
+                command=lambda delta=direction: self._move_history_page(delta),
+            )
+            button.grid(row=0, column=column, padx=4)
+            setattr(self, name, button)
+        self.history_page_label = ctk.CTkLabel(navigation, text="1 / 1", width=56, text_color=palette["muted"])
+        self.history_page_label.grid(row=0, column=2, padx=4)
 
         self.history_cards_frame = ctk.CTkFrame(self.history_scroll, fg_color="transparent")
         self.history_cards_frame.grid(row=3, column=0, sticky="ew")
@@ -31412,7 +31430,17 @@ class KeywordApp(ctk.CTk):
         self.history_category_menu.set("전체 분류")
         self._render_history_cards()
 
-    def _render_history_cards(self) -> None:
+    def _move_history_page(self, direction: int) -> None:
+        self.history_page += direction
+        self._render_history_cards(reset_page=False)
+        self.history_scroll._parent_canvas.yview_moveto(0)
+
+    def _render_history_cards(self, *, reset_page: bool = True) -> None:
+        if self._history_render_job is not None:
+            try:
+                self.after_cancel(self._history_render_job)
+            except (tk.TclError, ValueError):
+                pass
         self._history_render_job = None
         if not hasattr(self, "history_cards_frame"):
             return
@@ -31420,6 +31448,16 @@ class KeywordApp(ctk.CTk):
         selected_date = self.history_date_menu.get()
         selected_category = self.history_category_menu.get()
         entries = search_history(query, selected_date, selected_category)
+        # Keep every record searchable, but bound retained native widgets and
+        # fonts. Hidden history cards otherwise participate in every later
+        # modal's CTk parent-color propagation, even on unrelated menus.
+        page_count = max(1, (len(entries) + 9) // 10)
+        self.history_page = 0 if reset_page else min(max(0, self.history_page), page_count - 1)
+        start = self.history_page * 10
+        visible_entries = entries[start:start + 10]
+        self.history_page_label.configure(text=f"{self.history_page + 1} / {page_count}")
+        self.history_prev_button.configure(state="normal" if self.history_page > 0 else "disabled")
+        self.history_next_button.configure(state="normal" if self.history_page < page_count - 1 else "disabled")
         palette = self._theme_palette()
 
         for child in self.history_cards_frame.winfo_children():
@@ -31434,7 +31472,7 @@ class KeywordApp(ctk.CTk):
             active_filters.append(selected_category)
         filter_text = f" · {' · '.join(active_filters)}" if active_filters else ""
         self.history_result_label.configure(
-            text=f"검색 결과 {len(entries)}개{filter_text}",
+            text=f"검색 결과 {len(entries)}개 · {start + 1 if entries else 0}–{start + len(visible_entries)} 표시{filter_text}",
             text_color=palette["accent"] if entries else "#ff6b6b",
         )
 
@@ -31456,7 +31494,7 @@ class KeywordApp(ctk.CTk):
             self.history_rendered = True
             return
 
-        for row, entry in enumerate(entries):
+        for row, entry in enumerate(visible_entries):
             card = ctk.CTkFrame(
                 self.history_cards_frame,
                 fg_color=palette["panel"],
