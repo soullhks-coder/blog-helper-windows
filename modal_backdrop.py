@@ -133,6 +133,8 @@ class ModalDimmer:
             self.end()
 
     def _restoration_values(self):
+        if not self._windows_saved:
+            return {}
         # Freeze values before touching parents: their configure() calls can
         # propagate background changes into otherwise independent children.
         values = {}
@@ -208,14 +210,44 @@ class ModalDimmer:
             return level
 
         restore = self._restoration_values()
-        for key in sorted(restore, key=depth):
-            getter, setter, target = restore[key]
+        self._apply_values((key, *restore[key]) for key in sorted(restore, key=depth))
+        self._windows_saved.clear()
+
+    @staticmethod
+    def _apply_values(records):
+        """Paint a composite control once, not once per color property.
+
+        CTk.configure redraws immediately; frame colors also propagate into
+        descendants. Separate fg/bg/border/text writes multiply that work (and
+        the scrollbar's nested update_idletasks). Keep parent-first order and
+        compare each child only AFTER its parent has finished propagating.
+        Native canvas items/scroll content retain their own setter semantics.
+        """
+        groups = {}
+        for key, getter, setter, target in records:
+            widget = key[0]
+            composite = len(key) == 2 and isinstance(widget, (ctk.CTk, ctk.CTkBaseClass))
+            group = widget if composite else key
+            groups.setdefault(group, []).append((key, getter, setter, target))
+        for group in groups.values():
+            changed = []
+            for key, getter, setter, target in group:
+                try:
+                    if getter() != target:
+                        changed.append((key, setter, target))
+                except (tk.TclError, ValueError):
+                    pass
+            if not changed:
+                continue
+            widget = changed[0][0][0]
             try:
-                if getter() != target:
+                if len(changed) > 1:
+                    widget.configure(**{key[1]: target for key, _setter, target in changed})
+                else:
+                    _key, setter, target = changed[0]
                     setter(target)
             except (tk.TclError, ValueError):
                 pass
-        self._windows_saved.clear()
 
     def refresh(self):
         if self._refresh_job:
@@ -328,27 +360,24 @@ class ModalDimmer:
         visit(self.root)
         # Collect before applying: CTk frame background changes propagate to
         # children, so reading while painting would compound the dim effect.
-        for key, getter, setter, original, dimmed, image in changes:
-            try:
-                setter(dimmed)
-                # Keep only the current image per property, not every
-                # historical preview rendered while a popup is open.
-                self._windows_saved[key] = (getter, setter, original, dimmed, image)
-            except (tk.TclError, ValueError):
-                pass
+        pending = {key: (getter, setter, original, dimmed, image)
+                   for key, getter, setter, original, dimmed, image in changes}
+        # Even when parent propagation already produced the target, retain
+        # the original snapshot so closing restores that child's exact color.
+        self._windows_saved.update(pending)
+        self._apply_values((key, getter, setter, dimmed)
+                           for key, getter, setter, _original, dimmed, _image in changes)
         if self._windows:
+            reassert = []
             for key in observed:
                 record = self._windows_saved.get(key)
                 if record is None:
                     continue
                 getter, setter, _original, dimmed, _image = record
-                try:
-                    # CTk parent configuration propagates backgrounds into
-                    # children. Reassert our dimmed values, never bright ones.
-                    if getter() != dimmed:
-                        setter(dimmed)
-                except (tk.TclError, ValueError):
-                    pass
+                # CTk parent configuration propagates backgrounds into
+                # children. Reassert our dimmed values, never bright ones.
+                reassert.append((key, getter, setter, dimmed))
+            self._apply_values(reassert)
         # Keep live progress and newly drawn previews dimmed too.
         self._refresh_job = self.root.after(500, self.refresh)
 

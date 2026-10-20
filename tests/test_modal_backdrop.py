@@ -55,6 +55,57 @@ class Widget:
 
 
 class ModalBackdropTests(unittest.TestCase):
+    def test_composite_colors_and_image_use_one_redraw_and_skip_unchanged_values(self):
+        class Composite(Widget):
+            pass
+
+        widget = Composite()
+        widget.colors.update(fg_color='#ffffff', bg_color='#ffffff', border_color='#abcdef', image='old')
+        targets = dict(fg_color='#737373', bg_color='#737373', border_color='#4d5c6c', image='new')
+        records = [((widget, option), lambda o=option: widget.cget(o),
+                    lambda value, o=option: widget.configure(**{o: value}), target)
+                   for option, target in targets.items()]
+        with patch.object(modal_backdrop.ctk, 'CTkBaseClass', Composite):
+            ModalDimmer._apply_values(records)
+            self.assertEqual(widget.writes, [targets])
+            ModalDimmer._apply_values(records)
+            self.assertEqual(widget.writes, [targets])
+
+    def test_batched_restore_compares_children_after_parent_propagation(self):
+        class Composite(Widget):
+            def configure(self, **values):
+                super().configure(**values)
+                for child in self.children:
+                    child.colors['background'] = '#737373'
+
+        child = Composite()
+        parent = Composite(children=(child,))
+        parent.colors['background'] = '#737373'
+        records = [((widget, 'background'), lambda w=widget: w.cget('background'),
+                    lambda value, w=widget: w.configure(background=value), '#ffffff')
+                   for widget in (parent, child)]
+        with patch.object(modal_backdrop.ctk, 'CTkBaseClass', Composite):
+            ModalDimmer._apply_values(records)
+        self.assertEqual(parent.cget('background'), '#ffffff')
+        self.assertEqual(child.cget('background'), '#ffffff')
+
+    def test_native_scroll_content_and_canvas_items_keep_their_own_setters(self):
+        widget = Widget()
+        calls = []
+        records = [((widget, 1, option), lambda: 'old',
+                    lambda value, o=option: calls.append((o, value)), 'new')
+                   for option in ('fill', 'outline')]
+        records.append(((widget, 'background'), lambda: 'old',
+                        lambda value: calls.append(('native frame', value)), 'new'))
+        ModalDimmer._apply_values(records)
+        self.assertEqual(calls, [('fill', 'new'), ('outline', 'new'), ('native frame', 'new')])
+        self.assertFalse(widget.writes)
+
+    def test_empty_snapshot_does_not_walk_all_hidden_pages(self):
+        root = Widget()
+        with patch.object(root, 'winfo_children', side_effect=AssertionError('unnecessary full-tree scan')):
+            self.assertEqual(ModalDimmer(root)._restoration_values(), {})
+
     def test_disappearing_widget_cannot_abort_refresh_and_leave_dim_stale(self):
         class DestroyedWidget(Widget):
             def winfo_ismapped(self):
