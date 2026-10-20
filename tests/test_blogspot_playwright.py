@@ -421,7 +421,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn('name="확인", exact=True', publish_confirm_source)
         self.assertIn("confirm_button.click(force=True)", publish_confirm_source)
         self.assertIn("확인창 닫힘 확인", publish_confirm_source)
-        self.assertIn("confirm_blogspot_publish_dialog(page)", source)
+        self.assertIn("confirm_blogspot_publish_dialog(page, cancel_event=cancel_event", source)
 
     def test_blogger_toggles_compose_mode_for_each_body_image(self) -> None:
         source = inspect.getsource(main.run_blogspot_playwright_automation)

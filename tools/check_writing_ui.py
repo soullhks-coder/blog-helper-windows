@@ -2365,7 +2365,73 @@ def main() -> None:
                 show_error.assert_called_once()
                 assert app.direct_keyword_start_keyword == ""
                 assert app.direct_keyword_start_button.cget("state") == "normal"
+            # The standard writing stop is always immediately right of View,
+            # not a visual-only reset: stale workers/timers must be fenced.
+            app._open_writing_section('publish')
+            for geometry in ('1500x1000+30+35', '860x680+30+35'):
+                app.geometry(geometry)
+                settle(160)
+                view = app.open_published_post_button.grid_info()
+                stop = app.writing_stop_button.grid_info()
+                assert view['row'] == stop['row']
+                assert int(stop['column']) == int(view['column']) + 1
+                assert app.writing_stop_button.cget('text') == '발행중단'
+                assert app.writing_stop_button.cget('fg_color') == '#c73545'
+                assert app.writing_stop_button.cget('text_color') == '#ffffff'
+            app.writing_scroll._parent_canvas.yview_moveto(1)
+            settle(100)
+            screenshot('writing-stop-actions')
+            before_presets = app_module.copy.deepcopy(app.thumbnail_presets)
+            before_links = app_module.copy.deepcopy(app._current_writing_links())
+            before_v2 = app_module.copy.deepcopy(panel.deck)
+            old_scope = app._writing_result_queue()
+            pending_action = Mock()
+            app._after_writing(60, pending_action)
+            old_scope.put(('article_done', {'title': 'stale', 'html': '<p>stale</p>'}))
+            old_scope.put(('publish_pipeline_done', {'tistory': {'write_url': 'https://never-publish.tistory.com'}}))
+            stopped_worker = Mock()
+            stopped_worker.result_queue = old_scope
+            stopped_worker.is_alive.return_value = True
+            stopped_worker.settings = app_module.WordPressSettings(target_platforms=['wordpress'])
+            app.pipeline_worker = stopped_worker
+            unrelated_worker = Mock()
+            unrelated_worker.result_queue = app.result_queue
+            app.analysis_worker = unrelated_worker
+            app.writing_auto_run_active = True
+            app.generated_article_title, app.generated_article_html = 'stopped', '<p>stopped</p>'
+            app.article_editor.insert('1.0', '<p>stopped</p>')
+            with patch.object(app, '_handle_publish_pipeline_success') as publish_done, \
+                 patch.object(app_module.messagebox, 'showerror') as popup:
+                app.writing_stop_button.invoke()
+                poll_result_queue(app)
+                settle(120)
+                pending_action.assert_not_called()
+                publish_done.assert_not_called()
+                popup.assert_not_called()
+            stopped_worker.cancel.assert_called_once()
+            assert old_scope.cancel_event.is_set()
+            assert app.pipeline_worker is None and app.analysis_worker is unrelated_worker
+            unrelated_worker.cancel.assert_not_called()
+            assert app._writing_run_queue is None
+            assert not app.writing_auto_run_active
+            assert app.active_writing_section == 'topic'
+            assert app.writing_progress_stage == 1 and app.writing_progress_fraction == 0
+            assert not app.topic_entry.get() and not app.manual_keyword_entry.get()
+            assert not app.article_title_entry.get() and not app.article_editor.get('1.0', 'end').strip()
+            assert not app.reference_textbox.get('1.0', 'end').strip()
+            assert not app.generated_article_html and not app.generated_article_title
+            assert not app.cardnews_specs and not app.cardnews_image_paths
+            assert app.thumbnail_presets == before_presets
+            assert app._current_writing_links() == before_links
+            assert panel.deck == before_v2
+            assert not app_module.modal_dimmer(app).active
+            assert app.open_published_post_button.cget('state') == 'disabled'
+            assert app.publish_pipeline_button.cget('state') == 'normal'
+            stopped_worker.is_alive.return_value = False
+            app.analysis_worker = None
+            app.writing_stop_button.invoke()  # Idle/repeated stop is safe too.
             assert not errors, errors
+            print(f'{sys.platform} {args.theme}: standard stop/reset, red adjacent actions, stale-event/timer fencing and saved designs/V2/unrelated jobs preserved', flush=True)
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:
             faulthandler.cancel_dump_traceback_later()

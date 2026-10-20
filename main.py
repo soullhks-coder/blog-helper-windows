@@ -3395,6 +3395,7 @@ def wait_for_manual_publish_completion(
 ) -> None:
     """Keep the editor open until the user confirms their manual public publish."""
 
+    cancel_event = cancel_event or getattr(result_queue, "cancel_event", None)
     check_writing_cancelled(cancel_event)
     event = ManualPublishCompletionStore.begin(platform, profile_scope)
     platform_label = DailyPublishLimitStore.PLATFORM_LABELS.get(platform, platform)
@@ -4865,6 +4866,7 @@ class WordPressClient:
         }
 
     def upload_media(self, image_path: Path, title: str) -> dict:
+        check_writing_cancelled(getattr(self, "cancel_event", None))
         image_path = Path(image_path)
         file_name = build_wordpress_media_filename(image_path.with_suffix(".webp"), title)
         image_bytes = encode_webp_upload(image_path)
@@ -4880,6 +4882,7 @@ class WordPressClient:
             method="POST",
             headers=headers,
         )
+        check_writing_cancelled(getattr(self, "cancel_event", None))
         try:
             with urlopen(request, timeout=30, context=self.ssl_context) as response:
                 text = response.read().decode("utf-8", errors="ignore")
@@ -5042,6 +5045,7 @@ class WordPressClient:
             DailyPublishLimitStore.cancel_reservation(reservation_key)
 
     def _request_json(self, path: str, method: str = "GET", body: dict | None = None):
+        check_writing_cancelled(getattr(self, "cancel_event", None))
         url = f"{self.base_url}{path}"
         data = None
         headers = {
@@ -5076,6 +5080,7 @@ class WordPressClient:
             raise RuntimeError(f"워드프레스 주소에 연결할 수 없습니다: {exc.reason}") from exc
 
     def _request_form(self, path: str, method: str = "POST", body: dict[str, str] | None = None):
+        check_writing_cancelled(getattr(self, "cancel_event", None))
         url = f"{self.base_url}{path}"
         data = urlencode(body or {}).encode("utf-8")
         headers = {
@@ -5298,6 +5303,7 @@ def _wait_for_threads_login(
     deadline = time.time() + max(30, int(login_timeout_seconds or 300))
     login_notice_sent = False
     while time.time() < deadline:
+        check_writing_cancelled(getattr(result_queue, "cancel_event", None))
         active_pages = list(context.pages) or [page]
         page = active_pages[-1]
         if _threads_login_ready(page):
@@ -5389,6 +5395,8 @@ def run_threads_playwright_publish(
     result_queue: queue.Queue,
     login_timeout_seconds: int = 300,
 ) -> dict[str, str]:
+    cancel_event = getattr(result_queue, "cancel_event", None)
+    check_writing_cancelled(cancel_event)
     text = str(text or "").strip()
     if not text:
         raise RuntimeError("Threads에 게시할 내용이 비어 있습니다.")
@@ -5414,6 +5422,7 @@ def run_threads_playwright_publish(
             if not _threads_login_ready(page):
                 page.goto(THREADS_LOGIN_URL, wait_until="domcontentloaded")
             page = _wait_for_threads_login(context, page, result_queue, login_timeout_seconds)
+            check_writing_cancelled(cancel_event)
             profile = _threads_profile_from_page(page)
             username = str(profile.get("username") or "").strip()
             profile_url = str(profile.get("profile_url") or "").strip()
@@ -5442,6 +5451,7 @@ def run_threads_playwright_publish(
             if not publish_button.is_enabled():
                 raise RuntimeError("Threads 게시 버튼이 활성화되지 않았습니다. 작성 내용을 확인해 주세요.")
             result_queue.put(("threads_progress", "Threads 게시 버튼을 누르고 완료를 확인하고 있습니다..."))
+            check_writing_cancelled(cancel_event)
             publish_button.click()
             dialog.wait_for(state="hidden", timeout=60_000)
             save_threads_storage_state(context)
@@ -6683,6 +6693,7 @@ def replace_inline_images_for_wordpress(
 
     def replace_match(match: re.Match) -> str:
         nonlocal replaced_count
+        check_writing_cancelled(getattr(result_queue, "cancel_event", None))
         raw_path = unescape(match.group(1))
         image_path = Path(raw_path)
         if not image_path.exists():
@@ -6690,6 +6701,7 @@ def replace_inline_images_for_wordpress(
         if result_queue:
             result_queue.put(("publish_progress", (0.58, f"본문 이미지 {replaced_count + 1} 워드프레스 업로드 중...")))
         media = wordpress_client.upload_media(image_path, f"{title} 본문 이미지 {replaced_count + 1}")
+        check_writing_cancelled(getattr(result_queue, "cancel_event", None))
         image_url = str(media.get("source_url") or "").strip()
         if not image_url:
             return match.group(0)
@@ -9342,6 +9354,7 @@ def wait_for_blogspot_dashboard(
     deadline = time.time() + max(30, timeout_seconds)
     login_notice_sent = False
     while time.time() < deadline:
+        check_writing_cancelled(getattr(result_queue, "cancel_event", None))
         pages = list(context.pages)
         for candidate in reversed(pages):
             if is_blogspot_dashboard_ready(candidate):
@@ -10285,7 +10298,8 @@ def fill_blogspot_html_editor(page, article_html: str) -> None:
     page.wait_for_timeout(400)
 
 
-def confirm_blogspot_publish_dialog(page, timeout_ms: int = 20_000) -> None:
+def confirm_blogspot_publish_dialog(page, timeout_ms: int = 20_000, *, cancel_event=None,
+                                   on_public_publish_clicked=None) -> None:
     """Wait for Blogger's final publish prompt, confirm it, and verify dismissal."""
     question_pattern = re.compile(r"글을\s*게시하시겠습니까\s*\?")
     deadline = time.monotonic() + max(1, timeout_ms) / 1_000
@@ -10293,6 +10307,7 @@ def confirm_blogspot_publish_dialog(page, timeout_ms: int = 20_000) -> None:
     append_runtime_log("BLOGSPOT", "최종 공개 발행 확인창 대기 시작")
 
     while time.monotonic() < deadline:
+        check_writing_cancelled(cancel_event)
         questions = page.get_by_text(question_pattern)
         question = _first_visible_blogspot_locator(questions)
         if question is not None:
@@ -10315,10 +10330,14 @@ def confirm_blogspot_publish_dialog(page, timeout_ms: int = 20_000) -> None:
     if confirm_button is None:
         raise RuntimeError("블로그스팟 최종 발행 확인창의 확인 버튼을 찾지 못했습니다.")
 
+    check_writing_cancelled(cancel_event)
+    if on_public_publish_clicked is not None:
+        on_public_publish_clicked()
     confirm_button.click(force=True)
     append_runtime_log("BLOGSPOT", "최종 공개 발행 확인 버튼 클릭 완료")
     dismiss_deadline = time.monotonic() + 10
     while time.monotonic() < dismiss_deadline:
+        check_writing_cancelled(cancel_event)
         questions = page.get_by_text(question_pattern)
         if _first_visible_blogspot_locator(questions) is None:
             append_runtime_log("BLOGSPOT", "최종 공개 발행 확인창 닫힘 확인")
@@ -10384,6 +10403,8 @@ def run_blogspot_playwright_automation(
     profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0],
     auto_publish: bool = True,
 ) -> dict[str, object]:
+    cancel_event = getattr(result_queue, "cancel_event", None)
+    check_writing_cancelled(cancel_event)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -10394,6 +10415,11 @@ def run_blogspot_playwright_automation(
     normalized_save_mode = normalize_tistory_save_mode(save_mode)
     reservation_key = ""
     reference_image_paths: list[str] = []
+    public_publish_clicked = False
+
+    def mark_public_publish_clicked():
+        nonlocal public_publish_clicked
+        public_publish_clicked = True
     append_runtime_log(
         "BLOGSPOT",
         f"자동화 시작: mode={normalized_save_mode}, title={title[:120]}",
@@ -10463,6 +10489,7 @@ def run_blogspot_playwright_automation(
             blogspot_article_html,
             thumbnail_path,
         )
+        check_writing_cancelled(cancel_event)
         thumbnail_candidate = Path(thumbnail_path).expanduser()
         thumbnail_at_top = bool(
             str(thumbnail_path or "").strip()
@@ -10482,6 +10509,7 @@ def run_blogspot_playwright_automation(
             f"slots={len(image_slot_markers)}, thumbnail_top={thumbnail_at_top}",
         )
         with sync_playwright() as playwright:
+            check_writing_cancelled(cancel_event)
             context = launch_blogspot_persistent_context(playwright, profile_scope)
             try:
                 state = load_blogspot_storage_state(profile_scope)
@@ -10508,12 +10536,14 @@ def run_blogspot_playwright_automation(
                 if not is_blogspot_dashboard_ready(page):
                     raise RuntimeError("블로그스팟 글 목록 화면을 열지 못했습니다. 설정에서 로그인/프로필 확인을 다시 실행해 주세요.")
                 save_blogspot_storage_state(context, profile_scope)
+                check_writing_cancelled(cancel_event)
                 result_queue.put(("publish_progress", (0.95, "블로그스팟 새 글 편집기를 열고 있습니다...")))
                 new_post = page.get_by_role("button", name=re.compile(r"새 글"))
                 new_post.first.click()
                 page.wait_for_url(re.compile(r"/blog/post/edit/\d+/\d+"), timeout=40_000)
                 title_field = page.get_by_role("textbox", name="제목", exact=True)
                 title_field.wait_for(state="visible", timeout=20_000)
+                check_writing_cancelled(cancel_event)
                 title_field.fill(title)
                 fill_blogspot_html_editor(page, prepared_html)
                 append_runtime_log("BLOGSPOT", "제목·HTML 본문 최초 입력 완료")
@@ -10522,6 +10552,7 @@ def run_blogspot_playwright_automation(
                     zip(image_paths, image_slot_markers),
                     start=1,
                 ):
+                    check_writing_cancelled(cancel_event)
                     result_queue.put(
                         (
                             "publish_progress",
@@ -10541,6 +10572,7 @@ def run_blogspot_playwright_automation(
                         [image_path],
                         result_queue,
                     )
+                    check_writing_cancelled(cancel_event)
                     html_editor = open_blogspot_html_editor(page)
                     current_html = html_editor.evaluate(
                         "element => element.CodeMirror.getValue()"
@@ -10562,6 +10594,7 @@ def run_blogspot_playwright_automation(
                     page,
                     blogspot_prompt_labels,
                 )
+                check_writing_cancelled(cancel_event)
                 if entered_label_count:
                     result_queue.put(
                         (
@@ -10574,6 +10607,7 @@ def run_blogspot_playwright_automation(
                     )
                 save_blogspot_storage_state(context, profile_scope)
                 page.wait_for_timeout(1_500)
+                check_writing_cancelled(cancel_event)
 
                 if not auto_publish:
                     result_queue.put(
@@ -10626,6 +10660,7 @@ def run_blogspot_playwright_automation(
                 if normalized_save_mode == TISTORY_SAVE_MODE_DRAFT:
                     result_queue.put(("publish_progress", (0.99, "블로그스팟 임시글 자동 저장을 확인하고 있습니다...")))
                     page.wait_for_timeout(2_500)
+                    check_writing_cancelled(cancel_event)
                     return {
                         "status": "draft",
                         "message": "블로그스팟 HTML 본문과 이미지를 입력하고 임시글로 저장했습니다.",
@@ -10635,6 +10670,8 @@ def run_blogspot_playwright_automation(
 
                 result_queue.put(("publish_progress", (0.98, "블로그스팟 공개 발행을 진행하고 있습니다...")))
                 publish_button = page.get_by_role("button", name="게시", exact=True)
+                publish_button.first.wait_for(state="visible", timeout=20_000)
+                check_writing_cancelled(cancel_event)
                 publish_button.first.click()
                 append_runtime_log("BLOGSPOT", "상단 게시 버튼 클릭 완료")
                 result_queue.put(
@@ -10643,10 +10680,13 @@ def run_blogspot_playwright_automation(
                         (0.985, "블로그스팟 최종 발행 확인을 진행하고 있습니다..."),
                     )
                 )
-                confirm_blogspot_publish_dialog(page)
+                confirm_blogspot_publish_dialog(page, cancel_event=cancel_event,
+                    on_public_publish_clicked=mark_public_publish_clicked)
+                check_writing_cancelled(cancel_event)
                 page.wait_for_timeout(3_000)
                 published_url = ""
                 for attempt in range(6):
+                    check_writing_cancelled(cancel_event)
                     try:
                         published_url = fetch_blogspot_post_url_from_feed(blog_url, title)
                     except (OSError, HTTPError, URLError, ValueError, json.JSONDecodeError):
@@ -10675,6 +10715,9 @@ def run_blogspot_playwright_automation(
                 }
             finally:
                 context.close()
+    except WritingCancelled:
+        append_runtime_log("BLOGSPOT", "사용자가 현재 글쓰기 작업을 중단했습니다.")
+        raise
     except ManualPublishCancelled:
         append_runtime_log("BLOGSPOT", "사용자가 수동 발행 작업을 취소했습니다.")
         raise
@@ -10685,6 +10728,11 @@ def run_blogspot_playwright_automation(
         )
         raise
     finally:
+        if cancel_event is not None and cancel_event.is_set() and public_publish_clicked and reservation_key:
+            # A request already sent cannot be undone. Do not free its slot
+            # and permit a duplicate post merely because the UI was reset.
+            DailyPublishLimitStore.record_reserved_success("blogspot", daily_account, reservation_key)
+            reservation_key = ""
         DailyPublishLimitStore.cancel_reservation(reservation_key)
         cleanup_generated_upload_images(reference_image_paths)
 
@@ -25668,19 +25716,26 @@ class ThumbnailAIWorker(threading.Thread):
         self.keyword = keyword.strip()
         self.article_html = article_html.strip()
         self.result_queue = result_queue
+        self.cancel_event = getattr(result_queue, "cancel_event", None) or threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         try:
+            check_writing_cancelled(self.cancel_event)
             self.result_queue.put(("thumbnail_ai_progress", "Codex CLI로 썸네일 콘셉트 프롬프트를 설계하는 중..."))
             prompt = self._build_fallback_imagen_prompt()
             codex_prompt = self._build_codex_prompt()
             codex_output = self._run_codex_cli(codex_prompt)
+            check_writing_cancelled(self.cancel_event)
             if codex_output:
                 prompt = self._clean_codex_prompt(codex_output)
 
             self.result_queue.put(("thumbnail_ai_progress", "Imagen 4 Fast로 썸네일 배경 이미지를 생성하는 중..."))
             output_path = DATA_DIR / f"codex-imagen-thumbnail-{int(time.time() * 1000)}.png"
             ImagenClient(self.settings.imagen_api_key).generate_image(self.settings.imagen_model, prompt, output_path)
+            check_writing_cancelled(self.cancel_event)
             self.result_queue.put(
                 (
                     "thumbnail_ai_done",
@@ -25690,6 +25745,8 @@ class ThumbnailAIWorker(threading.Thread):
                     },
                 )
             )
+        except WritingCancelled:
+            return
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("thumbnail_ai_error", str(exc)))
 
@@ -26260,9 +26317,14 @@ class ArticleGenerationWorker(threading.Thread):
         self.reference_text = reference_text.strip()
         self.result_queue = result_queue
         self.tistory_v2_slides = tistory_v2_slides
+        self.cancel_event = getattr(result_queue, "cancel_event", None) or threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         try:
+            check_writing_cancelled(self.cancel_event)
             self.result_queue.put(("article_progress", (0.1, "프롬프트를 준비하고 있습니다...")))
             reference_block = ""
             if self.reference_text:
@@ -26336,6 +26398,8 @@ class ArticleGenerationWorker(threading.Thread):
                     self.result_queue.put(("article_progress", (0.85, "완성된 본문의 슬라이드용 짧은 요약을 정리하고 있습니다...")))
                     try:
                         summary_rows = request_summaries(title, article_html, lambda text: self._generate_with_provider(text, progress=0.85))
+                    except WritingCancelled:
+                        raise
                     except Exception as exc:
                         # Do not discard a complete article or force another paid
                         # article request when only its separate slide plan fails.
@@ -26345,6 +26409,8 @@ class ArticleGenerationWorker(threading.Thread):
             if self.settings.inline_images_enabled:
                 try:
                     article_html = self._attach_inline_images(title, article_html)
+                except WritingCancelled:
+                    raise
                 except Exception as image_exc:
                     self.result_queue.put(
                         (
@@ -26364,6 +26430,8 @@ class ArticleGenerationWorker(threading.Thread):
                     },
                 )
             )
+        except WritingCancelled:
+            return
         except Exception as exc:  # pragma: no cover - runtime handling
             error_message = str(exc).strip() or exc.__class__.__name__
             if is_network_timeout(exc):
@@ -26374,14 +26442,18 @@ class ArticleGenerationWorker(threading.Thread):
             self.result_queue.put(("article_error", error_message))
 
     def _generate_with_provider(self, prompt: str, progress: float = 0.45) -> tuple[str, str]:
+        check_writing_cancelled(self.cancel_event)
         def report_retry(message: str) -> None:
+            check_writing_cancelled(self.cancel_event)
             self.result_queue.put(("article_progress", (progress, message)))
 
-        return generate_text_with_writing_model(
+        result = generate_text_with_writing_model(
             self.settings,
             prompt,
             on_retry=report_retry,
         )
+        check_writing_cancelled(self.cancel_event)
+        return result
 
     def _attach_inline_images(self, title: str, article_html: str) -> str:
         count = max(1, min(int(self.settings.inline_images_count or 2), 4))
@@ -26421,6 +26493,7 @@ class ArticleGenerationWorker(threading.Thread):
         started_at = time.time()
         max_total_seconds = 180
         for index in range(1, count + 1):
+            check_writing_cancelled(self.cancel_event)
             if time.time() - started_at > max_total_seconds:
                 self.result_queue.put(("article_progress", (0.93, "본문 이미지 생성 시간이 길어져 남은 이미지는 건너뜁니다.")))
                 break
@@ -26439,8 +26512,12 @@ class ArticleGenerationWorker(threading.Thread):
                 else:
                     prompt = build_inline_image_prompt(title, self.keyword, article_html, index, count)
                 image_path = DATA_DIR / f"inline-image-{int(time.time() * 1000)}-{index}.png"
+                check_writing_cancelled(self.cancel_event)
                 imagen_client.generate_image(self.settings.imagen_model, prompt, image_path)
+                check_writing_cancelled(self.cancel_event)
                 figures.append(build_inline_image_figure(image_path, title, index))
+            except WritingCancelled:
+                raise
             except Exception as exc:
                 self.result_queue.put(("article_progress", (progress, f"본문 이미지 {index}/{count} 생성 실패 - 다음 단계로 넘어갑니다.")))
                 continue
@@ -26537,6 +26614,7 @@ class PublishPipelineWorker(threading.Thread):
                 check_writing_cancelled(self.cancel_event)
                 self.result_queue.put(("publish_progress", (0.15, "썸네일 파일을 준비하고 있습니다...")))
                 wordpress_client = WordPressClient(self.settings)
+                wordpress_client.cancel_event = self.cancel_event
                 featured_media_id = None
                 media_url = ""
                 wordpress_title = ensure_focus_keyword_in_title(self.title, self.focus_keyword)
@@ -26614,6 +26692,7 @@ class PublishPipelineWorker(threading.Thread):
                     slug=self.slug,
                     excerpt=self.meta_description,
                 )
+                check_writing_cancelled(self.cancel_event)
                 if wordpress_result.get("post_id"):
                     rank_math_applied = wordpress_client.update_rank_math_metadata(
                         int(wordpress_result["post_id"]),
@@ -45454,6 +45533,13 @@ class KeywordApp(ctk.CTk):
         )
         self.open_published_post_button.grid(row=0, column=3, padx=(10, 0), sticky="e")
         self.open_published_post_button.configure(state="disabled")
+        self.writing_stop_button = ctk.CTkButton(
+            publish_row, text="발행중단", width=96, height=44, corner_radius=14,
+            fg_color="#c73545", hover_color="#ac2938", text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold"), command=self._stop_writing_publishing,
+        )
+        self.writing_stop_button._preserve_theme_colors = True
+        self.writing_stop_button.grid(row=0, column=4, padx=(10, 0), sticky="e")
         publish_row._action_columns = None
         publish_row.bind(
             "<Configure>",
@@ -46040,18 +46126,29 @@ class KeywordApp(ctk.CTk):
         return max(160, round(320 * self.writing_scroll._get_widget_scaling()))
 
     def _layout_writing_publish_actions(self, row, width: int) -> None:
-        columns = 4 if width / row._get_widget_scaling() >= 700 else 2
-        if row._action_columns == columns:
-            return
-        row._action_columns = columns
         buttons = (self.publish_pipeline_button, self.queue_post_button,
                    self.tistory_retry_button, self.open_published_post_button)
-        for column in range(4):
+        standard = not self._is_tistory_v2_writing()
+        if standard:
+            buttons += (self.writing_stop_button,)
+        else:
+            self.writing_stop_button.grid_remove()
+        columns = len(buttons) if width / row._get_widget_scaling() >= (850 if standard else 700) else 2
+        signature = (len(buttons), columns)
+        if row._action_columns == signature:
+            return
+        row._action_columns = signature
+        for column in range(5):
             row.grid_columnconfigure(column, weight=1 if column < columns else 0,
                                      uniform="publish_action" if column < columns else "")
         for index, button in enumerate(buttons):
-            button.grid(row=index // columns, column=index % columns,
-                        padx=(0, 10) if index % columns < columns - 1 else 0,
+            target_row, column, span = index // columns, index % columns, 1
+            if standard and columns == 2:
+                # Always keep View + Stop adjacent, even in a narrow window.
+                target_row, column, span = ((0, index, 1) if index < 2 else
+                    (1, 0, 2) if index == 2 else (2, index - 3, 1))
+            button.grid(row=target_row, column=column, columnspan=span,
+                        padx=(0, 10) if column + span < columns else 0,
                         pady=(0, 8), sticky="ew")
 
     def _style_writing_design_workspace(self, workspace) -> None:
@@ -46800,7 +46897,7 @@ class KeywordApp(ctk.CTk):
             text="Codex CLI가 썸네일 콘셉트를 설계하고 Imagen이 배경 이미지를 생성합니다.",
             text_color="#6dadff",
         )
-        result_queue = self._writing_result_queue() if self.current_page == "tistory_v2" else self.result_queue
+        result_queue = self._writing_result_queue() if self.current_page in {"writing", "tistory_v2"} else self.result_queue
         self.thumbnail_ai_worker = ThumbnailAIWorker(settings, title, keyword, article_html, result_queue)
         self.thumbnail_ai_worker.start()
 
@@ -48632,20 +48729,21 @@ class KeywordApp(ctk.CTk):
         self.keyword_status_label.configure(text=context.get("status", "주제를 입력하거나 키워드 출처를 선택해 주세요."))
 
     def _writing_result_queue(self):
-        if not self._is_tistory_v2_writing():
-            return self.result_queue
+        variant = "tistory_v2" if self._is_tistory_v2_writing() else "writing"
         current = self.__dict__.get("_writing_run_queue")
-        if current is None or current.cancel_event.is_set():
+        if current is None or current.cancel_event.is_set() or getattr(current, "variant", variant) != variant:
+            if current is not None:
+                current.cancel()
             current = self._writing_run_queue = ScopedWritingQueue(self.result_queue)
+            current.variant = variant
         return current
 
     def _after_writing(self, delay, callback, *args):
-        if not self._is_tistory_v2_writing():
-            return self.after(delay, callback, *args)
         scope = self._writing_result_queue()
+        is_v2 = self._is_tistory_v2_writing()
 
         def continue_current_run():
-            if self._is_tistory_v2_writing() and scope is self.__dict__.get("_writing_run_queue") and not scope.cancel_event.is_set():
+            if self._is_tistory_v2_writing() == is_v2 and scope is self.__dict__.get("_writing_run_queue") and not scope.cancel_event.is_set():
                 callback(*args)
 
         return self.after(delay, continue_current_run)
@@ -48653,6 +48751,10 @@ class KeywordApp(ctk.CTk):
     def _stop_tistory_v2_publishing(self) -> None:
         if not self._is_tistory_v2_writing():
             return
+        self._stop_writing_publishing()
+
+    def _stop_writing_publishing(self) -> None:
+        is_v2 = self._is_tistory_v2_writing()
         scope = self.__dict__.get("_writing_run_queue")
         if scope is not None:
             scope.cancel()
@@ -48663,7 +48765,7 @@ class KeywordApp(ctk.CTk):
         self.writing_v2_run_settings = None
         self._tistory_v2_attention_reported = False
         stopped = list(self.__dict__.get("_stopped_writing_workers", []))
-        own_tistory_scopes = set()
+        own_manual_scopes = set()
         for name in (
             "analysis_worker", "daum_worker", "signal_worker", "newneek_worker",
             "loword_keyword_worker", "naver_creator_worker", "benchmark_worker",
@@ -48673,28 +48775,33 @@ class KeywordApp(ctk.CTk):
             if worker is None or scope is None or getattr(worker, "result_queue", None) is not scope:
                 continue
             if name == "tistory_automation_worker":
-                own_tistory_scopes.add(getattr(worker, "profile_scope", ""))
+                own_manual_scopes.add(("tistory", getattr(worker, "profile_scope", "")))
+            if name == "pipeline_worker" and not is_v2:
+                settings = getattr(worker, "settings", None)
+                if isinstance(settings, WordPressSettings) and "blogspot" in (settings.target_platforms or []):
+                    profile = service_profile_by_name(normalize_blogspot_profiles(settings.blogspot_profiles), settings.blogspot_active_profile)
+                    own_manual_scopes.add(("blogspot", str(profile.get("profile_scope") or BLOGSPOT_PROFILE_SCOPES[0])))
             cancel = getattr(worker, "cancel", None)
             if callable(cancel):
                 cancel()
             stopped.append(worker)
             setattr(self, name, None)
         panel = self.__dict__.get("tistory_v2_panel")
-        if panel is not None:
+        if is_v2 and panel is not None:
             worker = panel.reset_for_new_article()
             if worker is not None:
                 stopped.append(worker)
         self._stopped_writing_workers = [worker for worker in stopped if worker.is_alive()]
         for dialog_name in ("writing_complete_dialog", "reference_collection_dialog", "manual_publish_dialog"):
             if dialog_name == "manual_publish_dialog" and not (
-                self.manual_publish_dialog_platform == "tistory"
-                and self.manual_publish_dialog_profile_scope in own_tistory_scopes
+                (self.manual_publish_dialog_platform, self.manual_publish_dialog_profile_scope) in own_manual_scopes
             ):
                 continue
             dialog = self.__dict__.get(dialog_name)
             if dialog is not None and dialog.winfo_exists():
                 dialog.grab_release()
                 dialog.destroy()
+                modal_dimmer(self).detach(dialog)
                 setattr(self, dialog_name, None)
                 if dialog_name == "manual_publish_dialog":
                     self.manual_publish_dialog_platform = ""
@@ -48708,8 +48815,10 @@ class KeywordApp(ctk.CTk):
                      "loword_reference_map", "naver_creator_reference_map", "collected_reference_map"):
             setattr(self, name, {})
         self.selected_keyword_var.set("")
-        for entry in (self.topic_entry, self.manual_keyword_entry, self.article_title_entry, self.benchmark_url_entry,
-                      self.tistory_v2_wiki_keyword_entry):
+        entries = (self.topic_entry, self.manual_keyword_entry, self.article_title_entry, self.benchmark_url_entry)
+        if is_v2:
+            entries += (self.tistory_v2_wiki_keyword_entry,)
+        for entry in entries:
             entry.configure(state="normal")
             entry.delete(0, "end")
         self.reference_textbox.delete("1.0", "end")
@@ -48732,8 +48841,13 @@ class KeywordApp(ctk.CTk):
             self.thumbnail_ai_button.configure(state="normal", text="Codex+Imagen 배경 생성")
         self.article_progress_label.configure(text="키워드를 선택한 뒤 글 작성 버튼을 눌러 주세요.")
         self.article_summary_label.configure(text="새 글을 작성하려면 ①에서 키워드를 입력해 주세요.")
-        self.publish_status_label.configure(text="발행을 중단했습니다. 저장된 슬라이드와 설정은 유지됩니다.", text_color=self._theme_palette()["muted"])
-        self.keyword_status_label.configure(text="티스토리 V2 작업을 초기화했습니다. 새 키워드를 입력해 주세요.")
+        if not is_v2:
+            self.cardnews_specs = []
+            self.cardnews_image_paths = []
+            self.active_cardnews_slide_index = 0
+            self._render_active_cardnews_slide()
+        self.publish_status_label.configure(text="발행을 중단했습니다. 저장된 디자인과 설정은 유지됩니다.", text_color=self._theme_palette()["muted"])
+        self.keyword_status_label.configure(text=f"{'티스토리 V2' if is_v2 else '블로그글쓰기'} 작업을 초기화했습니다. 새 키워드를 입력해 주세요.")
         self.writing_completion_platforms = []
         if not self.active_automation_upload_item_id:
             self.pending_upload_cleanup_paths = []
@@ -48743,7 +48857,7 @@ class KeywordApp(ctk.CTk):
         self._clear_festival_writing_context()
         self._clear_welfare_writing_context()
         self._reset_writing_accordion_state()
-        self._set_writing_progress(1, "발행을 중단하고 처음으로 돌아왔습니다. 이미 발행된 글은 삭제되지 않습니다.", 0, state="idle")
+        self._set_writing_progress(1, "발행을 중단하고 처음으로 돌아왔습니다. 서버로 전달된 요청은 완료될 수 있으며 공개된 글은 삭제하지 않습니다.", 0, state="idle")
         self._save_ui_state()
         (self.benchmark_url_entry if self.benchmark_mode_var.get() else self.topic_entry).focus_set()
 
@@ -48794,6 +48908,10 @@ class KeywordApp(ctk.CTk):
                 messagebox.showinfo("글쓰기 진행 중", "현재 글쓰기 작업을 마친 뒤 일반 글쓰기와 티스토리 V2를 전환해 주세요.", parent=self)
                 return False
             self._remember_writing_keyword_inputs()
+            scope = self.__dict__.get("_writing_run_queue")
+            if scope is not None:
+                scope.cancel()
+            self._writing_run_queue = None
         self.writing_variant = variant
         if previous != variant:
             self._restore_writing_keyword_inputs(variant)
@@ -48856,6 +48974,8 @@ class KeywordApp(ctk.CTk):
             if previous != variant:
                 self._switch_thumbnail_preset(self.__dict__.get("_writing_standard_thumbnail_index", self.default_thumbnail_preset_index), save=False)
         self._layout_publish_design_previews(self.writing_design_preview_card, self.writing_design_preview_card.winfo_width())
+        actions = self.open_published_post_button.master
+        self._layout_writing_publish_actions(actions, actions.winfo_width())
         self._refresh_thumbnail_preset_buttons()
         self._layout_writing_control_row()
         return True
@@ -54076,10 +54196,10 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("미리보기 실패", str(exc))
 
     def _run_publish_pipeline(self) -> None:
-        if self._is_tistory_v2_writing():
+        if self.__dict__.get("_stopped_writing_workers"):
             self._stopped_writing_workers = [worker for worker in self.__dict__.get("_stopped_writing_workers", []) if worker.is_alive()]
             if self._stopped_writing_workers:
-                messagebox.showinfo("중단 처리 중", "이전 작업의 브라우저를 정리하고 있습니다. 잠시 후 업로드를 다시 눌러 주세요.", parent=self)
+                messagebox.showinfo("중단 처리 중", "이전 글쓰기 작업을 정리하고 있습니다. 잠시 후 업로드를 다시 눌러 주세요.", parent=self)
                 return
         if not self._ensure_cardnews_ready_for_publish():
             messagebox.showerror(
@@ -54202,7 +54322,7 @@ class KeywordApp(ctk.CTk):
         self.pipeline_worker.start()
 
     def _retry_tistory_automation(self) -> None:
-        if self._is_tistory_v2_writing() and any(worker.is_alive() for worker in self.__dict__.get("_stopped_writing_workers", [])):
+        if any(worker.is_alive() for worker in self.__dict__.get("_stopped_writing_workers", [])):
             messagebox.showinfo("중단 처리 중", "이전 작업의 브라우저를 정리하고 있습니다. 잠시 후 다시 눌러 주세요.", parent=self)
             return
         if self._is_tistory_v2_writing():

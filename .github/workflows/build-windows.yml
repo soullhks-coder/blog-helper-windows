@@ -82,6 +82,7 @@ jobs:
           python -m unittest discover -s tests -p test_input_surfaces.py -q
           python -m unittest discover -s tests -p test_macos_ime.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
+          python -m unittest discover -s tests -p test_writing_stop.py -q
           python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
           python -m unittest discover -s tests -p test_tistory_v2_review_publish.py -q
@@ -211,6 +212,7 @@ jobs:
           python -m unittest discover -s tests -p test_input_surfaces.py -q
           python -m unittest discover -s tests -p test_macos_ime.py -q
           python -m unittest discover -s tests -p test_writing_run.py -q
+          python -m unittest discover -s tests -p test_writing_stop.py -q
           python -m unittest discover -s tests -p test_writing_keyword_isolation.py -q
           python -m unittest discover -s tests -p test_tistory_v2_cancellation_workers.py -q
           python -m unittest discover -s tests -p test_tistory_v2_review_publish.py -q

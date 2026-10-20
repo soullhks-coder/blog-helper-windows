@@ -62,15 +62,38 @@ class WritingRunTests(unittest.TestCase):
         pending[0]()
         action.assert_not_called()
 
-    def test_non_v2_uses_original_queue_and_timer(self):
+    def test_standard_writing_also_scopes_results_and_scheduled_actions(self):
         import main
         app = SimpleNamespace(_writing_run_queue=None, result_queue=queue.Queue())
         app._is_tistory_v2_writing = lambda: False
-        self.assertIs(main.KeywordApp._writing_result_queue(app), app.result_queue)
-        app.after = Mock(return_value="job")
+        scope = main.KeywordApp._writing_result_queue(app)
+        self.assertIs(scope.target, app.result_queue)
+        self.assertEqual(scope.variant, 'writing')
+        app._writing_result_queue = lambda: main.KeywordApp._writing_result_queue(app)
+        pending = []
+        app.after = lambda delay, callback: pending.append(callback) or "job"
         action = Mock()
         self.assertEqual(main.KeywordApp._after_writing(app, 450, action, "argument"), "job")
-        app.after.assert_called_once_with(450, action, "argument")
+        pending[0]()
+        action.assert_called_once_with('argument')
+        action.reset_mock()
+        scope.cancel()
+        app._writing_run_queue = None
+        app._writing_result_queue()
+        pending[0]()
+        action.assert_not_called()
+
+    def test_variant_change_creates_a_separate_scope_and_revokes_old_events(self):
+        import main
+        app = SimpleNamespace(_writing_run_queue=None, result_queue=queue.Queue(), v2=False)
+        app._is_tistory_v2_writing = lambda: app.v2
+        old = main.KeywordApp._writing_result_queue(app)
+        old.put(('article_done', {}))
+        app.v2 = True
+        new = main.KeywordApp._writing_result_queue(app)
+        self.assertTrue(old.cancel_event.is_set())
+        self.assertEqual(new.variant, 'tistory_v2')
+        self.assertIsNone(active_writing_event(app.result_queue.get_nowait(), new))
 
 
 if __name__ == "__main__":
