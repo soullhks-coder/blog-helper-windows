@@ -9797,37 +9797,53 @@ def _blogspot_image_size_snapshot(image) -> dict:
         styleWidth: element.style.width || '',
         styleHeight: element.style.height || '',
         renderedWidth: Math.round(element.getBoundingClientRect().width),
-        renderedHeight: Math.round(element.getBoundingClientRect().height)
-    })""")
+        renderedHeight: Math.round(element.getBoundingClientRect().height),
+        computedWidth: getComputedStyle(element).width,
+        computedHeight: getComputedStyle(element).height,
+        originalWidth: element.getAttribute('data-original-width') || '',
+        originalHeight: element.getAttribute('data-original-height') || '',
+        complete: element.complete, connected: element.isConnected,
+        naturalWidth: element.naturalWidth, naturalHeight: element.naturalHeight
+    })""", timeout=1_000)
 
 
 def _wait_for_blogspot_image_size(page, image, before: dict) -> None:
     """Do not change editor modes while Blogger still holds the old image size."""
-    for attempt in range(33):
-        after = _blogspot_image_size_snapshot(image)
-        # The upload URL can change before the width/height are applied. A new
-        # src alone must not let the next HTML-mode click race the actual resize.
-        dimensions_changed = any(
-            after.get(field) != before.get(field)
-            for field in ("width", "styleWidth")
-        ) or (
-            bool(before.get("renderedWidth"))
-            and after.get("renderedWidth") != before.get("renderedWidth")
-        )
-        explicit_width = str(after.get("width") or after.get("styleWidth") or after.get("renderedWidth") or "")
-        width_match = re.fullmatch(r"(\d+(?:\.\d+)?)(?:px)?", explicit_width)
-        if (
-            dimensions_changed
-            or (width_match and float(width_match.group(1)) >= 640)
-        ):
+    from blogspot_image_layout import ImageResizeSettler, SIZE_TIMEOUT_MS, SIZE_POLL_MS, size_summary
+    from playwright.sync_api import Error as PlaywrightError
+    settler = ImageResizeSettler(before)
+    started = time.monotonic()
+    deadline = started + SIZE_TIMEOUT_MS / 1000
+    last = "크기 정보 확인 중"
+    append_runtime_log("BLOGSPOT", f"이미지 크기 적용 확인 시작 · 최대 30초 · 이전 {size_summary(before)}")
+    for attempt in range(SIZE_TIMEOUT_MS // SIZE_POLL_MS + 1):
+        try:
+            after = _blogspot_image_size_snapshot(image)
+            last = size_summary(after)
+            ready = settler.observe(after)
+        except PlaywrightError:
+            if page.is_closed():
+                raise RuntimeError("Blogger 이미지 크기 적용 확인 중 브라우저가 닫혔습니다.") from None
+            # Blogger can replace the img node while applying its resize.
+            # Keep polling the locator; do not click another editor control.
+            settler.reset()
+            ready = False
+            last = "이미지 노드 갱신 대기 중"
+        if ready:
             append_runtime_log(
                 "BLOGSPOT",
-                f"이미지 크기 반영 확인: width={after.get('width') or after.get('styleWidth') or after.get('renderedWidth')}",
+                f"이미지 크기 반영·로딩·안정화 확인: {settler.size[0]:g}x{settler.size[1]:g} · "
+                f"{time.monotonic() - started:.1f}초 · {last}",
             )
             return
-        if attempt < 32:
-            page.wait_for_timeout(250)
-    raise RuntimeError("Blogger 이미지 크기 선택은 눌렀지만 본문 이미지에 반영되지 않아 다음 작업을 진행하지 않았습니다.")
+        if attempt % 16 == 0:
+            append_runtime_log("BLOGSPOT", f"이미지 크기 적용 대기 중 · {last}")
+        remaining_ms = round((deadline - time.monotonic()) * 1000)
+        if attempt >= SIZE_TIMEOUT_MS // SIZE_POLL_MS or remaining_ms < SIZE_POLL_MS:
+            break
+        page.wait_for_timeout(SIZE_POLL_MS)
+    raise RuntimeError("Blogger 이미지 크기 선택은 눌렀지만 본문 이미지에 반영되지 않아 다음 작업을 진행하지 않았습니다. "
+                       f"(최대 30초 확인 · {last})")
 
 
 def _find_blogspot_image_edit_dialog(page):
@@ -9874,15 +9890,21 @@ def _center_blogspot_inserted_image(page, image) -> None:
     page.wait_for_timeout(350)
 
 
-def configure_blogspot_inserted_image(page, image_source: str) -> None:
+def configure_blogspot_inserted_image(page, image_source: str, *, original_size=None) -> None:
     """Apply Blogger's current compose-toolbar layout to one uploaded image."""
     image = find_blogspot_compose_image(page, image_source)
     if image is None:
         raise RuntimeError("업로드된 Blogger 이미지를 본문에서 다시 찾지 못했습니다.")
 
+    def snapshot_before():
+        before = _blogspot_image_size_snapshot(image)
+        if original_size is not None:
+            before.update(originalWidth=original_size[0], originalHeight=original_size[1])
+        return before
+
     dialog = _find_blogspot_image_edit_dialog(page)
     if dialog is not None:
-        _apply_blogspot_image_size_dialog(page, dialog, image, _blogspot_image_size_snapshot(image))
+        _apply_blogspot_image_size_dialog(page, dialog, image, snapshot_before())
         _center_blogspot_inserted_image(page, image)
         return
 
@@ -9897,7 +9919,7 @@ def configure_blogspot_inserted_image(page, image_source: str) -> None:
     )
     if size_button is None:
         raise RuntimeError("Blogger 이미지 크기 버튼을 찾지 못했습니다.")
-    before = _blogspot_image_size_snapshot(image)
+    before = snapshot_before()
     size_button.click()
     page.wait_for_timeout(350)
 
@@ -10046,7 +10068,12 @@ def _upload_blogspot_webp_files(page, image_paths: list[str], result_queue: queu
                 "BLOGSPOT",
                 "업로드된 이미지가 Blogger 본문에 직접 삽입된 현재 UI 감지",
             )
-            configure_blogspot_inserted_image(page, uploaded_source)
+            original_size = None
+            if len(valid_paths) == 1:
+                from PIL import Image
+                with Image.open(valid_paths[0]) as uploaded_image:
+                    original_size = uploaded_image.size
+            configure_blogspot_inserted_image(page, uploaded_source, original_size=original_size)
             append_runtime_log("BLOGSPOT", "현재 Blogger 이미지 배치 처리 완료")
             return len(valid_paths)
 

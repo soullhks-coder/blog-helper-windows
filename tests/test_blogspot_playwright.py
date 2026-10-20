@@ -9,6 +9,11 @@ from unittest.mock import Mock, patch
 import main
 
 
+def image_state(width):
+    return {"width": str(width), "height": str(width), "complete": True,
+            "naturalWidth": 1024, "naturalHeight": 1024}
+
+
 class BlogspotPlaywrightTests(unittest.TestCase):
     def test_each_compose_image_waits_after_selecting_extra_large_size(self) -> None:
         for available_label in ("매우 크게", "아주 크게"):
@@ -32,10 +37,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                 page.wait_for_timeout.side_effect = lambda timeout: events.append(("wait", timeout))
                 image = Mock()
                 image.click.side_effect = lambda: events.append(("click", "image"))
-                image.evaluate.side_effect = [
-                    {"width": "320"}, {"width": "640"},
-                    {"width": "320"}, {"width": "640"},
-                ]
+                image.evaluate.side_effect = ([image_state(320)] + [image_state(640)] * 4) * 2
 
                 with (
                     patch.object(main, "find_blogspot_compose_image", return_value=image),
@@ -46,8 +48,9 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                         main.configure_blogspot_inserted_image(page, image_source)
                         events.append(("next", image_source))
                         self.assertEqual(
-                            events[-3:],
-                            [("click", available_label), ("wait", 1_500), ("next", image_source)],
+                            events[-6:],
+                            [("click", available_label), ("wait", 1_500),
+                             ("wait", 250), ("wait", 250), ("wait", 250), ("next", image_source)],
                         )
                 self.assertEqual(events.count(("wait", 1_500)), 2)
 
@@ -75,20 +78,21 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         page = Mock()
         page.wait_for_timeout.side_effect = lambda delay: events.append(("wait", delay))
         image = Mock()
-        image.evaluate.return_value = {"width": "640"}
+        image.evaluate.return_value = image_state(640)
         with patch.object(main, "append_runtime_log"):
             main._apply_blogspot_image_size_dialog(page, dialog, image, {"width": "320"})
-        self.assertEqual(events, ["size-click", ("wait", 1_500), "update-click", "dialog-hidden"])
+        self.assertEqual(events, ["size-click", ("wait", 1_500), "update-click", "dialog-hidden",
+                                  ("wait", 250), ("wait", 250), ("wait", 250)])
         choice.click.assert_called_once_with()
         update.click.assert_called_once_with()
 
     def test_slow_size_change_keeps_waiting_without_clicking_another_control(self) -> None:
         page = Mock()
         image = Mock()
-        image.evaluate.side_effect = [{"width": "320"}] * 5 + [{"width": "640"}]
+        image.evaluate.side_effect = [image_state(320)] * 5 + [image_state(640)] * 4
         with patch.object(main, "append_runtime_log"):
             main._wait_for_blogspot_image_size(page, image, {"width": "320"})
-        self.assertEqual([call.args[0] for call in page.wait_for_timeout.call_args_list], [250] * 5)
+        self.assertEqual([call.args[0] for call in page.wait_for_timeout.call_args_list], [250] * 8)
         page.get_by_role.assert_not_called()
         image.click.assert_not_called()
 
@@ -114,28 +118,27 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         with patch.object(main, "append_runtime_log"):
             with self.assertRaisesRegex(RuntimeError, "반영되지 않아 다음 작업"):
                 main._wait_for_blogspot_image_size(page, image, {"width": "320"})
-        self.assertEqual(page.wait_for_timeout.call_count, 32)
+        self.assertEqual(page.wait_for_timeout.call_count, 120)
 
     def test_new_image_url_alone_does_not_count_as_finished_resize(self) -> None:
         page = Mock()
         image = Mock()
         image.evaluate.side_effect = [
-            {"src": "new-url", "width": "320", "height": "240"},
-            {"src": "new-url", "width": "640"},
-        ]
+            {**image_state(320), "src": "new-url"},
+        ] + [{**image_state(640), "src": "new-url"}] * 4
         with patch.object(main, "append_runtime_log"):
             main._wait_for_blogspot_image_size(page, image, {"src": "old-url", "width": "320"})
-        page.wait_for_timeout.assert_called_once_with(250)
+        self.assertEqual([call.args[0] for call in page.wait_for_timeout.call_args_list], [250] * 4)
 
     def test_already_extra_large_image_is_allowed_to_continue(self) -> None:
         for width in ("640", "800"):
             with self.subTest(width=width):
                 page = Mock()
                 image = Mock()
-                image.evaluate.return_value = {"width": width}
+                image.evaluate.return_value = image_state(width)
                 with patch.object(main, "append_runtime_log"):
                     main._wait_for_blogspot_image_size(page, image, {"width": width})
-                page.wait_for_timeout.assert_not_called()
+                self.assertEqual([call.args[0] for call in page.wait_for_timeout.call_args_list], [250] * 3)
 
     def test_legacy_layout_waits_before_selecting_alignment(self) -> None:
         for already_selected in (False, True):
