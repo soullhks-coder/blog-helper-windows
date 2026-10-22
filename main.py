@@ -10040,11 +10040,20 @@ def find_blogspot_image_insert_button(page):
 
 def upload_blogspot_images(page, image_paths: list[str], result_queue: queue.Queue) -> int:
     """All Blogger flows upload WebP copies, leaving shared/Tistory inputs intact."""
+    from blogspot_upload import BlogspotImageUploadError
     originals = [Path(path).expanduser().resolve() for path in image_paths if Path(path).expanduser().is_file()]
     if not originals:
         return 0
-    with webp_upload_files(originals) as webp_paths:
-        return _upload_blogspot_webp_files(page, webp_paths, result_queue)
+    try:
+        with webp_upload_files(originals) as webp_paths:
+            return _upload_blogspot_webp_files(page, webp_paths, result_queue)
+    except WritingCancelled:
+        raise
+    except BlogspotImageUploadError:
+        raise
+    except Exception as exc:
+        check_writing_cancelled(getattr(result_queue, "cancel_event", None))
+        raise BlogspotImageUploadError(f"Blogger 이미지 입력을 완료하지 못했습니다: {exc}") from exc
 
 
 def _upload_blogspot_webp_files(page, image_paths: list[str], result_queue: queue.Queue) -> int:
@@ -10057,32 +10066,18 @@ def _upload_blogspot_webp_files(page, image_paths: list[str], result_queue: queu
     )
     before_image_sources = set(collect_blogspot_compose_image_sources(page))
     result_queue.put(("publish_progress", (0.965, f"블로그스팟에 이미지 {len(valid_paths)}장을 첨부하고 있습니다...")))
-    image_button = find_blogspot_image_insert_button(page)
-    if image_button is None:
-        append_runtime_log(
-            "BLOGSPOT",
-            f"이미지 삽입 버튼 감지 실패 · {describe_blogspot_upload_state(page)}",
-        )
-        raise RuntimeError("블로그스팟의 이미지 삽입 버튼을 찾지 못했습니다.")
-    image_button.click(force=True)
-    # Blogger renders several hidden copies of this menu item. Selecting by text
-    # alone violates Playwright strict mode, and a pointer click on the visible
-    # Material menu item is occasionally swallowed. Target the one open menu item
-    # and activate it with the keyboard, which reliably launches Google Picker.
-    upload_option = page.locator('[role="menuitem"]:visible').filter(
-        has_text=re.compile(r"컴퓨터에서 업로드")
-    ).first
-    upload_option.wait_for(state="visible", timeout=15_000)
-    upload_option.focus()
-    upload_option.press("Enter")
-    append_runtime_log("BLOGSPOT", "Google 이미지 선택기 열기 완료")
-    picker_iframe = page.locator('iframe[src*="docs.google.com/picker"]:visible')
-    picker_iframe.first.wait_for(state="visible", timeout=20_000)
-    picker_frame = page.frame_locator('iframe[src*="docs.google.com/picker"]:visible')
-    browse_button = picker_frame.get_by_role("button", name="찾아보기", exact=True)
-    browse_button.wait_for(state="visible", timeout=20_000)
+    from blogspot_upload import open_image_picker
+    cancel_event = getattr(result_queue, "cancel_event", None)
+    picker_frame, browse_button = open_image_picker(
+        page, find_image_button=find_blogspot_image_insert_button,
+        describe_state=describe_blogspot_upload_state,
+        log=lambda message: append_runtime_log("BLOGSPOT", message),
+        check_cancel=lambda: check_writing_cancelled(cancel_event),
+    )
+    check_writing_cancelled(cancel_event)
     with page.expect_file_chooser(timeout=20_000) as chooser_info:
         browse_button.click()
+    check_writing_cancelled(cancel_event)
     chooser_info.value.set_files(valid_paths)
     append_runtime_log("BLOGSPOT", "파일 선택 완료 · Blogger 처리 대기 2.5초 시작")
     result_queue.put(("publish_progress", (0.97, "업로드한 이미지의 Blogger 레이아웃을 적용하고 있습니다...")))
@@ -10453,6 +10448,7 @@ def run_blogspot_playwright_automation(
     reservation_key = ""
     reference_image_paths: list[str] = []
     public_publish_clicked = False
+    recovery_backup_failed = False
 
     def mark_public_publish_clicked():
         nonlocal public_publish_clicked
@@ -10755,6 +10751,37 @@ def run_blogspot_playwright_automation(
                     "image_count": attached_count,
                     "daily_publish_count": count,
                 }
+            except Exception as exc:
+                from blogspot_upload import BlogspotImageUploadError
+                # Never turn a user stop, login problem or publication error
+                # into the image-recovery wait or a second automatic upload.
+                check_writing_cancelled(cancel_event)
+                if not isinstance(exc, BlogspotImageUploadError):
+                    raise
+                from blogspot_recovery import save_failed_editor, wait_for_failed_editor
+                recovery_path = ""
+                try:
+                    recovery_path = str(save_failed_editor(
+                        page, DATA_DIR / "blogspot-recovery", title=title,
+                        article_html=blogspot_article_html, image_paths=image_paths,
+                        blog_id=blog_id, profile_scope=profile_scope,
+                        completed_images=attached_count,
+                    ))
+                    append_runtime_log("BLOGSPOT", f"미완료 글·이미지 복구 사본 저장: {recovery_path}")
+                except Exception as backup_error:
+                    recovery_backup_failed = True
+                    append_runtime_log("BLOGSPOT", f"복구 사본 저장 실패 · 원본 참고 이미지는 보존: {type(backup_error).__name__}")
+                check_writing_cancelled(cancel_event)
+                if not page.is_closed():
+                    result_queue.put(("blogspot_editor_attention", {
+                        "error": str(exc), "recovery_path": recovery_path,
+                        "completed_images": attached_count, "total_images": len(image_paths),
+                    }))
+                    wait_for_failed_editor(page, check_cancel=lambda: check_writing_cancelled(cancel_event))
+                check_writing_cancelled(cancel_event)
+                if recovery_path:
+                    raise BlogspotImageUploadError(f"{exc}\n복구 폴더: {recovery_path}") from exc
+                raise
             finally:
                 context.close()
     except WritingCancelled:
@@ -10776,7 +10803,8 @@ def run_blogspot_playwright_automation(
             DailyPublishLimitStore.record_reserved_success("blogspot", daily_account, reservation_key)
             reservation_key = ""
         DailyPublishLimitStore.cancel_reservation(reservation_key)
-        cleanup_generated_upload_images(reference_image_paths)
+        if not recovery_backup_failed:
+            cleanup_generated_upload_images(reference_image_paths)
 
 
 def is_threads_auth_cookie(cookie: dict) -> bool:
@@ -48907,6 +48935,7 @@ class KeywordApp(ctk.CTk):
         self.writing_v2_pending_auto = False
         self.writing_v2_run_settings = None
         self._tistory_v2_attention_reported = False
+        self._blogspot_attention_reported = False
         stopped = list(self.__dict__.get("_stopped_writing_workers", []))
         own_manual_scopes = set()
         for name in (
@@ -55484,6 +55513,8 @@ class KeywordApp(ctk.CTk):
                     else:
                         self._handle_publish_pipeline_success(payload)
                 elif event_type == "publish_pipeline_error":
+                    attention_reported = getattr(self, "_blogspot_attention_reported", False)
+                    self._blogspot_attention_reported = False
                     self._stop_writing_auto_progress()
                     if hasattr(self, "blogspot_auto_publish_var"):
                         self._on_blogspot_auto_publish_changed(save=False)
@@ -55497,7 +55528,10 @@ class KeywordApp(ctk.CTk):
                         self.publish_status_label.configure(text="업로드에 실패했습니다. 오류 내용을 확인해 주세요.", text_color="#ff6b6b")
                         self.keyword_status_label.configure(text="업로드 파이프라인 실패")
                         self._set_writing_progress(4, f"블로그 업로드에 실패했습니다: {payload}", state="error")
-                        messagebox.showerror("업로드 오류", payload)
+                        if not attention_reported:
+                            messagebox.showerror("업로드 오류", payload)
+                elif event_type == "blogspot_editor_attention":
+                    self._handle_blogspot_editor_attention(payload)
                 elif event_type == "publish_progress":
                     progress, message = payload
                     self.publish_progress_bar.stop()
@@ -56141,6 +56175,30 @@ class KeywordApp(ctk.CTk):
             else:
                 next_delay = 420
             self.after(next_delay, self._poll_queue)
+
+    def _handle_blogspot_editor_attention(self, payload: dict) -> None:
+        # The live worker still owns this Chrome/profile. Do not free it or
+        # enable a second upload until inspection ends or the run is cancelled.
+        self._blogspot_attention_reported = True
+        self._stop_writing_auto_progress()
+        self.publish_progress_bar.stop()
+        self.publish_progress_bar.configure(mode="determinate")
+        message = (f"이미지 {payload['completed_images']}/{payload['total_images']}장 확인 후 중단 · "
+                   "Chrome에서 확인 후 창을 닫거나 발행중단을 눌러 주세요.")
+        self.publish_status_label.configure(text=message, text_color="#ffb86b")
+        if self.active_automation_upload_item_id:
+            self.automation_status_label.configure(text=message, text_color="#ffb86b")
+        else:
+            self.publish_pipeline_button.configure(state="disabled", text="Chrome 확인 대기 중...")
+            self._set_writing_progress(4, message, state="error")
+        backup = payload.get("recovery_path")
+        backup_note = f"\n\n복구 폴더: {backup}" if backup else "\n\n복구 사본 저장에 실패해 원본 참고 이미지를 보존했습니다."
+        messagebox.showwarning(
+            "블로그스팟 이미지 입력 확인 필요",
+            f"{payload['error']}\n\n작성 중인 Chrome을 열어 두었습니다. "
+            "프로그램은 추가 입력·발행하지 않습니다. 내용을 확인한 뒤 Chrome을 닫거나 "
+            f"[발행중단]을 눌러 종료해 주세요.{backup_note}",
+        )
 
     def _handle_wordpress_test_success(self, payload: dict) -> None:
         self.wp_test_button.configure(state="normal", text="검사")

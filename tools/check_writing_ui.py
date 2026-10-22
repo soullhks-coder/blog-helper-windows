@@ -2495,6 +2495,35 @@ def main() -> None:
             app.writing_stop_button.invoke()  # Idle/repeated stop is safe too.
             assert not errors, errors
             print(f'{sys.platform} {args.theme}: standard stop/reset, red adjacent actions, stale-event/timer fencing and saved designs/V2/unrelated jobs preserved', flush=True)
+            # An image failure must hold the live worker/profile, not enable a
+            # second upload. Cancelling inspection fences its late error too.
+            app._switch_page('writing')
+            recovery_scope = app._writing_result_queue()
+            recovery_worker = Mock(result_queue=recovery_scope)
+            recovery_worker.is_alive.return_value = True
+            app.pipeline_worker = recovery_worker
+            with patch.object(app_module.messagebox, 'showwarning') as warning:
+                recovery_scope.put(('blogspot_editor_attention', {
+                    'error': 'offline picker fixture', 'completed_images': 2,
+                    'total_images': 5, 'recovery_path': '/tmp/offline-recovery',
+                }))
+                poll_result_queue(app)
+                assert app._blogspot_attention_reported
+                assert app.pipeline_worker is recovery_worker
+                assert app.publish_pipeline_button.cget('state') == 'disabled'
+                assert '2/5' in app.publish_status_label.cget('text')
+                warning.assert_called_once()
+            with patch.object(app_module.messagebox, 'showerror') as duplicate:
+                app.writing_stop_button.invoke()
+                recovery_scope.put(('publish_pipeline_error', 'late stopped image failure'))
+                poll_result_queue(app)
+                duplicate.assert_not_called()
+            assert recovery_scope.cancel_event.is_set()
+            assert not app._blogspot_attention_reported
+            recovery_worker.is_alive.return_value = False
+            app.writing_stop_button.invoke()
+            assert not app_module.modal_dimmer(app).active
+            print(f'{sys.platform} {args.theme}: Blogger recovery owns live worker, blocks duplicate upload, and cancels without late errors', flush=True)
             app._switch_page('thumbnails')
             app._switch_thumbnail_preset(4)
             app.thumbnail_auto_title_var.set(False)

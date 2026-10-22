@@ -317,6 +317,25 @@ class BloggerV2BrowserTests(unittest.TestCase):
         self.confirm.assert_not_called()
         self.context.close.assert_called_once()
 
+    def test_third_pair_failure_preserves_v2_review_editor_without_tags_or_publication(self):
+        from blogspot_upload import BlogspotImageUploadError
+        self.page.is_closed.return_value = False
+        self.upload.side_effect = [1, 1, BlogspotImageUploadError('fixture picker unavailable')]
+        with patch('blogspot_recovery.save_failed_editor', return_value=self.root / 'recovery') as backup, \
+             patch('blogspot_recovery.wait_for_failed_editor') as inspect, \
+             self.assertRaises(BlogspotImageUploadError):
+            self.run_browser(auto_publish=False)
+        self.assertEqual(self.upload.call_count, 3)
+        self.assertEqual(backup.call_args.kwargs['completed_images'], 2)
+        self.assertEqual(len(backup.call_args.kwargs['image_paths']), 6)
+        inspect.assert_called_once()
+        self.tags.assert_not_called()
+        self.post.first.click.assert_not_called()
+        self.confirm.assert_not_called()
+        self.wait.assert_not_called()
+        self.record.assert_not_called()
+        self.context.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

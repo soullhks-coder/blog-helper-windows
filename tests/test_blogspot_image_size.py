@@ -1,6 +1,7 @@
 """Image resize completion must reflect settled geometry, not one DOM change."""
 import unittest
 import tempfile
+import queue
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 from PIL import Image
@@ -106,11 +107,12 @@ class BlogspotImageSizeTests(unittest.TestCase):
             path = Path(directory) / "fixture.webp"
             Image.new("RGB", (320, 200), "blue").save(path, "WEBP")
             with patch.object(main, "find_blogspot_image_insert_button", return_value=Mock()), \
+                 patch("blogspot_upload.open_image_picker", return_value=(MagicMock(), MagicMock())), \
                  patch.object(main, "collect_blogspot_compose_image_sources", side_effect=[[], [source]]), \
                  patch.object(main, "configure_blogspot_inserted_image") as configure, \
                  patch.object(main, "describe_blogspot_upload_state", return_value="fixture"), \
                  patch.object(main, "append_runtime_log"):
-                self.assertEqual(main._upload_blogspot_webp_files(page, [str(path)], Mock()), 1)
+                self.assertEqual(main._upload_blogspot_webp_files(page, [str(path)], queue.Queue()), 1)
                 configure.assert_called_once_with(page, source, original_size=(320, 200))
 
 

@@ -208,6 +208,69 @@ class BloggerStopTests(unittest.TestCase):
         self.assertIsInstance(errors[0], WritingCancelled)
         self.assertNotIn('stop-test-scope', main.ManualPublishCompletionStore.waiting_scopes('blogspot'))
 
+    def recovery_failure(self, *, closed=False, backup_error=None, cancel_wait=False):
+        from blogspot_upload import BlogspotImageUploadError
+        self.page.is_closed.return_value = closed
+        self.stack.enter_context(patch.object(main, 'prepare_blogspot_html_and_images',
+            return_value=('<p>body</p>', ['/fake/a.png', '/fake/b.png', '/fake/c.png'])))
+        self.stack.enter_context(patch.object(main, 'insert_blogspot_image_slot_markers',
+            return_value=('<p>body</p>', ['a', 'b', 'c'])))
+        self.stack.enter_context(patch.object(main, 'focus_blogspot_image_slot'))
+        upload = self.stack.enter_context(patch.object(main, 'upload_blogspot_images',
+            side_effect=[1, 1, BlogspotImageUploadError('picker unavailable')]))
+        backup = self.stack.enter_context(patch('blogspot_recovery.save_failed_editor',
+            return_value='/tmp/fixture-recovery', side_effect=backup_error))
+        def inspect(page, *, check_cancel):
+            self.context.close.assert_not_called()
+            self.publish.first.click.assert_not_called()
+            self.confirm.assert_not_called()
+            self.assertTrue(any(event[1][1][0] == 'blogspot_editor_attention' for event in self.scope.target.queue))
+            if cancel_wait:
+                self.scope.cancel()
+                check_cancel()
+        waiting = self.stack.enter_context(patch('blogspot_recovery.wait_for_failed_editor', side_effect=inspect))
+        return upload, backup, waiting
+
+    def test_third_image_failure_backs_up_and_holds_browser_without_post_or_whole_article_retry(self):
+        from blogspot_upload import BlogspotImageUploadError
+        upload, backup, waiting = self.recovery_failure()
+        with self.assertRaisesRegex(BlogspotImageUploadError, '복구 폴더'):
+            self.run_browser()
+        self.assertEqual(upload.call_count, 3)
+        self.assertEqual(backup.call_args.kwargs['completed_images'], 2)
+        self.assertEqual(backup.call_args.kwargs['image_paths'], ['/fake/a.png', '/fake/b.png', '/fake/c.png'])
+        waiting.assert_called_once()
+        self.confirm.assert_not_called()
+        self.record.assert_not_called()
+        self.context.close.assert_called_once()
+        self.release.assert_called_once_with('slot')
+
+    def test_failed_editor_wait_remains_cancellable_without_publication_or_late_error(self):
+        _, backup, waiting = self.recovery_failure(cancel_wait=True)
+        with self.assertRaises(WritingCancelled):
+            self.run_browser()
+        backup.assert_called_once()
+        waiting.assert_called_once()
+        self.record.assert_not_called()
+        self.context.close.assert_called_once()
+
+    def test_closed_chrome_saves_recovery_but_does_not_wait_for_an_invisible_window(self):
+        from blogspot_upload import BlogspotImageUploadError
+        _, backup, waiting = self.recovery_failure(closed=True)
+        with self.assertRaises(BlogspotImageUploadError):
+            self.run_browser()
+        backup.assert_called_once()
+        waiting.assert_not_called()
+        self.assertFalse(any(event[1][1][0] == 'blogspot_editor_attention' for event in self.scope.target.queue))
+
+    def test_backup_failure_never_deletes_reference_originals(self):
+        from blogspot_upload import BlogspotImageUploadError
+        self.recovery_failure(backup_error=OSError('disk full'))
+        with patch.object(main, 'cleanup_generated_upload_images') as cleanup, \
+             self.assertRaises(BlogspotImageUploadError):
+            self.run_browser()
+        cleanup.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
