@@ -9,6 +9,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def main():
+    # GitHub's Windows runner defaults to cp1252 stdout. Keep Korean style
+    # names diagnostic-only rather than letting their logging abort the test.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, help="Optional contact sheet for visual QA")
     args = parser.parse_args()
