@@ -186,5 +186,59 @@ class DesignColorPickerTests(unittest.TestCase):
             app._on_thumbnail_control_changed.assert_not_called()
 
 
+class DesignTextLayoutCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.app = object.__new__(main.KeywordApp)
+        self.app._thumbnail_measure_fonts = {}
+        self.font = Mock()
+        self.font.measure.side_effect = lambda text: len(text) * 10
+        self.factory = patch.object(main.tkfont, 'Font', return_value=self.font)
+        self.make_font = self.factory.start()
+        self.addCleanup(self.factory.stop)
+
+    def test_thumbnail_color_only_redraw_reuses_font_and_layout(self):
+        first = self.app._thumbnail_text_lines('나만의 메모 썸네일', 400, 56)
+        measured = self.font.measure.call_count
+        first.append('외부 변경')
+        again = self.app._thumbnail_text_lines('나만의 메모 썸네일', 400, 56)
+        self.assertNotIn('외부 변경', again)
+        self.assertEqual(self.font.measure.call_count, measured)
+        self.make_font.assert_called_once_with(root=self.app, family=main.UI_FONT_FAMILY, size=56, weight='bold')
+
+    def test_card_layout_is_reused_but_text_width_font_and_limit_change_recompute(self):
+        self.app._wrap_text_for_svg('핵심 요약 내용', 300, 30, 2)
+        measured = self.font.measure.call_count
+        self.app._wrap_text_for_svg('핵심 요약 내용', 300, 30, 2)
+        self.assertEqual(self.font.measure.call_count, measured)
+        for args in (('다른 내용', 300, 30, 2), ('핵심 요약 내용', 100, 30, 2),
+                     ('핵심 요약 내용', 300, 40, 2), ('핵심 요약 내용', 300, 30, 1)):
+            self.app._wrap_text_for_svg(*args)
+            self.assertGreater(self.font.measure.call_count, measured)
+            measured = self.font.measure.call_count
+
+    def test_font_family_change_never_reuses_an_old_measurement_font(self):
+        self.app._thumbnail_text_lines('제목', 400, 56)
+        with patch.object(main, 'UI_FONT_FAMILY', 'Another Family'):
+            self.app._thumbnail_text_lines('제목', 400, 56)
+        self.assertEqual(self.make_font.call_count, 2)
+        self.assertEqual(self.make_font.call_args.kwargs['family'], 'Another Family')
+
+    def test_font_and_text_caches_are_bounded(self):
+        for i in range(160):
+            self.app._thumbnail_text_lines(f'메모 {i}', 400, 20+i)
+        self.assertLessEqual(len(self.app._thumbnail_measure_fonts), 12)
+        self.assertLessEqual(len(self.app._design_text_layout_cache), 128)
+
+    def test_tk_scaling_change_invalidates_measurement_and_wrapping(self):
+        self.app.tk = Mock()
+        self.app.tk.call.return_value = 1.0
+        self.app._thumbnail_text_lines('메모', 400, 56)
+        measured = self.font.measure.call_count
+        self.app.tk.call.return_value = 1.5
+        self.app._thumbnail_text_lines('메모', 400, 56)
+        self.assertEqual(self.make_font.call_count, 2)
+        self.assertGreater(self.font.measure.call_count, measured)
+
+
 if __name__ == "__main__":
     unittest.main()

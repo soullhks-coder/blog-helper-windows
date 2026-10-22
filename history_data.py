@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-22",
-        "version": "v1.2.37",
+        "version": "v1.2.38",
         "category": "썸네일 배경 스타일",
         "title": "메모지·도트 등 7가지 배경과 자유 색상 선택",
         "request": "썸네일 관리에서 메모지·도트 같은 배경 스타일과 색상을 직접 지정하고 싶다는 요청",
@@ -24,6 +24,7 @@ BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
             "Mac에서 비정사각형 SVG가 정사각형 PNG로 저장되던 문제를 해당 경우의 Chrome 렌더링으로 해결",
             "Mac·Windows 실제 PNG 변환과 밝은·어두운 테마, 좁은 창의 색상 선택 UI 검증",
             "Windows 배포 검사 도구의 한글 로그 인코딩을 UTF-8로 지정해 cp1252 출력 오류 방지",
+            "색상·배경 미리보기 반복 시 글꼴 생성·한글 폭 측정을 재사용하고, 글·크기·글꼴 변경과 캐시 상한을 회귀 검사",
         ),
     },
     {

@@ -27511,7 +27511,7 @@ class KeywordApp(ctk.CTk):
         self._thumbnail_background_cache = None
         self._cardnews_background_cache = None
         self._source_image_cache: dict[str, tuple[int, object]] = {}
-        self._thumbnail_measure_fonts: dict[int, tkfont.Font] = {}
+        self._thumbnail_measure_fonts: dict[tuple, tkfont.Font] = {}
         self._scroll_exclusion_bindings: list[tuple[ctk.CTkScrollableFrame, ctk.CTkScrollableFrame]] = []
 
         self._build_layout()
@@ -47081,16 +47081,40 @@ class KeywordApp(ctk.CTk):
     def _wrap_thumbnail_text(self, text: str, width: int, font_size: int) -> str:
         return "\n".join(self._thumbnail_text_lines(text, width, font_size))
 
-    def _thumbnail_text_lines(self, text: str, width: int, font_size: int) -> list[str]:
-        max_width = max(80, width - 90)
-        font = self._thumbnail_measure_fonts.get(font_size)
+    def _design_font_context(self):
+        interpreter = self.__dict__.get("tk")
+        try:
+            scaling = round(float(interpreter.call("tk", "scaling")), 6) if interpreter is not None else 1.0
+        except (tk.TclError, TypeError, ValueError):
+            scaling = 1.0
+        return UI_FONT_FAMILY, scaling
+
+    def _design_measure_font(self, font_size: int):
+        """Keep measurement fonts owned by this Tk root, not a default root."""
+        cache = self._thumbnail_measure_fonts
+        key = (*self._design_font_context(), font_size)
+        font = cache.get(key)
         if font is None:
-            font = tkfont.Font(family=UI_FONT_FAMILY, size=font_size, weight="bold")
-            self._thumbnail_measure_fonts[font_size] = font
-            if len(self._thumbnail_measure_fonts) > 12:
-                oldest_size = next(iter(self._thumbnail_measure_fonts))
-                if oldest_size != font_size:
-                    self._thumbnail_measure_fonts.pop(oldest_size, None)
+            font = tkfont.Font(root=self, family=UI_FONT_FAMILY, size=font_size, weight="bold")
+            cache[key] = font
+            if len(cache) > 12:
+                cache.pop(next(iter(cache)))
+        return font
+
+    def _remember_design_text_layout(self, key, lines):
+        cache = self.__dict__.setdefault("_design_text_layout_cache", {})
+        cache[key] = tuple(lines)
+        if len(cache) > 128:
+            cache.pop(next(iter(cache)))
+        return list(lines)
+
+    def _thumbnail_text_lines(self, text: str, width: int, font_size: int) -> list[str]:
+        key = ("thumbnail", self._design_font_context(), text, width, font_size)
+        cached = self.__dict__.get("_design_text_layout_cache", {}).get(key)
+        if cached is not None:
+            return list(cached)
+        max_width = max(80, width - 90)
+        font = self._design_measure_font(font_size)
         raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not raw_lines:
             raw_lines = ["썸네일", "미리보기"]
@@ -47099,7 +47123,7 @@ class KeywordApp(ctk.CTk):
         for raw_line in raw_lines:
             wrapped.extend(self._wrap_thumbnail_line_by_pixels(raw_line, max_width, font))
 
-        return wrapped[:6] or ["썸네일", "미리보기"]
+        return self._remember_design_text_layout(key, wrapped[:6] or ["썸네일", "미리보기"])
 
     def _wrap_thumbnail_line_by_pixels(self, text: str, max_width: int, font: tkfont.Font) -> list[str]:
         if font.measure(text) <= max_width:
@@ -48300,7 +48324,11 @@ class KeywordApp(ctk.CTk):
         return "\n".join(elements)
 
     def _wrap_text_for_svg(self, text: str, max_width: int, font_size: int, max_lines: int) -> list[str]:
-        font = tkfont.Font(family=UI_FONT_FAMILY, size=font_size, weight="bold")
+        key = ("cardnews", self._design_font_context(), text, max_width, font_size, max_lines)
+        cached = self.__dict__.get("_design_text_layout_cache", {}).get(key)
+        if cached is not None:
+            return list(cached)
+        font = self._design_measure_font(font_size)
         words = list(text.strip()) if not re.search(r"\s", text.strip()) else text.strip().split()
         lines: list[str] = []
         current = ""
@@ -48323,7 +48351,7 @@ class KeywordApp(ctk.CTk):
             while lines[-1] and font.measure(lines[-1] + "...") > max_width:
                 lines[-1] = lines[-1][:-1]
             lines[-1] = lines[-1].rstrip() + "..."
-        return lines[:max_lines]
+        return self._remember_design_text_layout(key, lines[:max_lines])
 
     def _build_thumbnail_svg(self, width: int, height: int, font_size: int) -> str:
         text_value = self.thumbnail_prompt_preview.get("1.0", "end").strip()
@@ -48333,7 +48361,7 @@ class KeywordApp(ctk.CTk):
         stroke_color = self._thumbnail_color_value(self.thumbnail_text_stroke_menu.get())
         shadow_mode = self.thumbnail_shadow_menu.get()
         lines = self._thumbnail_text_lines(text_value, width, font_size)
-        font = tkfont.Font(family=UI_FONT_FAMILY, size=font_size, weight="bold")
+        font = self._design_measure_font(font_size)
         line_height = max(font_size * 1.18, font.metrics("linespace") * 0.92)
         center_x = width / 2
         first_y = (height / 2) - ((len(lines) - 1) * line_height / 2)
