@@ -5,7 +5,7 @@ import math
 import re
 import time
 
-from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
 
 PICKER_SELECTOR = 'iframe[src*="docs.google.com/picker"]:visible'
@@ -97,3 +97,28 @@ def open_image_picker(page, *, find_image_button, describe_state, log, check_can
     raise BlogspotImageUploadError(
         f"Google 이미지 선택기를 {PICKER_OPEN_ATTEMPTS}회 확인했지만 준비되지 않았습니다. "
         "파일은 전송하지 않았으며 자동 발행을 중단했습니다.")
+
+
+def select_upload_files(page, browse, image_paths, *, log, check_cancel, timeout_ms=5_000):
+    """Recover a swallowed Browse activation, but perform set_files exactly once."""
+    chooser = None
+    for method in ("click", "keyboard"):
+        check_cancel()
+        try:
+            with page.expect_file_chooser(timeout=timeout_ms) as selected:
+                if method == "click":
+                    browse.click(timeout=timeout_ms)
+                else:
+                    browse.press("Enter", timeout=timeout_ms)
+            chooser = selected.value
+            break
+        except PlaywrightTimeout:
+            check_cancel()
+            if page.is_closed():
+                raise BlogspotImageUploadError("파일을 선택하기 전에 Blogger Chrome이 닫혔습니다.") from None
+            log(f"찾아보기 {method} 실행 후 파일 선택 이벤트 대기 초과 · 아직 파일 전송 전")
+    if chooser is None:
+        raise BlogspotImageUploadError("찾아보기의 클릭·키보드 실행 모두 파일 선택 창을 열지 못했습니다. 파일은 전송하지 않았습니다.")
+    check_cancel()
+    # An uncertain result here must NEVER jump back into the activation loop.
+    chooser.set_files(image_paths)

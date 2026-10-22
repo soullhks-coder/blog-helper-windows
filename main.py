@@ -10066,7 +10066,7 @@ def _upload_blogspot_webp_files(page, image_paths: list[str], result_queue: queu
     )
     before_image_sources = set(collect_blogspot_compose_image_sources(page))
     result_queue.put(("publish_progress", (0.965, f"블로그스팟에 이미지 {len(valid_paths)}장을 첨부하고 있습니다...")))
-    from blogspot_upload import open_image_picker
+    from blogspot_upload import open_image_picker, select_upload_files
     cancel_event = getattr(result_queue, "cancel_event", None)
     picker_frame, browse_button = open_image_picker(
         page, find_image_button=find_blogspot_image_insert_button,
@@ -10074,11 +10074,11 @@ def _upload_blogspot_webp_files(page, image_paths: list[str], result_queue: queu
         log=lambda message: append_runtime_log("BLOGSPOT", message),
         check_cancel=lambda: check_writing_cancelled(cancel_event),
     )
-    check_writing_cancelled(cancel_event)
-    with page.expect_file_chooser(timeout=20_000) as chooser_info:
-        browse_button.click()
-    check_writing_cancelled(cancel_event)
-    chooser_info.value.set_files(valid_paths)
+    select_upload_files(
+        page, browse_button, valid_paths,
+        log=lambda message: append_runtime_log("BLOGSPOT", message),
+        check_cancel=lambda: check_writing_cancelled(cancel_event),
+    )
     append_runtime_log("BLOGSPOT", "파일 선택 완료 · Blogger 처리 대기 2.5초 시작")
     result_queue.put(("publish_progress", (0.97, "업로드한 이미지의 Blogger 레이아웃을 적용하고 있습니다...")))
 

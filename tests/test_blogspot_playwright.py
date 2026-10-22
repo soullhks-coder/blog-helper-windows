@@ -404,7 +404,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertNotIn('get_by_text("컴퓨터에서 업로드"', upload_source)
         self.assertIn('iframe[src*="docs.google.com/picker"]:visible', upload_source)
         self.assertIn("expect_file_chooser", upload_source)
-        self.assertIn("set_files(valid_paths)", upload_source)
+        self.assertIn("set_files(image_paths)", upload_source)
         self.assertIn("page.wait_for_timeout(2_500)", upload_source)
         self.assertIn('re.compile(r"^\\s*레이아웃 선택\\s*$")', upload_source)
         self.assertIn("last_picker_action_at", upload_source)

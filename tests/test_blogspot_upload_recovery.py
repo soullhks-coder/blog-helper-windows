@@ -158,6 +158,36 @@ class PickerTests(unittest.TestCase):
             opening.assert_called_once()
             page.expect_file_chooser.return_value.__enter__.return_value.value.set_files.assert_not_called()
 
+    def test_swallowed_browse_click_retries_keyboard_before_a_single_file_transfer(self):
+        page, browse = MagicMock(), Mock()
+        page.is_closed.return_value = False
+        chooser = page.expect_file_chooser.return_value
+        chooser.__exit__.side_effect = [PlaywrightTimeout('swallowed'), False]
+        upload.select_upload_files(page, browse, ['fixture.webp'], log=Mock(), check_cancel=Mock())
+        browse.click.assert_called_once()
+        browse.press.assert_called_once_with('Enter', timeout=5_000)
+        chooser.__enter__.return_value.value.set_files.assert_called_once_with(['fixture.webp'])
+
+    def test_both_browse_activations_fail_without_transferring_any_file(self):
+        page = MagicMock()
+        page.is_closed.return_value = False
+        chooser = page.expect_file_chooser.return_value
+        chooser.__exit__.side_effect = PlaywrightTimeout('no chooser')
+        with self.assertRaises(upload.BlogspotImageUploadError):
+            upload.select_upload_files(page, Mock(), ['fixture.webp'], log=Mock(), check_cancel=Mock())
+        self.assertEqual(page.expect_file_chooser.call_count, 2)
+        chooser.__enter__.return_value.value.set_files.assert_not_called()
+
+    def test_uncertain_set_files_result_never_retries_browse_or_set_files(self):
+        page, browse = MagicMock(), Mock()
+        chooser = page.expect_file_chooser.return_value.__enter__.return_value.value
+        chooser.set_files.side_effect = PlaywrightTimeout('uncertain transfer')
+        with self.assertRaises(PlaywrightTimeout):
+            upload.select_upload_files(page, browse, ['fixture.webp'], log=Mock(), check_cancel=Mock())
+        self.assertEqual(page.expect_file_chooser.call_count, 1)
+        chooser.set_files.assert_called_once()
+        browse.press.assert_not_called()
+
 
 class RecoveryTests(unittest.TestCase):
     def test_source_and_live_html_and_all_images_are_preserved_without_changing_originals(self):

@@ -19,7 +19,7 @@ const options = OPTIONS;
 window.requests = []; window.transfers = [];
 function picker() {
   const frame = document.createElement('iframe'); frame.id='picker';
-  frame.src='https://docs.google.com/picker?delay='+(options.browseDelay||0);
+  frame.src='https://docs.google.com/picker?delay='+(options.browseDelay||0)+'&ignore='+Number(!!options.ignoreBrowse);
   document.body.appendChild(frame);
 }
 function open(method) {
@@ -46,10 +46,14 @@ if(options.existing)picker();
 </script>'''
 
 PICKER = r'''<!doctype html><meta charset="utf-8">
-<button id="browse" hidden onclick="document.querySelector('#file').click()">찾아보기</button>
+<button id="browse" hidden onclick="choose(event)">찾아보기</button>
 <input id="file" type="file" multiple hidden>
 <script>
 setTimeout(()=>document.querySelector('#browse').hidden=false, DELAY);
+function choose(event) {
+  if(IGNORE && event.detail>0)return;
+  document.querySelector('#file').click();
+}
 document.querySelector('#file').addEventListener('change', e=>{
   parent.postMessage({type:'fixture-files',files:[...e.target.files].map(f=>f.name)}, '*');
 });
@@ -62,7 +66,7 @@ def main():
         os.environ['BLOG_HELPER_DISABLE_UPDATES'] = '1'
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         import main as app
-        from blogspot_upload import BlogspotImageUploadError, open_image_picker
+        from blogspot_upload import BlogspotImageUploadError, open_image_picker, select_upload_files
         from blogspot_recovery import save_failed_editor, wait_for_failed_editor
         from writing_run import WritingCancelled, check_writing_cancelled
         from playwright.sync_api import sync_playwright
@@ -75,6 +79,9 @@ def main():
                 headless=True, args=['--disable-background-networking', '--disable-component-update'])
             try:
                 page = browser.new_page()
+                print('Blogger offline Chrome version:', browser.version, flush=True)
+                page.on('console', lambda message: print('fixture console:', message.type, message.text, flush=True)
+                    if message.type == 'error' else None)
                 scenario = {}
                 def respond(route):
                     url = route.request.url
@@ -82,7 +89,8 @@ def main():
                         route.fulfill(body=EDITOR.replace('OPTIONS', json.dumps(scenario)), content_type='text/html')
                     elif url.startswith('https://docs.google.com/picker?'):
                         delay = int(parse_qs(urlparse(url).query).get('delay', [0])[0])
-                        route.fulfill(body=PICKER.replace('DELAY', str(delay)), content_type='text/html')
+                        ignore = int(parse_qs(urlparse(url).query).get('ignore', [0])[0])
+                        route.fulfill(body=PICKER.replace('DELAY', str(delay)).replace('IGNORE', str(ignore)), content_type='text/html')
                     else:
                         route.abort()
                 page.route('**/*', respond)
@@ -96,14 +104,16 @@ def main():
                     ('normal', {}, 1), ('swallowed-enter', {'swallow':[1]}, 2),
                     ('late-frame', {'frameDelay':350}, 1), ('late-browse', {'browseDelay':350}, 1),
                     ('hidden-stale-frame', {'hidden':True}, 1), ('existing-picker', {'existing':True}, 0),
+                    ('swallowed-browse', {'ignoreBrowse':True}, 1),
                 )
                 for name, options, requests in cases:
                     scenario.clear(); scenario.update(options)
                     page.goto('http://127.0.0.1/blogger-fixture')
                     frame, browse = open_picker()
-                    with page.expect_file_chooser() as selected:
-                        browse.click()
-                    selected.value.set_files(str(image_path))
+                    print(f'Blogger offline Chrome: starting {name}', flush=True)
+                    select_upload_files(page, browse, [str(image_path)], log=lambda message: print(
+                        'Blogger offline Chrome: '+str(message).encode('ascii', 'backslashreplace').decode(), flush=True),
+                        check_cancel=lambda: None)
                     page.wait_for_function('transfers.length===1')
                     assert len(page.evaluate('requests')) == requests, (name, page.evaluate('requests'))
                     assert page.evaluate('transfers') == [['fixture.png']], name
@@ -114,9 +124,7 @@ def main():
                 page.goto('http://127.0.0.1/blogger-fixture')
                 for index in range(3):
                     _, browse = open_picker()
-                    with page.expect_file_chooser() as selected:
-                        browse.click()
-                    selected.value.set_files(str(image_path))
+                    select_upload_files(page, browse, [str(image_path)], log=lambda message: None, check_cancel=lambda: None)
                     page.wait_for_function(f'transfers.length==={index+1}')
                 assert page.evaluate('requests') == ['keyboard','keyboard','keyboard','pointer']
                 assert page.evaluate('transfers') == [['fixture.png']]*3
