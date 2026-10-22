@@ -51,7 +51,9 @@ from image_uploads import encode_webp_upload, webp_upload_files
 import certifi
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import colorchooser, filedialog, messagebox, simpledialog
+from design_backgrounds import (BACKGROUND_STYLES, DEFAULT_PATTERN_COLOR, background_svg,
+                                draw_background, normalize_color, normalize_style)
 from modal_backdrop import DimmedDialogApi, modal_dimmer
 from writing_run import (ScopedWritingQueue, WritingCancelled, active_writing_event,
                          check_writing_cancelled)
@@ -59,6 +61,7 @@ from writing_run import (ScopedWritingQueue, WritingCancelled, active_writing_ev
 messagebox = DimmedDialogApi(messagebox)
 filedialog = DimmedDialogApi(filedialog)
 simpledialog = DimmedDialogApi(simpledialog)
+colorchooser = DimmedDialogApi(colorchooser)
 
 try:
     from tkinterdnd2 import (
@@ -476,6 +479,8 @@ def legacy_cardnews_preset_style(source: object | None = None) -> dict:
         "background_mode": str(
             value("cardnews_background_mode", "단색 배경") or "단색 배경"
         ),
+        "background_style": normalize_style(value("cardnews_background_style", "단색")),
+        "pattern_color": normalize_color(value("cardnews_pattern_color", DEFAULT_PATTERN_COLOR)),
         "background_image_path": str(
             value("cardnews_background_image_path", "") or ""
         ),
@@ -513,6 +518,8 @@ def default_thumbnail_preset(index: int = 0) -> dict:
         "height": 400,
         "ratio": "1:1",
         "background_mode": "단색 배경",
+        "background_style": "단색",
+        "pattern_color": DEFAULT_PATTERN_COLOR,
         "background_image_path": "",
         "image_position": "오른쪽하단",
         "image_scale": 100,
@@ -547,6 +554,8 @@ def legacy_thumbnail_preset(source: object) -> dict:
             "background_mode": str(
                 value("thumbnail_background_mode", "단색 배경") or "단색 배경"
             ),
+            "background_style": normalize_style(value("thumbnail_background_style", "단색")),
+            "pattern_color": normalize_color(value("thumbnail_pattern_color", DEFAULT_PATTERN_COLOR)),
             "background_image_path": str(
                 value("thumbnail_background_image_path", "") or ""
             ),
@@ -612,6 +621,8 @@ def normalize_thumbnail_presets(value: object, legacy: object | None = None) -> 
             except (TypeError, ValueError):
                 base[key] = fallback
         base["auto_title"] = bool(base.get("auto_title", True))
+        base["background_style"] = normalize_style(base.get("background_style"))
+        base["pattern_color"] = normalize_color(base.get("pattern_color"))
         base["image_grayscale"] = bool(base.get("image_grayscale", False))
         cardnews_style = legacy_cardnews_preset_style(legacy)
         if isinstance(base.get("cardnews_style"), dict):
@@ -627,6 +638,8 @@ def normalize_thumbnail_presets(value: object, legacy: object | None = None) -> 
         cardnews_style["image_grayscale"] = bool(
             cardnews_style.get("image_grayscale", False)
         )
+        cardnews_style["background_style"] = normalize_style(cardnews_style.get("background_style"))
+        cardnews_style["pattern_color"] = normalize_color(cardnews_style.get("pattern_color"))
         base["cardnews_style"] = cardnews_style
         base["cardnews_slide_styles"] = [
             dict(style)
@@ -1570,6 +1583,9 @@ def put_naver_kin_action_log(result_queue: queue.Queue | None, message: str) -> 
 
 
 def thumbnail_color_value(color_name: str) -> str:
+    custom = normalize_color(color_name, "")
+    if custom:
+        return custom
     return {
         "흰색": "#ffffff",
         "검정색": "#111111",
@@ -1673,7 +1689,18 @@ def shorten_thumbnail_text(text: str, keyword: str = "", max_chars: int = 24) ->
 
 def render_svg_to_png(svg_markup: str, destination: Path, size: int, failure_label: str) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if sys.platform != "darwin":
+    non_square = False
+    if sys.platform == "darwin":
+        try:
+            root = ET.fromstring(svg_markup)
+            dimensions = [float(str(root.get(key, "")).removesuffix("px")) for key in ("width", "height")]
+            non_square = all(value > 0 for value in dimensions) and dimensions[0] != dimensions[1]
+        except (ET.ParseError, ValueError, TypeError):
+            pass
+    # Quick Look pads non-square SVGs into a square PNG. Use the already
+    # supported Chrome renderer for those exports, preserving the actual SVG
+    # dimensions without guessing where its letterboxing starts or cropping.
+    if sys.platform != "darwin" or non_square:
         try:
             from playwright.sync_api import sync_playwright
 
@@ -1731,7 +1758,7 @@ def create_default_thumbnail_png(settings: "WordPressSettings", title: str, dest
     border_width = max(18, min(width, height) // 24)
     elements = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        f'<rect width="100%" height="100%" fill="{bg_color}" />',
+        background_svg(width, height, settings.thumbnail_background_style, bg_color, settings.thumbnail_pattern_color),
         f'<rect x="{border_width / 2}" y="{border_width / 2}" width="{width - border_width}" height="{height - border_width}" fill="none" stroke="{border_color}" stroke-width="{border_width}" />',
     ]
     stroke_attrs = (
@@ -1780,7 +1807,7 @@ def create_default_cardnews_png(
     summary_box_height = (summary_font_size * 2.8) + ((len(summary_lines) - 1) * summary_line_gap)
     elements = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        f'<rect width="100%" height="100%" fill="{bg_color}" />',
+        background_svg(width, height, settings.cardnews_background_style, bg_color, settings.cardnews_pattern_color),
         f'<rect x="{width * 0.057}" y="{height * 0.057}" width="{width * 0.886}" height="{height * 0.886}" fill="none" stroke="{border_color}" stroke-width="{max(18, min(width, height) * 0.033)}" />',
         f'<text x="{width * 0.914}" y="{height * 0.11}" text-anchor="end" font-family="Apple SD Gothic Neo, Noto Sans CJK KR, sans-serif" font-size="{max(22, min(width, height) * 0.027)}" font-weight="800" fill="{border_color}">{index}/{total}</text>',
     ]
@@ -3634,6 +3661,8 @@ class WordPressSettings:
     thumbnail_height: int = 400
     thumbnail_ratio: str = "1:1"
     thumbnail_background_mode: str = "단색 배경"
+    thumbnail_background_style: str = "단색"
+    thumbnail_pattern_color: str = DEFAULT_PATTERN_COLOR
     thumbnail_background_image_path: str = ""
     thumbnail_image_position: str = "오른쪽하단"
     thumbnail_image_scale: int = 100
@@ -3652,6 +3681,8 @@ class WordPressSettings:
     cardnews_height: int = 1024
     cardnews_ratio: str = "1:1"
     cardnews_background_mode: str = "단색 배경"
+    cardnews_background_style: str = "단색"
+    cardnews_pattern_color: str = DEFAULT_PATTERN_COLOR
     cardnews_background_image_path: str = ""
     cardnews_image_position: str = "가운데"
     cardnews_image_scale: int = 100
@@ -4597,6 +4628,8 @@ class AppStateStore:
             thumbnail_height=payload.get("thumbnail_height", 400),
             thumbnail_ratio=payload.get("thumbnail_ratio", "1:1"),
             thumbnail_background_mode=payload.get("thumbnail_background_mode", "단색 배경"),
+            thumbnail_background_style=normalize_style(payload.get("thumbnail_background_style")),
+            thumbnail_pattern_color=normalize_color(payload.get("thumbnail_pattern_color")),
             thumbnail_background_image_path=payload.get("thumbnail_background_image_path", ""),
             thumbnail_image_position=payload.get("thumbnail_image_position", "오른쪽하단"),
             thumbnail_image_scale=payload.get("thumbnail_image_scale", 100),
@@ -4622,6 +4655,8 @@ class AppStateStore:
             cardnews_height=payload.get("cardnews_height", 1024),
             cardnews_ratio=payload.get("cardnews_ratio", "1:1"),
             cardnews_background_mode=payload.get("cardnews_background_mode", "단색 배경"),
+            cardnews_background_style=normalize_style(payload.get("cardnews_background_style")),
+            cardnews_pattern_color=normalize_color(payload.get("cardnews_pattern_color")),
             cardnews_background_image_path=payload.get("cardnews_background_image_path", ""),
             cardnews_image_position=payload.get("cardnews_image_position", "가운데"),
             cardnews_image_scale=payload.get("cardnews_image_scale", 100),
@@ -45007,7 +45042,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._choose_thumbnail_background_image,
         )
-        image_select_button.grid(row=4, column=0, pady=(0, 6), sticky="ew")
+        image_select_button.grid(row=5, column=0, pady=(0, 6), sticky="ew")
 
         selected_file_label = ctk.CTkLabel(
             editor_panel,
@@ -45016,10 +45051,10 @@ class KeywordApp(ctk.CTk):
             text_color="#9aa7bb",
             font=ctk.CTkFont(size=13),
         )
-        selected_file_label.grid(row=5, column=0, pady=(0, 10), sticky="ew")
+        selected_file_label.grid(row=6, column=0, pady=(0, 10), sticky="ew")
 
         image_action_row = ctk.CTkFrame(editor_panel, fg_color="transparent")
-        image_action_row.grid(row=6, column=0, pady=(0, 10), sticky="ew")
+        image_action_row.grid(row=7, column=0, pady=(0, 10), sticky="ew")
         image_action_row.grid_columnconfigure(0, weight=1)
         image_action_row.grid_columnconfigure(1, weight=1)
 
@@ -45050,7 +45085,7 @@ class KeywordApp(ctk.CTk):
         self.thumbnail_image_position_menu.set("오른쪽하단")
 
         image_adjust_frame = ctk.CTkFrame(editor_panel, fg_color="#111826", corner_radius=14)
-        image_adjust_frame.grid(row=7, column=0, pady=(0, 10), sticky="ew")
+        image_adjust_frame.grid(row=8, column=0, pady=(0, 10), sticky="ew")
         image_adjust_frame.grid_columnconfigure(1, weight=1)
 
         scale_label = ctk.CTkLabel(image_adjust_frame, text="이미지 크기", font=ctk.CTkFont(size=13, weight="bold"))
@@ -45106,7 +45141,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._load_thumbnail_image_from_clipboard,
         )
-        clipboard_button.grid(row=8, column=0, pady=(0, 10), sticky="ew")
+        clipboard_button.grid(row=9, column=0, pady=(0, 10), sticky="ew")
 
         self.thumbnail_ai_button = ctk.CTkButton(
             editor_panel,
@@ -45119,10 +45154,10 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._generate_thumbnail_background_with_ai,
         )
-        self.thumbnail_ai_button.grid(row=9, column=0, pady=(0, 10), sticky="ew")
+        self.thumbnail_ai_button.grid(row=10, column=0, pady=(0, 10), sticky="ew")
 
         size_row = ctk.CTkFrame(editor_panel, fg_color="transparent")
-        size_row.grid(row=10, column=0, pady=(0, 10), sticky="ew")
+        size_row.grid(row=11, column=0, pady=(0, 10), sticky="ew")
         size_row.grid_columnconfigure(1, weight=1)
         size_row.grid_columnconfigure(2, weight=1)
 
@@ -45140,21 +45175,23 @@ class KeywordApp(ctk.CTk):
         self.thumbnail_height_entry.bind("<KeyRelease>", self._schedule_thumbnail_control_update)
 
         config_grid = ctk.CTkFrame(editor_panel, fg_color="transparent")
-        config_grid.grid(row=11, column=0, pady=(0, 10), sticky="ew")
+        config_grid.grid(row=4, column=0, pady=(0, 10), sticky="ew")
         for column in (0, 1):
             config_grid.grid_columnconfigure(column, weight=1)
 
-        self.thumbnail_background_mode_menu = self._thumbnail_labeled_menu(config_grid, 0, 0, "배경 이미지 선택", ["단색 배경", "선택 이미지 사용"], self._on_thumbnail_background_mode_changed)
-        self.thumbnail_background_mode_menu.set("단색 배경")
+        self.thumbnail_background_mode_menu = self._thumbnail_labeled_menu(config_grid, 0, 0, "배경 이미지 선택", ["스타일 배경", "선택 이미지 사용"], self._on_thumbnail_background_mode_changed)
+        self.thumbnail_background_mode_menu.set("스타일 배경")
         self.thumbnail_ratio_menu = self._thumbnail_labeled_menu(config_grid, 0, 1, "썸네일 비율", ["1:1", "16:9", "4:5", "3:2"], self._on_thumbnail_ratio_changed)
         self.thumbnail_ratio_menu.set("1:1")
-        self.thumbnail_bg_color_menu = self._thumbnail_labeled_menu(config_grid, 1, 0, "배경 색상", ["흰색", "검정색", "하늘색", "민트색", "노란색", "핑크색"], lambda _value: self._on_thumbnail_control_changed())
+        self._build_design_background_controls(config_grid, "thumbnail")
+        self.thumbnail_bg_color_menu = self._thumbnail_labeled_menu(config_grid, 2, 0, "배경 색상", ["흰색", "검정색", "하늘색", "민트색", "노란색", "핑크색"], lambda _value: self._on_thumbnail_control_changed())
         self.thumbnail_bg_color_menu.set("흰색")
-        self.thumbnail_border_color_menu = self._thumbnail_labeled_menu(config_grid, 1, 1, "배경 테두리 색상", ["빨간색", "파란색", "검정색", "민트색", "노란색", "핑크색", "흰색", "없음"], lambda _value: self._on_thumbnail_control_changed())
+        self._add_design_color_picker(self.thumbnail_bg_color_menu, "thumbnail", "bg_color")
+        self.thumbnail_border_color_menu = self._thumbnail_labeled_menu(config_grid, 2, 1, "배경 테두리 색상", ["빨간색", "파란색", "검정색", "민트색", "노란색", "핑크색", "흰색", "없음"], lambda _value: self._on_thumbnail_control_changed())
         self.thumbnail_border_color_menu.set("빨간색")
-        self.thumbnail_text_color_menu = self._thumbnail_labeled_menu(config_grid, 2, 0, "글씨 색상", ["검정색", "흰색", "파란색", "노란색", "빨간색"], lambda _value: self._on_thumbnail_control_changed())
+        self.thumbnail_text_color_menu = self._thumbnail_labeled_menu(config_grid, 3, 0, "글씨 색상", ["검정색", "흰색", "파란색", "노란색", "빨간색"], lambda _value: self._on_thumbnail_control_changed())
         self.thumbnail_text_color_menu.set("검정색")
-        self.thumbnail_text_stroke_menu = self._thumbnail_labeled_menu(config_grid, 2, 1, "글씨 테두리 색상", ["없음", "검정색", "흰색", "빨간색", "파란색"], lambda _value: self._on_thumbnail_control_changed())
+        self.thumbnail_text_stroke_menu = self._thumbnail_labeled_menu(config_grid, 3, 1, "글씨 테두리 색상", ["없음", "검정색", "흰색", "빨간색", "파란색"], lambda _value: self._on_thumbnail_control_changed())
         self.thumbnail_text_stroke_menu.set("없음")
 
         generate_button = ctk.CTkButton(editor_panel, text="썸네일 생성", height=42, corner_radius=14, fg_color="#7ba9f2", hover_color="#6897e1", text_color="#ffffff", font=ctk.CTkFont(size=16, weight="bold"), command=self._show_thumbnail_preview)
@@ -45438,24 +45475,26 @@ class KeywordApp(ctk.CTk):
         for column in (0, 1):
             cardnews_config_grid.grid_columnconfigure(column, weight=1)
 
-        self.cardnews_background_mode_menu = self._cardnews_labeled_menu(cardnews_config_grid, 0, 0, "카드 배경", ["단색 배경", "선택 이미지 사용"], lambda _value: self._on_cardnews_control_changed())
-        self.cardnews_background_mode_menu.set("단색 배경")
+        self.cardnews_background_mode_menu = self._cardnews_labeled_menu(cardnews_config_grid, 0, 0, "카드 배경", ["스타일 배경", "선택 이미지 사용"], lambda _value: self._on_cardnews_control_changed())
+        self.cardnews_background_mode_menu.set("스타일 배경")
         self.cardnews_ratio_menu = self._cardnews_labeled_menu(cardnews_config_grid, 0, 1, "카드 비율", ["1:1", "16:9", "4:5", "3:2"], self._on_cardnews_ratio_changed)
         self.cardnews_ratio_menu.set("1:1")
-        self.cardnews_bg_color_menu = self._cardnews_labeled_menu(cardnews_config_grid, 1, 0, "카드 배경색", ["흰색", "검정색", "하늘색", "민트색", "노란색", "핑크색"], lambda _value: self._on_cardnews_control_changed())
+        self._build_design_background_controls(cardnews_config_grid, "cardnews")
+        self.cardnews_bg_color_menu = self._cardnews_labeled_menu(cardnews_config_grid, 2, 0, "카드 배경색", ["흰색", "검정색", "하늘색", "민트색", "노란색", "핑크색"], lambda _value: self._on_cardnews_control_changed())
         self.cardnews_bg_color_menu.set("흰색")
+        self._add_design_color_picker(self.cardnews_bg_color_menu, "cardnews", "bg_color")
         self.cardnews_border_color_menu = self._cardnews_labeled_menu(
             cardnews_config_grid,
-            1,
+            2,
             1,
             "카드 테두리",
             CARDNEWS_BORDER_COLOR_PALETTE + ["흰색", "없음"],
             lambda _value: self._on_cardnews_control_changed(),
         )
         self.cardnews_border_color_menu.set("파란색")
-        self.cardnews_text_color_menu = self._cardnews_labeled_menu(cardnews_config_grid, 2, 0, "제목 글씨색", ["검정색", "흰색", "파란색", "노란색", "빨간색"], lambda _value: self._on_cardnews_control_changed())
+        self.cardnews_text_color_menu = self._cardnews_labeled_menu(cardnews_config_grid, 3, 0, "제목 글씨색", ["검정색", "흰색", "파란색", "노란색", "빨간색"], lambda _value: self._on_cardnews_control_changed())
         self.cardnews_text_color_menu.set("검정색")
-        self.cardnews_text_stroke_menu = self._cardnews_labeled_menu(cardnews_config_grid, 2, 1, "제목 테두리", ["없음", "검정색", "흰색", "빨간색", "파란색"], lambda _value: self._on_cardnews_control_changed())
+        self.cardnews_text_stroke_menu = self._cardnews_labeled_menu(cardnews_config_grid, 3, 1, "제목 테두리", ["없음", "검정색", "흰색", "빨간색", "파란색"], lambda _value: self._on_cardnews_control_changed())
         self.cardnews_text_stroke_menu.set("없음")
 
         cardnews_text_effect_row = ctk.CTkFrame(cardnews_design_panel, fg_color="transparent")
@@ -46238,6 +46277,42 @@ class KeywordApp(ctk.CTk):
         if workspace is getattr(self, "thumbnail_design_workspace", None):
             self._refresh_thumbnail_preset_buttons()
 
+    def _build_design_background_controls(self, parent, kind: str) -> None:
+        changed = self._on_thumbnail_control_changed if kind == "thumbnail" else self._on_cardnews_control_changed
+        style = self._thumbnail_labeled_menu(parent, 1, 0, "배경 스타일", list(BACKGROUND_STYLES), lambda _value: changed())
+        style.set("단색")
+        setattr(self, kind + "_background_style_menu", style)
+        color = self._thumbnail_labeled_menu(parent, 1, 1, "패턴·그라데이션 색",
+            ["회색", "하늘색", "민트색", "핑크색", "노란색", "보라색", "파란색"], lambda _value: changed())
+        color.set(DEFAULT_PATTERN_COLOR)
+        setattr(self, kind + "_pattern_color_menu", color)
+        self._add_design_color_picker(color, kind, "pattern_color")
+
+    def _add_design_color_picker(self, menu, kind: str, field: str) -> None:
+        menu.configure(width=100)
+        menu.grid_configure(padx=(0, 6))
+        button = ctk.CTkButton(menu.master, text="색상 선택", width=62, height=40, corner_radius=12,
+            font=ctk.CTkFont(size=11, weight="bold"), command=lambda: self._choose_design_color(kind, field))
+        button.grid(row=1, column=1, sticky="e")
+        setattr(self, f"{kind}_{field}_picker_button", button)
+
+    def _choose_design_color(self, kind: str, field: str) -> None:
+        menu = self.__dict__.get(f"{kind}_{field}_menu")
+        if kind not in {"thumbnail", "cardnews"} or field not in {"bg_color", "pattern_color"} or menu is None:
+            return
+        initial = thumbnail_color_value(menu.get()) or "#ffffff"
+        _rgb, selected = colorchooser.askcolor(initial, parent=self, title="배경 바탕색" if field == "bg_color" else "패턴·그라데이션 색")
+        selected = normalize_color(selected, "")
+        if selected:
+            menu.set(selected)
+            (self._on_thumbnail_control_changed if kind == "thumbnail" else self._on_cardnews_control_changed)()
+
+    def _design_background_values(self, kind: str) -> tuple[str, str]:
+        style = self.__dict__.get(kind + "_background_style_menu")
+        color = self.__dict__.get(kind + "_pattern_color_menu")
+        return (normalize_style(style.get() if style is not None else "단색"),
+                normalize_color(thumbnail_color_value(color.get()) if color is not None else DEFAULT_PATTERN_COLOR))
+
     def _thumbnail_labeled_menu(
         self,
         parent: ctk.CTkFrame,
@@ -46458,7 +46533,9 @@ class KeywordApp(ctk.CTk):
                 "width": self._safe_int(self.thumbnail_width_entry.get(), 400),
                 "height": self._safe_int(self.thumbnail_height_entry.get(), 400),
                 "ratio": self.thumbnail_ratio_menu.get(),
-                "background_mode": self.thumbnail_background_mode_menu.get(),
+                "background_mode": "선택 이미지 사용" if self.thumbnail_background_mode_menu.get() == "선택 이미지 사용" else "단색 배경",
+                "background_style": self._design_background_values("thumbnail")[0],
+                "pattern_color": self._design_background_values("thumbnail")[1],
                 "background_image_path": background_path,
                 "image_position": self.thumbnail_image_position_menu.get(),
                 "image_scale": round(float(self.thumbnail_image_scale_var.get())),
@@ -46517,9 +46594,11 @@ class KeywordApp(ctk.CTk):
                 entry.insert(0, str(value))
             self.thumbnail_ratio_menu.set(str(normalized.get("ratio") or "1:1"))
             self.thumbnail_background_mode_menu.set(
-                str(normalized.get("background_mode") or "단색 배경")
+                "선택 이미지 사용" if normalized.get("background_mode") == "선택 이미지 사용" else "스타일 배경"
             )
             self.thumbnail_bg_color_menu.set(str(normalized.get("bg_color") or "흰색"))
+            self.thumbnail_background_style_menu.set(normalize_style(normalized.get("background_style")))
+            self.thumbnail_pattern_color_menu.set(normalize_color(normalized.get("pattern_color")))
             self.thumbnail_border_color_menu.set(
                 str(normalized.get("border_color") or "빨간색")
             )
@@ -46947,16 +47026,19 @@ class KeywordApp(ctk.CTk):
     def _clear_thumbnail_background_image(self) -> None:
         self.thumbnail_background_image_path = ""
         self.thumbnail_selected_image_label_text.set("선택된 파일 없음")
-        self.thumbnail_background_mode_menu.set("단색 배경")
+        self.thumbnail_background_mode_menu.set("스타일 배경")
         self._on_thumbnail_control_changed()
 
     def _clear_cardnews_background_image(self) -> None:
         self.cardnews_background_image_path = ""
         self.cardnews_selected_image_label_text.set("선택된 파일 없음")
-        self.cardnews_background_mode_menu.set("단색 배경")
+        self.cardnews_background_mode_menu.set("스타일 배경")
         self._on_cardnews_control_changed()
 
     def _thumbnail_color_value(self, color_name: str) -> str:
+        custom = normalize_color(color_name, "")
+        if custom:
+            return custom
         return {
             "흰색": "#ffffff",
             "검정색": "#111111",
@@ -47246,12 +47328,12 @@ class KeywordApp(ctk.CTk):
             alpha = resized.getchannel("A")
             resized = ImageOps.grayscale(resized).convert("RGBA")
             resized.putalpha(alpha)
-        background = Image.new("RGBA", resized.size, (*self._hex_to_rgb(bg_color), 255))
         opacity = max(0, min(100, int(opacity_value))) / 100
         alpha = resized.getchannel("A").point(lambda value: round(value * opacity))
         resized.putalpha(alpha)
-        background.alpha_composite(resized)
-        return ImageTk.PhotoImage(background)
+        # Let Tk composite the image onto the actual vector background. Baking
+        # a solid color here would erase grid/dot/memo patterns under alpha.
+        return ImageTk.PhotoImage(resized)
 
     def _thumbnail_image_geometry(
         self,
@@ -47455,6 +47537,8 @@ class KeywordApp(ctk.CTk):
         canvas.configure(width=width, height=height, bg=bg_color)
         canvas.delete("all")
         setattr(self, photo_attr, None)
+        style, accent = self._design_background_values("cardnews")
+        draw_background(canvas, width, height, style, bg_color, accent)
 
         use_background_image = (
             self.cardnews_background_mode_menu.get() == "선택 이미지 사용"
@@ -47591,6 +47675,8 @@ class KeywordApp(ctk.CTk):
 
         canvas.configure(width=width, height=height, bg=bg_color)
         canvas.delete("all")
+        style, accent = self._design_background_values("thumbnail")
+        draw_background(canvas, width, height, style, bg_color, accent)
 
         if keep_photo:
             self.thumbnail_canvas_image = None
@@ -47862,7 +47948,9 @@ class KeywordApp(ctk.CTk):
             "width": self._safe_int(self.cardnews_width_entry.get(), 1024),
             "height": self._safe_int(self.cardnews_height_entry.get(), 1024),
             "ratio": self.cardnews_ratio_menu.get(),
-            "background_mode": self.cardnews_background_mode_menu.get(),
+            "background_mode": "선택 이미지 사용" if self.cardnews_background_mode_menu.get() == "선택 이미지 사용" else "단색 배경",
+            "background_style": self._design_background_values("cardnews")[0],
+            "pattern_color": self._design_background_values("cardnews")[1],
             "background_image_path": self.cardnews_background_image_path,
             "image_position": self.cardnews_image_position_menu.get(),
             "image_scale": round(float(self.cardnews_image_scale_var.get())),
@@ -47890,8 +47978,10 @@ class KeywordApp(ctk.CTk):
             self.cardnews_height_entry.delete(0, "end")
             self.cardnews_height_entry.insert(0, str(merged.get("height", 1024)))
             self.cardnews_ratio_menu.set(str(merged.get("ratio", "1:1")))
-            self.cardnews_background_mode_menu.set(str(merged.get("background_mode", "단색 배경")))
+            self.cardnews_background_mode_menu.set("선택 이미지 사용" if merged.get("background_mode") == "선택 이미지 사용" else "스타일 배경")
             self.cardnews_bg_color_menu.set(str(merged.get("bg_color", "흰색")))
+            self.cardnews_background_style_menu.set(normalize_style(merged.get("background_style")))
+            self.cardnews_pattern_color_menu.set(normalize_color(merged.get("pattern_color")))
             self.cardnews_border_color_menu.set(str(merged.get("border_color", "파란색")))
             self.cardnews_text_color_menu.set(str(merged.get("text_color", "검정색")))
             self.cardnews_text_stroke_menu.set(str(merged.get("text_stroke_color", "없음")))
@@ -48143,9 +48233,10 @@ class KeywordApp(ctk.CTk):
         summary_font_size = max(20, round(heading_font_size * 0.44))
         heading_lines = self._wrap_text_for_svg(heading, width - 190, heading_font_size, 3)
         summary_lines = self._wrap_text_for_svg(summary, width - 220, summary_font_size, 2)
+        style, accent = self._design_background_values("cardnews")
         elements = [
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-            f'<rect width="100%" height="100%" rx="0" fill="{bg_color}" />',
+            background_svg(width, height, style, bg_color, accent),
         ]
         if self.cardnews_image_grayscale_var.get():
             elements.append(
@@ -48163,7 +48254,10 @@ class KeywordApp(ctk.CTk):
                     f'<image href="{image_data_url}" x="{image_x}" y="{image_y}" width="{image_width}" height="{image_height}" '
                     f'preserveAspectRatio="xMidYMid meet" opacity="{opacity:.2f}"{filter_attr} />'
                 )
-                elements.append('<rect width="100%" height="100%" fill="#ffffff" opacity="0.32" />')
+                if style == "단색":
+                    # Retain the legacy solid-photo card's exported shading;
+                    # don't wash out the new patterned paper backgrounds.
+                    elements.append('<rect width="100%" height="100%" fill="#ffffff" opacity="0.32" />')
         elements.extend(
             [
                 f'<rect x="{width * 0.057}" y="{height * 0.057}" width="{width * 0.886}" height="{height * 0.886}" fill="none" stroke="{border_color}" stroke-width="{max(12, min(width, height) * 0.033)}" />',
@@ -48251,9 +48345,8 @@ class KeywordApp(ctk.CTk):
                 '<defs><filter id="blog-helper-gray"><feColorMatrix type="matrix" '
                 'values="0.299 0.587 0.114 0 0 0.299 0.587 0.114 0 0 0.299 0.587 0.114 0 0 0 0 0 1 0"/></filter></defs>'
             )
-        elements.extend([
-            f'<rect width="100%" height="100%" fill="{bg_color}" />',
-        ])
+        style, accent = self._design_background_values("thumbnail")
+        elements.append(background_svg(width, height, style, bg_color, accent))
 
         if self.thumbnail_background_mode_menu.get() == "선택 이미지 사용" and self.thumbnail_background_image_path:
             image_data_url = self._thumbnail_background_data_url()
@@ -50722,6 +50815,8 @@ class KeywordApp(ctk.CTk):
                 default_thumbnail.get("background_mode") or "단색 배경"
             ),
             thumbnail_background_image_path=thumbnail_background_image_path,
+            thumbnail_background_style=normalize_style(default_thumbnail.get("background_style")),
+            thumbnail_pattern_color=normalize_color(default_thumbnail.get("pattern_color")),
             thumbnail_image_position=str(
                 default_thumbnail.get("image_position") or "오른쪽하단"
             ),
@@ -50758,6 +50853,8 @@ class KeywordApp(ctk.CTk):
             cardnews_ratio=str(default_cardnews.get("ratio") or "1:1"),
             cardnews_background_mode=str(default_cardnews.get("background_mode") or "단색 배경"),
             cardnews_background_image_path=cardnews_background_image_path,
+            cardnews_background_style=normalize_style(default_cardnews.get("background_style")),
+            cardnews_pattern_color=normalize_color(default_cardnews.get("pattern_color")),
             cardnews_image_position=str(default_cardnews.get("image_position") or "가운데"),
             cardnews_image_scale=self._safe_int(default_cardnews.get("image_scale"), 100),
             cardnews_image_opacity=self._safe_int(default_cardnews.get("image_opacity"), 35),

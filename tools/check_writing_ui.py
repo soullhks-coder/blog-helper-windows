@@ -2495,6 +2495,59 @@ def main() -> None:
             app.writing_stop_button.invoke()  # Idle/repeated stop is safe too.
             assert not errors, errors
             print(f'{sys.platform} {args.theme}: standard stop/reset, red adjacent actions, stale-event/timer fencing and saved designs/V2/unrelated jobs preserved', flush=True)
+            app._switch_page('thumbnails')
+            app._switch_thumbnail_preset(4)
+            app.thumbnail_auto_title_var.set(False)
+            app.thumbnail_prompt_preview.delete('1.0', 'end')
+            app.thumbnail_prompt_preview.insert('1.0', '나만의 메모 썸네일')
+            app.thumbnail_bg_color_menu.set('#fff8ee')
+            app.thumbnail_pattern_color_menu.set('#e08db1')
+            for style in app_module.BACKGROUND_STYLES:
+                app.thumbnail_background_style_menu.set(style)
+                app._on_thumbnail_control_changed()
+                shapes = app.thumbnail_preview_canvas.find_withtag('design-background')
+                assert len(shapes) > (0 if style == '단색' else 1)
+                assert len(app.writing_thumbnail_preview_canvas.find_withtag('design-background')) == len(shapes)
+                assert f'data-blog-helper-background-style="{style}"' in app._build_thumbnail_svg(400, 400, 56)
+            app.thumbnail_background_style_menu.set('메모지')
+            app._on_thumbnail_control_changed()
+            with patch.object(app_module.colorchooser, 'askcolor', return_value=((100, 200, 170), '#64c8aa')):
+                app.thumbnail_pattern_color_picker_button.invoke()
+            assert app.thumbnail_pattern_color_menu.get() == '#64c8aa'
+            with patch.object(app_module.colorchooser, 'askcolor', return_value=(None, None)):
+                app.thumbnail_bg_color_picker_button.invoke()
+            assert app.thumbnail_bg_color_menu.get() == '#fff8ee'
+            app.cardnews_specs = [
+                {'heading': '첫 카드', 'summary': '메모와 도트', 'style': {'background_style': '도트', 'pattern_color': '#cc8ea3'}},
+                {'heading': '두 번째 카드', 'summary': '색상은 각각', 'style': {'background_style': '사선', 'pattern_color': '#6688cc'}},
+            ]
+            app.active_cardnews_slide_index = 0
+            app._render_active_cardnews_slide()
+            assert app.cardnews_background_style_menu.get() == '도트'
+            assert 'data-blog-helper-background-style="도트"' in app._build_body_cardnews_svg(600, 400, '첫 카드', '요약', 1, 2)
+            app._move_cardnews_slide(1)
+            assert app.cardnews_background_style_menu.get() == '사선'
+            app._move_cardnews_slide(-1)
+            assert app.cardnews_pattern_color_menu.get() == '#cc8ea3'
+            app._save_active_thumbnail_preset()
+            app._switch_thumbnail_preset(0)
+            assert app.thumbnail_background_style_menu.get() == '단색'
+            app._switch_thumbnail_preset(4)
+            assert app.thumbnail_background_style_menu.get() == '메모지'
+            assert app.thumbnail_bg_color_menu.get() == '#fff8ee'
+            assert app.thumbnail_pattern_color_menu.get() == '#64c8aa'
+            assert app.cardnews_background_style_menu.get() == '도트'
+            assert not app_module.modal_dimmer(app).active
+            for geometry in ('1500x1000+30+35', '860x680+30+35'):
+                app.geometry(geometry)
+                settle(120)
+                for kind in ('thumbnail', 'cardnews'):
+                    for field in ('bg_color', 'pattern_color'):
+                        menu = getattr(app, f'{kind}_{field}_menu')
+                        picker = getattr(app, f'{kind}_{field}_picker_button')
+                        assert menu.winfo_x() + menu.winfo_width() <= picker.winfo_x(), (geometry, kind, field)
+                        assert picker.winfo_x() + picker.winfo_width() <= menu.master.winfo_width() + 1
+            print(f'{sys.platform} {args.theme}: seven background styles, live previews/SVG, custom colors, five-set and per-card restoration, narrow layouts passed', flush=True)
             print(f"{sys.platform} {args.theme}: icons, targets, fixed accordion, data/export preservation, slides, responsive layout passed")
         finally:
             faulthandler.cancel_dump_traceback_later()
