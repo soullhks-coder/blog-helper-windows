@@ -204,6 +204,12 @@ def main():
                 "<h2>가방에 챙길 물건</h2><p>충전기와 개인 물품을 챙기세요.</p>", 10, "스카이")
             panel.store.save_deck(demo_deck)
             panel._load_deck(demo_deck)
+            # The keyword library is intentionally built on first navigation,
+            # just like V2. Inventory it only after exercising that real route.
+            previous_page = app.current_page
+            app._switch_page("keywords")
+            settle(100)
+            app._switch_page(previous_page)
             missing = set(MENU_GUIDES) - set(app.menu_help_buttons) - {"v2.publish"}
             print("Guide inventory:", len(MENU_GUIDES), "new topics; missing:", sorted(missing), flush=True)
             assert not missing, missing
