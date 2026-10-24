@@ -13,10 +13,12 @@ from PIL import Image
 EDITOR = r'''<!doctype html><meta charset="utf-8">
 <iframe class="editable" srcdoc="<p>BODY_KEEP_원문</p>"></iframe>
 <button id="image" onclick="document.querySelector('#menu').hidden=false">이미지 삽입</button>
-<div id="menu" hidden><div id="upload" role="menuitem" tabindex="0">컴퓨터에서 업로드</div></div>
+<div id="menu" hidden><div id="upload" role="menuitem" tabindex="0"
+ style="width:220px;height:40px"><span>컴퓨터에서 업로드</span></div></div>
 <script>
 const options = OPTIONS;
-window.requests = []; window.transfers = [];
+window.requests = []; window.transfers = []; window.rejected = [];
+let hoverAt=0, downAt=0;
 function picker() {
   const frame = document.createElement('iframe'); frame.id='picker';
   frame.src='https://docs.google.com/picker?delay='+(options.browseDelay||0)+'&ignore='+Number(!!options.ignoreBrowse);
@@ -24,6 +26,10 @@ function picker() {
 }
 function open(method) {
   requests.push(method); document.querySelector('#menu').hidden=true;
+  if (options.guardedAfter !== undefined && transfers.length >= options.guardedAfter
+      && (method!=='pointer' || performance.now()-hoverAt<150 || performance.now()-downAt<100)) {
+    rejected.push(method); return;
+  }
   if (options.never || (options.swallow||[]).includes(requests.length)) return;
   if (options.frameDelay) setTimeout(picker, options.frameDelay); else picker();
 }
@@ -31,6 +37,14 @@ document.querySelector('#upload').addEventListener('keydown', e=>{
   if(e.key==='Enter') {e.preventDefault();open('keyboard');}
 });
 document.querySelector('#upload').addEventListener('click', ()=>open('pointer'));
+document.querySelector('#upload').addEventListener('mouseenter', ()=>hoverAt=performance.now());
+document.querySelector('#upload').addEventListener('mousedown', ()=>downAt=performance.now());
+document.querySelector('#image').addEventListener('click', ()=>{
+  if (!options.overlay) return;
+  const block=document.createElement('div');
+  block.style='position:fixed;inset:0;background:transparent;z-index:9999';
+  document.body.appendChild(block);setTimeout(()=>block.remove(),350);
+});
 document.addEventListener('keydown', e=>{
   if(e.key==='Escape') {document.querySelector('#menu').hidden=true;document.querySelector('#picker')?.remove();}
 });
@@ -101,10 +115,11 @@ def main():
                         check_cancel=check, wait_seconds=wait)
 
                 cases = (
-                    ('normal', {}, 1), ('swallowed-enter', {'swallow':[1]}, 2),
+                    ('normal', {}, 1), ('swallowed-pointer', {'swallow':[1]}, 2),
                     ('late-frame', {'frameDelay':350}, 1), ('late-browse', {'browseDelay':350}, 1),
                     ('hidden-stale-frame', {'hidden':True}, 1), ('existing-picker', {'existing':True}, 0),
                     ('swallowed-browse', {'ignoreBrowse':True}, 1),
+                    ('hover-and-held-pointer', {'guardedAfter':0, 'overlay':True}, 1),
                 )
                 for name, options, requests in cases:
                     scenario.clear(); scenario.update(options)
@@ -120,14 +135,15 @@ def main():
                     assert page.frame_locator('iframe.editable').locator('body').inner_text() == 'BODY_KEEP_원문'
                     print(f'Blogger offline Chrome: {name}; one transfer, original body preserved', flush=True)
 
-                scenario.clear(); scenario.update({'swallow':[3]})
+                scenario.clear(); scenario.update({'swallow':[3], 'guardedAfter':2, 'overlay':True})
                 page.goto('http://127.0.0.1/blogger-fixture')
                 for index in range(3):
                     _, browse = open_picker()
                     select_upload_files(page, browse, [str(image_path)], log=lambda message: None, check_cancel=lambda: None)
                     page.wait_for_function(f'transfers.length==={index+1}')
-                assert page.evaluate('requests') == ['keyboard','keyboard','keyboard','pointer']
+                assert page.evaluate('requests') == ['pointer']*4
                 assert page.evaluate('transfers') == [['fixture.png']]*3
+                assert page.evaluate('rejected') == []
                 print('Blogger offline Chrome: swallowed third open recovered; first two files not retransmitted', flush=True)
 
                 scenario.clear(); scenario.update({'never':True})

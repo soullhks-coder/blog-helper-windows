@@ -9814,8 +9814,27 @@ def describe_blogspot_upload_state(page) -> str:
         button_summary = ", ".join(button_names[-12:])
     except Exception:
         button_summary = ""
+    try:
+        # No URL queries/fragments, document content or selected filenames:
+        # Picker URLs can contain authentication/session parameters.
+        frames = page.locator("iframe").evaluate_all("""elements => elements.map(el => {
+            let address = '';
+            try { const url = new URL(el.src); address = url.origin + url.pathname; } catch (_) {}
+            const rect = el.getBoundingClientRect();
+            return {address, visible: !!(rect.width && rect.height && getComputedStyle(el).visibility !== 'hidden')};
+        }).filter(el => el.address.includes('picker') || (el.visible && !el.address.startsWith('null')))""")
+        frame_summary = str(frames[:6])
+    except Exception:
+        frame_summary = "확인 불가"
+    try:
+        upload_options = page.locator('[role="menuitem"]:visible').filter(
+            has_text=re.compile(r"컴퓨터에서 업로드|Upload from computer", re.I))
+        upload_menu = "열림" if upload_options.count() else "닫힘"
+    except Exception:
+        upload_menu = "확인 불가"
     return (
         f"url={str(page.url or '')[:180]} · picker={picker_count} · "
+        f"upload_menu={upload_menu} · frames={frame_summary} · "
         f"dialogs={dialog_texts or '없음'} · buttons={button_summary or '확인 불가'}"
     )
 
@@ -10013,7 +10032,7 @@ def find_blogspot_image_insert_button(page):
                 continue
             if candidate.get_attribute("aria-disabled") == "true":
                 continue
-            candidate.click(force=True)
+            candidate.click(delay=120, timeout=5_000)
             page.wait_for_timeout(350)
             image_button = _first_visible_blogspot_locator(
                 page.get_by_role("button", name=button_name)

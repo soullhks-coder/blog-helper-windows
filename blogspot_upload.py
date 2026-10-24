@@ -25,22 +25,39 @@ def open_image_picker(page, *, find_image_button, describe_state, log, check_can
     can be retried, so an uncertain upload can never send the same file twice.
     """
     def ready_picker():
-        try:
-            if not page.locator(PICKER_SELECTOR).count():
-                return None
-            frame = page.frame_locator(PICKER_SELECTOR).first
-            browse = frame.get_by_role("button", name=re.compile(r"^(?:찾아보기|Browse)$", re.I)).first
-            return (frame, browse) if browse.is_visible() and browse.is_enabled() else None
-        except PlaywrightError:
-            # Google can detach/recreate its frame while it is initializing.
-            return None
+        ready = []
+        pickers = page.locator(PICKER_SELECTOR)
+        for index in range(pickers.count()):
+            try:
+                # Bind to this frame, rather than a .first/nth FrameLocator
+                # that could resolve to a different frame after a rerender.
+                handle = pickers.nth(index).element_handle(timeout=1_000)
+                frame = handle.content_frame() if handle is not None else None
+                if frame is None:
+                    continue
+                buttons = frame.get_by_role("button", name=re.compile(r"^(?:찾아보기|Browse)$", re.I))
+                for button_index in range(buttons.count()):
+                    browse = buttons.nth(button_index)
+                    if browse.is_visible() and browse.is_enabled():
+                        ready.append((frame, browse))
+                        break
+            except PlaywrightError:
+                # Google can detach/recreate a frame while it is initializing.
+                continue
+        if len(ready) > 1:
+            raise BlogspotImageUploadError("이미지 선택기가 여러 개 열려 대상을 확정하지 못했습니다. 파일은 전송하지 않았습니다.")
+        return ready[0] if ready else None
 
-    last_error = "선택기 또는 찾아보기 버튼이 준비되지 않았습니다."
     for attempt in range(1, PICKER_OPEN_ATTEMPTS + 1):
+        last_error = "선택기 또는 찾아보기 버튼이 준비되지 않았습니다."
+        phase = "기존 선택기 확인"
         check_cancel()
         if page.is_closed():
             raise BlogspotImageUploadError("이미지 선택기를 여는 중 Blogger Chrome이 닫혔습니다.")
-        ready = ready_picker()
+        try:
+            ready = ready_picker()
+        except PlaywrightError:
+            ready = None
         if ready:
             log("Google 이미지 선택기 열림·찾아보기 버튼 준비 확인 (기존 창 재사용)")
             return ready
@@ -59,21 +76,29 @@ def open_image_picker(page, *, find_image_button, describe_state, log, check_can
                         "응답하지 않는 이미지 선택기가 닫히지 않아 중복 창을 열지 않고 중단했습니다.")
 
             if not page.locator(PICKER_SELECTOR).count():
+                phase = "이미지 삽입 버튼"
                 image_button = find_image_button(page)
                 if image_button is None:
                     raise BlogspotImageUploadError("블로그스팟의 이미지 삽입 버튼을 찾지 못했습니다.")
-                image_button.click(force=True)
+                # A forced click can land on a disappearing image toolbar or
+                # menu backdrop. Wait for real pointer actionability instead.
+                image_button.hover(timeout=5_000)
+                page.wait_for_timeout(180)
+                check_cancel()
+                image_button.click(delay=120, timeout=5_000)
+                phase = "컴퓨터에서 업로드 메뉴"
                 option = page.locator('[role="menuitem"]:visible').filter(
                     has_text=re.compile(r"컴퓨터에서 업로드|Upload from computer", re.I)).first
                 option.wait_for(state="visible", timeout=5_000)
                 check_cancel()
-                option.focus()
-                if attempt == 1:
-                    option.press("Enter")
-                else:
-                    option.click(force=True)
-                log(f"Google 이미지 선택기 열기 요청 {attempt}/{PICKER_OPEN_ATTEMPTS} · 실제 창 준비 대기")
+                option.hover(timeout=5_000)
+                page.wait_for_timeout(200)
+                check_cancel()
+                option.click(delay=120, timeout=5_000)
+                log(f"업로드 메뉴 포인터 실행 {attempt}/{PICKER_OPEN_ATTEMPTS} · "
+                    f"메뉴={'열림' if option.is_visible() else '닫힘'} · 실제 Google 선택기 준비 대기")
 
+            phase = "선택기·찾아보기 준비"
             deadline = time.monotonic() + wait_seconds
             for _ in range(max(1, math.ceil(wait_seconds / .25)) + 1):
                 check_cancel()
@@ -93,7 +118,7 @@ def open_image_picker(page, *, find_image_button, describe_state, log, check_can
                 raise BlogspotImageUploadError("이미지 선택기를 여는 중 Blogger Chrome이 닫혔습니다.") from exc
             last_error = type(exc).__name__
         log(f"Google 이미지 선택기 준비 실패 {attempt}/{PICKER_OPEN_ATTEMPTS} · "
-            f"{last_error} · {describe_state(page)}")
+            f"단계={phase} · {last_error} · {describe_state(page)}")
     raise BlogspotImageUploadError(
         f"Google 이미지 선택기를 {PICKER_OPEN_ATTEMPTS}회 확인했지만 준비되지 않았습니다. "
         "파일은 전송하지 않았으며 자동 발행을 중단했습니다.")

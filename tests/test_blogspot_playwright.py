@@ -193,7 +193,7 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                     return "false"
                 return None
 
-            def click(self, force: bool = False) -> None:
+            def click(self, **_kwargs) -> None:
                 self.clicked = True
                 if self.aria_haspopup is None:
                     self.page.expanded = True
@@ -405,8 +405,8 @@ class BlogspotPlaywrightTests(unittest.TestCase):
         self.assertIn("find_blogspot_image_insert_button", upload_source)
         self.assertIn('name=re.compile(r"^(?:옵션 더보기|More options)$"', image_button_source)
         self.assertIn('candidate.get_attribute("aria-haspopup") == "true"', image_button_source)
-        self.assertIn("candidate.click(force=True)", image_button_source)
-        self.assertIn('option.press("Enter")', upload_source)
+        self.assertNotIn("force=True", image_button_source)
+        self.assertNotIn('option.press("Enter")', upload_source)
         self.assertNotIn('get_by_text("컴퓨터에서 업로드"', upload_source)
         self.assertIn('iframe[src*="docs.google.com/picker"]:visible', upload_source)
         self.assertIn("expect_file_chooser", upload_source)

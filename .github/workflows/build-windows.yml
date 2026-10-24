@@ -131,6 +131,7 @@ jobs:
           python tools/check_design_backgrounds.py
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
+          python tools/check_blogspot_upload_sequence.py
           python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
@@ -255,6 +256,7 @@ jobs:
           python tools/check_design_backgrounds.py
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
+          python tools/check_blogspot_upload_sequence.py
           python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py

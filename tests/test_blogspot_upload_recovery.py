@@ -20,16 +20,16 @@ class PickerTests(unittest.TestCase):
         self.state = SimpleNamespace(visible=False, ready=False, polls=0, activations=0)
         self.page, self.option, self.browse, self.frame = MagicMock(), MagicMock(), MagicMock(), MagicMock()
         self.page.is_closed.return_value = False
-        self.frame.get_by_role.return_value.first = self.browse
-        self.page.frame_locator.return_value.first = self.frame
+        self.frame.get_by_role.return_value.count.return_value = 1
+        self.frame.get_by_role.return_value.nth.return_value = self.browse
         self.pickers = Mock()
         self.pickers.count.side_effect = lambda: int(self.state.visible)
+        self.pickers.nth.return_value.element_handle.return_value.content_frame.return_value = self.frame
         self.menu = MagicMock()
         self.menu.filter.return_value.first = self.option
         self.page.locator.side_effect = lambda selector: self.pickers if selector == upload.PICKER_SELECTOR else self.menu
         self.browse.is_visible.side_effect = lambda: self.state.visible and self.state.ready
         self.browse.is_enabled.return_value = True
-        self.option.press.side_effect = lambda *_args: self.activate()
         self.option.click.side_effect = lambda **_kwargs: self.activate()
         self.page.keyboard.press.side_effect = lambda *_args: setattr(self.state, 'visible', False)
         self.page.wait_for_timeout.side_effect = lambda _delay: setattr(self.state, 'polls', self.state.polls + 1)
@@ -49,23 +49,30 @@ class PickerTests(unittest.TestCase):
         def activate():
             self.assertFalse(any('준비 확인' in c.args[0] for c in self.log.call_args_list))
             self.open_ready()
-        self.option.press.side_effect = lambda *_args: activate()
+        self.option.click.side_effect = lambda **_kwargs: activate()
         self.assertEqual(self.run_picker(), (self.frame, self.browse))
         self.assertIn('준비 확인', self.log.call_args.args[0])
         self.page.expect_file_chooser.assert_not_called()
 
-    def test_swallowed_enter_reopens_menu_and_uses_pointer_once(self):
-        self.option.click.side_effect = lambda **_kwargs: self.open_ready()
+    def test_swallowed_pointer_reopens_menu_and_uses_held_actionable_click(self):
+        def activate(**_kwargs):
+            self.activate()
+            if self.state.activations == 2:
+                self.open_ready()
+        self.option.click.side_effect = activate
         self.assertEqual(self.run_picker(), (self.frame, self.browse))
-        self.option.press.assert_called_once_with('Enter')
-        self.option.click.assert_called_once_with(force=True)
+        self.option.press.assert_not_called()
+        self.assertEqual(self.option.click.call_count, 2)
+        self.option.click.assert_called_with(delay=120, timeout=5_000)
+        self.find.return_value.click.assert_called_with(delay=120, timeout=5_000)
+        self.assertEqual(self.option.hover.call_count, 2)
         self.assertEqual(self.find.call_count, 2)
 
     def test_three_failed_opens_are_bounded_and_never_select_files(self):
         with self.assertRaisesRegex(upload.BlogspotImageUploadError, '3회'):
             self.run_picker()
         self.assertEqual(self.state.activations, 3)
-        self.assertLess(self.state.polls, 12)
+        self.assertLess(self.state.polls, 18)
         self.page.expect_file_chooser.assert_not_called()
         self.assertFalse(any('준비 확인' in c.args[0] for c in self.log.call_args_list))
 
@@ -97,7 +104,8 @@ class PickerTests(unittest.TestCase):
 
     def test_stop_during_readiness_wait_cannot_reactivate_upload_menu(self):
         def stop(_delay):
-            self.cancel.side_effect = WritingCancelled('stop')
+            if self.state.activations:
+                self.cancel.side_effect = WritingCancelled('stop')
         self.page.wait_for_timeout.side_effect = stop
         with self.assertRaises(WritingCancelled):
             self.run_picker()
@@ -125,9 +133,45 @@ class PickerTests(unittest.TestCase):
                 raise PlaywrightTimeout('frame replaced')
             return self.state.visible
         self.pickers.count.side_effect = visible
-        self.option.press.side_effect = lambda *_args: self.open_ready()
+        self.option.click.side_effect = lambda **_kwargs: self.open_ready()
         self.run_picker()
-        self.option.press.assert_called_once()
+        self.option.click.assert_called_once()
+
+    def test_hidden_first_browse_does_not_mask_the_visible_browse(self):
+        self.open_ready()
+        hidden = Mock()
+        hidden.is_visible.return_value = False
+        buttons = self.frame.get_by_role.return_value
+        buttons.count.return_value = 2
+        buttons.nth.side_effect = [hidden, self.browse]
+        self.assertEqual(self.run_picker(), (self.frame, self.browse))
+        self.find.assert_not_called()
+
+    def test_initializing_first_frame_does_not_mask_the_ready_frame(self):
+        self.open_ready()
+        self.pickers.count.side_effect = lambda: 2
+        handles = [Mock(), Mock()]
+        handles[0].element_handle.return_value.content_frame.return_value = None
+        handles[1].element_handle.return_value.content_frame.return_value = self.frame
+        self.pickers.nth.side_effect = handles
+        self.assertEqual(self.run_picker(), (self.frame, self.browse))
+        self.find.assert_not_called()
+
+    def test_two_ready_pickers_stop_before_any_file_transfer(self):
+        self.open_ready()
+        self.pickers.count.side_effect = lambda: 2
+        with self.assertRaisesRegex(upload.BlogspotImageUploadError, '여러 개'):
+            self.run_picker()
+        self.page.expect_file_chooser.assert_not_called()
+
+    def test_stop_during_menu_hover_prevents_activation(self):
+        def stop(_delay):
+            if self.option.hover.called:
+                self.cancel.side_effect = WritingCancelled('stop')
+        self.page.wait_for_timeout.side_effect = stop
+        with self.assertRaises(WritingCancelled):
+            self.run_picker()
+        self.option.click.assert_not_called()
 
     def test_error_after_file_transfer_never_reopens_or_retransmits(self):
         page, frame, browse = MagicMock(), Mock(), Mock()
