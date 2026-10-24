@@ -49256,7 +49256,7 @@ class KeywordApp(ctk.CTk):
                     view_state = old_panel.view_state() if old_panel is not None else None
                     panel = KeywordLibraryPage(
                         self.main_area, self, KEYWORD_LIBRARY_FILE,
-                        {"messagebox": messagebox, "filedialog": filedialog},
+                        {"messagebox": messagebox, "filedialog": filedialog, "simpledialog": simpledialog},
                     )
                     if view_state is not None:
                         panel.restore_view_state(view_state)

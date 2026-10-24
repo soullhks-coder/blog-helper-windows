@@ -61,6 +61,16 @@ class KeywordLibrary:
                     UNIQUE(keyword_id, event_key)
                 );
                 CREATE INDEX IF NOT EXISTS keywords_status ON keywords(status, id);
+                CREATE TABLE IF NOT EXISTS keyword_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS keyword_group_membership (
+                    keyword_id INTEGER PRIMARY KEY REFERENCES keywords(id) ON DELETE CASCADE,
+                    group_id INTEGER NOT NULL REFERENCES keyword_groups(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS keyword_group_members
+                    ON keyword_group_membership(group_id, keyword_id);
             """)
 
     @contextmanager
@@ -78,7 +88,72 @@ class KeywordLibrary:
     def _now():
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    def add(self, values) -> dict:
+    @staticmethod
+    def _group_name(name):
+        name = clean_keyword(name)
+        if not name or len(name) > 40 or keyword_key(name) in {"전체 그룹", "미분류"}:
+            raise ValueError("그룹 이름은 1~40자로 입력해 주세요. ‘전체 그룹’·‘미분류’는 사용할 수 없습니다.")
+        return name
+
+    @staticmethod
+    def _check_group(db, group_id):
+        if group_id and not db.execute("SELECT 1 FROM keyword_groups WHERE id=?", (int(group_id),)).fetchone():
+            raise ValueError("그룹을 찾을 수 없습니다. 목록을 다시 확인해 주세요.")
+
+    @staticmethod
+    def _set_group(db, item_id, group_id):
+        if group_id:
+            db.execute("INSERT INTO keyword_group_membership(keyword_id, group_id) VALUES (?, ?) "
+                       "ON CONFLICT(keyword_id) DO UPDATE SET group_id=excluded.group_id", (item_id, int(group_id)))
+        else:
+            db.execute("DELETE FROM keyword_group_membership WHERE keyword_id=?", (item_id,))
+
+    def groups(self) -> list[dict]:
+        with self._connection() as db:
+            return [dict(row) for row in db.execute("SELECT id, name FROM keyword_groups ORDER BY id")]
+
+    def create_group(self, name) -> int:
+        name = self._group_name(name)
+        try:
+            with self._connection() as db:
+                return db.execute("INSERT INTO keyword_groups(key, name, created_at) VALUES (?, ?, ?)",
+                                  (keyword_key(name), name, self._now())).lastrowid
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("같은 이름의 그룹이 이미 있습니다.") from exc
+
+    def rename_group(self, group_id, name):
+        name = self._group_name(name)
+        if not group_id:
+            raise ValueError("이름을 변경할 그룹을 선택해 주세요.")
+        try:
+            with self._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                self._check_group(db, group_id)
+                db.execute("UPDATE keyword_groups SET key=?, name=? WHERE id=?",
+                           (keyword_key(name), name, int(group_id)))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("같은 이름의 그룹이 이미 있습니다.") from exc
+
+    def delete_group(self, group_id):
+        # Only the folder/assignments are removed; keywords and usage stay intact.
+        with self._connection() as db:
+            db.execute("DELETE FROM keyword_groups WHERE id=?", (int(group_id),))
+
+    def assign_group(self, ids, group_id) -> int:
+        changed = 0
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_group(db, group_id)
+            for item_id in set(int(item) for item in ids):
+                row = db.execute("SELECT COALESCE(m.group_id, 0) AS group_id FROM keywords k "
+                                 "LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id WHERE k.id=?",
+                                 (item_id,)).fetchone()
+                if row is not None and row["group_id"] != int(group_id or 0):
+                    self._set_group(db, item_id, group_id)
+                    changed += 1
+        return changed
+
+    def add(self, values, *, group_id=None) -> dict:
         # Validate before beginning a transaction: never silently truncate data.
         values = [clean_keyword(value) for value in values if clean_keyword(value)]
         if len(values) > 100_000 or any(len(value) > 500 for value in values):
@@ -86,6 +161,7 @@ class KeywordLibrary:
         result = {"added": 0, "duplicate": 0, "used": 0, "first_added_id": None}
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_group(db, group_id)
             for value in values:
                 row = db.execute("SELECT id, status FROM keywords WHERE key=?", (keyword_key(value),)).fetchone()
                 if row and row["status"] != "removed":
@@ -100,29 +176,38 @@ class KeywordLibrary:
                                          (keyword_key(value), value, self._now())).lastrowid
                 if result["first_added_id"] is None:
                     result["first_added_id"] = item_id
+                self._set_group(db, item_id, group_id)
                 result["added"] += 1
         return result
 
-    def pending_page_offset(self, item_id, page_size=40) -> int:
+    def pending_page_offset(self, item_id, page_size=40, *, group_id=None) -> int:
         """Locate an added/restored row without reordering the existing inbox."""
         if item_id is None:
             return 0
         with self._connection() as db:
-            position = db.execute("SELECT COUNT(*) FROM keywords WHERE status='pending' AND id < ?",
-                                  (int(item_id),)).fetchone()[0]
+            position = db.execute("SELECT COUNT(*) FROM keywords k LEFT JOIN keyword_group_membership m "
+                                  "ON m.keyword_id=k.id WHERE k.status='pending' AND k.id < ? "
+                                  "AND (? IS NULL OR COALESCE(m.group_id, 0)=?)",
+                                  (int(item_id), group_id, group_id)).fetchone()[0]
         page_size = max(1, int(page_size))
         return position // page_size * page_size
 
-    def counts(self) -> dict:
+    def counts(self, *, group_id=None) -> dict:
         with self._connection() as db:
             result = {"pending": 0, "used": 0, "history": 0}
-            for row in db.execute("SELECT status, COUNT(*) AS count FROM keywords GROUP BY status"):
+            for row in db.execute("SELECT k.status, COUNT(*) AS count FROM keywords k "
+                                  "LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id "
+                                  "WHERE (? IS NULL OR COALESCE(m.group_id, 0)=?) GROUP BY k.status",
+                                  (group_id, group_id)):
                 if row["status"] in result:
                     result[row["status"]] = row["count"]
-            result["history"] = db.execute("SELECT COUNT(*) FROM usage").fetchone()[0]
+            result["history"] = db.execute("SELECT COUNT(*) FROM usage u "
+                                           "LEFT JOIN keyword_group_membership m ON m.keyword_id=u.keyword_id "
+                                           "WHERE (? IS NULL OR COALESCE(m.group_id, 0)=?)",
+                                           (group_id, group_id)).fetchone()[0]
             return result
 
-    def list(self, *, history=False, search="", offset=0, limit=40) -> tuple[list[dict], int]:
+    def list(self, *, history=False, search="", offset=0, limit=40, group_id=None) -> tuple[list[dict], int]:
         # instr treats %, _ and backslash literally, unlike LIKE search.
         query = keyword_key(search)
         with self._connection() as db:
@@ -136,9 +221,14 @@ class KeywordLibrary:
                 condition = "k.status='pending' AND instr(k.key, ?) > 0"
                 fields = "k.*, k.id AS item_id"
                 order = "k.id"
-            total = db.execute(f"SELECT COUNT(*) FROM {source} WHERE {condition}", (query,)).fetchone()[0]
+            source += (" LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id"
+                       " LEFT JOIN keyword_groups g ON g.id=m.group_id")
+            fields += ", COALESCE(m.group_id, 0) AS group_id, COALESCE(g.name, '미분류') AS group_name"
+            condition += " AND (? IS NULL OR COALESCE(m.group_id, 0)=?)"
+            params = (query, group_id, group_id)
+            total = db.execute(f"SELECT COUNT(*) FROM {source} WHERE {condition}", params).fetchone()[0]
             rows = db.execute(f"SELECT {fields} FROM {source} WHERE {condition} ORDER BY {order} LIMIT ? OFFSET ?",
-                              (query, max(1, int(limit)), max(0, int(offset)))).fetchall()
+                              (*params, max(1, int(limit)), max(0, int(offset)))).fetchall()
             return [dict(row) for row in rows], total
 
     def record_use(self, keyword, *, platform, url="", title="", event_key) -> bool:
@@ -168,12 +258,12 @@ class KeywordLibrary:
                                       (status, int(item_id), status)).rowcount
         return changed
 
-    def export(self, path: Path, *, history=False):
-        rows, _ = self.list(history=history, limit=2_147_483_647)
+    def export(self, path: Path, *, history=False, group_id=None):
+        rows, _ = self.list(history=history, group_id=group_id, limit=2_147_483_647)
         if Path(path).suffix.lower() == ".txt":
             Path(path).write_text("\n".join(row["keyword"] for row in rows) + ("\n" if rows else ""), encoding="utf-8")
             return
-        fields = ["keyword", "used_at", "platform", "url", "title"] if history else ["keyword", "added_at"]
+        fields = ["keyword", "group_name", "used_at", "platform", "url", "title"] if history else ["keyword", "group_name", "added_at"]
         with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fields, extrasaction="ignore")
             writer.writeheader()

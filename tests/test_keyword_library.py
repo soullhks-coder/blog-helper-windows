@@ -5,8 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import queue
+import sqlite3
 
 from keyword_library import KeywordLibrary, keyword_key, read_keyword_file
 import main
@@ -48,6 +49,115 @@ class KeywordLibraryTests(unittest.TestCase):
         self.assertEqual(keyword_key(" ＡＢＣ   여행\t추천 "), "abc 여행 추천")
         self.assertEqual(self.store.add(["2026년 운세", "1. 여행", "A, B", "100%_확인"])["added"], 4)
         self.assertEqual(self.store.list(search="%_")[1], 1)
+
+    def test_legacy_database_migration_preserves_keywords_statuses_and_history(self):
+        self.store.add(["기존 대기", "기존 사용", "기존 삭제"])
+        self.store.record_use("기존 사용", platform="tistory", url="https://example.com/old", event_key="old")
+        self.store.change_status([3], "removed")
+        # Model a v1.3.2 database, which has no group tables at all.
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("DROP TABLE keyword_group_membership")
+            db.execute("DROP TABLE keyword_groups")
+        migrated = KeywordLibrary(self.path)
+        self.assertEqual(migrated.groups(), [])
+        self.assertEqual(migrated.counts(group_id=0), {"pending": 1, "used": 1, "history": 1})
+        self.assertEqual(migrated.list()[0][0]["group_name"], "미분류")
+        self.assertEqual(migrated.list(history=True)[0][0]["url"], "https://example.com/old")
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM keywords").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_group_names_are_normalized_unique_and_validated(self):
+        group = self.store.create_group("  ＡＢＣ   여행 ")
+        self.assertEqual(self.store.groups(), [{"id": group, "name": "ABC 여행"}])
+        for name in ("abc 여행", "", "  ", "미분류", "전체 그룹", "이" * 41):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.store.create_group(name)
+        self.assertEqual(len(self.store.groups()), 1)
+
+    def test_group_add_filter_counts_and_page_location(self):
+        health = self.store.create_group("건강")
+        travel = self.store.create_group("여행")
+        self.store.add(["미분류 하나", "미분류 둘"])
+        self.store.add([f"건강 {i}" for i in range(85)], group_id=health)
+        added = self.store.add(["건강 마지막"], group_id=health)
+        self.store.add(["여행 키워드"], group_id=travel)
+        self.assertEqual(self.store.counts()["pending"], 89)
+        self.assertEqual(self.store.counts(group_id=0)["pending"], 2)
+        self.assertEqual(self.store.counts(group_id=health)["pending"], 86)
+        self.assertEqual(self.store.list(group_id=travel)[0][0]["keyword"], "여행 키워드")
+        self.assertEqual(self.store.list(group_id=health, search="건강 8")[1], 6)
+        offset = self.store.pending_page_offset(added["first_added_id"], group_id=health)
+        self.assertEqual(offset, 80)
+        self.assertIn("건강 마지막", [row["keyword"] for row in self.store.list(group_id=health, offset=offset)[0]])
+        self.store.record_use("건강 0", platform="wordpress", event_key="post1")
+        self.assertEqual(self.store.counts(group_id=health), {"pending": 85, "used": 1, "history": 1})
+        self.assertEqual(self.store.list(group_id=travel, history=True)[1], 0)
+
+    def test_global_duplicates_do_not_silently_move_between_groups_or_reuse_used_keyword(self):
+        first = self.store.create_group("건강")
+        second = self.store.create_group("건강 둘")
+        self.store.add(["마그네슘"], group_id=first)
+        self.assertEqual(self.store.add(["마그네슘"], group_id=second)["duplicate"], 1)
+        self.assertEqual(self.store.list(group_id=second)[1], 0)
+        with patch.object(main, "KEYWORD_LIBRARY_FILE", self.path):
+            main.record_managed_keyword_publication("마그네슘", "tistory", "https://example.com/group", "그룹 테스트")
+        self.assertEqual(self.store.add(["마그네슘"], group_id=second)["used"], 1)
+        self.assertEqual(self.store.list(history=True, group_id=first)[1], 1)
+        self.assertEqual(self.store.list(history=True, group_id=second)[1], 0)
+
+    def test_move_rename_delete_groups_preserves_keywords_and_all_usage(self):
+        first = self.store.create_group("그룹 하나")
+        second = self.store.create_group("그룹 둘")
+        self.store.add(["대기", "사용"], group_id=first)
+        self.store.record_use("사용", platform="tistory", event_key="post1", url="https://example.com/1")
+        self.store.record_use("사용", platform="wordpress", event_key="post2", url="https://example.com/2")
+        self.assertEqual(self.store.assign_group([1, 2, 2, 999], second), 2)
+        self.assertEqual(self.store.assign_group([1, 2], second), 0)
+        self.assertEqual(self.store.counts(group_id=first), {"pending": 0, "used": 0, "history": 0})
+        self.assertEqual(self.store.counts(group_id=second), {"pending": 1, "used": 1, "history": 2})
+        self.store.rename_group(second, "새 이름")
+        self.assertEqual(self.store.list(history=True)[0][0]["group_name"], "새 이름")
+        with self.assertRaises(ValueError):
+            self.store.rename_group(second, "그룹 하나")
+        self.store.delete_group(second)
+        self.assertEqual(self.store.counts(group_id=0), {"pending": 1, "used": 1, "history": 2})
+        self.assertEqual({row["url"] for row in self.store.list(history=True)[0]},
+                         {"https://example.com/1", "https://example.com/2"})
+        self.assertGreater(self.store.create_group("새 그룹"), second)
+
+    def test_assign_ungrouped_and_readd_removed_to_selected_group(self):
+        group = self.store.create_group("그룹")
+        self.store.add(["재등록"], group_id=group)
+        self.assertEqual(self.store.assign_group([1], 0), 1)
+        self.assertEqual(self.store.list(group_id=0)[1], 1)
+        self.store.change_status([1], "removed")
+        self.store.add(["재등록"], group_id=group)
+        self.assertEqual(self.store.list(group_id=group)[1], 1)
+        self.assertEqual(KeywordLibrary(self.path).list()[0][0]["group_id"], group)
+
+    def test_invalid_group_operations_are_atomic(self):
+        self.store.add(["기존"])
+        for operation in (lambda: self.store.add(["신규"], group_id=999),
+                          lambda: self.store.assign_group([1], 999)):
+            with self.assertRaises(ValueError):
+                operation()
+        self.assertEqual(self.store.counts(group_id=0)["pending"], 1)
+        self.assertEqual(self.store.list()[0][0]["keyword"], "기존")
+
+    def test_group_export_includes_group_name_and_only_selected_group(self):
+        group = self.store.create_group("그룹 ' %_ 이름")
+        self.store.add(["다른 그룹"])
+        self.store.add(["대기", "사용"], group_id=group)
+        self.store.record_use("사용", platform="tistory", event_key="1")
+        text = Path(self.directory.name) / "group.txt"
+        self.store.export(text, group_id=group)
+        self.assertEqual(read_keyword_file(text), ["대기"])
+        path = text.with_suffix(".csv")
+        self.store.export(path, group_id=group, history=True)
+        with path.open(encoding="utf-8-sig") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([(row["keyword"], row["group_name"]) for row in rows], [("사용", "그룹 ' %_ 이름")])
 
     def test_success_moves_to_history_with_title_url_platform_and_time(self):
         self.store.add(["마그네슘 효능"])

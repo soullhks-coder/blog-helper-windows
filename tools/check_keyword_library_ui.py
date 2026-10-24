@@ -97,10 +97,6 @@ def main():
             assert len(panel.rows) == 40
             assert len(panel.list_frame.winfo_children()) == 40
             screenshot("pending")
-            if args.guide:
-                from PIL import Image
-                with Image.open(args.screenshots / f"keywords-{args.theme}-pending.png") as capture:
-                    capture.save(root / "assets" / "writing-guide" / "keywords.library.png")
             panel.next.invoke()
             assert panel.rows[0]["keyword"] == "여행 키워드 040"
             panel.previous.invoke()
@@ -186,13 +182,116 @@ def main():
             panel.clear_search_button.invoke()
             assert panel.rows and not panel.search.get() and panel.offset == 0
             screenshot("registration-reset")
+            # Folder creation/cancel, targeted paste/import, bulk reassignment,
+            # grouped publication history and safe deletion of just a folder.
+            with patch.object(module.simpledialog, "askstring", return_value=None):
+                panel.create_group_button.invoke()
+            assert panel.store.groups() == []
+            with patch.object(module.simpledialog, "askstring", return_value="건강"):
+                panel.create_group_button.invoke()
+            health = panel.group_id
+            assert health and panel.rows == [] and not panel.history
+            assert panel.move_group_id == health
+            with patch.object(module.simpledialog, "askstring", return_value="건강"), \
+                 patch.object(module.messagebox, "showwarning") as warning:
+                panel.create_group_button.invoke()
+            warning.assert_called_once()
+            assert len(panel.store.groups()) == 1 and panel.group_id == health
+            panel.input.delete("1.0", "end")
+            panel.input.insert("1.0", "건강 샘플 하나\n건강 샘플 둘")
+            panel.add_input()
+            assert len(panel.rows) == 2 and all(row["group_id"] == health for row in panel.rows)
+            panel.select_all.select()
+            panel.select_page()
+            panel.change_move_group("미분류")
+            panel.move_group_button.invoke()
+            assert not panel.rows
+            panel.change_group("미분류")
+            panel.search.insert(0, "건강 샘플")
+            panel.apply_search()
+            assert len(panel.rows) == 2
+            panel.select_all.select()
+            panel.select_page()
+            panel.change_move_group("건강")
+            panel.move_group_button.invoke()
+            assert not panel.rows
+            with patch.object(module.simpledialog, "askstring", return_value="여행"):
+                panel.create_group_button.invoke()
+            travel = panel.group_id
+            panel.change_group("전체 그룹")
+            panel.search.insert(0, "여행 키워드 001")
+            panel.apply_search()
+            panel.selection[panel.rows[0]["id"]].set(True)
+            panel.change_move_group("건강")
+            panel.move_group_button.invoke()
+            assert panel.rows[0]["group_id"] == health
+            panel.change_group("건강")
+            assert len(panel.rows) == 3 and not panel.search.get()
+            imported.write_text("건강 파일 키워드", encoding="utf-8")
+            with patch.object(module.filedialog, "askopenfilename", return_value=str(imported)):
+                panel.import_file()
+            assert len(panel.rows) == 4
+            module.record_managed_keyword_publication("건강 샘플 하나", "tistory", "https://example.com/group", "그룹 테스트")
+            panel.history_tab.invoke()
+            assert len(panel.rows) == 1 and panel.rows[0]["group_name"] == "건강"
+            panel.selection[panel.rows[0]["id"]].set(True)
+            panel.change_move_group("여행")
+            panel.move_group_button.invoke()
+            assert not panel.rows
+            panel.change_group("여행")
+            assert panel.history and len(panel.rows) == 1
+            with patch.object(module.simpledialog, "askstring", return_value="여행 · 축제"):
+                panel.rename_group_button.invoke()
+            assert panel.group_menu.get() == "여행 · 축제"
+            assert panel.rows[0]["group_name"] == "여행 · 축제"
+            app._switch_page("writing")
+            app._switch_page("keywords")
+            panel = app.keyword_library_panel
+            settle()
+            assert panel.group_id == travel and panel.history
+            assert panel.move_group_menu.get() == "여행 · 축제"
+            group_export = Path(directory) / "group.csv"
+            with patch.object(module.filedialog, "asksaveasfilename", return_value=str(group_export)):
+                panel.export_file()
+            import csv
+            with group_export.open(encoding="utf-8-sig") as stream:
+                exported = list(csv.DictReader(stream))
+            assert len(exported) == 1 and exported[0]["group_name"] == "여행 · 축제"
+            screenshot("group-history")
+            before_delete = panel.store.counts()
+            with patch.object(module.messagebox, "askyesno", return_value=False):
+                panel.delete_group_button.invoke()
+            assert panel.group_id == travel
+            with patch.object(module.messagebox, "askyesno", return_value=True):
+                panel.delete_group_button.invoke()
+            assert panel.group_id == 0 and panel.store.counts() == before_delete
+            assert any(row["url"] == "https://example.com/group" for row in panel.rows)
+            panel.change_group("건강")
+            panel.pending_tab.invoke()
+            assert len(panel.rows) == 3
+            settle()
+            screenshot("groups")
+            if args.guide:
+                from PIL import Image
+                with Image.open(args.screenshots / f"keywords-{args.theme}-groups.png") as capture:
+                    capture.save(root / "assets" / "writing-guide" / "keywords.library.png")
             # Narrow window: footer, navigation and all action controls stay visible.
             app.geometry("1050x850")
             settle()
-            for widget in (panel.destination, panel.write_button, panel.next):
+            # Long folder names must not widen dropdowns or cover the controls.
+            with patch.object(module.simpledialog, "askstring", return_value="그룹 이름이 아주 길어도 화면 밖으로 나가지 않는지 확인합니다 한글입니다"):
+                panel.rename_group_button.invoke()
+            settle()
+            for widget in (panel.destination, panel.write_button, panel.next, panel.group_menu,
+                           panel.create_group_button, panel.delete_group_button, panel.move_group_menu, panel.move_group_button):
                 assert widget.winfo_rootx() + widget.winfo_width() <= app.winfo_rootx() + app.winfo_width(), str(widget)
+                assert widget.winfo_rootx() >= app.winfo_rootx(), str(widget)
                 assert widget.winfo_rooty() + widget.winfo_height() <= app.winfo_rooty() + app.winfo_height(), str(widget)
             assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
+            assert panel.group_menu.winfo_rootx() + panel.group_menu.winfo_width() <= panel.create_group_button.winfo_rootx()
+            with patch.object(module.simpledialog, "askstring", return_value="건강"):
+                panel.rename_group_button.invoke()
+            settle()
             screenshot("narrow")
             # Help uses the common dimmer and cleans up when navigating away.
             app._open_writing_help("keywords.library")
@@ -201,7 +300,7 @@ def main():
             app._switch_page("writing")
             settle()
             assert not module.modal_dimmer(app).active
-            print(f"{sys.platform} {args.theme}: two-entry registration, filtered import, 500 keywords, pagination, both writing modes, history/restore, manual use, export, narrow UI and help passed", flush=True)
+            print(f"{sys.platform} {args.theme}: groups/create/rename/move/delete, grouped paste/import/history/export, two-entry registration, 500 keywords, pagination, both writing modes, narrow UI and help passed", flush=True)
         finally:
             app.destroy()
 

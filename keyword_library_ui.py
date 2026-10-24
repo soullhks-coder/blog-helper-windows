@@ -25,6 +25,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.store = KeywordLibrary(path)
         self.palette = p = app._theme_palette()
         self.history, self.offset = False, 0
+        self.group_id, self.move_group_id = None, 0
+        self._group_ids = {"전체 그룹": None, "미분류": 0}
         self.rows, self.selection = [], {}
         self._search_job = None
         self._poll_job = None
@@ -36,21 +38,35 @@ class KeywordLibraryPage(ctk.CTkFrame):
         ctk.CTkLabel(header, text="키워드 관리", font=ctk.CTkFont(size=28, weight="bold"),
                      text_color=p["text"]).pack(anchor="w")
         self.summary = ctk.CTkLabel(header, text="", text_color=p["muted"], anchor="w")
-        self.summary.pack(anchor="w", pady=(6, 0))
+        self.summary.pack(anchor="w", fill="x", pady=(6, 0))
+        self.summary.bind("<Configure>", lambda _event: self.wrap_label(self.summary))
 
         add_card = ctk.CTkFrame(self, fg_color=p["card"], corner_radius=18)
         add_card.grid(row=1, column=0, padx=28, pady=(0, 12), sticky="ew")
         add_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(add_card, text="키워드 한 번에 등록", font=ctk.CTkFont(size=16, weight="bold"),
                      text_color=p["text"]).grid(row=0, column=0, padx=16, pady=(12, 4), sticky="w")
+        groups = ctk.CTkFrame(add_card, fg_color="transparent")
+        groups.grid(row=1, column=0, columnspan=2, padx=16, pady=(4, 10), sticky="ew")
+        groups.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(groups, text="그룹", text_color=p["text"]).grid(row=0, column=0, padx=(0, 8))
+        self.group_menu = self.option_menu(groups, values=["전체 그룹", "미분류"], width=180, command=self.change_group)
+        self.group_menu.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.create_group_button = self.button(groups, "+ 그룹 만들기", self.create_group, width=105)
+        self.create_group_button.grid(row=0, column=2, padx=(0, 6))
+        self.rename_group_button = self.button(groups, "이름 변경", self.rename_group, width=85)
+        self.rename_group_button.grid(row=0, column=3, padx=(0, 6))
+        self.delete_group_button = self.button(groups, "그룹 삭제", self.delete_group, width=85)
+        self.delete_group_button.grid(row=0, column=4)
         self.input = InputTextbox(add_card, height=90, wrap="word")
-        self.input.grid(row=1, column=0, padx=16, pady=(0, 6), sticky="ew")
+        self.input.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="ew")
         controls = ctk.CTkFrame(add_card, fg_color="transparent")
-        controls.grid(row=1, column=1, padx=(0, 16), sticky="ns")
+        controls.grid(row=2, column=1, padx=(0, 16), sticky="ns")
         self.button(controls, "목록에 추가", self.add_input, primary=True).pack(pady=(0, 8))
         self.button(controls, "TXT · CSV 불러오기", self.import_file).pack()
-        ctk.CTkLabel(add_card, text="한 줄에 키워드 하나씩 붙여넣으세요. 중복·이미 사용한 키워드는 건너뜁니다.",
-                     text_color=p["muted"], anchor="w").grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(add_card, text="선택한 그룹에 한 줄씩 등록합니다. 전체 그룹에서는 미분류에 저장하며, 전체 목록 기준 중복·사용 완료는 건너뜁니다.",
+                     wraplength=650, justify="left", text_color=p["muted"], anchor="w").grid(
+                         row=3, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
 
         card = ctk.CTkFrame(self, fg_color=p["card"], corner_radius=18)
         card.grid(row=2, column=0, padx=28, pady=(0, 12), sticky="nsew")
@@ -79,6 +95,12 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.restore_button = self.button(actions, "대기로 복원", self.restore, width=100)
         self.delete_button = self.button(actions, "선택 삭제", self.remove, width=90)
         self.delete_button.pack(side="left", padx=4)
+        move_controls = ctk.CTkFrame(actions, fg_color="transparent")
+        move_controls.pack(side="right")
+        self.move_group_menu = self.option_menu(move_controls, values=["미분류"], width=150, command=self.change_move_group)
+        self.move_group_menu.pack(side="left", padx=(8, 6))
+        self.move_group_button = self.button(move_controls, "그룹 이동", self.move_to_group, width=90)
+        self.move_group_button.pack(side="left")
         self.list_frame = ctk.CTkScrollableFrame(card, fg_color="transparent", corner_radius=0)
         self.list_frame.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="nsew")
         self.list_frame.grid_columnconfigure(0, weight=1)
@@ -98,7 +120,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.status = ctk.CTkLabel(footer, text="발행 성공 시 대기에서 빠지고 이력에 남습니다. 실패·중단·임시저장은 대기에 유지됩니다.",
                                    text_color=p["muted"], anchor="w", wraplength=490, justify="left")
         self.status.grid(row=0, column=0, padx=16, pady=12, sticky="ew")
-        self.destination = InputOptionMenu(footer, values=["블로그 글쓰기", "티스토리 V2"], width=140, height=32)
+        self.status.bind("<Configure>", lambda _event: self.wrap_label(self.status))
+        self.destination = self.option_menu(footer, values=["블로그 글쓰기", "티스토리 V2"], width=140)
         self.destination.grid(row=0, column=1, padx=8)
         self.write_button = self.button(footer, "선택 키워드 넣기", self.use_for_writing, primary=True, width=140)
         self.write_button.grid(row=0, column=2, padx=(0, 16))
@@ -111,9 +134,25 @@ class KeywordLibraryPage(ctk.CTkFrame):
                              corner_radius=14, fg_color=p["accent"] if primary else p["button"],
                              hover_color=p["button_hover"], text_color="#ffffff" if primary else p["text"])
 
+    def option_menu(self, parent, *, values, width, command=None):
+        p = self.palette
+        return InputOptionMenu(parent, values=values, width=width, height=32, command=command,
+                               dynamic_resizing=False,
+                               corner_radius=14, fg_color=p["button"], button_color=p["button"],
+                               button_hover_color=p["button_hover"], text_color=p["text"],
+                               dropdown_fg_color=p["card"], dropdown_hover_color=p["button_hover"],
+                               dropdown_text_color=p["text"])
+
+    def wrap_label(self, label):
+        if label.winfo_width() > 40:
+            width = max(120, int(label.winfo_width() / label._get_widget_scaling()) - 8)
+            if label.cget("wraplength") != width:
+                label.configure(wraplength=width)
+
     def view_state(self):
         return {"input": self.input.get("1.0", "end-1c"), "search": self.search.get(),
                 "history": self.history, "offset": self.offset, "destination": self.destination.get(),
+                "group_id": self.group_id, "move_group_id": self.move_group_id,
                 "selected": [key for key, var in self.selection.items() if var.get()],
                 "status": self.status.cget("text")}
 
@@ -122,6 +161,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         if state["search"]:
             self.search.insert(0, state["search"])
         self.destination.set(state["destination"])
+        self.group_id = state.get("group_id")
+        self.move_group_id = state.get("move_group_id", 0)
         self.switch(state["history"])
         self.offset = state["offset"]
         self.refresh()
@@ -133,28 +174,101 @@ class KeywordLibraryPage(ctk.CTkFrame):
     def notice(self, text):
         self.status.configure(text=text)
 
+    def refresh_groups(self):
+        self._group_ids = {"전체 그룹": None, "미분류": 0,
+                           **{row["name"]: row["id"] for row in self.store.groups()}}
+        names = {value: key for key, value in self._group_ids.items()}
+        if self.group_id not in names:
+            self.group_id = None
+            self.offset = 0
+        if self.move_group_id not in names:
+            self.move_group_id = 0
+        self.group_menu.configure(values=list(self._group_ids))
+        self.group_menu.set(names[self.group_id])
+        self.move_group_menu.configure(values=[name for name in self._group_ids if name != "전체 그룹"])
+        self.move_group_menu.set(names[self.move_group_id])
+        for button in (self.rename_group_button, self.delete_group_button):
+            button.configure(state="normal" if self.group_id else "disabled")
+
+    def change_group(self, name):
+        self.group_id = self._group_ids.get(name)
+        self.clear_search(refresh=False)
+        self.refresh()
+        self.list_frame._parent_canvas.yview_moveto(0)
+        self.notice(f"‘{self.group_menu.get()}’ 목록을 표시합니다. 그룹을 선택한 뒤 키워드를 등록하거나 선택 항목을 이동하세요.")
+
+    def change_move_group(self, name):
+        self.move_group_id = self._group_ids.get(name, 0) or 0
+
+    def create_group(self):
+        name = self.dialogs["simpledialog"].askstring("그룹 만들기", "새 그룹 이름을 입력해 주세요. (최대 40자)", parent=self.app)
+        if name is None:
+            return
+        group_id = self.safe(lambda: self.store.create_group(name))
+        if group_id is not None:
+            self.group_id = self.move_group_id = group_id
+            self.clear_search(refresh=False)
+            self.switch(False)
+            self.notice("그룹을 만들었습니다. 위에 키워드를 등록하거나, 전체 그룹의 기존 키워드를 선택해 그룹 이동하세요.")
+
+    def rename_group(self):
+        if not self.group_id:
+            return
+        name = self.dialogs["simpledialog"].askstring("그룹 이름 변경", "그룹 이름을 입력해 주세요. (최대 40자)",
+                                                      initialvalue=self.group_menu.get(), parent=self.app)
+        if name is not None and self.safe(lambda: (self.store.rename_group(self.group_id, name), True)[1]):
+            self.refresh()
+            self.notice("그룹 이름을 변경했습니다. 키워드와 사용 이력은 유지됩니다.")
+
+    def delete_group(self):
+        if not self.group_id or not self.dialogs["messagebox"].askyesno(
+            "그룹 삭제", f"‘{self.group_menu.get()}’ 그룹만 삭제할까요?\n키워드와 사용 이력은 삭제되지 않고 미분류에 남습니다.", parent=self.app,
+        ):
+            return
+        if self.safe(lambda: (self.store.delete_group(self.group_id), True)[1]):
+            self.group_id = 0
+            self.clear_search(refresh=False)
+            self.refresh()
+            self.notice("그룹만 삭제했습니다. 해당 키워드와 사용 이력은 미분류에서 확인할 수 있습니다.")
+
+    def move_to_group(self):
+        rows = self.selected()
+        if not rows:
+            return
+        count = self.safe(lambda: self.store.assign_group([row["item_id"] for row in rows], self.move_group_id))
+        if count is not None:
+            name = self.move_group_menu.get()
+            self.refresh()
+            self.notice(f"{count}개 키워드를 ‘{name}’ 그룹으로 이동했습니다. 기존 사용 이력은 유지됩니다.")
+
     def safe(self, callback):
         try:
             return callback()
+        except ValueError as exc:
+            self.dialogs["messagebox"].showwarning("키워드 관리", str(exc), parent=self.app)
+            return None
         except Exception as exc:
             self.dialogs["messagebox"].showerror("키워드 관리", f"키워드 작업 중 문제가 생겼습니다. 목록을 다시 열어 저장 상태를 확인해 주세요.\n\n{exc}", parent=self.app)
             return None
 
     def refresh(self):
         def load():
-            counts = self.store.counts()
-            rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset, limit=self.PAGE_SIZE)
+            self.refresh_groups()
+            counts = self.store.counts(group_id=self.group_id)
+            rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset,
+                                          limit=self.PAGE_SIZE, group_id=self.group_id)
             if not total:
                 self.offset = 0
             if total and not rows:
                 self.offset = (total - 1) // self.PAGE_SIZE * self.PAGE_SIZE
-                rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset, limit=self.PAGE_SIZE)
+                rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset,
+                                              limit=self.PAGE_SIZE, group_id=self.group_id)
             self.rows, self.selection = rows, {}
             self._last_stamp = self.store.path.stat().st_mtime_ns
             for widget in self.list_frame.winfo_children():
                 widget.destroy()
             self.select_all.deselect()
-            self.summary.configure(text=f"대기 {counts['pending']:,}개   ·   사용 완료 {counts['used']:,}개   ·   사용 이력 {counts['history']:,}건")
+            self.summary.configure(text=f"{self.group_menu.get()}   ·   대기 {counts['pending']:,}개   ·   사용 완료 {counts['used']:,}개   ·   사용 이력 {counts['history']:,}건")
             for index, row in enumerate(rows):
                 line = ctk.CTkFrame(self.list_frame, fg_color=self.palette["panel"], corner_radius=12)
                 line.grid(row=index, column=0, pady=(0, 6), sticky="ew")
@@ -170,6 +284,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
                 stamp = datetime.fromisoformat(raw_date).astimezone().strftime("%Y-%m-%d %H:%M")
                 detail = (f"{PLATFORMS.get(row['platform'], row['platform'])} · {stamp}"
                           + (" · 대기 복원됨" if row["status"] == "pending" else "")) if self.history else f"등록 {stamp}"
+                detail = f"{row['group_name']} · {detail}"
                 if self.history and row.get("url"):
                     detail += " · " + urlsplit(row["url"]).netloc
                 if self.history and row.get("title"):
@@ -181,7 +296,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
                         row=0, column=2, rowspan=2, padx=12)
             if not rows:
                 ctk.CTkLabel(self.list_frame, text="검색 결과가 없습니다. ‘검색 지우기’를 누르면 전체 목록을 볼 수 있습니다." if self.search.get() else
-                             "아직 사용한 키워드가 없습니다. 등록한 키워드는 ‘대기 키워드’에서 확인하세요." if self.history else "등록할 키워드를 위에 붙여넣어 주세요.",
+                             "아직 사용한 키워드가 없습니다. 등록한 키워드는 ‘대기 키워드’에서 확인하세요." if self.history else "이 그룹에 키워드가 없습니다. 위에 등록하거나 기존 키워드를 그룹 이동해 주세요.",
                              wraplength=480,
                              text_color=self.palette["muted"]).grid(row=0, column=0, pady=40)
             self.page_label.configure(text=f"{total:,}건 · {self.offset // self.PAGE_SIZE + 1} / {max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)} 페이지")
@@ -197,7 +312,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.safe(load)
 
     def add_values(self, values):
-        result = self.safe(lambda: self.store.add(values))
+        result = self.safe(lambda: self.store.add(values, group_id=self.group_id))
         if result is None:
             return False
         if not any(result[key] for key in ("added", "duplicate", "used")):
@@ -205,7 +320,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
             return False
         # Registration must reveal the pending inbox, not leave new entries
         # hidden behind an old history tab, search or pagination/scroll state.
-        offset = self.safe(lambda: self.store.pending_page_offset(result["first_added_id"], self.PAGE_SIZE)) or 0
+        offset = self.safe(lambda: self.store.pending_page_offset(
+            result["first_added_id"], self.PAGE_SIZE, group_id=self.group_id)) or 0
         self.clear_search(refresh=False)
         self.switch(False, offset=offset)
         self.list_frame._parent_canvas.yview_moveto(0)
@@ -228,8 +344,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         path = self.dialogs["filedialog"].asksaveasfilename(parent=self.app, title="키워드 내보내기",
             initialfile="키워드-사용이력.csv" if self.history else "키워드-대기목록.txt",
             defaultextension=".csv" if self.history else ".txt", filetypes=[("CSV", "*.csv"), ("TXT", "*.txt")])
-        if path and self.safe(lambda: (self.store.export(Path(path), history=self.history), True)):
-            self.notice("검색·페이지와 관계없이 현재 탭의 전체 목록을 내보냈습니다.")
+        if path and self.safe(lambda: (self.store.export(Path(path), history=self.history, group_id=self.group_id), True)):
+            self.notice("검색·페이지와 관계없이 선택한 그룹의 현재 탭 전체 목록을 내보냈습니다. CSV에는 그룹 이름도 포함됩니다.")
 
     def switch(self, history, *, offset=0):
         self.history, self.offset = history, offset
