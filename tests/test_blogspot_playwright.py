@@ -23,14 +23,20 @@ class BlogspotPlaywrightTests(unittest.TestCase):
                 def locator_for(name, *, visible=True):
                     candidate = Mock()
                     candidate.is_visible.return_value = True
-                    candidate.click.side_effect = lambda **_kwargs: events.append(("click", name))
+                    candidate.bounding_box.return_value = {"width": 120, "height": 36}
+                    def click(**_kwargs):
+                        events.append(("click", name))
+                        candidate.is_visible.return_value = False
+                    candidate.click.side_effect = click
                     locator = Mock()
                     locator.count.return_value = int(visible)
                     locator.nth.return_value = candidate
                     return locator
 
                 page = Mock()
-                page.get_by_role.side_effect = lambda _role, name, exact: locator_for(name)
+                page.get_by_role.side_effect = lambda role, name, exact: locator_for(
+                    name, visible=(role == "button" and name in ("가운데 정렬", "이미지 크기")) or
+                    (role == "menuitemradio" and name == available_label))
                 page.get_by_text.side_effect = lambda name, exact: locator_for(
                     name, visible=name == available_label
                 )

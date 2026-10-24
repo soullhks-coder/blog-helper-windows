@@ -102,6 +102,7 @@ jobs:
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
           python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -m unittest discover -s tests -p test_blogspot_image_size.py -q
+          python -m unittest discover -s tests -p test_blogspot_image_controls.py -q
           python -m unittest discover -s tests -p test_blogspot_upload_recovery.py -q
           python -m unittest discover -s tests -p test_keyword_library.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
@@ -239,6 +240,7 @@ jobs:
           python -m unittest discover -s tests -p test_wordpress_media_upload.py -q
           python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -m unittest discover -s tests -p test_blogspot_image_size.py -q
+          python -m unittest discover -s tests -p test_blogspot_image_controls.py -q
           python -m unittest discover -s tests -p test_blogspot_upload_recovery.py -q
           python -m unittest discover -s tests -p test_keyword_library.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"

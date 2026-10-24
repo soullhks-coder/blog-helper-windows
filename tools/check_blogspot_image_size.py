@@ -52,6 +52,27 @@ function choose(dialog=false) {
     if (dialog) document.querySelector('[role=radio]').setAttribute('aria-checked','true');
     else apply();
 }
+// Realistic popup rows: child text, a hover-driven active state, held pointer
+// input and an occasionally swallowed first activation.
+window.menuAttempts=0;
+if (options.nestedMenu) {
+    const menu=document.querySelector('#choices');
+    menu.setAttribute('role','menu');
+    menu.innerHTML=`<div role="menuitemradio" aria-checked="true">중간</div>
+        <div id="extra-large" role="menuitemradio" aria-checked="false"
+        style="position:relative;width:180px;height:40px;background:#eee"
+        onmouseenter="this.dataset.hover=performance.now()"
+        onmousedown="this.dataset.down=performance.now();record('menu-down')"
+        onclick="menuClick(event,this)"><span style="position:absolute;left:40px;top:10px">매우 크게</span></div>`;
+}
+function menuClick(event,row) {
+    menuAttempts++;
+    if ((options.parentTargetOnly && event.target!==row)
+        || (options.hoverDelay && performance.now()-Number(row.dataset.hover)<options.hoverDelay)
+        || (options.heldPress && performance.now()-Number(row.dataset.down)<100)
+        || menuAttempts<=(options.ignoreClicks||0)) {record('ignored-choice');return;}
+    row.setAttribute('aria-checked','true');choose();
+}
 document.querySelector('#dialog').hidden=!options.dialog;
 const w=options.originalWidth||1024, h=options.originalHeight||1024;
 const imageUrl='/image.png?w='+w+'&h='+h+'&target=1';
@@ -116,6 +137,9 @@ def main():
                         ("intermediate-growth", {"delay": 3_000, "partial": True}, 3_000),
                         ("height-still-pending", {"delay": 3_000, "widthFirst": True}, 3_000),
                         ("edit-dialog-update", {"delay": 200, "dialog": True}, 0),
+                        ("nested-hover-menu-row", {"nestedMenu": True, "parentTargetOnly": True,
+                            "hoverDelay": 150, "heldPress": True}, 0),
+                        ("ignored-first-menu-click", {"nestedMenu": True, "ignoreClicks": 1}, 0),
                     )
                     for name, options, minimum in cases:
                         page.goto(origin)
@@ -145,7 +169,23 @@ def main():
                         else:
                             assert not [item for item in events if choice["time"] < item["time"] < next_action["time"]
                                         and item["action"] in ("center", "size-menu", "update")], events
+                        if options.get("nestedMenu"):
+                            assert page.evaluate("menuAttempts") == 1 + options.get("ignoreClicks", 0), events
                         print("Blogger local Chrome:", name, "passed", flush=True)
+                    page.goto(origin)
+                    page.set_content(FIXTURE.replace("OPTIONS", '{"nestedMenu":true,"ignoreClicks":99}'))
+                    image = page.frame_locator("iframe.editable").locator("img#target")
+                    image.wait_for()
+                    image.evaluate("el => el.decode()")
+                    try:
+                        app.configure_blogspot_inserted_image(page, image.get_attribute("src"), original_size=(1024,1024))
+                    except RuntimeError as exc:
+                        assert "선택이 접수되지" in str(exc), str(exc)
+                    else:
+                        raise AssertionError("An unselected open menu unexpectedly continued")
+                    assert page.evaluate("menuAttempts") == 2
+                    assert not [item for item in page.evaluate("events") if item["action"] == "next"]
+                    print("Blogger local Chrome: two rejected menu clicks preserve the draft and stop", flush=True)
                     # A swallowed size click must still stop the pipeline, not
                     # silently continue. Accelerate this negative fixture only.
                     page.goto(origin)

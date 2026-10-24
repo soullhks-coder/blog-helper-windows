@@ -9982,24 +9982,10 @@ def configure_blogspot_inserted_image(page, image_source: str, *, original_size=
         _center_blogspot_inserted_image(page, image)
         return
 
-    size_choice = None
-    for label in ("매우 크게", "아주 크게"):
-        size_choice = _first_visible_blogspot_locator(
-            page.get_by_text(label, exact=True)
-        )
-        if size_choice is not None:
-            size_choice.click()
-            append_runtime_log(
-                "BLOGSPOT",
-                f"현재 Blogger 도구에서 이미지 크기 클릭 완료: {label} · 클릭 후 1.5초 대기 시작",
-            )
-            # This wait belongs to the size-option click, not the upload action.
-            page.wait_for_timeout(1_500)
-            append_runtime_log("BLOGSPOT", "크기 항목 클릭 후 1.5초 대기 완료")
-            _wait_for_blogspot_image_size(page, image, before)
-            break
-    if size_choice is None:
-        raise RuntimeError("Blogger 이미지 크기의 '매우 크게' 항목을 찾지 못했습니다.")
+    from blogspot_image_controls import select_popup_size
+    select_popup_size(page, labels=("매우 크게", "아주 크게"),
+                      log=lambda message: append_runtime_log("BLOGSPOT", message))
+    _wait_for_blogspot_image_size(page, image, before)
 
 
 def find_blogspot_image_insert_button(page):
