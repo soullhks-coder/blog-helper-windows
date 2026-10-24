@@ -83,7 +83,7 @@ class KeywordLibrary:
         values = [clean_keyword(value) for value in values if clean_keyword(value)]
         if len(values) > 100_000 or any(len(value) > 500 for value in values):
             raise ValueError("한 번에 100,000개까지, 키워드 하나당 500자까지 등록할 수 있습니다.")
-        result = {"added": 0, "duplicate": 0, "used": 0}
+        result = {"added": 0, "duplicate": 0, "used": 0, "first_added_id": None}
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             for value in values:
@@ -94,11 +94,24 @@ class KeywordLibrary:
                 if row:
                     db.execute("UPDATE keywords SET status='pending', keyword=?, added_at=? WHERE id=?",
                                (value, self._now(), row["id"]))
+                    item_id = row["id"]
                 else:
-                    db.execute("INSERT INTO keywords(key, keyword, added_at) VALUES (?, ?, ?)",
-                               (keyword_key(value), value, self._now()))
+                    item_id = db.execute("INSERT INTO keywords(key, keyword, added_at) VALUES (?, ?, ?)",
+                                         (keyword_key(value), value, self._now())).lastrowid
+                if result["first_added_id"] is None:
+                    result["first_added_id"] = item_id
                 result["added"] += 1
         return result
+
+    def pending_page_offset(self, item_id, page_size=40) -> int:
+        """Locate an added/restored row without reordering the existing inbox."""
+        if item_id is None:
+            return 0
+        with self._connection() as db:
+            position = db.execute("SELECT COUNT(*) FROM keywords WHERE status='pending' AND id < ?",
+                                  (int(item_id),)).fetchone()[0]
+        page_size = max(1, int(page_size))
+        return position // page_size * page_size
 
     def counts(self) -> dict:
         with self._connection() as db:

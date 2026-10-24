@@ -66,7 +66,9 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.search = InputEntry(tabs, placeholder_text="키워드 검색")
         self.search.grid(row=0, column=2, sticky="ew")
         self.search.bind("<KeyRelease>", self.search_changed)
-        self.button(tabs, "내보내기", self.export_file, width=90).grid(row=0, column=3, padx=(8, 0))
+        self.clear_search_button = self.button(tabs, "검색 지우기", self.clear_search, width=80)
+        self.clear_search_button.grid(row=0, column=3, padx=(8, 0))
+        self.button(tabs, "내보내기", self.export_file, width=90).grid(row=0, column=4, padx=(8, 0))
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
         self.select_all = ctk.CTkCheckBox(actions, text="이 페이지 전체", command=self.select_page,
@@ -142,6 +144,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         def load():
             counts = self.store.counts()
             rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset, limit=self.PAGE_SIZE)
+            if not total:
+                self.offset = 0
             if total and not rows:
                 self.offset = (total - 1) // self.PAGE_SIZE * self.PAGE_SIZE
                 rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset, limit=self.PAGE_SIZE)
@@ -176,23 +180,36 @@ class KeywordLibraryPage(ctk.CTkFrame):
                     self.button(line, "발행글 보기", lambda url=row["url"]: self.app._open_source_url(url), width=90).grid(
                         row=0, column=2, rowspan=2, padx=12)
             if not rows:
-                ctk.CTkLabel(self.list_frame, text="검색 결과가 없습니다." if self.search.get() else
-                             "아직 사용한 키워드가 없습니다." if self.history else "등록할 키워드를 위에 붙여넣어 주세요.",
+                ctk.CTkLabel(self.list_frame, text="검색 결과가 없습니다. ‘검색 지우기’를 누르면 전체 목록을 볼 수 있습니다." if self.search.get() else
+                             "아직 사용한 키워드가 없습니다. 등록한 키워드는 ‘대기 키워드’에서 확인하세요." if self.history else "등록할 키워드를 위에 붙여넣어 주세요.",
+                             wraplength=480,
                              text_color=self.palette["muted"]).grid(row=0, column=0, pady=40)
             self.page_label.configure(text=f"{total:,}건 · {self.offset // self.PAGE_SIZE + 1} / {max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)} 페이지")
             self.previous.configure(state="normal" if self.offset else "disabled")
             self.next.configure(state="normal" if self.offset + self.PAGE_SIZE < total else "disabled")
-            for button, active in ((self.pending_tab, not self.history), (self.history_tab, self.history)):
-                button.configure(fg_color=self.palette["selected"] if active else self.palette["button"],
-                                 text_color=self.palette["accent"] if active else self.palette["text"])
+            for button, active, label, count in (
+                (self.pending_tab, not self.history, "대기 키워드", counts["pending"]),
+                (self.history_tab, self.history, "사용 이력", counts["history"]),
+            ):
+                button.configure(text=f"{label} {count:,}",
+                                 fg_color=self.palette["accent"] if active else self.palette["button"],
+                                 text_color="#ffffff" if active else self.palette["text"])
         self.safe(load)
 
     def add_values(self, values):
         result = self.safe(lambda: self.store.add(values))
         if result is None:
             return False
+        if not any(result[key] for key in ("added", "duplicate", "used")):
+            self.notice("추가할 키워드를 한 줄에 하나씩 입력해 주세요.")
+            return False
+        # Registration must reveal the pending inbox, not leave new entries
+        # hidden behind an old history tab, search or pagination/scroll state.
+        offset = self.safe(lambda: self.store.pending_page_offset(result["first_added_id"], self.PAGE_SIZE)) or 0
+        self.clear_search(refresh=False)
+        self.switch(False, offset=offset)
+        self.list_frame._parent_canvas.yview_moveto(0)
         self.notice(f"{result['added']:,}개 등록 · 중복 {result['duplicate']:,}개 · 사용 완료 {result['used']:,}개 건너뜀")
-        self.refresh()
         return True
 
     def add_input(self):
@@ -214,8 +231,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         if path and self.safe(lambda: (self.store.export(Path(path), history=self.history), True)):
             self.notice("검색·페이지와 관계없이 현재 탭의 전체 목록을 내보냈습니다.")
 
-    def switch(self, history):
-        self.history, self.offset = history, 0
+    def switch(self, history, *, offset=0):
+        self.history, self.offset = history, offset
         self.used_button.pack_forget()
         self.delete_button.pack_forget()
         self.restore_button.pack_forget()
@@ -226,6 +243,16 @@ class KeywordLibraryPage(ctk.CTkFrame):
             self.delete_button.pack(side="left", padx=4)
         self.write_button.configure(state="disabled" if history else "normal")
         self.refresh()
+
+    def clear_search(self, *, refresh=True):
+        if self._search_job is not None:
+            self.after_cancel(self._search_job)
+            self._search_job = None
+        self.search.delete(0, "end")
+        self.offset = 0
+        if refresh:
+            self.refresh()
+            self.list_frame._parent_canvas.yview_moveto(0)
 
     def search_changed(self, _event=None):
         if self._search_job is not None:

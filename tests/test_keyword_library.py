@@ -21,7 +21,7 @@ class KeywordLibraryTests(unittest.TestCase):
 
     def test_bulk_500_keywords_persist_and_search_paginate(self):
         result = self.store.add([f"키워드 {i}" for i in range(500)] + ["키워드 0", "", "  "])
-        self.assertEqual(result, {"added": 500, "duplicate": 1, "used": 0})
+        self.assertEqual(result, {"added": 500, "duplicate": 1, "used": 0, "first_added_id": 1})
         reopened = KeywordLibrary(self.path)
         rows, total = reopened.list(offset=480, limit=40)
         self.assertEqual(total, 500)
@@ -29,6 +29,20 @@ class KeywordLibraryTests(unittest.TestCase):
         self.assertEqual(rows[0]["keyword"], "키워드 480")
         self.assertEqual(reopened.counts()["pending"], 500)
         self.assertEqual(reopened.list(search="워드 49")[1], 11)
+
+    def test_registration_locates_first_added_or_readded_pending_page(self):
+        initial = self.store.add([f"키워드 {i}" for i in range(85)])
+        self.assertEqual(self.store.pending_page_offset(initial["first_added_id"]), 0)
+        added = self.store.add(["키워드 0", "새 키워드 1", "새 키워드 2"])
+        offset = self.store.pending_page_offset(added["first_added_id"])
+        self.assertEqual(offset, 80)
+        self.assertIn("새 키워드 1", [row["keyword"] for row in self.store.list(offset=offset)[0]])
+        self.store.change_status([1], "removed")
+        restored = self.store.add(["키워드 0"])
+        self.assertEqual(restored["first_added_id"], 1)
+        self.assertEqual(self.store.pending_page_offset(restored["first_added_id"]), 0)
+        self.assertIsNone(self.store.add(["키워드 0"])["first_added_id"])
+        self.assertEqual(self.store.pending_page_offset(None), 0)
 
     def test_normalization_preserves_meaningful_numbers_and_punctuation(self):
         self.assertEqual(keyword_key(" ＡＢＣ   여행\t추천 "), "abc 여행 추천")

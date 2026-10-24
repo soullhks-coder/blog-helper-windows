@@ -74,7 +74,23 @@ def main():
             panel = app.keyword_library_panel
             assert panel is not None
             assert int(app.keywords_nav_button.grid_info()["row"]) == 3
-            panel.input.insert("1.0", "\n".join(f"여행 키워드 {i:03d}" for i in range(500)))
+            # Regression: the user's two entries were saved but hidden behind
+            # a previous history tab and search. Registration reveals them.
+            panel.history_tab.invoke()
+            panel.search.insert(0, "일치하지 않는 검색어")
+            panel.search_changed()
+            panel.input.insert("1.0", "여행 키워드 000\n여행 키워드 001")
+            panel.add_input()
+            settle()
+            assert panel.store.counts()["pending"] == 2
+            assert [row["keyword"] for row in panel.rows] == ["여행 키워드 000", "여행 키워드 001"]
+            assert not panel.history and not panel.search.get() and panel.offset == 0
+            assert panel._search_job is None
+            assert panel.input.get("1.0", "end-1c") == ""
+            assert panel.pending_tab.cget("text") == "대기 키워드 2"
+            assert panel.pending_tab.cget("fg_color") == panel.palette["accent"]
+            screenshot("two-added")
+            panel.input.insert("1.0", "\n".join(f"여행 키워드 {i:03d}" for i in range(2, 500)))
             panel.add_input()
             settle()
             assert panel.store.counts()["pending"] == 500
@@ -150,6 +166,26 @@ def main():
             with patch.object(module.filedialog, "asksaveasfilename", return_value=str(export)):
                 panel.export_file()
             assert len(export.read_text(encoding="utf-8").splitlines()) == 499
+            # Import from an empty/filtered history view must also reveal the
+            # new rows even when the inbox spans many pages.
+            panel.history_tab.invoke()
+            panel.search.insert(0, "없는 키워드")
+            panel.apply_search()
+            imported = Path(directory) / "new.txt"
+            imported.write_text("새 등록 하나\n새 등록 둘", encoding="utf-8")
+            with patch.object(module.filedialog, "askopenfilename", return_value=str(imported)):
+                panel.import_file()
+            settle()
+            assert not panel.history and not panel.search.get()
+            assert panel.offset == 480
+            assert {"새 등록 하나", "새 등록 둘"}.issubset({row["keyword"] for row in panel.rows})
+            assert panel.list_frame._parent_canvas.yview()[0] == 0
+            panel.search.insert(0, "없는 키워드")
+            panel.apply_search()
+            assert not panel.rows and panel.offset == 0
+            panel.clear_search_button.invoke()
+            assert panel.rows and not panel.search.get() and panel.offset == 0
+            screenshot("registration-reset")
             # Narrow window: footer, navigation and all action controls stay visible.
             app.geometry("1050x850")
             settle()
@@ -165,7 +201,7 @@ def main():
             app._switch_page("writing")
             settle()
             assert not module.modal_dimmer(app).active
-            print(f"{sys.platform} {args.theme}: 500 keywords, pagination, both writing modes, history/restore, manual use, export, narrow UI and help passed", flush=True)
+            print(f"{sys.platform} {args.theme}: two-entry registration, filtered import, 500 keywords, pagination, both writing modes, history/restore, manual use, export, narrow UI and help passed", flush=True)
         finally:
             app.destroy()
 
