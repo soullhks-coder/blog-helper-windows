@@ -103,6 +103,7 @@ jobs:
           python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -m unittest discover -s tests -p test_blogspot_image_size.py -q
           python -m unittest discover -s tests -p test_blogspot_upload_recovery.py -q
+          python -m unittest discover -s tests -p test_keyword_library.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -129,6 +130,7 @@ jobs:
           python tools/check_design_backgrounds.py
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
+          python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
           python tools/check_menu_help_ui.py
@@ -238,6 +240,7 @@ jobs:
           python -m unittest discover -s tests -p test_blogspot_playwright.py -q
           python -m unittest discover -s tests -p test_blogspot_image_size.py -q
           python -m unittest discover -s tests -p test_blogspot_upload_recovery.py -q
+          python -m unittest discover -s tests -p test_keyword_library.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 
       - name: Check writing UI in dark and light themes
@@ -250,6 +253,7 @@ jobs:
           python tools/check_design_backgrounds.py
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
+          python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
           python tools/check_menu_help_ui.py

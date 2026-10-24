@@ -16,7 +16,7 @@ class MenuHelpTests(unittest.TestCase):
         self.assertEqual(set(ALL_GUIDES), set(WRITING_GUIDES) | set(MENU_GUIDES))
         pages = {page for page, topic, titles in MENU_SECTIONS}
         self.assertEqual(pages, {"home", "automation", "naver_blog", "naver_kin", "public_data",
-                                 "thumbnails", "prompts", "settings", "tistory_v2"})
+                                 "thumbnails", "prompts", "settings", "tistory_v2", "keywords"})
         mapped = {topic for page, topic, titles in MENU_SECTIONS}
         self.assertEqual(mapped | {"v2.review", "v2.publish"}, set(MENU_GUIDES))
         for topic, guide in MENU_GUIDES.items():

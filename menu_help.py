@@ -7,6 +7,11 @@ def guide(title, stage, intro, steps, note):
 
 
 MENU_GUIDES = {
+    "keywords.library": guide("키워드 한 번에 등록", "키워드 관리 · 대기 목록과 이력", "여러 키워드를 저장하고 실제 발행한 키워드를 구분해요.", (
+        ("한 번에 등록하세요", "한 줄에 키워드 하나씩 붙여넣거나 TXT·CSV 파일을 불러오세요. 중복·이미 사용한 키워드는 건너뛰어요."),
+        ("글쓰기에 넣으세요", "키워드를 하나 선택한 뒤 블로그 글쓰기 또는 티스토리 V2로 넣으세요. 넣는 것만으로 작업이 시작되지 않아요. 글쓰기에서 블로그·설정을 확인하고 시작하세요."),
+        ("사용 이력을 확인하세요", "발행이 확인된 키워드는 대기에서 빠지고 사용 이력에 남아요. 사용 처리로 직접 옮기거나 이력에서 대기로 복원할 수도 있어요. 내보내기는 현재 탭 전체 목록을 저장해요.")),
+        "이 Mac 또는 PC에 저장되는 목록이며 다른 컴퓨터와 자동 공유되지 않아요. 실패·중단·임시저장은 사용 처리하지 않아요. 검토 발행은 직접 발행 완료를 확인한 뒤 반영돼요."),
     "home.select": guide("글쓰기 선택", "홈 · 글쓰기 시작", "블로그와 계정을 먼저 고른 뒤 글쓰기를 시작해요.", (
         ("블로그를 선택하세요", "로고 옆 동그라미로 서비스를 선택하고 드롭다운에서 등록한 블로그를 골라 주세요. 계정 등록은 환경설정의 서비스 연동에서 해요."),
         ("썸네일과 프롬프트를 고르세요", "선택한 블로그에서 마지막으로 사용한 썸네일·프롬프트를 불러와요. 원하는 조합으로 바꾸면 다음에도 기억해요."),
@@ -282,6 +287,7 @@ MENU_GUIDES = {
 # (page, topic, exact static section headings). Existing label widgets are kept:
 # only their geometry is grouped with an adjacent compact help icon.
 MENU_SECTIONS = (
+    ("keywords", "keywords.library", ("키워드 한 번에 등록",)),
     ("home", "home.select", ("글쓰기 선택",)),
     ("home", "home.keywords", ("다음 키워드 TOP10", "시그널 키워드 TOP10", "로워드 키워드 TOP10")),
     ("home", "home.adsense", ("Google AdSense 예상 수익",)),

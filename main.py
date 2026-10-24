@@ -57,6 +57,8 @@ from design_backgrounds import (BACKGROUND_STYLES, DEFAULT_PATTERN_COLOR, backgr
 from modal_backdrop import DimmedDialogApi, modal_dimmer
 from writing_run import (ScopedWritingQueue, WritingCancelled, active_writing_event,
                          check_writing_cancelled)
+from keyword_library import KeywordLibrary
+from keyword_library_ui import KeywordLibraryPage
 
 messagebox = DimmedDialogApi(messagebox)
 filedialog = DimmedDialogApi(filedialog)
@@ -366,6 +368,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_UPLOAD_DIR = DATA_DIR / "Generated Uploads"
 DESIGN_ASSET_DIR = DATA_DIR / "Design Assets"
 STATE_FILE = DATA_DIR / "app_state.json"
+KEYWORD_LIBRARY_FILE = DATA_DIR / "keyword-library.sqlite3"
 DAILY_PUBLISH_COUNTS_FILE = DATA_DIR / "daily-publish-counts.json"
 FESTIVAL_STATE_FILE = DATA_DIR / "visitkorea_festival_state.json"
 FESTIVAL_POSTER_DIR = DATA_DIR / "Festival Posters"
@@ -915,6 +918,7 @@ INLINE_IMAGES_PROVIDERS = (
 SIDEBAR_MENU_DEFAULT_LABELS = {
     "home": "홈",
     "writing": "블로그글쓰기",
+    "keywords": "키워드관리",
     "automation": "블로그자동화",
     "naver_blog": "N블로그자동화",
     "tistory_v2": "티스토리 V2",
@@ -975,6 +979,7 @@ BOOTSTRAP_ICON_LABELS_BY_NAME = {
 SIDEBAR_MENU_DEFAULT_ICONS = {
     "home": "house",
     "writing": "pencil-square",
+    "keywords": "search",
     "automation": "robot",
     "naver_blog": "journal-text",
     "tistory_v2": "type",
@@ -16106,6 +16111,10 @@ def run_naver_blog_playwright_bootstrap(
                     published_payload["message"] = (
                         "새로 발행된 네이버 블로그 글 주소를 확인했습니다."
                     )
+                    record_managed_keyword_publication(
+                        str((article_payload or {}).get("topic") or ""), "naver_blog", published_url,
+                        str((article_payload or {}).get("title") or ""),
+                    )
                     result_queue.put(
                         ("naver_blog_published_url", published_payload)
                     )
@@ -24393,6 +24402,8 @@ class WordPressPublishWorker(threading.Thread):
                 category_id=self.settings.category_id,
                 status=status,
             )
+            if result.get("status") == "publish":
+                record_managed_keyword_publication(self.insight.keyword, "wordpress", str(result.get("link") or ""), title)
             self.result_queue.put(("wp_publish_done", result))
         except Exception as exc:  # pragma: no cover - runtime handling
             self.result_queue.put(("wp_error", str(exc)))
@@ -25912,6 +25923,23 @@ class TistoryProfileWorker(threading.Thread):
             self.result_queue.put(("tistory_profile_error", str(exc)))
 
 
+def record_managed_keyword_publication(keyword: str, platform: str, url: str, title: str, *, event_key: str = "") -> None:
+    """Called only after confirmed publication, never after generation/upload.
+
+    A library failure must not turn a successfully published post into a failed
+    upload or trigger a duplicate publication. Unregistered keywords are ignored.
+    """
+    if not keyword or not KEYWORD_LIBRARY_FILE.is_file():
+        return
+    try:
+        KeywordLibrary(KEYWORD_LIBRARY_FILE).record_use(
+            keyword, platform=platform, url=url, title=title,
+            event_key=f"{platform}:{url or event_key}",
+        )
+    except Exception as exc:
+        append_runtime_log("KEYWORDS", f"발행은 완료됐지만 키워드 이력 저장 실패: {exc}")
+
+
 class TistoryAutomationWorker(threading.Thread):
     def __init__(
         self,
@@ -25945,9 +25973,11 @@ class TistoryAutomationWorker(threading.Thread):
         tistory_v2_slide_sizes: list[list[int]] | None = None,
         cancel_event: threading.Event | None = None,
         upload_webp: bool = True,
+        source_keyword: str = "",
     ) -> None:
         super().__init__(daemon=True)
         self.title = title
+        self.source_keyword = str(source_keyword or "").strip()
         self.article_html = article_html
         self.result_queue = result_queue
         self.delay_seconds = delay_seconds
@@ -26279,6 +26309,13 @@ class TistoryAutomationWorker(threading.Thread):
                         "save_mode": self.save_mode,
                         "manual_completed": False,
                     }
+                if done_payload["save_mode"] == TISTORY_SAVE_MODE_PUBLISH and (
+                    done_payload["published_url"] or done_payload["manual_completed"]
+                ):
+                    record_managed_keyword_publication(
+                        self.source_keyword, "tistory", done_payload["published_url"], self.title,
+                        event_key=f"{id(self)}:{time.time_ns()}",
+                    )
                 if (
                     done_payload["published_url"]
                     or done_payload["manual_completed"]
@@ -26611,6 +26648,7 @@ class PublishPipelineWorker(threading.Thread):
         tistory_v2_keyword: str = "",
         tistory_v2_deck: dict | None = None,
         cancel_event=None,
+        source_keyword: str = "",
     ) -> None:
         super().__init__(daemon=True)
         self.settings = settings
@@ -26618,6 +26656,7 @@ class PublishPipelineWorker(threading.Thread):
         self.article_html = article_html
         self.thumbnail_path = thumbnail_path
         self.focus_keyword = focus_keyword
+        self.source_keyword = str(source_keyword or tistory_v2_keyword or focus_keyword).strip()
         self.tag_names = tag_names
         self.slug = slug
         self.meta_description = meta_description
@@ -26762,6 +26801,12 @@ class PublishPipelineWorker(threading.Thread):
                     slug=self.slug,
                     excerpt=self.meta_description,
                 )
+                if wordpress_result.get("status") == "publish":
+                    record_managed_keyword_publication(
+                        self.source_keyword, "wordpress",
+                        str(wordpress_result.get("link") or wordpress_result.get("post_url") or ""),
+                        wordpress_title, event_key=f"post:{wordpress_result.get('post_id')}",
+                    )
                 check_writing_cancelled(self.cancel_event)
                 if wordpress_result.get("post_id"):
                     rank_math_applied = wordpress_client.update_rank_math_metadata(
@@ -26827,6 +26872,7 @@ class PublishPipelineWorker(threading.Thread):
                     "html": tistory_article_html,
                     "thumbnail_path": self.thumbnail_path,
                     "focus_keyword": self.focus_keyword,
+                    "source_keyword": self.source_keyword,
                     "tag_names": self.tag_names,
                     "reference_articles": self.reference_articles,
                     "wordpress_url": wordpress_url,
@@ -26896,6 +26942,11 @@ class PublishPipelineWorker(threading.Thread):
                         ).get("profile_scope") or BLOGSPOT_PROFILE_SCOPES[0]),
                         **v2_options,
                     )
+                    if (blogspot_result.get("status") == "publish" or blogspot_result.get("manual_completed")):
+                        record_managed_keyword_publication(
+                            self.source_keyword, "blogspot", str(blogspot_result.get("link") or ""),
+                            self.title, event_key=f"{id(self)}:{time.time_ns()}",
+                        )
                 check_writing_cancelled(self.cancel_event)
 
             threads_result = None
@@ -28734,6 +28785,7 @@ class KeywordApp(ctk.CTk):
                 sidebar_buttons = {
                     "home": getattr(self, "home_nav_button", None),
                     "writing": getattr(self, "writing_nav_button", None),
+                    "keywords": getattr(self, "keywords_nav_button", None),
                     "automation": getattr(self, "automation_nav_button", None),
                     "naver_blog": getattr(self, "naver_blog_nav_button", None),
                     "tistory_v2": getattr(self, "tistory_v2_nav_button", None),
@@ -29062,6 +29114,8 @@ class KeywordApp(ctk.CTk):
             mapping["naver_kin"] = self.naver_kin_page
         if hasattr(self, "thumbnails_page"):
             mapping["thumbnails"] = self.thumbnails_page
+        if hasattr(self, "keywords_page"):
+            mapping["keywords"] = self.keywords_page
         if hasattr(self, "tistory_v2_page"):
             mapping["tistory_v2"] = self.writing_page
         return mapping
@@ -29142,6 +29196,7 @@ class KeywordApp(ctk.CTk):
         self.prompt_article_boxes = {}
         self.prompt_set_menus = {}
         self.prompt_name_entries = {}
+        self.keyword_library_panel = None
 
     def _rebuild_layout_for_theme(self, theme: str, current_page: str | None = None) -> None:
         current_page = current_page or getattr(self, "current_page", "home")
@@ -29341,6 +29396,16 @@ class KeywordApp(ctk.CTk):
         )
         self.writing_nav_button.grid(row=2, column=0, padx=26, pady=(0, 10), sticky="ew")
 
+        self.keywords_nav_button = ctk.CTkButton(
+            self.sidebar_frame,
+            text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "keywords"),
+            anchor="w", height=56, corner_radius=14,
+            fg_color="transparent", hover_color="#111826", text_color="#9aa7bb",
+            font=ctk.CTkFont(size=19, weight="bold"),
+            command=lambda: self._switch_page("keywords"),
+        )
+        self.keywords_nav_button.grid(row=3, column=0, padx=26, pady=(0, 10), sticky="ew")
+
         self.automation_nav_button = ctk.CTkButton(
             self.sidebar_frame,
             text=sidebar_menu_label(self.wordpress_settings.sidebar_menu_labels, "automation"),
@@ -29353,7 +29418,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("automation"),
         )
-        self.automation_nav_button.grid(row=3, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.automation_nav_button.grid(row=4, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.naver_blog_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29370,7 +29435,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("naver_blog"),
         )
-        self.naver_blog_nav_button.grid(row=4, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.naver_blog_nav_button.grid(row=5, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.tistory_v2_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29380,7 +29445,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("tistory_v2"),
         )
-        self.tistory_v2_nav_button.grid(row=5, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.tistory_v2_nav_button.grid(row=6, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.naver_kin_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29394,7 +29459,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("naver_kin"),
         )
-        self.naver_kin_nav_button.grid(row=6, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.naver_kin_nav_button.grid(row=7, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.public_data_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29408,7 +29473,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("public_data"),
         )
-        self.public_data_nav_button.grid(row=7, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.public_data_nav_button.grid(row=8, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.thumbnail_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29418,7 +29483,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("thumbnails"),
         )
-        self.thumbnail_nav_button.grid(row=8, column=0, padx=26, pady=(0, 10), sticky="ew")
+        self.thumbnail_nav_button.grid(row=9, column=0, padx=26, pady=(0, 10), sticky="ew")
 
         self.prompt_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29432,7 +29497,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("prompts"),
         )
-        self.prompt_nav_button.grid(row=9, column=0, padx=26, sticky="ew")
+        self.prompt_nav_button.grid(row=10, column=0, padx=26, sticky="ew")
 
         self.settings_nav_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -29446,7 +29511,7 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=19, weight="bold"),
             command=lambda: self._switch_page("settings"),
         )
-        self.settings_nav_button.grid(row=10, column=0, padx=26, pady=(10, 0), sticky="ew")
+        self.settings_nav_button.grid(row=11, column=0, padx=26, pady=(10, 0), sticky="ew")
 
         self._disable_sidebar_drag_hover()
         self._build_sidebar_activity_shimmers()
@@ -29549,6 +29614,12 @@ class KeywordApp(ctk.CTk):
         _update_packaged_startup_splash("8/8 프롬프트 준비 중...")
         self._build_prompts_page()
 
+        # Open the library lazily: a large keyword list must not slow startup.
+        self.keywords_page = ctk.CTkFrame(self.main_area, fg_color="transparent")
+        self.keywords_page.grid_columnconfigure(0, weight=1)
+        self.keywords_page.grid_rowconfigure(0, weight=1)
+        self.keyword_library_panel = None
+
         self._install_menu_help()
         self._switch_page("home")
 
@@ -29561,7 +29632,7 @@ class KeywordApp(ctk.CTk):
             return
         self._sidebar_layout_signature = signature
         for name in (
-            "home_nav_button", "writing_nav_button", "automation_nav_button",
+            "home_nav_button", "writing_nav_button", "keywords_nav_button", "automation_nav_button",
             "naver_blog_nav_button", "tistory_v2_nav_button", "naver_kin_nav_button", "public_data_nav_button",
             "thumbnail_nav_button", "prompt_nav_button", "settings_nav_button",
         ):
@@ -32999,6 +33070,7 @@ class KeywordApp(ctk.CTk):
         button_names = {
             "home": "home_nav_button",
             "writing": "writing_nav_button",
+            "keywords": "keywords_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
             "tistory_v2": "tistory_v2_nav_button",
@@ -33025,6 +33097,7 @@ class KeywordApp(ctk.CTk):
         button_names = {
             "home": "home_nav_button",
             "writing": "writing_nav_button",
+            "keywords": "keywords_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
             "tistory_v2": "tistory_v2_nav_button",
@@ -33123,6 +33196,7 @@ class KeywordApp(ctk.CTk):
         button_names = (
             "home_nav_button",
             "writing_nav_button",
+            "keywords_nav_button",
             "automation_nav_button",
             "naver_blog_nav_button",
             "tistory_v2_nav_button",
@@ -33279,6 +33353,7 @@ class KeywordApp(ctk.CTk):
         button_names = {
             "home": "home_nav_button",
             "writing": "writing_nav_button",
+            "keywords": "keywords_nav_button",
             "automation": "automation_nav_button",
             "naver_blog": "naver_blog_nav_button",
             "tistory_v2": "tistory_v2_nav_button",
@@ -49168,6 +49243,32 @@ class KeywordApp(ctk.CTk):
             page_name = "home"
         if page_name in {"writing", "tistory_v2"} and not self._set_writing_variant(page_name):
             return
+        if page_name == "keywords":
+            try:
+                # Cocoa/Tk can reuse an empty backing store when an unchanged
+                # dark page is remapped. Rebuild only this small paginated view
+                # on return, retaining the paste buffer, filter and selection.
+                old_panel = self.keyword_library_panel
+                rebuild = (old_panel is not None and sys.platform == "darwin"
+                           and self.wordpress_settings.app_theme == "블랙테마"
+                           and self.current_page != "keywords")
+                if old_panel is None or rebuild:
+                    view_state = old_panel.view_state() if old_panel is not None else None
+                    panel = KeywordLibraryPage(
+                        self.main_area, self, KEYWORD_LIBRARY_FILE,
+                        {"messagebox": messagebox, "filedialog": filedialog},
+                    )
+                    if view_state is not None:
+                        panel.restore_view_state(view_state)
+                    self.keywords_page.destroy()
+                    self.keywords_page = self.keyword_library_panel = panel
+                    self.__dict__.get("menu_help_buttons", {}).pop("keywords.library", None)
+                    self._install_menu_help("keywords", self.keyword_library_panel)
+                else:
+                    self.keyword_library_panel.refresh()
+            except Exception as exc:
+                messagebox.showerror("키워드 관리 열기 실패", str(exc), parent=self)
+                return
         self.current_page = page_name
         refresh_sidebar_styles = getattr(
             self,
@@ -49233,6 +49334,57 @@ class KeywordApp(ctk.CTk):
                 self._stop_naver_kin_clipboard_monitor()
         if hasattr(self, "shell_frame"):
             self._finish_theme_paint()
+
+    def _use_managed_keyword(self, keyword: str, destination: str = "writing") -> None:
+        """Populate step one only. Never spend AI quota or publish on selection."""
+        workers = ("analysis_worker", "reference_collection_worker", "article_worker", "pipeline_worker",
+                   "tistory_automation_worker", "wp_publish_worker", "daum_worker", "signal_worker",
+                   "newneek_worker", "loword_keyword_worker", "naver_creator_worker")
+        completion_dialog = self.__dict__.get("writing_complete_dialog")
+        if self._writing_keyword_selection_locked() or any(
+            self._worker_is_running(getattr(self, name, None)) for name in workers
+        ) or (completion_dialog is not None and completion_dialog.winfo_exists()):
+            messagebox.showinfo("글쓰기 진행 중", "현재 작업을 마치거나 발행중단한 뒤 키워드를 넣어 주세요.", parent=self)
+            return
+        destination = destination if destination in {"writing", "tistory_v2"} else "writing"
+        if self.generated_article_html.strip() and not messagebox.askyesno(
+            "새 키워드 준비", "현재 작성한 글 대신 선택 키워드로 새 작업을 준비할까요?\n저장하지 않은 현재 글 내용은 초기화됩니다.", parent=self
+        ):
+            return
+        self._switch_page(destination)
+        if self.current_page != destination:
+            return
+        self._stop_writing_auto_progress()
+        self._reset_writing_accordion_state()
+        if self.benchmark_mode_var.get():
+            self.benchmark_mode_var.set(False)
+            self._on_benchmark_mode_changed(save=False)
+        self.current_keyword = keyword
+        self.current_keyword_source = "library"
+        self.topic_entry.delete(0, "end")
+        self.topic_entry.insert(0, keyword)
+        self.manual_keyword_entry.delete(0, "end")
+        self.manual_keyword_entry.insert(0, keyword)
+        self.selected_keyword_var.set(keyword)
+        self._clear_keyword_choices()
+        self.accepted_recommended_keyword = keyword
+        self._clear_result_cards()
+        self.current_insights = []
+        for name in ("daum_reference_map", "signal_reference_map", "newneek_reference_map",
+                     "loword_reference_map", "naver_creator_reference_map", "collected_reference_map"):
+            setattr(self, name, {})
+        self.pending_reference_keyword = ""
+        self._clear_festival_writing_context()
+        self._clear_welfare_writing_context()
+        self.generated_article_title = ""
+        self.generated_article_html = ""
+        self.article_title_entry.delete(0, "end")
+        self.article_editor.delete("1.0", "end")
+        self.reference_textbox.delete("1.0", "end")
+        self._update_reference_count()
+        self._set_writing_progress(1, f"'{keyword}' 키워드를 불러왔습니다. 블로그·설정을 확인한 뒤 [시작]을 눌러 주세요.", 0.0)
+        self._save_ui_state()
+        self.topic_entry.focus_set()
 
     def _insert_tistory_v2_images(self, deck: dict, paths: list[Path]) -> None:
         from tistory_v2 import insert_slide_figures
@@ -54267,6 +54419,7 @@ class KeywordApp(ctk.CTk):
             slug=slug,
             meta_description=meta_description,
             result_queue=self.result_queue,
+            source_keyword=str(item.get("keyword") or title).strip(),
             reference_articles=extract_reference_article_sources(
                 str(item.get("reference_text") or ""),
                 item.get("source_urls") if isinstance(item.get("source_urls"), dict) else None,
@@ -54577,6 +54730,7 @@ class KeywordApp(ctk.CTk):
             self.open_published_post_button.configure(state="disabled")
         self.tistory_automation_worker = TistoryAutomationWorker(
             title=title,
+            source_keyword=self._selected_or_manual_keyword() or self.current_keyword,
             article_html=article_html,
             result_queue=self._writing_result_queue(),
             delay_seconds=3.0,
@@ -56460,6 +56614,7 @@ class KeywordApp(ctk.CTk):
                 if not (self.tistory_automation_worker and self.tistory_automation_worker.is_alive()):
                     self.tistory_automation_worker = TistoryAutomationWorker(
                         title=tistory.get("title", ""),
+                        source_keyword=tistory.get("source_keyword", ""),
                         article_html=tistory.get("html", ""),
                         result_queue=self._writing_result_queue(),
                         thumbnail_path=tistory.get("thumbnail_path", ""),
@@ -56619,6 +56774,7 @@ class KeywordApp(ctk.CTk):
                 if not (self.tistory_automation_worker and self.tistory_automation_worker.is_alive()):
                     self.tistory_automation_worker = TistoryAutomationWorker(
                         title=tistory.get("title", ""),
+                        source_keyword=tistory.get("source_keyword", ""),
                         article_html=tistory.get("html", ""),
                         result_queue=self.result_queue,
                         thumbnail_path=tistory.get("thumbnail_path", ""),

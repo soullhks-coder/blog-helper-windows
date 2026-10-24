@@ -18,6 +18,7 @@ class SidebarMenuLabelTests(unittest.TestCase):
             {
                 "home": "홈",
                 "writing": "블로그글쓰기",
+                "keywords": "키워드관리",
                 "automation": "블로그자동화",
                 "naver_blog": "N블로그자동화",
                 "tistory_v2": "티스토리 V2",

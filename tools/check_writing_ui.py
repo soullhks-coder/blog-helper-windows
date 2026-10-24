@@ -180,6 +180,7 @@ def main() -> None:
             button_pages = {
                 "home_nav_button": "home",
                 "writing_nav_button": "writing",
+                "keywords_nav_button": "keywords",
                 "automation_nav_button": "automation",
                 "naver_blog_nav_button": "naver_blog",
                 "tistory_v2_nav_button": "tistory_v2",
@@ -1193,6 +1194,7 @@ def main() -> None:
             for page_name, button_name in {
                 "home": "home_nav_button",
                 "writing": "writing_nav_button",
+                "keywords": "keywords_nav_button",
                 "automation": "automation_nav_button",
                 "naver_blog": "naver_blog_nav_button",
                 "tistory_v2": "tistory_v2_nav_button",
@@ -2016,6 +2018,7 @@ def main() -> None:
             sidebar_button_names = {
                 "home": "home_nav_button",
                 "writing": "writing_nav_button",
+                "keywords": "keywords_nav_button",
                 "automation": "automation_nav_button",
                 "naver_blog": "naver_blog_nav_button",
                 "tistory_v2": "tistory_v2_nav_button",
@@ -2151,6 +2154,7 @@ def main() -> None:
             settle(220)
             for page_name, page_frame in app._page_frame_map().items():
                 app._switch_page(page_name)
+                page_frame = app._page_frame_map()[page_name]  # lazy pages can replace their placeholder
                 settle(220)
                 app._finish_theme_paint(force=True)
                 settle(80)
