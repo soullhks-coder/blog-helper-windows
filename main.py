@@ -24,6 +24,7 @@ import traceback
 import webbrowser
 import weakref
 import xml.etree.ElementTree as ET
+from settings_persistence import PROFILE_FIELDS, PROFILE_IDENTITIES, SettingsFile, SettingsReadError, merge_settings
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -4206,6 +4207,7 @@ def normalize_writing_prompt_active_target(
 
 
 class AppStateStore:
+    _read_only_paths: set[str] = set()
     PRESERVE_ON_AUTOSAVE = (
         "blog_url",
         "username",
@@ -4258,30 +4260,38 @@ class AppStateStore:
 
     @staticmethod
     def _write_payload(payload: dict) -> None:
-        temporary_state_file = STATE_FILE.with_suffix(".json.tmp")
-        temporary_state_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary_state_file.replace(STATE_FILE)
+        SettingsFile(STATE_FILE).update(lambda _previous: payload)
+
+    @staticmethod
+    def copy_tracking(source, target) -> None:
+        for name in ("_state_baseline", "_state_source", "_state_read_error"):
+            if name in vars(source):
+                setattr(target, name, copy.deepcopy(getattr(source, name)))
+
+    @staticmethod
+    def _remember(settings) -> WordPressSettings:
+        settings._state_baseline = asdict(settings)
+        settings._state_source = str(STATE_FILE.resolve())
+        return settings
 
     @staticmethod
     def load() -> WordPressSettings:
-        if not STATE_FILE.exists():
-            return PromptFileStore.load_into(WordPressSettings())
-
         try:
-            payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return PromptFileStore.load_into(WordPressSettings())
-
-        payload, migrated = AppStateStore._apply_settings_migrations(payload)
-        migrated = migrate_design_assets_payload(payload) or migrated
-        if migrated:
-            try:
-                AppStateStore._write_payload(payload)
-            except OSError:
-                pass
+            def migrate(payload):
+                if payload:
+                    payload, _changed = AppStateStore._apply_settings_migrations(payload)
+                    migrate_design_assets_payload(payload)
+                return payload
+            payload, _previous = SettingsFile(STATE_FILE).update(migrate)
+        except OSError as exc:
+            settings = PromptFileStore.load_into(WordPressSettings())
+            settings._state_read_error = str(exc)
+            AppStateStore._read_only_paths.add(str(STATE_FILE.resolve()))
+            append_runtime_log("SETTINGS", f"설정 읽기 실패 · 원본 보호 · {type(exc).__name__}")
+            return AppStateStore._remember(settings)
+        AppStateStore._read_only_paths.discard(str(STATE_FILE.resolve()))
+        if not payload:
+            return AppStateStore._remember(PromptFileStore.load_into(WordPressSettings()))
 
         username = payload.get("username", "")
         fallback_password = payload.get("app_password_fallback", "")
@@ -4696,10 +4706,15 @@ class AppStateStore:
             settings.prompt_sets = PromptFileStore.load_prompt_sets(settings)
         if not settings.selected_prompt_id or not any(item.get("id") == settings.selected_prompt_id for item in settings.prompt_sets):
             settings.selected_prompt_id = settings.prompt_sets[0]["id"] if settings.prompt_sets else ""
-        return settings
+        return AppStateStore._remember(settings)
 
     @staticmethod
-    def save(settings: WordPressSettings, save_secrets: bool = True) -> None:
+    def save(settings: WordPressSettings, save_secrets: bool = True, *,
+             allow_profile_clear: bool = False) -> None:
+        if getattr(settings, "_state_read_error", ""):
+            if not save_secrets:
+                return  # Read-only startup can populate widgets without saving defaults.
+            raise SettingsReadError(settings._state_read_error)
         payload = asdict(settings)
         for prompt_key in (
             "title_prompt_template",
@@ -4707,73 +4722,82 @@ class AppStateStore:
             *PromptFileStore.FILES.keys(),
         ):
             payload.pop(prompt_key, None)
-        previous_payload = {}
-        if STATE_FILE.exists():
-            try:
-                previous_payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                previous_payload = {}
-        if not save_secrets:
+        baseline = getattr(settings, "_state_baseline", None)
+        if getattr(settings, "_state_source", "") != str(STATE_FILE.resolve()):
+            baseline = None
+        credentials = {
+            "app_password": f"{KEYCHAIN_WP_PREFIX}{settings.username}",
+            "gpt_api_key": KEYCHAIN_GPT_ACCOUNT,
+            "gemini_api_key": KEYCHAIN_GEMINI_ACCOUNT,
+            "imagen_api_key": KEYCHAIN_IMAGEN_ACCOUNT,
+            "public_data_api_key": KEYCHAIN_PUBLIC_DATA_ACCOUNT,
+            "blogspot_access_token": KEYCHAIN_BLOGSPOT_ACCOUNT,
+            "blogspot_client_secret": KEYCHAIN_BLOGSPOT_CLIENT_SECRET,
+            "blogspot_refresh_token": KEYCHAIN_BLOGSPOT_REFRESH_TOKEN,
+        }
+        baseline = copy.deepcopy(baseline) if baseline is not None else None
+        for name in credentials:
+            payload[name] = ""
+            if baseline is not None:
+                baseline[name] = ""
+        def merge(previous):
+            preserve = AppStateStore.PRESERVE_ON_AUTOSAVE
+            if allow_profile_clear:
+                preserve = tuple(key for key in preserve if not key.startswith(("naver_", "tistory_", "blogspot_")))
+            result = merge_settings(previous, payload, baseline=baseline,
+                preserve_empty=preserve, autosave=not save_secrets,
+                protect_profiles=not allow_profile_clear)
+            for name in credentials:
+                fallback = name + "_fallback"
+                value = str(getattr(settings, name) or "")
+                unchanged = (getattr(settings, "_state_baseline", {}).get(name) == value
+                             and baseline is not None)
+                result[fallback] = (previous.get(fallback, "") or value) if not save_secrets else (
+                    previous.get(fallback, value) if unchanged else value)
+            return result
+        # Do not launch up to eight keychain processes for an unchanged save,
+        # or rewrite unrelated credentials when only a UI option changed.
+        def commit_credentials(saved, previous):
+            if not save_secrets:
+                return
+            for name, account in credentials.items():
+                fallback = name + "_fallback"
+                value = saved.get(fallback, "")
+                account_changed = name == "app_password" and saved.get("username") != previous.get("username")
+                if value and (value != previous.get(fallback) or account_changed):
+                    if name == "app_password":
+                        account = f"{KEYCHAIN_WP_PREFIX}{saved.get('username', '')}"
+                    KeychainStore.save_secret(account, value)
+        saved, _previous = SettingsFile(STATE_FILE).update(merge, on_commit=commit_credentials)
+        if not save_secrets and not allow_profile_clear:
             for key in AppStateStore.PRESERVE_ON_AUTOSAVE:
-                if not str(payload.get(key) or "").strip() and str(previous_payload.get(key) or "").strip():
-                    payload[key] = previous_payload[key]
-        payload["app_password"] = ""
-        payload["app_password_fallback"] = settings.app_password if save_secrets else (previous_payload.get("app_password_fallback", "") or settings.app_password)
-        payload["gpt_api_key"] = ""
-        payload["gpt_api_key_fallback"] = settings.gpt_api_key if save_secrets else (previous_payload.get("gpt_api_key_fallback", "") or settings.gpt_api_key)
-        payload["gemini_api_key"] = ""
-        payload["gemini_api_key_fallback"] = settings.gemini_api_key if save_secrets else (previous_payload.get("gemini_api_key_fallback", "") or settings.gemini_api_key)
-        payload["imagen_api_key"] = ""
-        payload["imagen_api_key_fallback"] = settings.imagen_api_key if save_secrets else (previous_payload.get("imagen_api_key_fallback", "") or settings.imagen_api_key)
-        payload["public_data_api_key"] = ""
-        payload["public_data_api_key_fallback"] = settings.public_data_api_key if save_secrets else (previous_payload.get("public_data_api_key_fallback", "") or settings.public_data_api_key)
-        payload["blogspot_access_token"] = ""
-        payload["blogspot_access_token_fallback"] = settings.blogspot_access_token if save_secrets else (previous_payload.get("blogspot_access_token_fallback", "") or settings.blogspot_access_token)
-        payload["blogspot_client_secret"] = ""
-        payload["blogspot_client_secret_fallback"] = settings.blogspot_client_secret if save_secrets else (previous_payload.get("blogspot_client_secret_fallback", "") or settings.blogspot_client_secret)
-        payload["blogspot_refresh_token"] = ""
-        payload["blogspot_refresh_token_fallback"] = settings.blogspot_refresh_token if save_secrets else (previous_payload.get("blogspot_refresh_token_fallback", "") or settings.blogspot_refresh_token)
-        if save_secrets and settings.app_password:
-            KeychainStore.save_secret(
-                f"{KEYCHAIN_WP_PREFIX}{settings.username}",
-                settings.app_password,
-            )
-        if save_secrets and settings.gpt_api_key:
-            KeychainStore.save_secret(KEYCHAIN_GPT_ACCOUNT, settings.gpt_api_key)
-        if save_secrets and settings.gemini_api_key:
-            KeychainStore.save_secret(KEYCHAIN_GEMINI_ACCOUNT, settings.gemini_api_key)
-        if save_secrets and settings.imagen_api_key:
-            KeychainStore.save_secret(KEYCHAIN_IMAGEN_ACCOUNT, settings.imagen_api_key)
-        if save_secrets and settings.public_data_api_key:
-            KeychainStore.save_secret(KEYCHAIN_PUBLIC_DATA_ACCOUNT, settings.public_data_api_key)
-        if save_secrets and settings.blogspot_access_token:
-            KeychainStore.save_secret(KEYCHAIN_BLOGSPOT_ACCOUNT, settings.blogspot_access_token)
-        if save_secrets and settings.blogspot_client_secret:
-            KeychainStore.save_secret(KEYCHAIN_BLOGSPOT_CLIENT_SECRET, settings.blogspot_client_secret)
-        if save_secrets and settings.blogspot_refresh_token:
-            KeychainStore.save_secret(KEYCHAIN_BLOGSPOT_REFRESH_TOKEN, settings.blogspot_refresh_token)
-        if payload == previous_payload:
-            return
-        AppStateStore._write_payload(payload)
+                if not getattr(settings, key, None) and saved.get(key):
+                    setattr(settings, key, copy.deepcopy(saved[key]))
+            for key in PROFILE_FIELDS:
+                if not isinstance(saved.get(key), list) or not isinstance(getattr(settings, key, None), list):
+                    continue
+                previous_profiles = {p.get("profile_scope") or p.get("name"): p
+                    for p in saved.get(key, []) if isinstance(p, dict)}
+                for profile in getattr(settings, key, []):
+                    old = previous_profiles.get(profile.get("profile_scope") or profile.get("name"), {})
+                    for name in PROFILE_IDENTITIES:
+                        if not profile.get(name) and old.get(name):
+                            profile[name] = old[name]
+        AppStateStore._remember(settings)
 
     @staticmethod
     def update_fields(**values) -> None:
         """키체인과 전체 설정 객체를 다시 읽지 않고 소수 필드만 저장합니다."""
-        try:
-            payload = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        changed = False
-        for key, value in values.items():
-            if payload.get(key) != value:
-                payload[key] = value
-                changed = True
-        if not changed:
-            return
-        AppStateStore._write_payload(payload)
+        if str(STATE_FILE.resolve()) in AppStateStore._read_only_paths:
+            return  # Startup already warned; keep navigation/geometry in memory only.
+        SettingsFile(STATE_FILE).update(lambda payload: {**payload, **values})
 
 
 class KeychainStore:
+    # Keep a locked/unresponsive OS credential store from blocking the UI
+    # indefinitely. Callers retain their existing saved fallback on failure.
+    TIMEOUT_SECONDS = 5
+
     @staticmethod
     def load_secret(account: str) -> str:
         if not account:
@@ -4801,9 +4825,10 @@ class KeychainStore:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=KeychainStore.TIMEOUT_SECONDS,
             )
             return result.stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return ""
 
     @staticmethod
@@ -4820,36 +4845,29 @@ class KeychainStore:
             except Exception:
                 return False
 
-        subprocess.run(
-            [
-                "security",
-                "delete-generic-password",
-                "-a",
-                account,
-                "-s",
-                KEYCHAIN_SERVICE,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        result = subprocess.run(
-            [
-                "security",
-                "add-generic-password",
-                "-a",
-                account,
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-                password,
-                "-U",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.returncode == 0
+        # -U updates an existing item. Deleting first both doubles the process
+        # launches and loses the previous credential if the update then fails.
+        try:
+            result = subprocess.run(
+                [
+                    "security",
+                    "add-generic-password",
+                    "-a",
+                    account,
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-w",
+                    password,
+                    "-U",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=KeychainStore.TIMEOUT_SECONDS,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
 
     @staticmethod
     def delete_secret(account: str) -> None:
@@ -4865,19 +4883,23 @@ class KeychainStore:
                 pass
             return
 
-        subprocess.run(
-            [
-                "security",
-                "delete-generic-password",
-                "-a",
-                account,
-                "-s",
-                KEYCHAIN_SERVICE,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            subprocess.run(
+                [
+                    "security",
+                    "delete-generic-password",
+                    "-a",
+                    account,
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=KeychainStore.TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 class WordPressClient:
@@ -9217,6 +9239,7 @@ def is_tistory_auth_cookie(cookie: dict) -> bool:
 
 
 def normalize_tistory_storage_state(state: dict) -> dict:
+    from math import isfinite
     if not isinstance(state, dict):
         return {"cookies": [], "origins": []}
     normalized_state = dict(state)
@@ -9232,7 +9255,13 @@ def normalize_tistory_storage_state(state: dict) -> dict:
         if not isinstance(cookie, dict):
             continue
         normalized = dict(cookie)
-        if is_tistory_auth_cookie(normalized) and float(normalized.get("expires", -1) or -1) < 0:
+        try:
+            expires = float(normalized.get("expires", -1))
+        except (TypeError, ValueError):
+            continue
+        if not isfinite(expires):
+            continue
+        if is_tistory_auth_cookie(normalized) and expires < 0:
             normalized["expires"] = persistent_expires
         key = (
             str(normalized.get("domain") or ""),
@@ -9250,34 +9279,47 @@ def normalize_tistory_storage_state(state: dict) -> dict:
 
 
 def load_tistory_storage_state(profile_scope: str = TISTORY_PROFILE_SCOPES[0]) -> dict:
+    from tistory_session import load_snapshot
     _profile_dir, state_file = tistory_profile_paths(profile_scope)
-    if not state_file.exists():
-        return {"cookies": [], "origins": []}
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return {"cookies": [], "origins": []}
+    state, recovered = load_snapshot(state_file)
+    if recovered:
+        append_runtime_log("TISTORY", "로그인 기록의 이전 정상 사본을 읽었습니다.")
     return normalize_tistory_storage_state(state)
+
+
+def restore_tistory_session_cookies(context, profile_scope: str = TISTORY_PROFILE_SCOPES[0]) -> int:
+    """Keep current persistent-profile cookies; restore only missing valid ones."""
+    from tistory_session import missing_cookies
+    try:
+        state = load_tistory_storage_state(profile_scope)
+        recovered = missing_cookies(state.get("cookies", []), context.cookies())
+        if recovered:
+            context.add_cookies(recovered)
+        append_runtime_log("TISTORY", f"현재 Chrome 로그인 정보 유지 · 누락 쿠키 {len(recovered)}개만 복원")
+        return len(recovered)
+    except Exception as exc:
+        # A broken backup must not prevent using the persistent Chrome profile.
+        append_runtime_log("TISTORY", f"로그인 기록 보완 생략: {type(exc).__name__}")
+        return 0
 
 
 def save_tistory_storage_state(
     context,
     profile_scope: str = TISTORY_PROFILE_SCOPES[0],
+    *,
+    authenticated: bool = False,
 ) -> None:
+    if not authenticated:
+        return
+    from tistory_session import save_snapshot
     try:
         state = context.storage_state()
         normalized_state = normalize_tistory_storage_state(state)
         _profile_dir, state_file = tistory_profile_paths(profile_scope)
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(
-            json.dumps(normalized_state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        cookies = normalized_state.get("cookies", [])
-        if cookies:
-            context.add_cookies(cookies)
-    except Exception:
-        pass
+        save_snapshot(state_file, normalized_state, authenticated=True,
+                      is_auth_cookie=is_tistory_auth_cookie)
+    except Exception as exc:
+        append_runtime_log("TISTORY", f"로그인 기록 저장 실패 · 기존 사본 유지: {type(exc).__name__}")
 
 
 def load_blogspot_storage_state(profile_scope: str = BLOGSPOT_PROFILE_SCOPES[0]) -> dict:
@@ -19577,9 +19619,7 @@ def run_tistory_profile_bootstrap(
     with sync_playwright() as playwright:
         context = launch_tistory_persistent_context(playwright, profile_scope)
         try:
-            saved_state = load_tistory_storage_state(profile_scope)
-            if saved_state.get("cookies"):
-                context.add_cookies(saved_state["cookies"])
+            restore_tistory_session_cookies(context, profile_scope)
             page = context.pages[-1] if context.pages else context.new_page()
             page.set_default_timeout(20_000)
             page.set_default_navigation_timeout(60_000)
@@ -19594,14 +19634,15 @@ def run_tistory_profile_bootstrap(
                 timeout_seconds=login_timeout_seconds,
                 event_type="tistory_profile_progress",
             )
-            save_tistory_storage_state(context, profile_scope)
+            save_tistory_storage_state(context, profile_scope, authenticated=True)
             return {
                 "profile_scope": profile_scope,
                 "kakao_account": account_text,
                 "write_url": write_url,
             }
         finally:
-            save_tistory_storage_state(context, profile_scope)
+            # Native Chrome persists its own latest cookies on close. A later
+            # logout/error must not overwrite the editor-verified snapshot.
             context.close()
 
 
@@ -19659,10 +19700,7 @@ def run_tistory_playwright_automation(
         page = None
         try:
             check_writing_cancelled(cancel_event)
-            saved_state = load_tistory_storage_state(profile_scope)
-            saved_cookies = saved_state.get("cookies", []) if isinstance(saved_state, dict) else []
-            if saved_cookies:
-                context.add_cookies(saved_cookies)
+            restore_tistory_session_cookies(context, profile_scope)
             page = context.pages[-1] if context.pages else context.new_page()
             page.set_default_timeout(20_000)
             page.set_default_navigation_timeout(60_000)
@@ -19700,7 +19738,7 @@ def run_tistory_playwright_automation(
             if "/manage/newpost" not in (page.url or ""):
                 page.goto(write_url, wait_until="domcontentloaded")
 
-            save_tistory_storage_state(context, profile_scope)
+            save_tistory_storage_state(context, profile_scope, authenticated=True)
             result_queue.put(("tistory_progress", "로그인 확인 완료. 프롬프트 순서에 따라 제목·본문·이미지를 자동 입력하고 있습니다..."))
             page.wait_for_timeout(1800)
             check_writing_cancelled(cancel_event)
@@ -20075,10 +20113,9 @@ def run_tistory_playwright_automation(
                 raise error from exc
             raise
         finally:
-            try:
-                save_tistory_storage_state(context, profile_scope)
-            finally:
-                context.close()
+            # Keep the snapshot taken directly after login verification;
+            # finally can run after a manual logout, failed page or closed tab.
+            context.close()
 
 
 def close_active_browser_tab(browser_name: str) -> None:
@@ -27314,6 +27351,10 @@ class KeywordApp(ctk.CTk):
         except tk.TclError:
             self._window_icon_image = None
         self.wordpress_settings = settings
+        if getattr(settings, "_state_read_error", ""):
+            self.after(1000, lambda: messagebox.showwarning(
+                "설정 파일 확인 필요", settings._state_read_error +
+                "\n설정 저장을 중단했습니다. 설정 파일을 복구한 뒤 프로그램을 다시 실행해 주세요."))
         ctk.set_appearance_mode("light" if self.wordpress_settings.app_theme == "화이트테마" else "dark")
         self.geometry(self._safe_window_geometry(self.wordpress_settings.window_geometry))
         self.minsize(860, 600)
@@ -36048,7 +36089,7 @@ class KeywordApp(ctk.CTk):
         var = getattr(self, "naver_kin_profile_vars", {}).get(f"{index}:nickname")
         if var is not None:
             var.set("")
-        AppStateStore.save(self.wordpress_settings, save_secrets=False)
+        AppStateStore.save(self.wordpress_settings, save_secrets=False, allow_profile_clear=True)
         self._refresh_naver_kin_profile_cards()
         if hasattr(self, "naver_kin_profile_status_label"):
             self.naver_kin_profile_status_label.configure(
@@ -36374,7 +36415,7 @@ class KeywordApp(ctk.CTk):
                 self.wordpress_settings.naver_blog_active_profile,
                 persist=False,
             )
-            AppStateStore.save(self.wordpress_settings, save_secrets=False)
+            AppStateStore.save(self.wordpress_settings, save_secrets=False, allow_profile_clear=True)
             self._refresh_naver_profile_cards()
             self.naver_blog_status_label.configure(text=f"{name} 프로필 입력값을 초기화했습니다.", text_color="#ffcc66")
 
@@ -50043,7 +50084,11 @@ class KeywordApp(ctk.CTk):
         except Exception:
             return
         self.wordpress_settings = settings
-        AppStateStore.save(settings, save_secrets=False)
+        try:
+            AppStateStore.save(settings, save_secrets=False)
+        except OSError as exc:
+            append_runtime_log("SETTINGS", f"자동 저장 보류 · {type(exc).__name__}")
+            self._update_quick_status("설정 저장 보류", str(exc), "#ff6b6b")
 
     def _on_reference_text_changed(self, _event=None) -> None:
         self._mark_text_input_activity(_event)
@@ -51104,6 +51149,7 @@ class KeywordApp(ctk.CTk):
             settings.category_id = None
         if settings.category_id and settings.category_id not in settings.category_ids:
             settings.category_ids.append(settings.category_id)
+        AppStateStore.copy_tracking(self.wordpress_settings, settings)
         return settings
 
     def _save_wordpress_settings(self) -> None:

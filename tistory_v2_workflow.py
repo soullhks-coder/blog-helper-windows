@@ -165,9 +165,7 @@ class TistoryV2Workflow:
             context = api.launch_tistory_persistent_context(playwright, scope)
             page = None
             try:
-                state = api.load_tistory_storage_state(scope)
-                if state.get("cookies"):
-                    context.add_cookies(state["cookies"])
+                api.restore_tistory_session_cookies(context, scope)
                 # Open a dedicated V2 tab rather than replacing an existing tab.
                 page = context.new_page()
                 page.set_default_timeout(20_000)
@@ -183,7 +181,7 @@ class TistoryV2Workflow:
                 page.goto(snapshot["write_url"], wait_until="domcontentloaded")
                 page, _ = api.wait_for_tistory_editor(context, page, snapshot["write_url"], events,
                                                        check_cancel=lambda: check_cancel(cancel))
-                api.save_tistory_storage_state(context, scope)
+                api.save_tistory_storage_state(context, scope, authenticated=True)
                 check_cancel(cancel)
                 script = api.build_tistory_editor_automation_script(
                     title, body, input_mode=profile["input_mode"],
@@ -212,7 +210,6 @@ class TistoryV2Workflow:
                                                    expected_sizes=deck_slide_sizes(deck))
                 check_cancel(cancel)
                 api.enter_tistory_tags_native(page, tags[:8], events)
-                api.save_tistory_storage_state(context, scope)
                 notify("editor_ready", "티스토리 입력 완료 · 썸네일 1장 + 슬라이드 10장 / 2장씩 콜라주 5개. Chrome에서 확인해 주세요.")
                 api.append_runtime_log("TISTORY V2", f"편집기 입력 완료: {profile['name']} · 슬라이드 10장 · 콜라주 5개")
                 self._wait_for_browser(page, cancel)
@@ -226,10 +223,9 @@ class TistoryV2Workflow:
                     self._wait_for_browser(page, cancel)
                 raise
             finally:
-                try:
-                    api.save_tistory_storage_state(context, scope)
-                finally:
-                    context.close()
+                # A manual review can end with logout or a closed tab. Only
+                # the confirmed login above is eligible for a backup snapshot.
+                context.close()
 
     @staticmethod
     def _wait_for_browser(page, cancel):

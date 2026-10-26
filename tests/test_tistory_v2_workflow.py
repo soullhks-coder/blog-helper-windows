@@ -87,8 +87,8 @@ class TistoryV2WorkflowTests(unittest.TestCase):
                         "thumbnail": {"svg": "<svg/>", "size": 400}}
             with patch("playwright.sync_api.sync_playwright", return_value=session), \
                  patch.object(main, "launch_tistory_persistent_context", return_value=context) as launch, \
-                 patch.object(main, "load_tistory_storage_state", return_value={"cookies": [{"name": "test-cookie"}]}), \
-                 patch.object(main, "save_tistory_storage_state"), \
+                 patch.object(main, "restore_tistory_session_cookies") as restore, \
+                 patch.object(main, "save_tistory_storage_state") as save_session, \
                  patch.object(main, "wait_for_tistory_editor", return_value=(page, "")), \
                  patch.object(main, "render_svg_to_png", return_value=Path(temporary) / "thumb.png"), \
                  patch.object(main, "enter_tistory_tags_native"), \
@@ -102,7 +102,8 @@ class TistoryV2WorkflowTests(unittest.TestCase):
                 result = self.workflow.fill_editor(snapshot, deck, paths, Path(temporary), threading.Event(), lambda _: None, notify)
             self.assertEqual(result["collage_count"], 5)
             launch.assert_called_once_with(playwright, profile["profile_scope"])
-            context.add_cookies.assert_called_once()
+            restore.assert_called_once_with(context, profile["profile_scope"])
+            save_session.assert_called_once_with(context, profile["profile_scope"], authenticated=True)
             page.goto.assert_called_once_with(snapshot["write_url"], wait_until="domcontentloaded")
             insert.assert_called_once()
             self.assertEqual(len(insert.call_args.args[1]), 10)

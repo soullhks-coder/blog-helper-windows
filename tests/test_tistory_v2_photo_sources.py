@@ -124,6 +124,7 @@ class PhotoSourceTests(unittest.TestCase):
             extract_tistory_prompt_tags=lambda body: (body, ['서울']),
             render_svg_to_png=Mock(return_value=self.directory / 'thumbnail.png'),
             launch_tistory_persistent_context=Mock(return_value=context), load_tistory_storage_state=Mock(return_value={}),
+            restore_tistory_session_cookies=Mock(),
             save_tistory_storage_state=Mock(), wait_for_tistory_editor=Mock(return_value=(page, '')),
             build_tistory_editor_automation_script=Mock(return_value='script'), enter_tistory_tags_native=Mock(), append_runtime_log=Mock())
         workflow = TistoryV2Workflow(None, api)
