@@ -47,7 +47,7 @@ class SettingsFileTests(unittest.TestCase):
         self.path.write_text("broken", encoding="utf-8")
         with self.assertRaises(SettingsReadError):
             self.store.update(lambda _previous: {"account": "default"})
-        self.assertEqual(self.path.read_text(), "broken")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "broken")
 
     def test_interrupted_replace_keeps_primary_and_removes_unique_temporary(self):
         self.store.update(lambda _previous: {"account": "good"})
@@ -76,7 +76,7 @@ class SettingsFileTests(unittest.TestCase):
                 self.fail("Concurrent state transaction did not finish")
             self.assertEqual(process.exitcode, 0)
         self.assertEqual(len(self.store.read()), 30)
-        self.assertIsInstance(json.loads(self.store.backup.read_text()), dict)
+        self.assertIsInstance(json.loads(self.store.backup.read_text(encoding="utf-8")), dict)
 
     def test_same_process_lock_has_a_bounded_wait(self):
         errors = []
@@ -119,7 +119,7 @@ class AppStateRetentionTests(unittest.TestCase):
         self.save_initial()
         stale = self.main.WordPressSettings(tistory_profiles=self.main.normalize_tistory_profiles([]), writing_topic="new topic")
         self.main.AppStateStore.save(stale, save_secrets=False)
-        saved = json.loads(self.path.read_text())
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(saved["tistory_profiles"][1]["blog_url"], self.profiles[1]["blog_url"])
         self.assertEqual(saved["tistory_profiles"][1]["kakao_account"], "fixture")
         self.assertEqual(saved["writing_topic"], "new topic")
@@ -134,7 +134,7 @@ class AppStateRetentionTests(unittest.TestCase):
         stale.tistory_profiles[0]["last_prompt_id"] = "selected-prompt"
         stale.writing_topic = "edited topic"
         self.main.AppStateStore.save(stale, save_secrets=False)
-        saved = json.loads(self.path.read_text())
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(saved["tistory_profiles"][2]["blog_url"], "https://third.tistory.com")
         self.assertEqual(saved["tistory_profiles"][0]["last_prompt_id"], "selected-prompt")
         self.assertEqual(saved["window_geometry"], "1500x900")
@@ -145,14 +145,14 @@ class AppStateRetentionTests(unittest.TestCase):
         settings = self.main.AppStateStore.load()
         settings.tistory_profiles[1].update(blog_url="", write_url="", kakao_account="")
         self.main.AppStateStore.save(settings)
-        self.assertEqual(json.loads(self.path.read_text())["tistory_profiles"][1]["blog_url"], "")
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["tistory_profiles"][1]["blog_url"], "")
 
     def test_explicit_profile_reset_without_secret_save_is_not_backfilled(self):
         self.save_initial()
         settings = self.main.AppStateStore.load()
         settings.tistory_profiles[1].update(blog_url="", write_url="", kakao_account="")
         self.main.AppStateStore.save(settings, save_secrets=False, allow_profile_clear=True)
-        self.assertEqual(json.loads(self.path.read_text())["tistory_profiles"][1]["blog_url"], "")
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["tistory_profiles"][1]["blog_url"], "")
 
     def test_wordpress_credential_uses_the_current_persisted_username(self):
         settings = self.main.WordPressSettings(username="old", app_password="old-password")
@@ -196,7 +196,7 @@ class AppStateRetentionTests(unittest.TestCase):
                 second.join(3)
         self.assertEqual(errors, [])
         self.assertEqual(calls, ["first", "second"])
-        self.assertEqual(json.loads(self.path.read_text())["gpt_api_key_fallback"], "second")
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["gpt_api_key_fallback"], "second")
 
     def test_unrelated_and_identical_saves_do_not_rewrite_any_credential(self):
         settings = self.main.WordPressSettings(gpt_api_key="fixture-gpt", gemini_api_key="fixture-gemini")
@@ -225,7 +225,7 @@ class AppStateRetentionTests(unittest.TestCase):
         self.main.AppStateStore.update_fields(tistory_profiles=[])
         with self.assertRaises(SettingsReadError):
             self.main.AppStateStore.save(settings)
-        self.assertEqual(self.path.read_text(), "broken")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "broken")
 
     def test_blank_profile_protection_handles_old_null_fields(self):
         result = merge_settings({"tistory_profiles": None}, {"tistory_profiles": []}, autosave=True)

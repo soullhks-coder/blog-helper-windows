@@ -57,8 +57,8 @@ class TistorySessionPersistenceTests(unittest.TestCase):
         first, second = state("first"), state("second")
         self.assertTrue(self.save(first))
         self.assertTrue(self.save(second))
-        self.assertEqual(json.loads(self.path.read_text()), second)
-        self.assertEqual(json.loads(self.path.with_name(self.path.name + ".backup").read_text()), first)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), second)
+        self.assertEqual(json.loads(self.path.with_name(self.path.name + ".backup").read_text(encoding="utf-8")), first)
         self.assertEqual(list(self.directory.glob("*.tmp")), [])
 
     def test_identical_success_and_finally_snapshots_do_not_write_twice(self):
@@ -79,7 +79,7 @@ class TistorySessionPersistenceTests(unittest.TestCase):
         with patch.object(session.os, "replace", side_effect=replace):
             with self.assertRaises(OSError):
                 self.save(state("second"))
-        self.assertEqual(json.loads(self.path.read_text()), first)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), first)
         self.assertEqual(list(self.directory.glob("*.tmp")), [])
 
     def test_broken_json_uses_last_complete_backup_without_rewriting_primary(self):
@@ -90,7 +90,7 @@ class TistorySessionPersistenceTests(unittest.TestCase):
         payload, recovered = session.load_snapshot(self.path)
         self.assertTrue(recovered)
         self.assertEqual(payload, first)
-        self.assertEqual(self.path.read_text(), '{"cookies": [')
+        self.assertEqual(self.path.read_text(encoding="utf-8"), '{"cookies": [')
 
     def test_session_keep_days_still_applies_but_zero_expiry_stays_expired(self):
         normalized = main.normalize_tistory_storage_state({"cookies": [
@@ -163,7 +163,7 @@ class TistorySessionPersistenceTests(unittest.TestCase):
                 patch.object(main, "wait_for_tistory_editor", return_value=(page, "")), \
                 patch.object(main, "append_runtime_log"):
             main.run_tistory_profile_bootstrap("https://example.tistory.com/manage/newpost", queue.Queue())
-        snapshot = json.loads(self.path.read_text())
+        snapshot = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(snapshot["cookies"][0]["value"], "verified")
         context.storage_state.assert_called_once()
         context.close.assert_called_once()

@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-26",
-        "version": "v1.3.6",
+        "version": "v1.3.7",
         "category": "계정 보존·설정 저장 최적화",
         "title": "티스토리 로그인 기록과 전체 서비스 계정 정보 보호",
         "request": "등록한 티스토리 블로그 계정이 풀리는 현상을 점검하고 프로그램을 최적화해달라는 요청",
