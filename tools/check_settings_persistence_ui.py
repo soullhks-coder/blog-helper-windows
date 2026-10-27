@@ -96,6 +96,11 @@ def main():
         app.report_callback_exception = lambda *error: errors.append(error)
 
         def settle(delay=100):
+            # CTk's first Windows mainloop changes the native title bar and
+            # pumps Tk events before entering tk.mainloop(). On a slow runner
+            # that can consume the scheduled quit too early, then wait forever.
+            # Initialize the real window/event queue before arming our bound.
+            app.update()
             app.after(delay, app.quit)
             app.mainloop()
             app.update_idletasks()

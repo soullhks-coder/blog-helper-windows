@@ -127,6 +127,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          python tools/check_settings_persistence_ui.py
           python tools/check_windows_modal_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
@@ -136,7 +137,6 @@ jobs:
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
           python tools/check_blogspot_upload_sequence.py
-          python tools/check_settings_persistence_ui.py
           python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
@@ -257,6 +257,7 @@ jobs:
 
       - name: Check writing UI in dark and light themes
         run: |
+          python tools/check_settings_persistence_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
           python tools/check_macos_ime_ui.py
@@ -266,7 +267,6 @@ jobs:
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
           python tools/check_blogspot_upload_sequence.py
-          python tools/check_settings_persistence_ui.py
           python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py

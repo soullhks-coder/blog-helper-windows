@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-10-28",
-        "version": "v1.3.9",
+        "version": "v1.3.10",
         "category": "저장 데이터 보호",
         "title": "버튼 세트·썸네일·서비스 연결 설정의 초기화 범위와 백업 보강",
         "request": "저장한 본문 링크 버튼 세트도 사라져 원인을 확인하고 재발 방어 조치를 해달라는 요청",
