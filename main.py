@@ -1851,7 +1851,8 @@ def create_default_cardnews_png(
 
 
 def migrate_legacy_app_state() -> None:
-    if STATE_FILE.exists():
+    store = SettingsFile(STATE_FILE)
+    if STATE_FILE.exists() or store.backup.exists() or store.history_paths():
         return
     legacy_candidates = [
         Path(tempfile.gettempdir()) / "BlogHelper" / "app_state.json",
@@ -4233,6 +4234,8 @@ class AppStateStore:
         "home_target_platform",
         "home_selected_prompt_id",
         "blog_writing_preferences",
+        "writing_link_sets",
+        "thumbnail_presets",
         "blogspot_client_id",
         "blogspot_redirect_uri",
         "codex_cli_path",
@@ -4786,11 +4789,41 @@ class AppStateStore:
         AppStateStore._remember(settings)
 
     @staticmethod
-    def update_fields(**values) -> None:
+    def update_fields(**values) -> dict | None:
         """키체인과 전체 설정 객체를 다시 읽지 않고 소수 필드만 저장합니다."""
         if str(STATE_FILE.resolve()) in AppStateStore._read_only_paths:
             return  # Startup already warned; keep navigation/geometry in memory only.
-        SettingsFile(STATE_FILE).update(lambda payload: {**payload, **values})
+        saved, _previous = SettingsFile(STATE_FILE).update(lambda payload:
+            merge_settings(payload, values))
+        return saved
+
+    @staticmethod
+    def save_writing_link_set(item: dict, *, expected: dict | None, identity: str | None) -> dict:
+        """Commit one named set, never a cached copy of the entire library."""
+        if str(STATE_FILE.resolve()) in AppStateStore._read_only_paths:
+            raise SettingsReadError('설정 파일을 복구한 뒤 다시 저장해 주세요.')
+        normalized = normalize_writing_link_sets([item])
+        if len(normalized) != 1:
+            raise ValueError('저장할 버튼 세트가 올바르지 않습니다.')
+        item = normalized[0]
+        def upsert(payload):
+            sets = normalize_writing_link_sets(payload.get('writing_link_sets'))
+            current = next((row for row in sets if row['name'] == item['name']), None)
+            if current != expected and current != item:
+                raise SettingsReadError('다른 실행에서 같은 이름의 버튼 세트가 변경됐습니다. 다시 불러온 후 저장해 주세요.')
+            payload['writing_link_sets'] = merge_settings(
+                {'writing_link_sets': sets}, {'writing_link_sets': [item]},
+                explicit_named_updates=True)['writing_link_sets']
+            preferences = normalize_blog_writing_preferences(payload.get('blog_writing_preferences'))
+            if identity:
+                preferences.setdefault(identity, {}).update(
+                    writing_links=copy.deepcopy(item['links']), writing_links_enabled=item['enabled'],
+                    writing_link_set_name=item['name'])
+                payload['blog_writing_preferences'] = preferences
+            payload.update(writing_links=copy.deepcopy(item['links']), writing_links_enabled=item['enabled'])
+            return payload
+        saved, _previous = SettingsFile(STATE_FILE).update(upsert)
+        return saved
 
 
 class KeychainStore:
@@ -50251,6 +50284,7 @@ class KeywordApp(ctk.CTk):
             return False
         sets = normalize_writing_link_sets(self.wordpress_settings.writing_link_sets)
         existing = next((i for i, item in enumerate(sets) if item["name"] == name), None)
+        expected = copy.deepcopy(sets[existing]) if existing is not None else None
         if existing is not None and not messagebox.askyesno(
             "버튼 세트 덮어쓰기", f"'{name}' 세트를 현재 버튼 설정으로 덮어쓸까요?", parent=self,
         ):
@@ -50272,11 +50306,14 @@ class KeywordApp(ctk.CTk):
                 writing_links=links, writing_links_enabled=enabled, writing_link_set_name=name,
             )
         try:
-            AppStateStore.update_fields(writing_link_sets=sets, blog_writing_preferences=preferences,
-                                        writing_links=links, writing_links_enabled=enabled)
+            saved = AppStateStore.save_writing_link_set(item,
+                expected=expected, identity=identity)
         except OSError as exc:
             messagebox.showerror("버튼 저장 실패", str(exc), parent=self)
             return False
+        if isinstance(saved, dict):
+            sets = normalize_writing_link_sets(saved.get('writing_link_sets'))
+            preferences = normalize_blog_writing_preferences(saved.get('blog_writing_preferences'))
         self.wordpress_settings.writing_link_sets = sets
         self.wordpress_settings.blog_writing_preferences = preferences
         self.wordpress_settings.writing_links = copy.deepcopy(links)
@@ -51333,7 +51370,21 @@ class KeywordApp(ctk.CTk):
 
     def _reset_wordpress_settings(self) -> None:
         previous_username = self.wordpress_settings.username
-        self.wordpress_settings = WordPressSettings()
+        settings = copy.deepcopy(self.wordpress_settings)
+        defaults = WordPressSettings()
+        # This button belongs to the WordPress connection. Never replace the
+        # application-wide model: it also holds every other account/library.
+        for name in ('blog_url', 'username', 'app_password', 'category_name', 'category_id',
+                     'category_names', 'category_ids', 'categories', 'post_mode',
+                     'wordpress_daily_publish_limit', 'webmaster_submit_naver',
+                     'webmaster_submit_daum', 'webmaster_submit_google', 'webmaster_completion_message'):
+            setattr(settings, name, copy.deepcopy(getattr(defaults, name)))
+        try:
+            AppStateStore.save(settings)
+        except OSError as exc:
+            messagebox.showerror('초기화 중단', f'기존 설정을 보존했습니다. 저장 상태를 확인해 주세요.\n{exc}', parent=self)
+            return
+        self.wordpress_settings = settings
         for entry in (self.blog_url_entry, self.username_entry, self.password_entry):
             entry.delete(0, "end")
         self.category_menu.configure(values=["카테고리 없음"])
@@ -51345,9 +51396,11 @@ class KeywordApp(ctk.CTk):
         self.webmaster_naver_var.set(True)
         self.webmaster_daum_var.set(True)
         self.webmaster_google_var.set(True)
+        completion_var = self.__dict__.get('webmaster_completion_message_var')
+        if completion_var is not None:
+            completion_var.set(False)
         self.wordpress_daily_publish_limit_entry.delete(0, "end")
         self.wordpress_daily_publish_limit_entry.insert(0, "0")
-        AppStateStore.save(self.wordpress_settings)
         self._refresh_daily_publish_limit_statuses()
         KeychainStore.delete_secret(f"{KEYCHAIN_WP_PREFIX}{previous_username}")
         self._set_wp_status("● 설정 초기화 완료", "#9da7ba")

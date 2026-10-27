@@ -41,7 +41,7 @@ class WritingLinkSetTests(unittest.TestCase):
     def save(self, app, name="내 버튼", overwrite=True):
         with patch.object(main.simpledialog, "askstring", return_value=name), \
              patch.object(main.messagebox, "askyesno", return_value=overwrite), \
-             patch.object(main.AppStateStore, "update_fields") as store:
+             patch.object(main.AppStateStore, "save_writing_link_set") as store:
             result = app._save_writing_link_set()
         return result, store
 
@@ -52,7 +52,8 @@ class WritingLinkSetTests(unittest.TestCase):
         self.assertTrue(result)
         expected = {"name": "내 버튼", "links": app.links, "enabled": False}
         self.assertEqual(app.wordpress_settings.writing_link_sets, [expected])
-        self.assertEqual(store.call_args.kwargs["writing_link_sets"], [expected])
+        self.assertEqual(store.call_args.args, (expected,))
+        self.assertIsNone(store.call_args.kwargs['expected'])
         self.assertEqual(app.writing_link_set_menu.set.call_args.args, ("내 버튼",))
         self.assertEqual(app.wordpress_settings.blog_writing_preferences["wordpress"]["writing_link_set_name"], "내 버튼")
         app.links[0]["url"] = "https://changed.example"
@@ -95,7 +96,7 @@ class WritingLinkSetTests(unittest.TestCase):
         app = self.make_app()
         before = copy.deepcopy(app.wordpress_settings.blog_writing_preferences)
         with patch.object(main.simpledialog, "askstring", return_value="새 세트"), \
-             patch.object(main.AppStateStore, "update_fields", side_effect=OSError("fixture")), \
+             patch.object(main.AppStateStore, "save_writing_link_set", side_effect=OSError("fixture")), \
              patch.object(main.messagebox, "showerror") as error:
             self.assertFalse(app._save_writing_link_set())
         error.assert_called_once()

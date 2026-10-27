@@ -78,6 +78,8 @@ def main():
             settings = module.WordPressSettings(
                 app_theme="화이트테마" if args.theme == "light" else "블랙테마",
                 window_geometry="1450x950", app_title="Fixture initial title",
+                blog_url='https://fixture-wp.example', username='fixture-wp',
+                thumbnail_presets=module.normalize_thumbnail_presets(None),
                 tistory_profiles=tistory, tistory_active_profile=tistory[0]["name"],
                 tistory_blog_url=tistory[0]["blog_url"], tistory_write_url=tistory[0]["write_url"],
                 blogspot_profiles=blogspot, blogspot_active_profile=blogspot[0]["name"],
@@ -176,6 +178,36 @@ def main():
                 assert persisted["fixture_external_marker"] == "keep-external-field"
                 assert identities(persisted) == expected
             print("Settings offline Tk: UI-reader tracking survived two stale-object autosaves; external connection/geometry preserved", flush=True)
+
+            # Real named-save dialog callback commits only this set, then an
+            # unrelated full settings save must retain another writer's set.
+            app._switch_page('writing')
+            app._load_link_rows([{'button_text': 'Fixture link', 'url': 'https://fixture.example/button',
+                                 'full_width': True, 'position': '본문하단'}])
+            with patch.object(module.simpledialog, 'askstring', return_value='Fixture button set'):
+                assert app._save_writing_link_set()
+            module.AppStateStore.save_writing_link_set({
+                'name': 'Fixture external set', 'enabled': False,
+                'links': [{'button_text': 'External', 'url': 'https://fixture.example/external'}],
+            }, expected=None, identity='tistory:tistory_2')
+            external_designs = copy.deepcopy(store.read()['thumbnail_presets'])
+            external_designs[2].update(font_size=99, border_color='노란색', background_style='메모지')
+            store.update(lambda current: {**current, 'thumbnail_presets': external_designs})
+            for _ in range(2):
+                app._save_ui_state_now()
+                saved = store.read()
+                assert len(saved['writing_link_sets']) == 2
+                assert saved['thumbnail_presets'][2]['font_size'] == 99
+            protected = {key: copy.deepcopy(saved[key]) for key in (
+                'writing_link_sets', 'thumbnail_presets', 'tistory_profiles', 'blogspot_profiles',
+                'blog_writing_preferences', 'app_title', 'app_theme')}
+            app._reset_wordpress_settings()
+            app._save_ui_state_now()
+            saved = store.read()
+            assert {key: saved[key] for key in protected} == protected
+            assert not saved['blog_url'] and not saved['username']
+            assert store.history_paths()
+            print('Settings offline Tk: real button save, external set/design, repeated stale autosaves and WordPress-only reset preserved libraries/accounts', flush=True)
 
             app._reset_naver_profile(1)
             app._save_ui_state_now()
