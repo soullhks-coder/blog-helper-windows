@@ -128,20 +128,22 @@ class SettingsFile:
         return value
 
     def _read(self):
-        for path in (self.path, self.backup):
-            if not path.exists():
-                continue
-            try:
-                return self._decode(path), path != self.path
-            except (OSError, ValueError):
-                continue
+        try:
+            return self._decode(self.path), False
+        except (OSError, ValueError):
+            pass
         history = self.history_paths()
-        for path in history:
+        candidates = [path for path in (self.backup, *history) if path.is_file()]
+        # A successful named save has its own immutable snapshot, newer than
+        # .bak (which contains the preceding state). Do not lose that newest
+        # set by always choosing the older rotating backup first.
+        candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+        for path in candidates:
             try:
                 payload = self._decode(path)
-                if not critical_settings(payload):
+                if path != self.backup and not critical_settings(payload):
                     continue
-                if '-revision-' in path.name:
+                if path != self.backup and '-revision-' in path.name:
                     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')).hexdigest()[:16]
                     if not path.name.endswith(f'-{digest}.json'):
                         continue

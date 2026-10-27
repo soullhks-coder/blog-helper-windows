@@ -138,6 +138,14 @@ class SettingsHistorySafetyTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), latest)
         self.assertEqual(self.path.with_suffix('.json.corrupt').read_bytes(), b'{broken-primary')
 
+    def test_newer_successful_named_save_is_preferred_over_older_valid_rotating_backup(self):
+        self.store.update(lambda _: copy.deepcopy(self.good))
+        latest = {**self.good, 'writing_link_sets': [button_set('나중에 저장한 버튼')]}
+        self.store.update(lambda _: latest)
+        self.assertEqual(json.loads(self.store.backup.read_text(encoding='utf-8')), self.good)
+        self.path.write_bytes(b'{broken-primary')
+        self.assertEqual(self.store.read(), latest)
+
     def test_invalid_newest_history_is_skipped(self):
         self.store.update(lambda _: copy.deepcopy(self.good))
         for name, content in (('99990101T000000Z-revision-deadbeef.json', '{}'),
