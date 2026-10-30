@@ -127,6 +127,7 @@ class PhotoSourceTests(unittest.TestCase):
             restore_tistory_session_cookies=Mock(),
             save_tistory_storage_state=Mock(), wait_for_tistory_editor=Mock(return_value=(page, '')),
             build_tistory_editor_automation_script=Mock(return_value='script'), enter_tistory_tags_native=Mock(), append_runtime_log=Mock())
+        api.prepare_tistory_publish_thumbnail = Mock()
         workflow = TistoryV2Workflow(None, api)
         snapshot = {'profile': {'profile_scope': 'test', 'name': 'test', 'input_mode': 'HTML'},
                     'write_url': 'https://example.tistory.com/manage/newpost', 'thumbnail': {'svg': '<svg/>', 'size': 400}}

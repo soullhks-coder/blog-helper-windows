@@ -198,7 +198,7 @@ class OriginalPipelineTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["tag_names"], ["서울", "여행"])
             self.assertEqual(run.call_args.kwargs["tistory_v2_slide_paths"], paths)
 
-    def _editor_run(self, *, collage_ok=True, ads=False, review=False):
+    def _editor_run(self, *, collage_ok=True, ads=False, review=False, representative=False, representative_ok=True):
         order = []
         page, context = MagicMock(), MagicMock()
         page.url = "https://example.tistory.com/manage/newpost"
@@ -208,6 +208,9 @@ class OriginalPipelineTests(unittest.TestCase):
             order.append("body") or {"titleOk": True, "bodyOk": True}
             if script == "body-script" else 2 if args else None)
         with ExitStack() as stack:
+            directory = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            thumbnail = directory / 'current-liver.png'
+            thumbnail.write_bytes(b'current-liver-thumbnail')
             stack.enter_context(patch("playwright.sync_api.sync_playwright", return_value=MagicMock()))
             stack.enter_context(patch.object(main, "launch_tistory_persistent_context", return_value=context))
             stack.enter_context(patch.object(main, "load_tistory_storage_state", return_value={}))
@@ -226,29 +229,45 @@ class OriginalPipelineTests(unittest.TestCase):
             stack.enter_context(patch("tistory_v2_editor.insert_native_slide_pairs", side_effect=collage))
             stack.enter_context(patch.object(main, "enter_tistory_tags_native", side_effect=lambda *args: order.append("tags")))
             draft = stack.enter_context(patch.object(main, "click_tistory_draft_save_native", side_effect=lambda *args: order.append("draft") or True))
-            complete = stack.enter_context(patch.object(main, "click_tistory_complete_native"))
+            complete = stack.enter_context(patch.object(main, "click_tistory_complete_native",
+                side_effect=lambda *args, **kwargs: order.append('panel') or True))
+            attach = stack.enter_context(patch.object(main, 'attach_tistory_representative_image_file',
+                side_effect=lambda *args, **kwargs: order.append('thumbnail') or representative_ok))
             publish = stack.enter_context(patch.object(main, "click_tistory_public_publish_native"))
             def manual_wait(*args, **kwargs):
                 order.append("review")
                 self.assertEqual(args[:2], ("tistory", main.TISTORY_PROFILE_SCOPES[0]))
                 self.assertIs(args[2], page)
                 context.close.assert_not_called()  # Editor stays available for the user.
-                complete.assert_not_called()
+                if representative:
+                    complete.assert_called_once()
+                    self.assertEqual(Path(attach.call_args.args[1]), thumbnail.resolve())
+                else:
+                    complete.assert_not_called()
                 publish.assert_not_called()
                 draft.assert_not_called()
             wait = stack.enter_context(patch.object(main, "wait_for_manual_publish_completion", side_effect=manual_wait))
             def run():
                 return main.run_tistory_playwright_automation(page.url, "body-script", queue.Queue(),
                     auto_publish=not review,
+                    representative_image_path=str(thumbnail) if representative else '',
                     save_mode=main.TISTORY_SAVE_MODE_PUBLISH if review else main.TISTORY_SAVE_MODE_DRAFT,
                     tistory_v2_slide_paths=[f"/{i}.png" for i in range(10)],
                     tistory_v2_slide_size=[900, 600],
                     tistory_v2_slide_sizes=[[900, 600], [600, 900]] * 5,
                     tistory_v2_ads={"code": '<ins class="adsbygoogle"></ins>', "count": 2} if ads else None)
-            if collage_ok:
+            if collage_ok and representative and not representative_ok:
+                with self.assertRaisesRegex(RuntimeError, '대표이미지'):
+                    run()
+                self.assertEqual(order, ['body', 'collage', 'tags', 'panel', 'thumbnail'])
+                wait.assert_not_called()
+                draft.assert_not_called()
+                attention_wait.assert_called_once_with(page)
+            elif collage_ok:
                 success, result = run()
                 self.assertTrue(success)
-                self.assertEqual(order, ["body", "collage", "tags", "review" if review else "draft"])
+                self.assertEqual(order, ["body", "collage", "tags"] +
+                    (['panel', 'thumbnail'] if representative else []) + ["review" if review else "draft"])
                 if review:
                     wait.assert_called_once()
                     self.assertTrue(result["manual_completed"])
@@ -262,7 +281,10 @@ class OriginalPipelineTests(unittest.TestCase):
                 draft.assert_not_called()
                 attention_wait.assert_called_once_with(page)
             publish.assert_not_called()
-            complete.assert_not_called()
+            if representative and collage_ok:
+                complete.assert_called_once()
+            else:
+                complete.assert_not_called()
             context.close.assert_called_once()
 
     def test_native_collages_finish_before_tags_and_draft(self):
@@ -276,6 +298,12 @@ class OriginalPipelineTests(unittest.TestCase):
 
     def test_review_finishes_body_collages_and_tags_without_any_save_or_publish_click(self):
         self._editor_run(review=True, ads=True)
+
+    def test_review_prepares_current_representative_after_tags_before_manual_wait(self):
+        self._editor_run(review=True, representative=True)
+
+    def test_failed_review_representative_stops_before_manual_completion_or_publish(self):
+        self._editor_run(review=True, representative=True, representative_ok=False)
 
 
 if __name__ == "__main__":

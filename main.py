@@ -19479,6 +19479,32 @@ def _attach_tistory_representative_image_file(
     )
 
 
+def prepare_tistory_publish_thumbnail(
+    page,
+    image_path: str,
+    result_queue: queue.Queue,
+    *,
+    upload_webp: bool = False,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """Prepare the publish sheet's image without clicking its publish button."""
+    check_writing_cancelled(cancel_event)
+    path = Path(image_path).expanduser().resolve()
+    if not path.is_file():
+        raise RuntimeError(f'현재 글의 대표이미지 파일을 찾지 못했습니다: {path.name}')
+    fingerprint = hashlib.sha256(path.read_bytes()).hexdigest()
+    stop_options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+    if not click_tistory_complete_native(page, result_queue, **stop_options):
+        raise RuntimeError("티스토리 '완료' 버튼으로 발행 설정창을 열지 못했습니다. 대표이미지 확인을 위해 작업을 중단했습니다.")
+    check_writing_cancelled(cancel_event)
+    if not attach_tistory_representative_image_file(page, str(path), result_queue, upload_webp=upload_webp):
+        raise RuntimeError('현재 글의 대표이미지 교체를 확인하지 못해 작업을 중단했습니다.')
+    check_writing_cancelled(cancel_event)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != fingerprint:
+        raise RuntimeError('대표이미지 준비 중 원본 파일이 바뀌었습니다. 다시 준비해 주세요.')
+    append_runtime_log('TISTORY', f'현재 글 대표이미지 준비 확인: file={path.name}, sha256={fingerprint}')
+
+
 def launch_tistory_persistent_context(
     playwright,
     profile_scope: str = TISTORY_PROFILE_SCOPES[0],
@@ -19873,10 +19899,17 @@ def run_tistory_playwright_automation(
                 enter_tistory_tags_native(page, tag_names, result_queue)
                 check_writing_cancelled(cancel_event)
             if not auto_publish and not result_payload.get("modeOnly"):
+                if representative_image_path:
+                    prepare_tistory_publish_thumbnail(
+                        page, representative_image_path, result_queue,
+                        upload_webp=upload_webp, cancel_event=cancel_event,
+                    )
                 result_queue.put(
                     (
                         "tistory_progress",
-                        "티스토리 태그 입력까지 완료했습니다. 내용을 검수하고 직접 공개 발행한 뒤 완료 팝업의 [완료하기]를 눌러 주세요.",
+                        ("티스토리 태그와 현재 글의 대표이미지 설정까지 완료했습니다. 발행 설정창을 확인하고 직접 공개 발행한 뒤 완료 팝업의 [완료하기]를 눌러 주세요."
+                         if representative_image_path else
+                         "티스토리 태그 입력까지 완료했습니다. 내용을 검수하고 직접 공개 발행한 뒤 완료 팝업의 [완료하기]를 눌러 주세요."),
                     )
                 )
                 wait_for_manual_publish_completion(
@@ -19899,19 +19932,15 @@ def run_tistory_playwright_automation(
                 }
             if publish_after_input:
                 check_writing_cancelled(cancel_event)
-                if not click_tistory_complete_native(page, result_queue, **stop_options):
+                if representative_image_path:
+                    prepare_tistory_publish_thumbnail(
+                        page, representative_image_path, result_queue,
+                        upload_webp=upload_webp, cancel_event=cancel_event,
+                    )
+                elif not click_tistory_complete_native(page, result_queue, **stop_options):
                     raise RuntimeError(
                         "티스토리 태그 입력 후 '완료' 버튼을 누르지 못했거나 발행 설정 화면을 확인하지 못했습니다."
                     )
-                if representative_image_path:
-                    check_writing_cancelled(cancel_event)
-                    attach_tistory_representative_image_file(
-                        page,
-                        representative_image_path,
-                        result_queue,
-                        upload_webp=upload_webp,
-                    )
-                    check_writing_cancelled(cancel_event)
                 published_url = ""
                 publish_response_values: list[str] = []
 
@@ -26344,7 +26373,7 @@ class TistoryAutomationWorker(threading.Thread):
                 self.result_queue,
                 publish_after_input=self.publish_after_input,
                 native_image_files=native_image_files,
-                representative_image_path=self.thumbnail_path if self.publish_after_input else "",
+                representative_image_path=self.thumbnail_path if (self.publish_after_input or not self.auto_publish) else "",
                 public_blog_url=self.public_blog_url,
                 expected_title=self.title,
                 tag_names=self.tag_names,

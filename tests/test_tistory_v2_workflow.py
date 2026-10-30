@@ -92,6 +92,7 @@ class TistoryV2WorkflowTests(unittest.TestCase):
                  patch.object(main, "wait_for_tistory_editor", return_value=(page, "")), \
                  patch.object(main, "render_svg_to_png", return_value=Path(temporary) / "thumb.png"), \
                  patch.object(main, "enter_tistory_tags_native"), \
+                 patch.object(main, "prepare_tistory_publish_thumbnail") as representative, \
                  patch.object(main, "append_runtime_log"), \
                  patch("tistory_v2_editor.insert_native_slide_pairs", return_value={"slide_count": 10, "collage_count": 5}) as insert, \
                  patch.object(self.workflow, "_wait_for_browser") as wait, \
@@ -110,6 +111,7 @@ class TistoryV2WorkflowTests(unittest.TestCase):
             self.assertEqual(insert.call_args.kwargs["expected_size"], (900, 600))
             notify.assert_called_once()
             self.assertEqual(notify.call_args.args[0], "editor_ready")
+            representative.assert_called_once()
             wait.assert_called_once()
             context.close.assert_called_once()
             for operation in (complete, publish, draft, reserve):

@@ -210,7 +210,9 @@ class TistoryV2Workflow:
                                                    expected_sizes=deck_slide_sizes(deck))
                 check_cancel(cancel)
                 api.enter_tistory_tags_native(page, tags[:8], events)
-                notify("editor_ready", "티스토리 입력 완료 · 썸네일 1장 + 슬라이드 10장 / 2장씩 콜라주 5개. Chrome에서 확인해 주세요.")
+                api.prepare_tistory_publish_thumbnail(page, str(thumbnail_path), events,
+                    upload_webp=bool(profile.get('upload_webp', True)), cancel_event=cancel)
+                notify("editor_ready", "티스토리 입력과 현재 글 대표이미지 설정 완료 · 슬라이드 10장 / 콜라주 5개. Chrome에서 검토 후 직접 발행해 주세요.")
                 api.append_runtime_log("TISTORY V2", f"편집기 입력 완료: {profile['name']} · 슬라이드 10장 · 콜라주 5개")
                 self._wait_for_browser(page, cancel)
                 return result

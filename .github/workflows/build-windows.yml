@@ -89,6 +89,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_blogspot.py -q
           python -m unittest discover -s tests -p test_tistory_v2_publish.py -q
           python -m unittest discover -s tests -p test_manual_publish_mode.py -q
+          python -m unittest discover -s tests -p test_tistory_review_thumbnail.py -q
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -m unittest discover -s tests -p test_image_uploads.py -q
           python -m unittest discover -s tests -p test_writing_links.py -q
@@ -128,6 +129,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           python tools/check_settings_persistence_ui.py
+          python tools/check_tistory_review_thumbnail.py
           python tools/check_windows_modal_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
@@ -233,6 +235,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_v2_blogspot.py -q
           python -m unittest discover -s tests -p test_tistory_v2_publish.py -q
           python -m unittest discover -s tests -p test_manual_publish_mode.py -q
+          python -m unittest discover -s tests -p test_tistory_review_thumbnail.py -q
           python -m unittest discover -s tests -p 'test_naver_blog*.py' -q
           python -m unittest discover -s tests -p test_image_uploads.py -q
           python -m unittest discover -s tests -p test_writing_links.py -q
@@ -258,6 +261,7 @@ jobs:
       - name: Check writing UI in dark and light themes
         run: |
           python tools/check_settings_persistence_ui.py
+          python tools/check_tistory_review_thumbnail.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
           python tools/check_macos_ime_ui.py
