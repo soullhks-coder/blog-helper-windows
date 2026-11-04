@@ -49444,7 +49444,7 @@ class KeywordApp(ctk.CTk):
         if hasattr(self, "shell_frame"):
             self._finish_theme_paint()
 
-    def _use_managed_keyword(self, keyword: str, destination: str = "writing") -> None:
+    def _use_managed_keyword(self, keyword: str, destination: str = "writing", *, wiki_keyword: str = "") -> None:
         """Populate step one only. Never spend AI quota or publish on selection."""
         workers = ("analysis_worker", "reference_collection_worker", "article_worker", "pipeline_worker",
                    "tistory_automation_worker", "wp_publish_worker", "daum_worker", "signal_worker",
@@ -49472,6 +49472,11 @@ class KeywordApp(ctk.CTk):
         self.current_keyword_source = "library"
         self.topic_entry.delete(0, "end")
         self.topic_entry.insert(0, keyword)
+        if destination == 'tistory_v2':
+            wiki_keyword = wiki_keyword.strip()
+            self.tistory_v2_wiki_keyword_entry.delete(0, 'end')
+            self.tistory_v2_wiki_keyword_entry.insert(0, wiki_keyword)
+            self.wordpress_settings.tistory_v2_wiki_keyword = wiki_keyword
         self.manual_keyword_entry.delete(0, "end")
         self.manual_keyword_entry.insert(0, keyword)
         self.selected_keyword_var.set(keyword)

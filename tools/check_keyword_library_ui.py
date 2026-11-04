@@ -347,6 +347,67 @@ def main():
                 panel.rename_group_button.invoke()
             settle()
             screenshot("narrow")
+            # Optional article/photo pairs, per-row editing and V2 handoff.
+            with patch.object(module.simpledialog, 'askstring', return_value='V2 사진 검색어'):
+                panel.create_group_button.invoke()
+            panel.input.delete('1.0', 'end')
+            panel.input.insert('1.0', '마그네슘 효능,마그네슘\n마그네슘 권장량\n"비타민, 미네랄",영양소')
+            panel.add_input()
+            assert [(row['keyword'], row['wiki_keyword']) for row in panel.rows] == [
+                ('마그네슘 효능', '마그네슘'), ('마그네슘 권장량', ''), ('비타민, 미네랄', '영양소')]
+            paired_id, optional_id = panel.rows[0]['id'], panel.rows[1]['id']
+            with patch.object(module.simpledialog, 'askstring', return_value='마그네슘 원소'):
+                panel.wiki_edit_buttons[paired_id].invoke()
+            assert panel.rows[0]['wiki_keyword'] == '마그네슘 원소'
+            with patch.object(module.simpledialog, 'askstring', return_value=None):
+                panel.wiki_edit_buttons[paired_id].invoke()
+            assert panel.rows[0]['wiki_keyword'] == '마그네슘 원소'
+            with patch.object(module.simpledialog, 'askstring', return_value=''):
+                panel.wiki_edit_buttons[paired_id].invoke()
+            assert panel.rows[0]['wiki_keyword'] == ''
+            panel.input.insert('1.0', '마그네슘 효능,마그네슘')
+            panel.add_input()
+            assert len(panel.rows) == 3 and panel.rows[0]['wiki_keyword'] == '마그네슘'
+            imported.write_text('키워드,위키 검색어\n철분 부족 증상,철\n칼슘 하루 권장량,\n', encoding='utf-8-sig')
+            wiki_csv = Path(directory) / 'wiki-input.csv'
+            wiki_csv.write_bytes(imported.read_bytes())
+            with patch.object(module.filedialog, 'askopenfilename', return_value=str(wiki_csv)):
+                panel.import_file()
+            assert len(panel.rows) == 5 and panel.rows[-2]['wiki_keyword'] == '철'
+            settle()
+            for widget in panel.wiki_edit_buttons.values():
+                assert widget.winfo_rootx() + widget.winfo_width() <= app.winfo_rootx() + app.winfo_width()
+            screenshot('wiki-keywords')
+            panel.destination.set('티스토리 V2')
+            panel.selection[paired_id].set(True)
+            with patch.object(app, '_run_publish_pipeline') as publish:
+                panel.write_button.invoke()
+                publish.assert_not_called()
+            assert app.topic_entry.get() == '마그네슘 효능'
+            assert app.tistory_v2_wiki_keyword_entry.get() == '마그네슘'
+            assert app.wordpress_settings.tistory_v2_wiki_keyword == '마그네슘'
+            app._switch_page('keywords')
+            panel = app.keyword_library_panel
+            panel.select_all.deselect()
+            panel.select_page()
+            panel.selection[optional_id].set(True)
+            panel.write_button.invoke()
+            assert app.topic_entry.get() == '마그네슘 권장량'
+            assert app.tistory_v2_wiki_keyword_entry.get() == ''
+            assert app.wordpress_settings.tistory_v2_wiki_keyword == ''
+            app.tistory_v2_wiki_keyword_entry.insert(0, 'V2 보관 검색어')
+            app._switch_page('keywords')
+            panel = app.keyword_library_panel
+            panel.select_all.deselect()
+            panel.select_page()
+            panel.selection[paired_id].set(True)
+            panel.destination.set('블로그 글쓰기')
+            panel.write_button.invoke()
+            assert app.current_page == 'writing'
+            assert app.wordpress_settings.tistory_v2_wiki_keyword == 'V2 보관 검색어'
+            app._switch_page('keywords')
+            panel = app.keyword_library_panel
+            print('Keyword wiki: comma/optional/quoted bulk pairs, row editing, CSV import, V2 transfer, empty-query reset and writing-mode isolation passed', flush=True)
             # Help uses the common dimmer and cleans up when navigating away.
             app._open_writing_help("keywords.library")
             settle()

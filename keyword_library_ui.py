@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import customtkinter as ctk
 from input_surfaces import InputEntry, InputOptionMenu, InputTextbox
-from keyword_library import KeywordLibrary, read_keyword_file
+from keyword_library import KeywordLibrary, parse_keyword_entries, read_keyword_entries
 
 
 PLATFORMS = {"wordpress": "워드프레스", "tistory": "티스토리", "blogspot": "블로그스팟",
@@ -66,7 +66,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
         controls.grid(row=2, column=1, padx=(0, 16), sticky="ns")
         self.button(controls, "목록에 추가", self.add_input, primary=True).pack(pady=(0, 8))
         self.button(controls, "TXT · CSV 불러오기", self.import_file).pack()
-        ctk.CTkLabel(add_card, text="선택한 그룹에 한 줄씩 등록합니다. 전체 그룹에서는 미분류에 저장하며, 전체 목록 기준 중복·사용 완료는 건너뜁니다.",
+        ctk.CTkLabel(add_card, text='한 줄에 글쓰기 키워드, 위키 검색어(선택) · 예: 마그네슘 효능, 마그네슘\n검색어를 생략하면 글쓰기 키워드를 사용합니다. 문구에 쉼표가 있으면 큰따옴표로 묶어 주세요.',
                      wraplength=650, justify="left", text_color=p["muted"], anchor="w").grid(
                          row=3, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
 
@@ -275,6 +275,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
                 rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset,
                                               limit=self.PAGE_SIZE, group_id=self.group_id)
             self.rows, self.selection = rows, {}
+            self.wiki_edit_buttons = {}
             self._view_context = (self.history, self.group_id, self.search.get())
             self._last_stamp = self.store.path.stat().st_mtime_ns
             for widget in self.list_frame.winfo_children():
@@ -291,7 +292,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
                                 variable=var).grid(row=0, column=0, rowspan=2, padx=(12, 4), pady=10)
                 label = ctk.CTkLabel(line, text=row["keyword"], text_color=self.palette["text"], anchor="w",
                                      font=ctk.CTkFont(size=14, weight="bold"), wraplength=430, justify="left")
-                label.grid(row=0, column=1, padx=8, pady=(9, 0), sticky="w")
+                label.grid(row=0, column=1, padx=8, pady=(9, 0), sticky="ew")
+                label.bind('<Configure>', lambda _event, widget=label: self.wrap_label(widget))
                 raw_date = row.get("used_at") if self.history else row.get("added_at")
                 stamp = datetime.fromisoformat(raw_date).astimezone().strftime("%Y-%m-%d %H:%M")
                 detail = (f"{PLATFORMS.get(row['platform'], row['platform'])} · {stamp}"
@@ -301,8 +303,15 @@ class KeywordLibraryPage(ctk.CTkFrame):
                     detail += " · " + urlsplit(row["url"]).netloc
                 if self.history and row.get("title"):
                     detail += " · " + row["title"]
-                ctk.CTkLabel(line, text=detail, text_color=self.palette["muted"], anchor="w",
-                             wraplength=520, justify="left").grid(row=1, column=1, padx=8, pady=(0, 9), sticky="w")
+                detail += "\n위키 검색어: " + (row['wiki_keyword'] or '자동 · 글쓰기 키워드 사용')
+                detail_label = ctk.CTkLabel(line, text=detail, text_color=self.palette["muted"], anchor="w",
+                                          wraplength=520, justify="left")
+                detail_label.grid(row=1, column=1, padx=8, pady=(0, 9), sticky="ew")
+                detail_label.bind('<Configure>', lambda _event, widget=detail_label: self.wrap_label(widget))
+                if not self.history:
+                    edit = self.button(line, '위키 검색어', lambda item=dict(row): self.edit_wiki_keyword(item), width=95)
+                    edit.grid(row=0, column=2, rowspan=2, padx=12)
+                    self.wiki_edit_buttons[row['id']] = edit
                 if self.history and row.get("url", "").startswith(("https://", "http://")):
                     self.button(line, "발행글 보기", lambda url=row["url"]: self.app._open_source_url(url), width=90).grid(
                         row=0, column=2, rowspan=2, padx=12)
@@ -324,7 +333,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.safe(load)
 
     def add_values(self, values):
-        result = self.safe(lambda: self.store.add(values, group_id=self.group_id))
+        result = self.safe(lambda: self.store.add_entries(values, group_id=self.group_id))
         if result is None:
             return False
         if not any(result[key] for key in ("added", "duplicate", "used")):
@@ -337,18 +346,20 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.clear_search(refresh=False)
         self.switch(False, offset=offset)
         self.list_frame._parent_canvas.yview_moveto(0)
-        self.notice(f"{result['added']:,}개 등록 · 중복 {result['duplicate']:,}개 · 사용 완료 {result['used']:,}개 건너뜀")
+        self.notice(f"{result['added']:,}개 등록 · 중복 {result['duplicate']:,}개 · 위키 검색어 {result['wiki_updated']:,}개 갱신 · 사용 완료 {result['used']:,}개 건너뜀"
+                    + (f" · 다른 그룹 {result['other_group']:,}개 유지" if result['other_group'] else ''))
         return True
 
     def add_input(self):
-        if self.add_values(self.input.get("1.0", "end").splitlines()):
+        values = self.safe(lambda: parse_keyword_entries(self.input.get("1.0", "end")))
+        if values is not None and self.add_values(values):
             self.input.delete("1.0", "end")
 
     def import_file(self):
         path = self.dialogs["filedialog"].askopenfilename(parent=self.app, title="키워드 불러오기",
             filetypes=[("키워드 목록", "*.txt *.csv"), ("모든 파일", "*.*")])
         if path:
-            values = self.safe(lambda: read_keyword_file(Path(path)))
+            values = self.safe(lambda: read_keyword_entries(Path(path)))
             if values is not None:
                 self.add_values(values)
 
@@ -514,10 +525,22 @@ class KeywordLibraryPage(ctk.CTkFrame):
                 self.refresh()
                 self.notice(f"삭제한 {count}개를 각 그룹의 대기로 복원했습니다.")
 
+    def edit_wiki_keyword(self, row):
+        value = self.dialogs['simpledialog'].askstring(
+            '위키백과·나무위키 검색어', f"글쓰기 키워드: {row['keyword']}\n비워 두면 글쓰기 키워드로 사진을 검색합니다.",
+            initialvalue=row['wiki_keyword'], parent=self.app)
+        if value is None:
+            return
+        result = self.safe(lambda: self.store.update_wiki_keyword(row, value))
+        if result is not None:
+            self.log(f"위키 검색어 저장: id={row['item_id']}, changed={result}")
+            self.refresh()
+            self.notice('위키 검색어를 저장했습니다. 티스토리 V2에 키워드를 넣으면 함께 불러옵니다.')
+
     def use_for_writing(self):
         rows = self.selected()
         if len(rows) != 1:
             self.notice("글쓰기에 넣을 키워드를 하나만 선택해 주세요.")
             return
         destination = "tistory_v2" if self.destination.get() == "티스토리 V2" else "writing"
-        self.app._use_managed_keyword(rows[0]["keyword"], destination)
+        self.app._use_managed_keyword(rows[0]["keyword"], destination, wiki_keyword=rows[0]['wiki_keyword'])

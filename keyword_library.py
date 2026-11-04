@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 import sqlite3
+import tempfile
 import unicodedata
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,21 +25,52 @@ def keyword_key(value: str) -> str:
     return clean_keyword(value).casefold()
 
 
-def read_keyword_file(path: Path) -> list[str]:
+def _keyword_entries(rows, *, headers=False):
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if not rows:
+        return []
+    names = [cell.strip().casefold() for cell in rows[0]]
+    title_names = {"keyword", "키워드", "글쓰기 키워드"}
+    wiki_names = {"wiki_keyword", "wiki keyword", "위키 검색어", "위키검색어", "위키 키워드", "위키키워드",
+                  "사진 검색어", "사진검색어", "위키백과·나무위키 검색어", "위키백과", "나무위키"}
+    named = any(name in title_names for name in names) and (headers or any(name in wiki_names for name in names))
+    column = next((i for i, name in enumerate(names) if name in title_names), 0) if named else 0
+    wiki_column = next((i for i, name in enumerate(names) if name in wiki_names), None) if named else 1
+    result = []
+    for index, row in enumerate(rows[1:] if named else rows, 2 if named else 1):
+        if not named and len(row) > 2:
+            raise ValueError(f"{index}행은 ‘글쓰기 키워드, 위키 검색어’ 두 항목까지 입력해 주세요. 문구에 쉼표가 있으면 큰따옴표로 묶어 주세요.")
+        if len(row) <= column or not clean_keyword(row[column]):
+            raise ValueError(f"{index}행의 글쓰기 키워드가 비어 있습니다.")
+        entry = {"keyword": clean_keyword(row[column])}
+        if wiki_column is not None and len(row) > wiki_column:
+            entry["wiki_keyword"] = clean_keyword(row[wiki_column])
+        result.append(entry)
+    return result
+
+
+def parse_keyword_entries(text: str) -> list[dict]:
+    try:
+        return _keyword_entries(list(csv.reader(io.StringIO(text), skipinitialspace=True, strict=True)))
+    except csv.Error as exc:
+        raise ValueError("쉼표 구분 형식을 확인해 주세요. 문구에 쉼표나 큰따옴표가 있으면 CSV 형식으로 묶어 주세요.") from exc
+
+
+def read_keyword_entries(path: Path) -> list[dict]:
     data = Path(path).read_bytes()
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = data.decode("cp949")
-    if Path(path).suffix.lower() != ".csv":
-        return text.splitlines()
-    rows = list(csv.reader(io.StringIO(text)))
-    if not rows:
-        return []
-    headers = [cell.strip().casefold() for cell in rows[0]]
-    column = next((i for i, cell in enumerate(headers) if cell in {"keyword", "키워드"}), 0)
-    start = 1 if any(cell in {"keyword", "키워드"} for cell in headers) else 0
-    return [row[column] for row in rows[start:] if len(row) > column]
+    try:
+        return _keyword_entries(list(csv.reader(io.StringIO(text), skipinitialspace=True, strict=True)),
+                                headers=Path(path).suffix.lower() == ".csv")
+    except csv.Error as exc:
+        raise ValueError("키워드 파일의 쉼표·큰따옴표 형식을 확인해 주세요.") from exc
+
+
+def read_keyword_file(path: Path) -> list[str]:
+    return [entry["keyword"] for entry in read_keyword_entries(path)]
 
 
 class KeywordLibrary:
@@ -45,12 +78,17 @@ class KeywordLibrary:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='keywords'").fetchone()
+            migrate_wiki = exists and 'wiki_keyword' not in {row['name'] for row in db.execute('PRAGMA table_info(keywords)')}
+            if migrate_wiki:
+                self._backup_before_wiki_migration(db)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS keywords (
                     id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE,
                     keyword TEXT NOT NULL, added_at TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'used', 'removed'))
+                        CHECK (status IN ('pending', 'used', 'removed')),
+                    wiki_keyword TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS usage (
                     id INTEGER PRIMARY KEY,
@@ -83,6 +121,22 @@ class KeywordLibrary:
                     PRIMARY KEY(removal_id, keyword_id)
                 );
             """)
+            if migrate_wiki:
+                db.execute('BEGIN IMMEDIATE')
+                if 'wiki_keyword' not in {row['name'] for row in db.execute('PRAGMA table_info(keywords)')}:
+                    db.execute("ALTER TABLE keywords ADD COLUMN wiki_keyword TEXT NOT NULL DEFAULT ''")
+
+    def _backup_before_wiki_migration(self, db):
+        directory = self.path.parent / 'Keyword Backups'
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor, name = tempfile.mkstemp(prefix='before-wiki-column-', suffix='.sqlite3', dir=directory)
+        os.close(descriptor)
+        try:
+            with closing(sqlite3.connect(name)) as destination:
+                db.backup(destination)
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise
 
     @contextmanager
     def _connection(self):
@@ -165,26 +219,46 @@ class KeywordLibrary:
         return changed
 
     def add(self, values, *, group_id=None) -> dict:
+        result = self.add_entries([{"keyword": value} for value in values], group_id=group_id)
+        return {key: result[key] for key in ("added", "duplicate", "used", "first_added_id")}
+
+    def add_entries(self, entries, *, group_id=None) -> dict:
         # Validate before beginning a transaction: never silently truncate data.
-        values = [clean_keyword(value) for value in values if clean_keyword(value)]
-        if len(values) > 100_000 or any(len(value) > 500 for value in values):
+        entries = list(entries)
+        if any(not clean_keyword(row['keyword']) and clean_keyword(row.get('wiki_keyword') or '') for row in entries):
+            raise ValueError('위키 검색어를 지정할 글쓰기 키워드를 입력해 주세요.')
+        entries = [{"keyword": clean_keyword(entry["keyword"]),
+                    "wiki_keyword": clean_keyword(entry.get("wiki_keyword") or "")}
+                   for entry in entries if clean_keyword(entry["keyword"])]
+        if len(entries) > 100_000 or any(max(len(row['keyword']), len(row['wiki_keyword'])) > 500 for row in entries):
             raise ValueError("한 번에 100,000개까지, 키워드 하나당 500자까지 등록할 수 있습니다.")
-        result = {"added": 0, "duplicate": 0, "used": 0, "first_added_id": None}
+        result = {"added": 0, "duplicate": 0, "used": 0, "first_added_id": None, "wiki_updated": 0, "other_group": 0}
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._check_group(db, group_id)
-            for value in values:
-                row = db.execute("SELECT id, status FROM keywords WHERE key=?", (keyword_key(value),)).fetchone()
+            for entry in entries:
+                value, wiki = entry['keyword'], entry['wiki_keyword']
+                row = db.execute("SELECT k.id, k.status, k.wiki_keyword, COALESCE(m.group_id, 0) AS group_id "
+                                 "FROM keywords k LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id WHERE k.key=?",
+                                 (keyword_key(value),)).fetchone()
                 if row and row["status"] != "removed":
                     result["used" if row["status"] == "used" else "duplicate"] += 1
+                    if row['status'] == 'pending' and wiki and wiki != row['wiki_keyword']:
+                        if group_id is not None and row['group_id'] != int(group_id):
+                            result['other_group'] += 1
+                        else:
+                            db.execute('UPDATE keywords SET wiki_keyword=? WHERE id=?', (wiki, row['id']))
+                            result['wiki_updated'] += 1
+                            if result['first_added_id'] is None:
+                                result['first_added_id'] = row['id']
                     continue
                 if row:
-                    db.execute("UPDATE keywords SET status='pending', keyword=?, added_at=? WHERE id=?",
-                               (value, self._now(), row["id"]))
+                    db.execute("UPDATE keywords SET status='pending', keyword=?, added_at=?, wiki_keyword=? WHERE id=?",
+                               (value, self._now(), wiki or row['wiki_keyword'], row["id"]))
                     item_id = row["id"]
                 else:
-                    item_id = db.execute("INSERT INTO keywords(key, keyword, added_at) VALUES (?, ?, ?)",
-                                         (keyword_key(value), value, self._now())).lastrowid
+                    item_id = db.execute("INSERT INTO keywords(key, keyword, added_at, wiki_keyword) VALUES (?, ?, ?, ?)",
+                                         (keyword_key(value), value, self._now(), wiki)).lastrowid
                 if result["first_added_id"] is None:
                     result["first_added_id"] = item_id
                 self._set_group(db, item_id, group_id)
@@ -225,7 +299,7 @@ class KeywordLibrary:
             if history:
                 source = "usage u JOIN keywords k ON k.id=u.keyword_id"
                 condition = "instr(k.key, ?) > 0"
-                fields = "u.*, k.status, u.keyword_id AS item_id"
+                fields = "u.*, k.status, k.wiki_keyword, u.keyword_id AS item_id"
                 order = "u.id DESC"
             else:
                 source = "keywords k"
@@ -259,6 +333,23 @@ class KeywordLibrary:
                 db.execute("UPDATE keywords SET status='used' WHERE id=?", (row["id"],))
             return bool(inserted)
 
+    def update_wiki_keyword(self, expected, value) -> bool:
+        value = clean_keyword(value)
+        if len(value) > 500:
+            raise ValueError('위키 검색어는 500자까지 입력해 주세요.')
+        with self._connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = db.execute('SELECT k.*, COALESCE(m.group_id, 0) AS group_id FROM keywords k '
+                                 'LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id WHERE k.id=?',
+                                 (int(expected['item_id']),)).fetchone()
+            if (current is None or current['status'] != 'pending' or any(current[field] != expected[field]
+                    for field in ('key', 'added_at', 'group_id', 'wiki_keyword'))):
+                raise ValueError('키워드의 그룹·상태·검색어가 바뀌어 저장하지 않았습니다. 목록에서 다시 선택해 주세요.')
+            if current['wiki_keyword'] == value:
+                return False
+            db.execute('UPDATE keywords SET wiki_keyword=? WHERE id=?', (value, int(expected['item_id'])))
+        return True
+
     def remove_selected(self, rows, *, group_id=None, search="") -> dict:
         """Delete exactly the confirmed snapshot, or reject the entire batch."""
         rows = [dict(row) for row in rows]
@@ -275,7 +366,7 @@ class KeywordLibrary:
                                      "LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id WHERE k.id=?",
                                      (item_id,)).fetchone()
                 if (current is None or current["status"] != "pending"
-                    or any(current[field] != expected[field] for field in ("key", "keyword", "added_at", "group_id"))
+                    or any(current[field] != expected[field] for field in ("key", "keyword", "added_at", "group_id", "wiki_keyword"))
                     or (group_id is not None and current["group_id"] != int(group_id))
                     or keyword_key(search) not in current["key"]):
                     raise ValueError("선택한 키워드의 그룹·검색 조건·상태가 바뀌어 삭제하지 않았습니다. 목록에서 다시 선택해 주세요.")
@@ -332,9 +423,11 @@ class KeywordLibrary:
     def export(self, path: Path, *, history=False, group_id=None):
         rows, _ = self.list(history=history, group_id=group_id, limit=2_147_483_647)
         if Path(path).suffix.lower() == ".txt":
-            Path(path).write_text("\n".join(row["keyword"] for row in rows) + ("\n" if rows else ""), encoding="utf-8")
+            with Path(path).open('w', encoding='utf-8', newline='') as stream:
+                writer = csv.writer(stream, lineterminator='\n')
+                writer.writerows([row['keyword'], row['wiki_keyword']] if row['wiki_keyword'] else [row['keyword']] for row in rows)
             return
-        fields = ["keyword", "group_name", "used_at", "platform", "url", "title"] if history else ["keyword", "group_name", "added_at"]
+        fields = ["keyword", "wiki_keyword", "group_name", "used_at", "platform", "url", "title"] if history else ["keyword", "wiki_keyword", "group_name", "added_at"]
         with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fields, extrasaction="ignore")
             writer.writeheader()
