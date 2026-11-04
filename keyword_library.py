@@ -71,6 +71,17 @@ class KeywordLibrary:
                 );
                 CREATE INDEX IF NOT EXISTS keyword_group_members
                     ON keyword_group_membership(group_id, keyword_id);
+                CREATE TABLE IF NOT EXISTS keyword_removals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at TEXT NOT NULL,
+                    scope_group_id INTEGER, search TEXT NOT NULL, restored_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS keyword_removal_items (
+                    removal_id INTEGER NOT NULL REFERENCES keyword_removals(id),
+                    keyword_id INTEGER NOT NULL REFERENCES keywords(id),
+                    key TEXT NOT NULL, keyword TEXT NOT NULL, added_at TEXT NOT NULL,
+                    group_id INTEGER NOT NULL, group_name TEXT NOT NULL,
+                    PRIMARY KEY(removal_id, keyword_id)
+                );
             """)
 
     @contextmanager
@@ -247,6 +258,66 @@ class KeywordLibrary:
             if inserted:
                 db.execute("UPDATE keywords SET status='used' WHERE id=?", (row["id"],))
             return bool(inserted)
+
+    def remove_selected(self, rows, *, group_id=None, search="") -> dict:
+        """Delete exactly the confirmed snapshot, or reject the entire batch."""
+        rows = [dict(row) for row in rows]
+        if not rows:
+            return {"id": None, "count": 0}
+        ids = [int(row["item_id"]) for row in rows]
+        if len(ids) != len(set(ids)):
+            raise ValueError("선택 목록이 중복되었습니다. 목록을 다시 확인해 주세요.")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_group(db, group_id)
+            for expected, item_id in zip(rows, ids):
+                current = db.execute("SELECT k.*, COALESCE(m.group_id, 0) AS group_id FROM keywords k "
+                                     "LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id WHERE k.id=?",
+                                     (item_id,)).fetchone()
+                if (current is None or current["status"] != "pending"
+                    or any(current[field] != expected[field] for field in ("key", "keyword", "added_at", "group_id"))
+                    or (group_id is not None and current["group_id"] != int(group_id))
+                    or keyword_key(search) not in current["key"]):
+                    raise ValueError("선택한 키워드의 그룹·검색 조건·상태가 바뀌어 삭제하지 않았습니다. 목록에서 다시 선택해 주세요.")
+            removal_id = db.execute("INSERT INTO keyword_removals(removed_at, scope_group_id, search) VALUES (?, ?, ?)",
+                                    (self._now(), group_id, clean_keyword(search))).lastrowid
+            db.executemany("INSERT INTO keyword_removal_items VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           [(removal_id, item_id, row["key"], row["keyword"], row["added_at"],
+                             row["group_id"], row["group_name"]) for row, item_id in zip(rows, ids)])
+            db.executemany("UPDATE keywords SET status='removed' WHERE id=?", [(item_id,) for item_id in ids])
+        return {"id": removal_id, "count": len(ids)}
+
+    @staticmethod
+    def _restorable_rows(db, removal_id):
+        # Re-added, published or deleted-again keywords belong to their newer
+        # operation. An old undo must never overwrite those later changes.
+        return [dict(row) for row in db.execute(
+            "SELECT k.id AS item_id, k.keyword, COALESCE(g.name, '미분류') AS group_name "
+            "FROM keyword_removal_items i JOIN keywords k ON k.id=i.keyword_id "
+            "LEFT JOIN keyword_group_membership m ON m.keyword_id=k.id "
+            "LEFT JOIN keyword_groups g ON g.id=m.group_id "
+            "WHERE i.removal_id=? AND k.status='removed' AND k.key=i.key AND k.added_at=i.added_at "
+            "AND NOT EXISTS (SELECT 1 FROM keyword_removal_items newer WHERE newer.keyword_id=k.id "
+            "AND newer.removal_id>i.removal_id) ORDER BY k.id", (int(removal_id),))]
+
+    def last_removal(self):
+        with self._connection() as db:
+            for batch in db.execute("SELECT * FROM keyword_removals WHERE restored_at IS NULL ORDER BY id DESC"):
+                rows = self._restorable_rows(db, batch["id"])
+                if rows:
+                    return {**dict(batch), "rows": rows}
+        return None
+
+    def restore_removal(self, removal_id) -> int:
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            batch = db.execute("SELECT restored_at FROM keyword_removals WHERE id=?", (int(removal_id),)).fetchone()
+            if batch is None or batch["restored_at"] is not None:
+                return 0
+            rows = self._restorable_rows(db, removal_id)
+            db.executemany("UPDATE keywords SET status='pending' WHERE id=?", [(row["item_id"],) for row in rows])
+            db.execute("UPDATE keyword_removals SET restored_at=? WHERE id=?", (self._now(), int(removal_id)))
+        return len(rows)
 
     def change_status(self, ids, status) -> int:
         if status not in {"pending", "removed"}:

@@ -44,6 +44,7 @@ def main():
         errors = []
         app.report_callback_exception = lambda *error: errors.append(error)
         def settle(delay=120):
+            app.update()
             app.after(delay, app.quit)
             app.mainloop()
             app.update_idletasks()
@@ -288,6 +289,57 @@ def main():
                 assert widget.winfo_rootx() >= app.winfo_rootx(), str(widget)
                 assert widget.winfo_rooty() + widget.winfo_height() <= app.winfo_rooty() + app.winfo_height(), str(widget)
             assert app.settings_nav_button.winfo_rooty() + app.settings_nav_button.winfo_height() < app.sidebar_version_label.winfo_rooty()
+            # Cross-group deletion: confirm exact IDs, abort a pending search
+            # and reject a member moved to health during the native dialog.
+            mbti = panel.store.create_group('MBTI')
+            panel.store.add([f'INTP 궁합 {index:02d}' for index in range(45)], group_id=mbti)
+            panel.store.add(['삭제 보호 건강 하나', '삭제 보호 건강 둘'], group_id=health)
+            health_before = panel.store.counts(group_id=health)
+            panel.refresh()
+            panel.change_group('MBTI')
+            selected_ids = [panel.rows[index]['item_id'] for index in (0, 4)]
+            for item_id in selected_ids:
+                panel.selection[item_id].set(True)
+            with patch.object(module.messagebox, 'askyesno', return_value=True) as confirm:
+                panel.delete_button.invoke()
+            assert 'MBTI 2개' in confirm.call_args.args[1]
+            assert panel.store.counts(group_id=mbti)['pending'] == 43
+            assert panel.store.counts(group_id=health) == health_before
+            assert [row['item_id'] for row in panel.store.last_removal()['rows']] == selected_ids
+            panel.select_all.select()
+            panel.select_page()
+            panel.search.insert(0, '다른 검색 조건')
+            panel.search_changed()
+            with patch.object(module.messagebox, 'askyesno') as confirm:
+                panel.delete_button.invoke()
+            confirm.assert_not_called()
+            assert panel.store.counts(group_id=mbti)['pending'] == 43
+            assert panel.rows == [] and panel._search_job is None
+            panel.clear_search()
+            candidates = panel.rows[:3]
+            for row in candidates:
+                panel.selection[row['id']].set(True)
+            def move_while_confirming(*args, **kwargs):
+                panel.store.assign_group([candidates[0]['item_id']], health)
+                return True
+            with patch.object(module.messagebox, 'askyesno', side_effect=move_while_confirming), \
+                 patch.object(module.messagebox, 'showwarning') as warning:
+                panel.delete_button.invoke()
+            warning.assert_called_once()
+            assert panel.store.counts(group_id=mbti)['pending'] == 42
+            assert panel.store.counts(group_id=health)['pending'] == health_before['pending'] + 1
+            with patch.object(module.messagebox, 'askyesno', return_value=True):
+                panel.undo_delete_button.invoke()
+            assert panel.store.counts(group_id=mbti)['pending'] == 44
+            assert panel.store.counts(group_id=health)['pending'] == health_before['pending'] + 1
+            # A missing folder falls back to ungrouped, never to all groups.
+            panel.store.delete_group(mbti)
+            panel.refresh()
+            assert panel.group_id == 0 and all(row['group_id'] == 0 for row in panel.rows)
+            for widget in (panel.select_all, panel.used_button, panel.delete_button, panel.undo_delete_button):
+                assert widget.winfo_rootx() >= app.winfo_rootx()
+                assert widget.winfo_rootx() + widget.winfo_width() <= panel.move_group_menu.winfo_rootx()
+            print('Keyword deletion: exact selection, pending-search block, cross-group race rejection and audited undo passed')
             assert panel.group_menu.winfo_rootx() + panel.group_menu.winfo_width() <= panel.create_group_button.winfo_rootx()
             with patch.object(module.simpledialog, "askstring", return_value="건강"):
                 panel.rename_group_button.invoke()

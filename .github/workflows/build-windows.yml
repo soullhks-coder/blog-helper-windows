@@ -110,6 +110,7 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_session_persistence.py -q
           python -m unittest discover -s tests -p test_keychain_store.py -q
           python -m unittest discover -s tests -p test_keyword_library.py -q
+          python -m unittest discover -s tests -p test_keyword_deletion.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -130,6 +131,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python tools/check_settings_persistence_ui.py
           python tools/check_tistory_review_thumbnail.py
+          python tools/check_keyword_library_ui.py
           python tools/check_windows_modal_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
@@ -139,7 +141,6 @@ jobs:
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
           python tools/check_blogspot_upload_sequence.py
-          python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
           python tools/check_menu_help_ui.py
@@ -256,12 +257,14 @@ jobs:
           python -m unittest discover -s tests -p test_tistory_session_persistence.py -q
           python -m unittest discover -s tests -p test_keychain_store.py -q
           python -m unittest discover -s tests -p test_keyword_library.py -q
+          python -m unittest discover -s tests -p test_keyword_deletion.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 
       - name: Check writing UI in dark and light themes
         run: |
           python tools/check_settings_persistence_ui.py
           python tools/check_tistory_review_thumbnail.py
+          python tools/check_keyword_library_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
           python tools/check_macos_ime_ui.py
@@ -271,7 +274,6 @@ jobs:
           python tools/check_blogspot_image_size.py
           python tools/check_blogspot_picker_ui.py
           python tools/check_blogspot_upload_sequence.py
-          python tools/check_keyword_library_ui.py
           python tools/check_tistory_numeric_titles.py
           python tools/check_writing_help_ui.py
           python tools/check_menu_help_ui.py

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections import Counter
 from pathlib import Path
 import tkinter as tk
 import uuid
@@ -31,6 +32,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self._search_job = None
         self._poll_job = None
         self._last_stamp = None
+        self._view_context = None
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -95,6 +97,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.restore_button = self.button(actions, "대기로 복원", self.restore, width=100)
         self.delete_button = self.button(actions, "선택 삭제", self.remove, width=90)
         self.delete_button.pack(side="left", padx=4)
+        self.undo_delete_button = self.button(actions, "삭제 복원", self.undo_remove, width=90)
+        self.undo_delete_button.pack(side="left", padx=4)
         move_controls = ctk.CTkFrame(actions, fg_color="transparent")
         move_controls.pack(side="right")
         self.move_group_menu = self.option_menu(move_controls, values=["미분류"], width=150, command=self.change_move_group)
@@ -179,7 +183,8 @@ class KeywordLibraryPage(ctk.CTkFrame):
                            **{row["name"]: row["id"] for row in self.store.groups()}}
         names = {value: key for key, value in self._group_ids.items()}
         if self.group_id not in names:
-            self.group_id = None
+            # A disappeared folder must not silently expand to every group.
+            self.group_id = 0
             self.offset = 0
         if self.move_group_id not in names:
             self.move_group_id = 0
@@ -264,6 +269,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
                 rows, total = self.store.list(history=self.history, search=self.search.get(), offset=self.offset,
                                               limit=self.PAGE_SIZE, group_id=self.group_id)
             self.rows, self.selection = rows, {}
+            self._view_context = (self.history, self.group_id, self.search.get())
             self._last_stamp = self.store.path.stat().st_mtime_ns
             for widget in self.list_frame.winfo_children():
                 widget.destroy()
@@ -351,12 +357,14 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.history, self.offset = history, offset
         self.used_button.pack_forget()
         self.delete_button.pack_forget()
+        self.undo_delete_button.pack_forget()
         self.restore_button.pack_forget()
         if history:
             self.restore_button.pack(side="left", padx=4)
         else:
             self.used_button.pack(side="left", padx=4)
             self.delete_button.pack(side="left", padx=4)
+            self.undo_delete_button.pack(side="left", padx=4)
         self.write_button.configure(state="disabled" if history else "normal")
         self.refresh()
 
@@ -385,7 +393,7 @@ class KeywordLibraryPage(ctk.CTkFrame):
         if self.app.current_page == "keywords":
             try:
                 changed = self.store.path.stat().st_mtime_ns != self._last_stamp
-            except OSError:
+            except Exception:
                 changed = False
             if changed:
                 self.refresh()
@@ -406,10 +414,24 @@ class KeywordLibraryPage(ctk.CTkFrame):
         self.list_frame._parent_canvas.yview_moveto(0)
 
     def select_page(self):
+        if not self.selection_is_current():
+            return
         for variable in self.selection.values():
             variable.set(bool(self.select_all.get()))
 
+    def selection_is_current(self):
+        if self._view_context != (self.history, self.group_id, self.search.get()):
+            if self._search_job is not None:
+                self.after_cancel(self._search_job)
+                self._search_job = None
+            self.refresh()
+            self.notice("그룹·검색 조건이 바뀌어 선택을 해제했습니다. 표시된 목록에서 다시 선택해 주세요.")
+            return False
+        return True
+
     def selected(self):
+        if not self.selection_is_current():
+            return []
         rows = [row for row in self.rows if self.selection[row["id"]].get()]
         if not rows:
             self.notice("먼저 목록에서 키워드를 선택해 주세요.")
@@ -436,12 +458,55 @@ class KeywordLibraryPage(ctk.CTkFrame):
                 self.refresh()
 
     def remove(self):
-        rows = self.selected()
-        if rows and self.dialogs["messagebox"].askyesno("대기 키워드 삭제", f"선택한 {len(rows)}개를 대기 목록에서 삭제할까요?\n기존 사용 이력은 지우지 않습니다.", parent=self.app):
-            count = self.safe(lambda: self.store.change_status([row["item_id"] for row in rows], "removed"))
-            if count is not None:
-                self.notice(f"대기 목록에서 {count}개를 삭제했습니다. 같은 키워드를 다시 등록할 수 있습니다.")
+        if self.history:
+            return
+        rows = [dict(row) for row in self.selected()]
+        context = self._view_context
+        if not rows:
+            return
+        self.log(f"삭제 확인 요청: group={context[1]}, search={context[2]!r}, ids={[row['item_id'] for row in rows]}")
+        if self.dialogs["messagebox"].askyesno("대기 키워드 삭제", self.removal_preview(rows) +
+                "\n\n선택 항목만 삭제할까요? 삭제 후 [삭제 복원]으로 되돌릴 수 있습니다.", parent=self.app):
+            if not self.winfo_exists() or context != self._view_context or not self.selection_is_current():
+                self.log("삭제 중단: 확인 중 표시 목록 변경")
+                return
+            result = self.safe(lambda: self.store.remove_selected(rows, group_id=context[1], search=context[2]))
+            if result is not None:
+                self.log(f"삭제 완료: batch={result['id']}, count={result['count']}, ids={[row['item_id'] for row in rows]}")
+                self.notice(f"선택한 {result['count']}개를 삭제했습니다. [삭제 복원]으로 되돌릴 수 있습니다.")
                 self.refresh()
+            else:
+                self.log("삭제 중단: 선택 대상 검증 실패")
+                self.refresh()
+
+    @staticmethod
+    def removal_preview(rows):
+        groups = Counter(row["group_name"] for row in rows)
+        summary = " · ".join(f"{name} {count}개" for name, count in groups.items())
+        preview = "\n".join(f"• {row['keyword']}" for row in rows[:8])
+        extra = f"\n외 {len(rows) - 8}개" if len(rows) > 8 else ""
+        return f"선택 {len(rows)}개 · {summary}\n\n{preview}{extra}"
+
+    def log(self, message):
+        logger = self.dialogs.get("log")
+        if logger:
+            try:
+                logger(message)
+            except OSError:
+                pass  # The transactional database audit remains authoritative.
+
+    def undo_remove(self):
+        batch = self.safe(self.store.last_removal)
+        if batch is None:
+            self.notice("복원할 최근 삭제 내역이 없습니다. 수정 전 삭제 항목은 백업에서 확인해 주세요.")
+            return
+        if self.dialogs["messagebox"].askyesno("최근 삭제 복원", self.removal_preview(batch["rows"]) +
+                "\n\n이 삭제 내역을 대기로 복원할까요? 이후 사용·변경된 항목은 유지합니다.", parent=self.app):
+            count = self.safe(lambda: self.store.restore_removal(batch["id"]))
+            if count is not None:
+                self.log(f"삭제 복원: batch={batch['id']}, count={count}")
+                self.refresh()
+                self.notice(f"삭제한 {count}개를 각 그룹의 대기로 복원했습니다.")
 
     def use_for_writing(self):
         rows = self.selected()
