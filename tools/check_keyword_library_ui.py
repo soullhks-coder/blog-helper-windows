@@ -336,6 +336,8 @@ def main():
             panel.store.delete_group(mbti)
             panel.refresh()
             assert panel.group_id == 0 and all(row['group_id'] == 0 for row in panel.rows)
+            panel.change_group('MBTI')  # An old dropdown event must not mean all groups.
+            assert panel.group_id == 0 and all(row['group_id'] == 0 for row in panel.rows)
             for widget in (panel.select_all, panel.used_button, panel.delete_button, panel.undo_delete_button):
                 assert widget.winfo_rootx() >= app.winfo_rootx()
                 assert widget.winfo_rootx() + widget.winfo_width() <= panel.move_group_menu.winfo_rootx()

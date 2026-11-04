@@ -11,7 +11,7 @@ from __future__ import annotations
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
         "date": "2026-11-04",
-        "version": "v1.3.12",
+        "version": "v1.3.13",
         "category": "키워드 선택 삭제 보호",
         "title": "키워드 삭제 범위 검증과 삭제 복원",
         "request": "MBTI 그룹의 키워드를 다중 삭제했는데 건강 그룹의 키워드도 사라져 점검·수정 요청",

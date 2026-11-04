@@ -196,6 +196,12 @@ class KeywordLibraryPage(ctk.CTkFrame):
             button.configure(state="normal" if self.group_id else "disabled")
 
     def change_group(self, name):
+        if name not in self._group_ids:
+            self.group_id = 0
+            self.clear_search(refresh=False)
+            self.refresh()
+            self.notice("그룹 목록이 바뀌어 선택을 해제했습니다. 그룹을 다시 선택해 주세요.")
+            return
         self.group_id = self._group_ids.get(name)
         self.clear_search(refresh=False)
         self.refresh()
