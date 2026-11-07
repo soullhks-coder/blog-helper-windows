@@ -49,8 +49,8 @@ def main():
                 automation_publish_interval_minutes=120, automation_queue=[
                     {'id':'v2-later', 'keyword':'두 번째', 'v2_config':config, 'status':'V2 대기 중', 'scheduled_at':1900000000},
                     {'id':'normal-first', 'keyword':'첫 번째', 'article_html':'<p>Fixture article</p>', 'status':'대기 중', 'scheduled_at':1},
-                    {'id':'paused', 'keyword':'확인 필요', 'v2_config':config, 'status':'V2 확인 필요', 'scheduled_at':2},
-                    {'id':'interrupted', 'keyword':'종료 시 중단', 'v2_config':config, 'status':'업로드 중', 'scheduled_at':3},
+                    {'id':'paused', 'keyword':'확인 필요', 'v2_config':config, 'status':'V2 확인 필요', 'scheduled_at':1900000200},
+                    {'id':'interrupted', 'keyword':'종료 시 중단', 'v2_config':config, 'status':'업로드 중', 'scheduled_at':1900000300},
                 ])
             api.AppStateStore.save(settings, save_secrets=False)
         anchor = 1700000000 if args.phase == 1 else 1700100000
@@ -70,8 +70,10 @@ def main():
             items = {item['id']: item for item in app.automation_queue}
             assert items['normal-first']['scheduled_at'] == anchor + minutes * 60
             assert items['v2-later']['scheduled_at'] == anchor + minutes * 120
-            assert items['paused']['status'] == 'V2 확인 필요' and items['paused']['scheduled_at'] == 2
-            assert items['interrupted']['status'] == 'V2 확인 필요' and items['interrupted']['scheduled_at'] == 3
+            assert items['paused']['status'] == 'V2 확인 필요' and items['paused']['scheduled_at'] == 1900000200
+            assert items['interrupted']['status'] == 'V2 확인 필요' and items['interrupted']['scheduled_at'] == 1900000300
+            with patch.object(api.time, 'time', return_value=anchor):
+                assert app._next_automation_schedule_timestamp() == anchor + minutes * 180
             assert app.automation_publish_interval_menu.get() == f'{minutes}분'
             options = app.automation_publish_interval_menu.cget('values')
             assert all(f'{value}분' in options for value in (120, 180, 240, 300))

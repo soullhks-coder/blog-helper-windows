@@ -53892,7 +53892,7 @@ class KeywordApp(ctk.CTk):
         now = time.time()
         latest_future = now
         for item in self.automation_queue:
-            if str(item.get("status") or "") in ("업로드 완료", "업로드 중"):
+            if str(item.get("status") or "") in ("업로드 완료", "업로드 중", "V2 확인 필요", "V2 준비 중"):
                 continue
             try:
                 scheduled_at = float(item.get("scheduled_at") or 0)
@@ -54094,8 +54094,9 @@ class KeywordApp(ctk.CTk):
         item = self._find_automation_queue_item(item_id)
         if not item or not item.get("v2_config") or item.get("status") != "V2 확인 필요":
             return
+        scheduled_at = self._next_automation_schedule_timestamp()
         item["status"] = "V2 대기 중"
-        item["scheduled_at"] = self._next_automation_schedule_timestamp()
+        item["scheduled_at"] = scheduled_at
         item.pop("upload_error", None)
         self._save_automation_queue()
         self._refresh_automation_queue()

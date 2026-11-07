@@ -42,6 +42,22 @@ class RestartScheduleTests(unittest.TestCase):
         self.assertEqual(second[1]['scheduled_at'], 1100000 + 7200)
         self.assertEqual(second[0]['scheduled_at'], 1100000 + 14400)
 
+    def test_old_paused_reservations_do_not_push_new_jobs_or_retry_away_from_launch_slots(self):
+        app = self.app()
+        for item in app.automation_queue:
+            if item['id'] in {'paused', 'uploading', 'preparing'}:
+                item['scheduled_at'] = 1900000000
+        with patch.object(main, 'append_runtime_log'):
+            main.KeywordApp._reset_automation_schedule_for_startup(app)
+        with patch.object(main.time, 'time', return_value=1000000):
+            self.assertEqual(main.KeywordApp._next_automation_schedule_timestamp(app), 1000000 + 21600)
+            app._next_automation_schedule_timestamp = lambda: main.KeywordApp._next_automation_schedule_timestamp(app)
+            app._find_automation_queue_item = lambda _id: next(row for row in app.automation_queue if row['id'] == _id)
+            main.KeywordApp._retry_automation_v2_item(app, 'paused')
+        paused = app._find_automation_queue_item('paused')
+        self.assertEqual(paused['status'], 'V2 대기 중')
+        self.assertEqual(paused['scheduled_at'], 1000000 + 21600)
+
     def test_empty_invalid_equal_and_missing_timestamps_have_stable_order(self):
         items = [{'id':str(i), 'status':'대기 중', 'v2_config':{'fixed':True}, 'scheduled_at':stamp}
                  for i, stamp in enumerate((None, 'bad', float('nan'), 0))]
