@@ -27395,6 +27395,9 @@ class ContrastSegmentedButton(ctk.CTkFrame):
 class KeywordApp(ctk.CTk):
     def __init__(self) -> None:
         global UI_FONT_FAMILY
+        self._automation_started_at = time.time()
+        self._automation_startup_schedule_applied = False
+        self._automation_startup_schedule_error = ""
         if os.name == "nt":
             _update_packaged_startup_splash("설정 불러오는 중...\n잠시만 기다려 주세요.")
             try:
@@ -27722,6 +27725,7 @@ class KeywordApp(ctk.CTk):
         _update_packaged_startup_splash("저장값 복원 중...\n마지막 준비 중입니다.")
         self._install_mousewheel_router()
         self._populate_wordpress_fields()
+        self._reset_automation_schedule_for_startup()
         self._apply_app_theme(self.wordpress_settings.app_theme, save=False)
         self.bind("<Configure>", self._on_window_configure)
         self.bind_all("<KeyPress>", self._mark_text_input_activity, add="+")
@@ -53832,6 +53836,34 @@ class KeywordApp(ctk.CTk):
             return self.wordpress_settings.automation_interval_hours
         return self._safe_int(self.automation_interval_menu.get().replace("시간", ""), 1)
 
+    def _reset_automation_schedule_for_startup(self) -> None:
+        if self._automation_startup_schedule_applied:
+            return
+        from automation_schedule import restart_schedule
+        previous = self.automation_queue
+        try:
+            if getattr(self.wordpress_settings, "_state_read_error", ""):
+                raise ValueError("설정 파일을 복구한 뒤 다시 실행해 주세요.")
+            updated, count = restart_schedule(previous, self._automation_started_at,
+                                               self._automation_publish_interval_minutes())
+            if count:
+                self.automation_queue = updated
+                self._save_automation_queue()
+                self._refresh_automation_queue()
+                self.automation_status_label.configure(
+                    text=f"실행 시각 기준으로 대기 {count}개의 예정시간을 {self._automation_publish_interval_minutes()}분 간격으로 다시 배정했습니다.",
+                    text_color="#48d980")
+                append_runtime_log("AUTOMATION", f"재실행 예약시간 재배정: count={count}, started_at={self._automation_started_at}, interval={self._automation_publish_interval_minutes()}")
+            self._automation_startup_schedule_applied = True
+            self._automation_startup_schedule_error = ""
+        except Exception as exc:
+            self.automation_queue = previous
+            self.wordpress_settings.automation_queue = list(previous)
+            self._automation_startup_schedule_error = str(exc)
+            self.automation_status_label.configure(
+                text=f"시작 기준 예약시간을 저장하지 못해 자동등록을 보류했습니다: {exc}", text_color="#ff6b6b")
+            append_runtime_log("AUTOMATION", f"재실행 예약시간 저장 실패 - 발행 보류: {exc}")
+
     def _automation_publish_interval_minutes(self) -> int:
         if not hasattr(self, "automation_publish_interval_menu"):
             return self.wordpress_settings.automation_publish_interval_minutes
@@ -54682,6 +54714,9 @@ class KeywordApp(ctk.CTk):
 
     def _automation_publish_scheduler_tick(self) -> None:
         self._automation_publish_schedule_job = None
+        if getattr(self, "_automation_startup_schedule_error", ""):
+            self._schedule_next_automation_publish()
+            return
         if not getattr(self, "automation_queue", None):
             self._schedule_next_automation_publish()
             return
@@ -54711,6 +54746,9 @@ class KeywordApp(ctk.CTk):
     ) -> bool:
         remote_request = bool(item_id)
         self._stop_automation_publish_countdown()
+        if getattr(self, "_automation_startup_schedule_error", ""):
+            self._schedule_next_automation_publish()
+            return False
         if self.active_automation_upload_item_id or self._writing_keyword_selection_locked() or any(
             self._worker_is_running(getattr(self, name, None)) for name in
             ("article_worker", "reference_collection_worker", "analysis_worker", "wp_publish_worker")
