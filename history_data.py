@@ -10,7 +10,7 @@ from __future__ import annotations
 
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
-        "date": "2026-11-07", "version": "v1.3.16", "category": "티스토리 V2 자동화",
+        "date": "2026-11-07", "version": "v1.3.17", "category": "티스토리 V2 자동화",
         "title": "키워드 관리와 V2 예약 발행 대기열 연결",
         "request": "자동화 발행 대상에 티스토리 V2를 추가하고 키워드 관리의 선택 키워드를 V2 대기열로 전달",
         "changes": (

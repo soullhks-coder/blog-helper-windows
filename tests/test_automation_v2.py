@@ -97,7 +97,7 @@ class AutomationV2Tests(unittest.TestCase):
         self.base.automation_target_platforms = ['tistory_v2']
         with patch.object(main, 'STATE_FILE', self.root / 'state.json'):
             main.AppStateStore.save(self.base, save_secrets=False)
-            saved = json.loads((self.root / 'state.json').read_text())
+            saved = json.loads((self.root / 'state.json').read_text(encoding='utf-8'))
         self.assertEqual(saved['automation_queue'], items)
         self.assertEqual(saved['automation_target_platforms'], ['tistory_v2'])
         self.app.automation_queue = []
