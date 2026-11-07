@@ -277,6 +277,100 @@ class AutomationV2Tests(unittest.TestCase):
         app = SimpleNamespace(active_automation_upload_item_id='v2-pending-events')
         self.assertTrue(main.KeywordApp._writing_keyword_selection_locked(app))
 
+    def test_waiting_keyword_edit_invalidates_old_content_but_preserves_schedule_and_options(self):
+        item = v2.make_items([{'keyword': '마그네슘', 'wiki_keyword': 'Mg'}], self.config, [])[0][0]
+        item.update(title='완성 제목', article_html=BODY, reference_text='old facts', source_urls={'old': 'https://example.com'},
+                    thumbnail_path='old-thumb.png', slide_summaries=SUMMARIES, v2_deck={'id': 'old'},
+                    provider='offline', scheduled_at=12345)
+        before = copy.deepcopy(item)
+        result = v2.edited_keywords(item, before, '  칼슘  효능 ', '', [item])
+        self.assertEqual(result['keyword'], '칼슘 효능')
+        self.assertEqual(result['wiki_keyword'], '')
+        self.assertEqual(result['title'], '칼슘 효능')
+        for key in ('article_html', 'reference_text', 'thumbnail_path'):
+            self.assertEqual(result[key], '')
+        for key in ('slide_summaries', 'v2_deck', 'provider'):
+            self.assertNotIn(key, result)
+        self.assertEqual(result['source_urls'], {})
+        for key in ('id', 'scheduled_at', 'status', 'v2_config', 'target_platforms'):
+            self.assertEqual(result[key], before[key])
+        self.assertEqual(item, before)
+
+    def test_wiki_only_edit_keeps_article_summaries_and_pause_boundary(self):
+        item = v2.make_items([{'keyword': '마그네슘', 'wiki_keyword': 'Mg'}], self.config, [])[0][0]
+        item.update(status=v2.PAUSED, article_html=BODY, reference_text='수집 내용', slide_summaries=SUMMARIES,
+                    v2_deck={'id': 'old-photos'}, thumbnail_path='current.png')
+        result = v2.edited_keywords(item, copy.deepcopy(item), '마그네슘', '  마그네슘  ', [item])
+        self.assertEqual(result['wiki_keyword'], '마그네슘')
+        for key in ('article_html', 'slide_summaries', 'reference_text', 'thumbnail_path', 'status'):
+            self.assertEqual(result[key], item[key])
+        self.assertNotIn('v2_deck', result)
+        self.assertEqual(v2.edited_keywords(item, copy.deepcopy(item), '마그네슘', 'Mg', [item]), item)
+
+    def test_edit_rejects_blank_long_duplicate_stale_running_or_published_jobs_atomically(self):
+        items = v2.make_items([{'keyword': '마그네슘'}, {'keyword': '칼슘'}], self.config, [])[0]
+        item, before = items[0], copy.deepcopy(items[0])
+        for keyword, wiki in [('', ''), ('x' * 501, ''), ('마그네슘', 'x' * 501), ('칼슘', '')]:
+            with self.subTest(keyword=keyword[:20], wiki=wiki[:20]), self.assertRaises(ValueError):
+                v2.edited_keywords(item, before, keyword, wiki, items)
+            self.assertEqual(item, before)
+        with self.assertRaisesRegex(ValueError, '변경'):
+            v2.edited_keywords(item, {**before, 'wiki_keyword': 'stale'}, 'new', '', items)
+        for patch in ({'status': 'V2 준비 중'}, {'status': '업로드 중'}, {'published_url': 'https://example.com/post'}):
+            changed = {**item, **patch}
+            with self.subTest(patch=patch), self.assertRaises(ValueError):
+                v2.edited_keywords(changed, copy.deepcopy(changed), 'new', '', [changed])
+        with self.assertRaises(ValueError):
+            v2.edited_keywords(item, before, 'new', '', items, active_id=item['id'])
+        with self.assertRaises(ValueError):
+            v2.edited_keywords(None, before, 'new', '', items)
+
+    def test_edit_scheduler_hold_blocks_both_due_and_explicit_start_and_releases_on_close(self):
+        item = v2.make_items([{'keyword': '편집 중'}], self.config, [])[0][0]
+        item['scheduled_at'] = 1
+        app = SimpleNamespace(automation_queue=[item], _automation_keyword_editing_ids={item['id']},
+            active_automation_upload_item_id='', pipeline_worker=None, tistory_automation_worker=None,
+            _writing_keyword_selection_locked=lambda: False, _worker_is_running=lambda worker: False,
+            _stop_automation_publish_countdown=Mock(), _schedule_next_automation_publish=Mock(),
+            _find_automation_queue_item=lambda _id: item, _start_automation_v2_item=Mock())
+        self.assertIsNone(main.KeywordApp._next_publishable_automation_item_for_time(app, due_only=True))
+        self.assertFalse(main.KeywordApp._publish_next_automation_queue_item(app, item_id=item['id']))
+        app._start_automation_v2_item.assert_not_called()
+        app._automation_keyword_editing_ids.clear()
+        self.assertIs(main.KeywordApp._next_publishable_automation_item_for_time(app, due_only=True), item)
+
+    def test_edit_save_failure_rolls_back_original_job_and_cached_settings(self):
+        item = v2.make_items([{'keyword': '원본', 'wiki_keyword': '원본 사진'}], self.config, [])[0][0]
+        before = copy.deepcopy(item)
+        app = SimpleNamespace(automation_queue=[item], wordpress_settings=self.base, active_automation_upload_item_id='',
+            _find_automation_queue_item=lambda _id: item,
+            _save_automation_queue=Mock(side_effect=OSError('disk full')))
+        with self.assertRaisesRegex(OSError, 'disk full'):
+            main.KeywordApp._save_automation_queue_keywords(app, item['id'], before, '새 키워드', '')
+        self.assertEqual(item, before)
+        self.assertEqual(self.base.automation_queue, [before])
+
+    def test_edited_job_is_saved_with_optional_query_and_other_job_intact(self):
+        items = v2.make_items([{'keyword': '원본', 'wiki_keyword': '원본 사진'}, {'keyword': '다른 작업'}], self.config, [])[0]
+        items[0].update(article_html=BODY, scheduled_at=23456)
+        self.base.automation_queue = items
+        before_other = copy.deepcopy(items[1])
+        app = SimpleNamespace(automation_queue=items, wordpress_settings=self.base, active_automation_upload_item_id='',
+            _find_automation_queue_item=lambda _id: items[0], _refresh_automation_queue=Mock(), automation_status_label=Mock())
+        def save():
+            self.base.automation_queue = list(items)
+            main.AppStateStore.save(self.base, save_secrets=False)
+        app._save_automation_queue = save
+        with patch.object(main, 'STATE_FILE', self.root / 'state.json'), patch.object(main, 'append_runtime_log'):
+            save()
+            main.KeywordApp._save_automation_queue_keywords(app, items[0]['id'], copy.deepcopy(items[0]), '새로운 키워드', '')
+            saved = json.loads((self.root / 'state.json').read_text(encoding='utf-8'))['automation_queue']
+        self.assertEqual(saved[0]['keyword'], '새로운 키워드')
+        self.assertEqual(saved[0]['wiki_keyword'], '')
+        self.assertEqual(saved[0]['article_html'], '')
+        self.assertEqual(saved[0]['scheduled_at'], 23456)
+        self.assertEqual(saved[1], before_other)
+
 
 if __name__ == '__main__':
     unittest.main()

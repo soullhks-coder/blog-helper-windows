@@ -39235,6 +39235,8 @@ class KeywordApp(ctk.CTk):
             (
                 str(item.get("id") or ""),
                 str(item.get("title") or ""),
+                str(item.get("keyword") or ""),
+                str(item.get("wiki_keyword") or ""),
                 str(item.get("status") or ""),
                 str(item.get("scheduled_at") or ""),
                 tuple(item.get("target_platforms") or []),
@@ -39343,9 +39345,13 @@ class KeywordApp(ctk.CTk):
                 command=lambda target_id=item_id: self._delete_automation_queue_item(target_id),
             ).grid(row=0, column=1)
 
+            from automation_v2 import can_edit
+            if can_edit(item, self.active_automation_upload_item_id):
+                ctk.CTkButton(action_row, text="키워드 수정", width=90, height=34, corner_radius=11,
+                              command=lambda target_id=item_id: self._edit_automation_queue_keywords(target_id)).grid(row=0, column=2, padx=(8, 0))
             if item.get("v2_config") and status == "V2 확인 필요":
                 ctk.CTkButton(action_row, text="다시 시도", width=82, height=34, corner_radius=11,
-                              command=lambda target_id=item_id: self._retry_automation_v2_item(target_id)).grid(row=0, column=2, padx=(8, 0))
+                              command=lambda target_id=item_id: self._retry_automation_v2_item(target_id)).grid(row=0, column=3, padx=(8, 0))
 
             status_label = ctk.CTkLabel(
                 card,
@@ -49382,6 +49388,9 @@ class KeywordApp(ctk.CTk):
         return True
 
     def _switch_page(self, page_name: str) -> None:
+        editor = self.__dict__.get("automation_keyword_dialog")
+        if editor is not None and page_name != "automation":
+            editor.close()
         if page_name != getattr(self, "current_page", None):
             help_dialog = self.__dict__.get("writing_help_dialog")
             if help_dialog is not None:
@@ -53936,6 +53945,42 @@ class KeywordApp(ctk.CTk):
             self._refresh_automation_queue()
         return {"added": len(items), "skipped": skipped}
 
+    def _edit_automation_queue_keywords(self, item_id: str) -> None:
+        from automation_v2 import can_edit
+        from automation_keyword_editor import AutomationKeywordEditor
+        dialog = self.__dict__.get("automation_keyword_dialog")
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+        item = self._find_automation_queue_item(item_id)
+        if not can_edit(item, self.active_automation_upload_item_id):
+            messagebox.showinfo("수정 불가", "대기 중인 V2 작업만 수정할 수 있습니다.")
+            return
+        AutomationKeywordEditor(self, item)
+
+    def _save_automation_queue_keywords(self, item_id: str, expected: dict, keyword: str, wiki_keyword: str) -> None:
+        from automation_v2 import edited_keywords
+        if getattr(self.wordpress_settings, "_state_read_error", ""):
+            raise ValueError("설정 파일을 복구한 뒤 대기 키워드를 저장해 주세요.")
+        item = self._find_automation_queue_item(item_id)
+        updated = edited_keywords(item, expected, keyword, wiki_keyword, self.automation_queue,
+                                  active_id=self.active_automation_upload_item_id)
+        if updated == item:
+            return
+        previous = copy.deepcopy(item)
+        item.clear()
+        item.update(updated)
+        try:
+            self._save_automation_queue()
+        except Exception:
+            item.clear()
+            item.update(previous)
+            self.wordpress_settings.automation_queue = list(self.automation_queue)
+            raise
+        append_runtime_log("AUTOMATION V2", f"대기 키워드 수정: id={item_id}, keyword={keyword}, wiki={wiki_keyword}")
+        self._refresh_automation_queue()
+        self.automation_status_label.configure(text="대기 키워드를 저장했습니다. 수정한 값으로 준비·발행합니다.", text_color="#48d980")
+
     def _start_automation_v2_item(self, item: dict) -> bool:
         from automation_v2 import PrepareWorker, execution_settings, PAUSED
         try:
@@ -54012,6 +54057,8 @@ class KeywordApp(ctk.CTk):
             self._handle_automation_publish_error(str(exc))
 
     def _retry_automation_v2_item(self, item_id: str) -> None:
+        if item_id in getattr(self, "_automation_keyword_editing_ids", set()):
+            return
         item = self._find_automation_queue_item(item_id)
         if not item or not item.get("v2_config") or item.get("status") != "V2 확인 필요":
             return
@@ -54611,6 +54658,8 @@ class KeywordApp(ctk.CTk):
         candidates: list[dict] = []
         for item in self.automation_queue:
             status = str(item.get("status") or "")
+            if str(item.get("id") or "") in getattr(self, "_automation_keyword_editing_ids", set()):
+                continue
             if status in ("업로드 완료", "업로드 중", "V2 준비 중", "V2 확인 필요"):
                 continue
             if not str(item.get("article_html") or "").strip() and not item.get("v2_config"):
@@ -54689,6 +54738,9 @@ class KeywordApp(ctk.CTk):
             if item_id
             else self._next_publishable_automation_item_for_time(due_only=scheduled)
         )
+        if item and str(item.get("id") or "") in getattr(self, "_automation_keyword_editing_ids", set()):
+            self._schedule_next_automation_publish()
+            return False
         if item and str(item.get("status") or "") in ("업로드 완료", "업로드 중", "V2 준비 중", "V2 확인 필요"):
             item = None
         if item and not str(item.get("article_html") or "").strip() and not item.get("v2_config"):

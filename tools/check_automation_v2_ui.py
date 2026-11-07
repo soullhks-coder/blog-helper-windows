@@ -108,6 +108,46 @@ def main():
             assert panel.store.counts()['pending'] == 2
             assert app.wordpress_settings.target_platforms == settings.target_platforms
             shot('queue')
+            # Two bordered inputs in one modal; while open, this item is held
+            # out of the scheduler without changing its stored reservation.
+            from modal_backdrop import modal_dimmer
+            before_edit = copy.deepcopy(second)
+            app._edit_automation_queue_keywords(second['id'])
+            settle()
+            dialog = app.automation_keyword_dialog
+            assert dialog.keyword_entry.get() == second['keyword']
+            assert dialog.wiki_entry.get() == ''
+            assert second['id'] in app._automation_keyword_editing_ids
+            assert modal_dimmer(app).active
+            shot('keyword-edit')
+            dialog.cancel_button.invoke()
+            settle()
+            assert second == before_edit
+            assert not app._automation_keyword_editing_ids and not modal_dimmer(app).active
+            app._edit_automation_queue_keywords(second['id'])
+            dialog = app.automation_keyword_dialog
+            dialog.keyword_entry.delete(0, 'end')
+            dialog.keyword_entry.insert(0, first['keyword'])
+            dialog.save_button.invoke()
+            assert '이미 있습니다' in dialog.error.cget('text')
+            assert second == before_edit
+            dialog.keyword_entry.delete(0, 'end')
+            dialog.keyword_entry.insert(0, '칼슘 많은 음식')
+            dialog.wiki_entry.insert(0, '칼슘')
+            dialog.save_button.invoke()
+            settle()
+            assert app.automation_keyword_dialog is None
+            assert second['keyword'] == '칼슘 많은 음식' and second['wiki_keyword'] == '칼슘'
+            assert second['scheduled_at'] == before_edit['scheduled_at']
+            assert not app._automation_keyword_editing_ids and not modal_dimmer(app).active
+            assert panel.store.list()[0][1]['keyword'] == '칼슘 하루 권장량'
+            app._edit_automation_queue_keywords(second['id'])
+            app._switch_page('keywords')
+            settle()
+            assert app.automation_keyword_dialog is None and not modal_dimmer(app).active
+            assert not app._automation_keyword_editing_ids
+            app._switch_page('automation')
+            settle()
             # A later checkbox change cannot retarget an existing V2 job.
             app.automation_target_platform_vars['wordpress'].set(True)
             app._on_automation_target_changed('wordpress')
@@ -185,11 +225,20 @@ def main():
             before = first['status']
             app._reschedule_expired_automation_items()
             assert first['status'] == before
+            old_body = first['article_html']
+            app._edit_automation_queue_keywords(first['id'])
+            dialog = app.automation_keyword_dialog
+            dialog.wiki_entry.delete(0, 'end')
+            dialog.save_button.invoke()
+            settle()
+            assert first['status'] == 'V2 확인 필요' and first['article_html'] == old_body
+            assert first['wiki_keyword'] == '' and 'v2_deck' not in first
+            assert not modal_dimmer(app).active and not app._automation_keyword_editing_ids
             shot('paused')
             app.geometry('1120x850')
             settle()
             shot('compact')
-            print(f'PASS {args.theme}: multi-keyword/wiki queue, fixed account, direct mode, real article/slides, native handoff, pause')
+            print(f'PASS {args.theme}: multi-keyword/wiki queue, keyword editing/cancel/duplicate/scheduler hold/navigation dim restore, fixed account, direct mode, real article/slides, native handoff, pause')
         finally:
             app.destroy()
 

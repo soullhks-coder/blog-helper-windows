@@ -4,9 +4,10 @@ from __future__ import annotations
 import copy
 import threading
 import uuid
+from datetime import datetime
 from urllib.parse import urlsplit
 
-from keyword_library import keyword_key
+from keyword_library import clean_keyword, keyword_key
 from tistory_v2 import (V2Store, assign_deck_themes, assign_slide_images,
                         apply_text_positions, apply_slide_font_sizes)
 from writing_run import WritingCancelled, check_writing_cancelled
@@ -14,6 +15,7 @@ from writing_run import WritingCancelled, check_writing_cancelled
 
 TARGET = "tistory_v2"
 PAUSED = "V2 확인 필요"
+EDITABLE = {"V2 대기 중", "대기 중", PAUSED}
 PROFILE_FIELDS = ("blog_url", "write_url", "input_mode", "auto_publish", "upload_webp",
                   "save_mode", "reference_image_protection_mode", "ads_enabled", "ads_code",
                   "ads_slot_id", "ads_position", "ads_count", "daily_publish_limit", "profile_scope")
@@ -124,6 +126,47 @@ def make_items(rows, config, existing):
                       "status": "V2 대기 중", "target_platforms": [TARGET],
                       "v2_config": copy.deepcopy(config)})
     return items, skipped
+
+
+def can_edit(item, active_id=""):
+    return bool(item and item.get("v2_config") and item.get("status") in EDITABLE
+                and str(item.get("id") or "") != str(active_id)
+                and not item.get("published_url") and not item.get("published_urls"))
+
+
+def edited_keywords(item, expected, keyword, wiki_keyword, existing, *, active_id=""):
+    """Validate before changing anything; leave manager rows and other jobs alone."""
+    if not can_edit(item, active_id):
+        raise ValueError("대기 중인 V2 작업만 수정할 수 있습니다. 실행 중이거나 발행된 작업은 변경하지 않습니다.")
+    if item != expected:
+        raise ValueError("대기열 정보가 변경되었습니다. 수정창을 닫고 최신 항목에서 다시 열어 주세요.")
+    keyword, wiki_keyword = clean_keyword(keyword), clean_keyword(wiki_keyword)
+    if not keyword:
+        raise ValueError("글쓰기 키워드를 입력해 주세요.")
+    if len(keyword) > 500 or len(wiki_keyword) > 500:
+        raise ValueError("키워드와 위키 검색어는 각각 500자 이내로 입력해 주세요.")
+    account = _account(item["v2_config"])
+    if any(other.get("id") != item["id"] and other.get("v2_config")
+           and _account(other["v2_config"]) == account
+           and keyword_key(other.get("keyword", "")) == keyword_key(keyword) for other in existing):
+        raise ValueError("이 블로그의 V2 대기열에 같은 키워드가 이미 있습니다.")
+    article_changed = keyword != item.get("keyword", "")
+    wiki_changed = wiki_keyword != item.get("wiki_keyword", "")
+    result = copy.deepcopy(item)
+    if not article_changed and not wiki_changed:
+        return result
+    result.update(keyword=keyword, wiki_keyword=wiki_keyword,
+                  keyword_edit_revision=int(item.get("keyword_edit_revision", 0)) + 1,
+                  keywords_edited_at=datetime.now().isoformat(timespec="seconds"))
+    # Keep the reservation, publication settings and failed/review boundary.
+    # No files are deleted: old saved decks may still be open in the editor.
+    for key in ("v2_deck", "cardnews_image_paths", "cardnews_paths", "slide_paths"):
+        result.pop(key, None)
+    if article_changed:
+        result.update(title=keyword, article_html="", reference_text="", source_urls={}, thumbnail_path="")
+        for key in ("slide_summaries", "provider", "cleanup_paths", "generation_error"):
+            result.pop(key, None)
+    return result
 
 
 class PrepareWorker(threading.Thread):
