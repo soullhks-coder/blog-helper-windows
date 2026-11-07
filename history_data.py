@@ -10,7 +10,7 @@ from __future__ import annotations
 
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
-        "date": "2026-11-07", "version": "v1.3.15", "category": "티스토리 V2 자동화",
+        "date": "2026-11-07", "version": "v1.3.16", "category": "티스토리 V2 자동화",
         "title": "키워드 관리와 V2 예약 발행 대기열 연결",
         "request": "자동화 발행 대상에 티스토리 V2를 추가하고 키워드 관리의 선택 키워드를 V2 대기열로 전달",
         "changes": (
@@ -20,6 +20,7 @@ BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
             "동일 계정의 중복 작업을 제외하고 기존 대기열 대상은 체크 변경으로 바뀌지 않도록 보호",
             "V2 오류·실행 중 종료는 확인 대기 상태로 보존하고 완성 본문을 재사용해 명시적으로 다시 시도",
             "티스토리 V2 직접 글쓰기 선택을 별도로 제공하고 실제 발행 성공 전에는 키워드 사용 이력 유지",
+            "지원 종료된 macOS 14 빌드 환경을 macOS 15로 전환해 Mac 자동 배포 복구",
         ),
     },
     {
