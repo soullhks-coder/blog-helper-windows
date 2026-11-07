@@ -125,11 +125,13 @@ class KeywordLibraryPage(ctk.CTkFrame):
                                    text_color=p["muted"], anchor="w", wraplength=490, justify="left")
         self.status.grid(row=0, column=0, padx=16, pady=12, sticky="ew")
         self.status.bind("<Configure>", lambda _event: self.wrap_label(self.status))
-        self.destination = self.option_menu(footer, values=["블로그 글쓰기", "티스토리 V2"], width=140)
+        self.destination = self.option_menu(footer, values=["블로그 글쓰기", "티스토리 V2", "티스토리 V2 직접 글쓰기"], width=165,
+                                            command=self.destination_changed)
         self.destination.grid(row=0, column=1, padx=8)
         self.write_button = self.button(footer, "선택 키워드 넣기", self.use_for_writing, primary=True, width=140)
         self.write_button.grid(row=0, column=2, padx=(0, 16))
         self.refresh()
+        self.destination_changed()
         self._poll_job = self.after(1000, self.poll)
 
     def button(self, parent, text, command, *, primary=False, width=140):
@@ -539,8 +541,36 @@ class KeywordLibraryPage(ctk.CTkFrame):
 
     def use_for_writing(self):
         rows = self.selected()
+        if not rows:
+            return
+        if self.destination.get() == "티스토리 V2" and "tistory_v2" in self.app._automation_target_platforms():
+            if self.history:
+                self.notice("사용 이력은 대기로 복원한 뒤 대기열에 넣어 주세요.")
+                return
+            current, _ = self.store.list(group_id=self.group_id, search=self.search.get(), limit=100000)
+            snapshots = {row['item_id']: row for row in current}
+            if any(snapshots.get(row['item_id']) != row for row in rows):
+                self.refresh()
+                self.notice("키워드 정보가 변경되었습니다. 목록을 확인하고 다시 선택해 주세요.")
+                return
+            result = self.safe(lambda: self.app._enqueue_managed_v2_keywords(rows))
+            if result is None:
+                return
+            self.notice(f"티스토리 V2 대기열 {result['added']}개 추가 · 중복 {result['skipped']}개 건너뜀. 예약시간에 수집·글작성·슬라이드·발행을 진행합니다.")
+            if result['added']:
+                for variable in self.selection.values():
+                    variable.set(False)
+                self.app._switch_page("automation")
+                self.app.automation_status_label.configure(text=self.status.cget('text'), text_color=self.palette['accent'])
+            return
         if len(rows) != 1:
             self.notice("글쓰기에 넣을 키워드를 하나만 선택해 주세요.")
             return
-        destination = "tistory_v2" if self.destination.get() == "티스토리 V2" else "writing"
+        destination = "tistory_v2" if self.destination.get().startswith("티스토리 V2") else "writing"
         self.app._use_managed_keyword(rows[0]["keyword"], destination, wiki_keyword=rows[0]['wiki_keyword'])
+
+    def destination_changed(self, _value=None):
+        queued = self.destination.get() == "티스토리 V2" and "tistory_v2" in self.app._automation_target_platforms()
+        self.write_button.configure(text="선택 키워드 넣기")
+        self.notice("티스토리 V2 자동화 선택 중 · 여러 키워드를 선택해 예약 대기열에 넣습니다. 위키 검색어도 함께 저장합니다."
+                    if queued else "선택한 한 키워드를 글쓰기 화면에 불러옵니다. 발행 성공 시 사용 이력에 남습니다.")

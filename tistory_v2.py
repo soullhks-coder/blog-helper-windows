@@ -231,21 +231,22 @@ class V2Store:
                 pass
         return text_position_defaults(values)
 
-    def new_deck(self, keyword: str, title: str, body: str, count: int, theme: str) -> dict:
+    def new_deck(self, keyword: str, title: str, body: str, count: int, theme: str, *, preferences: dict | None = None) -> dict:
         deck_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+        values = self.preferences() if preferences is None else preferences
         try:
-            size = deck_slide_size(self.preferences())
+            size = deck_slide_size(values)
         except ValueError:
             size = SLIDE_SIZE
-        positions = self.slide_position_defaults()
-        font_sizes = slide_font_size_overrides(self.preferences().get("font_size_defaults"))
+        positions = self.slide_position_defaults() if preferences is None else text_position_defaults(values)
+        font_sizes = slide_font_size_overrides(values.get("font_size_defaults"))
         slides = build_slides(title or keyword, body, count)
         apply_text_positions(slides, positions["text_horizontal"], positions["text_vertical"])
         apply_slide_font_sizes(slides, font_sizes)
         deck = {"id": deck_id, "keyword": keyword, "title": title or keyword,
                 "wiki_keyword": keyword,
                 "body": body, "theme": theme,
-                "show_photo_sources": bool(self.preferences().get("show_photo_sources", True)),
+                "show_photo_sources": bool(values.get("show_photo_sources", True)),
                 "slide_size": list(size),
                 "text_position_defaults": positions,
                 "font_size_defaults": font_sizes,

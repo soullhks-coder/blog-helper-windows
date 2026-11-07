@@ -24085,6 +24085,7 @@ class AutomationKeywordQueueWorker(threading.Thread):
                 raise RuntimeError("대기열에 담을 키워드를 찾지 못했습니다.")
             completed_count = 0
             for index, payload in enumerate(payloads, start=1):
+                payload.setdefault("target_platforms", list(self.settings.automation_target_platforms))
                 keyword = str(payload.get("keyword") or "").strip()
                 if not keyword:
                     continue
@@ -24356,6 +24357,18 @@ class AutomationKeywordQueueWorker(threading.Thread):
                 }
             )
         return items
+
+
+class AutomationV2DiscoveryWorker(AutomationKeywordQueueWorker):
+    def __init__(self, settings, sources, result_queue, config):
+        super().__init__(settings, sources, result_queue)
+        self.config = copy.deepcopy(config)
+
+    def run(self):
+        try:
+            self.result_queue.put(("automation_v2_discovered", {"rows": self._fetch_keyword_payloads(), "config": self.config}))
+        except Exception as exc:
+            self.result_queue.put(("automation_collect_error", str(exc)))
 
 
 class AutomationKeywordDiscoveryWorker(threading.Thread):
@@ -27620,6 +27633,10 @@ class KeywordApp(ctk.CTk):
         self.last_published_urls: dict[str, str] = {}
         self.writing_completion_platforms: list[str] = []
         self.automation_queue = list(self.wordpress_settings.automation_queue or [])
+        for item in self.automation_queue:
+            if item.get("v2_config") and item.get("status") in {"V2 준비 중", "업로드 중"}:
+                item["status"] = "V2 확인 필요"
+                item["upload_error"] = "이전 실행 중 중단된 작업입니다. Chrome/발행 결과를 확인한 뒤 다시 시도해 주세요."
         self.password_visible = False
         self.current_page = "home"
         self.active_platform = "wordpress"
@@ -39130,7 +39147,7 @@ class KeywordApp(ctk.CTk):
 
         target_card = ctk.CTkFrame(control_card, fg_color="#121a28", corner_radius=16)
         target_card.grid(row=6, column=0, columnspan=7, padx=18, pady=(0, 16), sticky="ew")
-        target_card.grid_columnconfigure(4, weight=1)
+        target_card.grid_columnconfigure(5, weight=1)
 
         ctk.CTkLabel(
             target_card,
@@ -39139,10 +39156,11 @@ class KeywordApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=0, padx=(16, 14), pady=14, sticky="w")
 
-        automation_targets = set(self.wordpress_settings.automation_target_platforms or ["wordpress"])
+        from automation_v2 import targets as normalize_automation_targets
+        automation_targets = set(normalize_automation_targets(self.wordpress_settings.automation_target_platforms))
         self.automation_target_platform_vars = {}
         for column, (platform_key, label) in enumerate(
-            (("wordpress", "워드프레스"), ("tistory", "티스토리"), ("blogspot", "블로그스팟")),
+            (("wordpress", "워드프레스"), ("tistory", "티스토리"), ("blogspot", "블로그스팟"), ("tistory_v2", "티스토리 V2")),
             start=1,
         ):
             variable = tk.BooleanVar(value=platform_key in automation_targets)
@@ -39151,13 +39169,18 @@ class KeywordApp(ctk.CTk):
                 target_card,
                 text=label,
                 variable=variable,
-                command=self._save_automation_settings,
+                command=lambda key=platform_key: self._on_automation_target_changed(key),
                 checkbox_width=22,
                 checkbox_height=22,
                 fg_color="#3468e8",
                 hover_color="#2d5cd0",
                 font=ctk.CTkFont(size=14, weight="bold"),
             ).grid(row=0, column=column, padx=(0, 16), pady=14, sticky="w")
+
+        ctk.CTkLabel(
+            target_card, text="티스토리 V2는 단독 실행 · V2 메뉴의 티스토리 블로그·프롬프트·썸네일로 10장/콜라주 5개를 발행합니다.",
+            text_color="#9aa7bb", font=ctk.CTkFont(size=12), anchor="w", wraplength=760,
+        ).grid(row=1, column=0, columnspan=6, padx=16, pady=(0, 12), sticky="ew")
 
         self.automation_list = ctk.CTkScrollableFrame(
             self.automation_page,
@@ -39173,6 +39196,7 @@ class KeywordApp(ctk.CTk):
     def _refresh_automation_queue(self) -> None:
         if not hasattr(self, "automation_list"):
             return
+        palette = self._theme_palette()
         self._ensure_automation_queue_schedules()
         completed_ids = {
             str(item.get("id") or "")
@@ -39259,7 +39283,8 @@ class KeywordApp(ctk.CTk):
 
             title = str(item.get("title") or "제목 없음")
             keyword = str(item.get("keyword") or item.get("topic") or "키워드 없음")
-            platforms = ", ".join(item.get("target_platforms") or []) or "대상 블로그 미선택"
+            labels = {"wordpress": "워드프레스", "tistory": "티스토리", "blogspot": "블로그스팟", "tistory_v2": "티스토리 V2"}
+            platforms = ", ".join(labels.get(p, p) for p in item.get("target_platforms") or []) or "대상 블로그 미선택"
             created_at = str(item.get("created_at") or "")
             scheduled_at = item.get("scheduled_at")
             scheduled_text = self._format_automation_schedule_time(scheduled_at)
@@ -39280,15 +39305,18 @@ class KeywordApp(ctk.CTk):
                 hover_color="#2d5cd0",
             ).grid(row=0, column=0, rowspan=4, padx=(18, 0), pady=20, sticky="nw")
 
-            ctk.CTkLabel(
+            title_label = ctk.CTkLabel(
                 card,
                 text=title,
-                text_color="#f2f6ff",
+                text_color=palette["text"],
                 font=ctk.CTkFont(size=18, weight="bold"),
                 anchor="w",
                 justify="left",
                 wraplength=760,
-            ).grid(row=0, column=1, padx=16, pady=(18, 6), sticky="ew")
+            )
+            title_label.grid(row=0, column=1, padx=16, pady=(18, 6), sticky="ew")
+            title_label.bind("<Configure>", lambda _event, widget=title_label: widget.configure(
+                wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
 
             action_row = ctk.CTkFrame(card, fg_color="transparent")
             action_row.grid(row=0, column=2, padx=(0, 16), pady=(16, 4), sticky="ne")
@@ -39315,15 +39343,28 @@ class KeywordApp(ctk.CTk):
                 command=lambda target_id=item_id: self._delete_automation_queue_item(target_id),
             ).grid(row=0, column=1)
 
-            ctk.CTkLabel(
+            if item.get("v2_config") and status == "V2 확인 필요":
+                ctk.CTkButton(action_row, text="다시 시도", width=82, height=34, corner_radius=11,
+                              command=lambda target_id=item_id: self._retry_automation_v2_item(target_id)).grid(row=0, column=2, padx=(8, 0))
+
+            status_label = ctk.CTkLabel(
                 card,
                 text=f"키워드: {keyword}  ·  대상: {platforms}  ·  상태: {status}",
-                text_color="#b8c5d8",
+                text_color=palette["muted"],
                 font=ctk.CTkFont(size=14),
                 anchor="w",
                 justify="left",
-            ).grid(row=1, column=1, padx=16, sticky="ew")
+            )
+            status_label.grid(row=1, column=1, columnspan=2, padx=16, sticky="ew")
+            status_label.bind("<Configure>", lambda _event, widget=status_label: widget.configure(
+                wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
             detail_text = f"담은 시간: {created_at}"
+            if item.get("v2_config"):
+                config = item["v2_config"]
+                detail_text += (f" · {config['profile']['blog_url'] or config['profile']['write_url']}"
+                                f" · 프롬프트: {config['prompt']['name']} · 썸네일 {config['thumbnail_index'] + 1}"
+                                f" · 위키: {item.get('wiki_keyword') or keyword}"
+                                + (" · 검토 발행" if config.get("review_publish") else ""))
             if thumbnail_path:
                 detail_text += f"  ·  썸네일: {thumbnail_path}"
             else:
@@ -39332,15 +39373,18 @@ class KeywordApp(ctk.CTk):
                 detail_text += f"  ·  발행 URL: {item['published_url']}"
             if item.get("upload_error"):
                 detail_text += f"  ·  오류: {str(item['upload_error'])[:120]}"
-            ctk.CTkLabel(
+            detail_label = ctk.CTkLabel(
                 card,
                 text=detail_text,
-                text_color="#8292a9",
+                text_color=palette["muted"],
                 font=ctk.CTkFont(size=12),
                 anchor="w",
                 justify="left",
                 wraplength=760,
-            ).grid(row=2, column=1, padx=16, pady=(6, 18), sticky="ew")
+            )
+            detail_label.grid(row=2, column=1, columnspan=2, padx=16, pady=(6, 18), sticky="ew")
+            detail_label.bind("<Configure>", lambda _event, widget=detail_label: widget.configure(
+                wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
 
             schedule_row = ctk.CTkFrame(card, fg_color="transparent")
             schedule_row.grid(row=3, column=1, columnspan=2, padx=16, pady=(0, 18), sticky="ew")
@@ -49412,6 +49456,10 @@ class KeywordApp(ctk.CTk):
                 self._schedule_automation_queue_refresh()
             else:
                 self._refresh_automation_queue()
+                if sys.platform == "darwin" and self.wordpress_settings.app_theme == "블랙테마":
+                    self.after_idle(self._redraw_automation_surfaces)
+        if page_name == "keywords" and self.keyword_library_panel is not None:
+            self.keyword_library_panel.destination_changed()
         if hasattr(self, "_start_naver_kin_clipboard_monitor"):
             if page_name == "naver_kin":
                 if hasattr(self, "naver_kin_tab_frames"):
@@ -49499,6 +49547,21 @@ class KeywordApp(ctk.CTk):
         self._set_writing_progress(1, f"'{keyword}' 키워드를 불러왔습니다. 블로그·설정을 확인한 뒤 [시작]을 눌러 주세요.", 0.0)
         self._save_ui_state()
         self.topic_entry.focus_set()
+
+    def _redraw_automation_surfaces(self) -> None:
+        """Refresh Cocoa canvas backing stores after returning from keyword management."""
+        if self.current_page != "automation":
+            return
+        pending = [self.automation_page]
+        while pending:
+            widget = pending.pop()
+            if not widget.winfo_exists():
+                continue
+            draw = getattr(widget, "_draw", None)
+            if callable(draw):
+                draw()
+            if not isinstance(widget, (InputEntry, InputTextbox, InputOptionMenu, InputComboBox)):
+                pending.extend(widget.winfo_children())
 
     def _insert_tistory_v2_images(self, deck: dict, paths: list[Path]) -> None:
         from tistory_v2 import insert_slide_figures
@@ -53508,6 +53571,8 @@ class KeywordApp(ctk.CTk):
             self._after_writing(120, lambda keyword=selected_keyword: self._auto_collect_reference_for_keyword(keyword))
 
     def _writing_keyword_selection_locked(self) -> bool:
+        if getattr(self, "active_automation_upload_item_id", ""):
+            return True
         panel = self.__dict__.get("tistory_v2_panel")
         if (panel and panel.busy) or self.__dict__.get("writing_v2_publish_pending"):
             return True
@@ -53675,7 +53740,21 @@ class KeywordApp(ctk.CTk):
 
     def _add_current_post_to_automation_queue(self) -> None:
         if self._is_tistory_v2_writing():
-            messagebox.showinfo("티스토리 V2", "V2 슬라이드·콜라주는 이 화면의 [썸네일 완료 후 업로드]로 진행해 주세요. 기존 자동화 대기열에는 일반 글만 추가됩니다.")
+            messagebox.showinfo("티스토리 V2", "이 화면의 [썸네일 완료 후 업로드]로 진행하거나, 키워드 관리에서 여러 키워드를 V2 자동화 대기열에 넣어 주세요.")
+            return
+        if self._automation_target_platforms() == ["tistory_v2"]:
+            article_html = self._get_current_article_html()
+            if not article_html.strip():
+                messagebox.showwarning("대기열 추가 불가", "먼저 글 제목과 본문을 준비해 주세요.")
+                return
+            try:
+                self._enqueue_managed_v2_keywords([{
+                    "keyword": self._selected_or_manual_keyword() or self.current_keyword,
+                    "title": self.article_title_entry.get().strip() or self.generated_article_title,
+                    "article_html": article_html,
+                }])
+            except (ValueError, RuntimeError) as exc:
+                messagebox.showerror("V2 대기열 추가 실패", str(exc))
             return
         settings = self._read_wordpress_settings()
         if settings.inline_images_enabled and settings.inline_images_provider == "카드뉴스 생성":
@@ -53802,6 +53881,8 @@ class KeywordApp(ctk.CTk):
         grace_seconds = 90
         changed = False
         for item in list(self.automation_queue):
+            if item.get("v2_config"):
+                continue  # Run overdue V2 jobs in order; never unpause a failed job.
             if str(item.get("status") or "") in ("업로드 완료", "업로드 중"):
                 continue
             try:
@@ -53820,9 +53901,125 @@ class KeywordApp(ctk.CTk):
         return changed
 
     def _automation_target_platforms(self) -> list[str]:
-        if not hasattr(self, "automation_target_platform_vars"):
-            return list(self.wordpress_settings.automation_target_platforms or ["wordpress"])
-        return [platform for platform, var in self.automation_target_platform_vars.items() if var.get()]
+        from automation_v2 import targets
+        variables = getattr(self, "automation_target_platform_vars", {})
+        if not variables:
+            return targets(self.wordpress_settings.automation_target_platforms)
+        return targets([platform for platform, var in variables.items() if var.get()])
+
+    def _on_automation_target_changed(self, platform: str) -> None:
+        variables = self.automation_target_platform_vars
+        if variables[platform].get():
+            for key, variable in variables.items():
+                if (platform == "tistory_v2" and key != platform) or (platform != "tistory_v2" and key == "tistory_v2"):
+                    variable.set(False)
+        self._save_automation_settings()
+
+    def _enqueue_managed_v2_keywords(self, rows: list[dict], *, config: dict | None = None) -> dict:
+        """Persist keyword-only jobs; generation/publication starts at scheduled time."""
+        from automation_v2 import snapshot, make_items
+        config = copy.deepcopy(config) if config is not None else snapshot(self, sys.modules[__name__])
+        items, skipped = make_items(rows, config, self.automation_queue)
+        previous = list(self.automation_queue)
+        for item in items:
+            item["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._assign_automation_schedule(item)
+            self.automation_queue.append(item)
+        if items:
+            try:
+                self._save_automation_queue()
+            except Exception:
+                self.automation_queue = previous
+                self.wordpress_settings.automation_queue = list(previous)
+                raise
+            append_runtime_log("AUTOMATION V2", f"대기열 등록: count={len(items)}, skipped={skipped}, profile={config['profile']['name']}")
+            self._refresh_automation_queue()
+        return {"added": len(items), "skipped": skipped}
+
+    def _start_automation_v2_item(self, item: dict) -> bool:
+        from automation_v2 import PrepareWorker, execution_settings, PAUSED
+        try:
+            if getattr(self.wordpress_settings, "_state_read_error", ""):
+                raise ValueError("설정 파일을 복구한 뒤 V2 작업을 재개해 주세요.")
+            settings = execution_settings(item["v2_config"], self._read_wordpress_settings(include_prompts=False), sys.modules[__name__])
+            settings.tistory_v2_wiki_keyword = str(item.get("wiki_keyword") or "")
+            error = writing_model_validation_error(settings)
+            if error:
+                raise ValueError(error)
+            # Enforce current limits before any paid article generation.
+            if settings.tistory_save_mode == TISTORY_SAVE_MODE_PUBLISH:
+                DailyPublishLimitStore.ensure_can_publish("tistory", settings.tistory_blog_url or settings.tistory_write_url,
+                                                         settings.tistory_daily_publish_limit)
+            item["status"] = "V2 준비 중"
+            item.pop("upload_error", None)
+            self.active_automation_upload_item_id = str(item["id"])
+            self._automation_v2_settings = settings
+            self._save_automation_queue()
+            self._refresh_automation_queue()
+            self.pipeline_worker = PrepareWorker(item, settings, sys.modules[__name__], self.result_queue)
+            self.pipeline_worker.start()
+            return True
+        except Exception as exc:
+            item["status"], item["upload_error"] = PAUSED, str(exc)
+            self.active_automation_upload_item_id = ""
+            self._save_automation_queue()
+            self._refresh_automation_queue()
+            self.automation_status_label.configure(text=f"V2 확인 필요: {exc}", text_color="#ff6b6b")
+            append_runtime_log("AUTOMATION V2", f"실행 확인 필요: id={item['id']}, error={exc}")
+            self._schedule_next_automation_publish()
+            return False
+
+    def _handle_automation_v2_article_ready(self, payload: dict) -> None:
+        item = self._find_automation_queue_item(str(payload.get("id") or ""))
+        if not item or self.active_automation_upload_item_id != item["id"]:
+            return
+        for key in ("title", "article_html", "reference_text", "slide_summaries", "provider"):
+            item[key] = copy.deepcopy(payload.get(key))
+        self._save_automation_queue()
+
+    def _handle_automation_v2_prepared(self, payload: dict) -> None:
+        item = self._find_automation_queue_item(str(payload.get("id") or ""))
+        if not item or self.active_automation_upload_item_id != item["id"]:
+            return
+        self._handle_automation_v2_article_ready(payload)
+        item["v2_deck"] = copy.deepcopy(payload["v2_deck"])
+        try:
+            # Tk-owned thumbnail controls are accessed only on this UI thread.
+            original = self._capture_thumbnail_preset_from_ui()
+            try:
+                preset = copy.deepcopy(item["v2_config"]["thumbnail_preset"])
+                if preset.get("auto_title", True):
+                    preset["text"] = item["title"]
+                self._apply_thumbnail_preset_to_ui(preset, refresh_preview=False, apply_cardnews=False)
+                path = DATA_DIR / f"automation-thumbnail-{item['id']}.png"
+                self._export_thumbnail_png(path)
+                item["thumbnail_path"] = str(path)
+            finally:
+                self._apply_thumbnail_preset_to_ui(original, refresh_preview=False, apply_cardnews=False)
+            item["status"] = "업로드 중"
+            self._save_automation_queue()
+            self._refresh_automation_queue()
+            settings = self._automation_v2_settings
+            self.pipeline_worker = PublishPipelineWorker(
+                settings=settings, title=item["title"], article_html=item["article_html"],
+                thumbnail_path=item["thumbnail_path"], focus_keyword=item["keyword"], tag_names=[],
+                slug=slugify_korean_text(item["title"]), meta_description="", result_queue=self.result_queue,
+                tistory_v2=True, tistory_v2_keyword=item["keyword"], tistory_v2_deck=item["v2_deck"],
+                source_keyword=item["keyword"],
+            )
+            self.pipeline_worker.start()
+        except Exception as exc:
+            self._handle_automation_publish_error(str(exc))
+
+    def _retry_automation_v2_item(self, item_id: str) -> None:
+        item = self._find_automation_queue_item(item_id)
+        if not item or not item.get("v2_config") or item.get("status") != "V2 확인 필요":
+            return
+        item["status"] = "V2 대기 중"
+        item["scheduled_at"] = self._next_automation_schedule_timestamp()
+        item.pop("upload_error", None)
+        self._save_automation_queue()
+        self._refresh_automation_queue()
 
     def _save_automation_settings(self) -> None:
         self.wordpress_settings.automation_interval_hours = self._automation_interval_hours()
@@ -53859,6 +54056,7 @@ class KeywordApp(ctk.CTk):
         return {
             identity
             for item in self.automation_queue
+            if not item.get("v2_config")
             if (identity := self._automation_keyword_identity(str(item.get("keyword") or "")))
         }
 
@@ -54032,7 +54230,7 @@ class KeywordApp(ctk.CTk):
                 messagebox.showwarning("키워드 선택 필요", "대기열에 추가할 추천 키워드를 체크해 주세요.")
                 return
 
-            existing_keywords = self._existing_automation_keyword_identities()
+            existing_keywords = set() if self._automation_target_platforms() == ["tistory_v2"] else self._existing_automation_keyword_identities()
             unique_payloads: list[dict] = []
             selected_identities: set[str] = set()
             skipped_count = 0
@@ -54057,6 +54255,22 @@ class KeywordApp(ctk.CTk):
         if not automation_targets:
             if not scheduled:
                 messagebox.showwarning("대상 블로그 필요", "자동화 발행 대상을 최소 1개 이상 선택해 주세요.")
+            return
+
+        if automation_targets == ["tistory_v2"]:
+            try:
+                if selected_payloads is None:
+                    # Discovery stays separate from generation for V2 too.
+                    from automation_v2 import snapshot
+                    self.automation_keyword_worker = AutomationV2DiscoveryWorker(
+                        self._read_wordpress_settings(include_prompts=False), sources, self.result_queue,
+                        snapshot(self, sys.modules[__name__]))
+                    self.automation_keyword_worker.start()
+                else:
+                    result = self._enqueue_managed_v2_keywords(selected_payloads)
+                    self.automation_status_label.configure(text=f"V2 대기열 {result['added']}개 추가 · 중복 {result['skipped']}개 제외", text_color="#48d980")
+            except (ValueError, RuntimeError) as exc:
+                self.automation_status_label.configure(text=str(exc), text_color="#ff6b6b")
             return
 
         settings = self._read_wordpress_settings()
@@ -54120,6 +54334,8 @@ class KeywordApp(ctk.CTk):
     def _handle_automation_keyword_item_collected(self, payload: dict) -> bool:
         settings = self._read_wordpress_settings(include_prompts=False)
         automation_targets = list(payload.get("target_platforms") or self._automation_target_platforms())
+        if "tistory_v2" in automation_targets:
+            return bool(self._enqueue_managed_v2_keywords([payload])["added"])
         existing_keys = {
             f"{item.get('source_name')}::{item.get('keyword')}"
             for item in self.automation_queue
@@ -54334,6 +54550,9 @@ class KeywordApp(ctk.CTk):
 
     def _delete_selected_automation_queue_items(self) -> None:
         selected_ids = set(self._selected_automation_queue_ids())
+        if self.active_automation_upload_item_id in selected_ids:
+            messagebox.showinfo("진행 중", "실행 중인 작업은 삭제할 수 없습니다. 나머지 작업만 선택해 주세요.")
+            return
         if not selected_ids:
             messagebox.showinfo("선택 필요", "삭제할 대기열 항목을 체크해 주세요.")
             return
@@ -54355,6 +54574,9 @@ class KeywordApp(ctk.CTk):
             )
 
     def _clear_automation_queue(self) -> None:
+        if self.active_automation_upload_item_id:
+            messagebox.showinfo("진행 중", "실행 중인 작업이 있어 전체 삭제할 수 없습니다. 완료 후 다시 시도해 주세요.")
+            return
         if not self.automation_queue:
             messagebox.showinfo("대기열 비어 있음", "삭제할 대기열 작업이 없습니다.")
             return
@@ -54389,9 +54611,9 @@ class KeywordApp(ctk.CTk):
         candidates: list[dict] = []
         for item in self.automation_queue:
             status = str(item.get("status") or "")
-            if status in ("업로드 완료", "업로드 중"):
+            if status in ("업로드 완료", "업로드 중", "V2 준비 중", "V2 확인 필요"):
                 continue
-            if not str(item.get("article_html") or "").strip():
+            if not str(item.get("article_html") or "").strip() and not item.get("v2_config"):
                 continue
             try:
                 scheduled_at = float(item.get("scheduled_at") or 0)
@@ -54440,6 +54662,12 @@ class KeywordApp(ctk.CTk):
     ) -> bool:
         remote_request = bool(item_id)
         self._stop_automation_publish_countdown()
+        if self.active_automation_upload_item_id or self._writing_keyword_selection_locked() or any(
+            self._worker_is_running(getattr(self, name, None)) for name in
+            ("article_worker", "reference_collection_worker", "analysis_worker", "wp_publish_worker")
+        ):
+            self._schedule_next_automation_publish()
+            return False
         if self.pipeline_worker and self.pipeline_worker.is_alive():
             if scheduled:
                 self._schedule_next_automation_publish()
@@ -54461,9 +54689,9 @@ class KeywordApp(ctk.CTk):
             if item_id
             else self._next_publishable_automation_item_for_time(due_only=scheduled)
         )
-        if item and str(item.get("status") or "") in ("업로드 완료", "업로드 중"):
+        if item and str(item.get("status") or "") in ("업로드 완료", "업로드 중", "V2 준비 중", "V2 확인 필요"):
             item = None
-        if item and not str(item.get("article_html") or "").strip():
+        if item and not str(item.get("article_html") or "").strip() and not item.get("v2_config"):
             item = None
         if not item:
             if not scheduled:
@@ -54471,14 +54699,15 @@ class KeywordApp(ctk.CTk):
             self._schedule_next_automation_publish()
             return False
 
+        if item.get("v2_config"):
+            return self._start_automation_v2_item(item)
+
         settings = self._read_wordpress_settings(include_prompts=False)
-        automation_targets = (
-            list(item.get("target_platforms") or [])
-            if remote_request
-            else self._automation_target_platforms()
-        )
-        if not automation_targets:
-            automation_targets = self._automation_target_platforms()
+        automation_targets = list(item["target_platforms"]) if "target_platforms" in item else self._automation_target_platforms()
+        if "tistory_v2" in automation_targets:
+            self.automation_status_label.configure(text="V2 발행 설정이 없는 이전 작업입니다. 삭제한 뒤 V2 대기열에 다시 넣어 주세요.", text_color="#ff6b6b")
+            self._schedule_next_automation_publish()
+            return False
         settings.target_platforms = list(automation_targets)
         settings.automation_target_platforms = list(automation_targets)
         if not automation_targets:
@@ -54591,7 +54820,8 @@ class KeywordApp(ctk.CTk):
             messagebox.showerror("시간 형식 오류", str(exc))
             return
         item["scheduled_at"] = scheduled_at
-        item["status"] = "대기 중" if str(item.get("status") or "") != "업로드 중" else item.get("status")
+        if item.get("status") not in {"업로드 중", "V2 준비 중", "V2 확인 필요"}:
+            item["status"] = "대기 중"
         self._save_automation_queue()
         self._refresh_automation_queue()
         if hasattr(self, "automation_status_label"):
@@ -54601,6 +54831,9 @@ class KeywordApp(ctk.CTk):
             )
 
     def _delete_automation_queue_item(self, item_id: str) -> None:
+        if item_id == self.active_automation_upload_item_id:
+            messagebox.showinfo("진행 중", "실행 중인 작업은 삭제할 수 없습니다.")
+            return
         item = self._find_automation_queue_item(item_id)
         if not item:
             return
@@ -55580,6 +55813,19 @@ class KeywordApp(ctk.CTk):
                 elif event_type == "automation_collect_progress":
                     if hasattr(self, "automation_status_label"):
                         self.automation_status_label.configure(text=payload, text_color="#6dadff")
+                elif event_type == "automation_v2_discovered":
+                    self._enqueue_managed_v2_keywords(payload["rows"], config=payload["config"])
+                    self._schedule_next_automation_collection()
+                elif event_type == "automation_v2_progress":
+                    if payload.get("id") == self.active_automation_upload_item_id:
+                        self.automation_status_label.configure(text=payload["message"], text_color="#6dadff")
+                elif event_type == "automation_v2_article_ready":
+                    self._handle_automation_v2_article_ready(payload)
+                elif event_type == "automation_v2_prepared":
+                    self._handle_automation_v2_prepared(payload)
+                elif event_type == "automation_v2_error":
+                    if payload.get("id") == self.active_automation_upload_item_id:
+                        self._handle_automation_publish_error(payload["message"])
                 elif event_type == "automation_keyword_candidates_done":
                     self._handle_automation_keyword_candidates_loaded(payload)
                 elif event_type == "automation_keyword_candidates_error":
@@ -56984,6 +57230,10 @@ class KeywordApp(ctk.CTk):
                             or TISTORY_PROFILE_SCOPES[0]
                         ),
                         reference_articles=list(tistory.get("reference_articles") or []),
+                        tistory_v2_slide_paths=tistory.get("tistory_v2_slide_paths"),
+                        tistory_v2_source_credits=tistory.get("tistory_v2_source_credits", ""),
+                        tistory_v2_slide_size=tistory.get("tistory_v2_slide_size"),
+                        tistory_v2_slide_sizes=tistory.get("tistory_v2_slide_sizes"),
                     )
                     self.active_automation_tistory_pending = True
                     self.tistory_automation_worker.start()
@@ -57009,20 +57259,22 @@ class KeywordApp(ctk.CTk):
         title = str(item.get("title") or "자동화 글") if item else "자동화 글"
         remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
         if item:
-            item["status"] = "업로드 실패"
+            item["status"] = "V2 확인 필요" if item.get("v2_config") else "업로드 실패"
             item["upload_error"] = str(error_message)
             item["upload_failed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             item["scheduled_at"] = self._next_automation_schedule_timestamp()
         if remote_job_id and self.remote_agent is not None:
             self.remote_agent.fail(remote_job_id, f"즉시발행에 실패했습니다: {error_message}")
         self.active_automation_upload_item_id = ""
+        self._automation_v2_settings = None
         self.active_automation_tistory_pending = False
         self.tistory_automation_worker = None
         cleanup_tistory_automation_files()
         self._save_automation_queue()
         self._refresh_automation_queue()
         self.automation_status_label.configure(
-            text=f"'{title}' 자동등록 실패. 다음 등록을 예약합니다.",
+            text=(f"'{title}' V2 작업 중단 · 오류 확인 후 [다시 시도]를 눌러 주세요." if item and item.get("v2_config")
+                  else f"'{title}' 자동등록 실패. 다음 등록을 예약합니다."),
             text_color="#ff6b6b",
         )
         self._schedule_next_automation_publish()
@@ -57075,7 +57327,7 @@ class KeywordApp(ctk.CTk):
         else:
             remote_job_id = str(item.get("remote_job_id") or "").strip() if item else ""
             if item:
-                item["status"] = "업로드 실패"
+                item["status"] = "V2 확인 필요" if item.get("v2_config") else "업로드 실패"
                 item["upload_error"] = status_message or "티스토리 자동입력 실패"
                 item["upload_failed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 item["scheduled_at"] = self._next_automation_schedule_timestamp()
@@ -57084,6 +57336,7 @@ class KeywordApp(ctk.CTk):
             text = f"'{title}' {status_message or '자동등록 실패'}. 다음 등록을 예약합니다."
             color = "#ff6b6b"
         self.active_automation_upload_item_id = ""
+        self._automation_v2_settings = None
         self._save_automation_queue()
         self._refresh_automation_queue()
         self.automation_status_label.configure(text=text, text_color=color)
