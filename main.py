@@ -39124,7 +39124,7 @@ class KeywordApp(ctk.CTk):
 
         self.automation_publish_interval_menu = InputOptionMenu(
             management_row,
-            values=["3분", "5분", "10분", "20분", "30분", "40분", "50분", "60분"],
+            values=["3분", "5분", "10분", "20분", "30분", "40분", "50분", "60분", "120분", "180분", "240분", "300분"],
             width=92,
             height=36,
             corner_radius=12,
