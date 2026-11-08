@@ -334,6 +334,66 @@ class AutomationV2Tests(unittest.TestCase):
         app = SimpleNamespace(active_automation_upload_item_id='v2-pending-events')
         self.assertTrue(main.KeywordApp._writing_keyword_selection_locked(app))
 
+    def test_review_edit_changes_only_job_mode_and_execution_honors_both_directions(self):
+        item = v2.make_items([{'keyword': '검토할 글'}], self.config, [])[0][0]
+        item.update(article_html=BODY, slide_summaries=SUMMARIES, v2_deck={'id': 'saved-deck'},
+                    thumbnail_path='current.png', scheduled_at=12345, status=v2.PAUSED)
+        original = copy.deepcopy(item)
+        off = v2.edited_review_publish(item, original, False)
+        expected = copy.deepcopy(item)
+        expected['v2_config']['review_publish'] = False
+        expected['review_publish_revision'] = 1
+        self.assertEqual(off, expected)
+        self.assertEqual(item, original)
+        self.assertTrue(v2.execution_settings(off['v2_config'], self.base, self.api).tistory_auto_publish)
+        on = v2.edited_review_publish(off, copy.deepcopy(off), True)
+        settings = v2.execution_settings(on['v2_config'], self.base, self.api)
+        self.assertFalse(settings.tistory_auto_publish)
+        self.assertEqual(settings.tistory_save_mode, main.TISTORY_SAVE_MODE_PUBLISH)
+        self.assertEqual(v2.edited_review_publish(on, copy.deepcopy(on), True), on)
+
+    def test_review_edit_rejects_stale_running_published_and_non_boolean_values(self):
+        item = v2.make_items([{'keyword': '검토할 글'}], self.config, [])[0][0]
+        for changed, expected, enabled, active in [
+            (item, {**item, 'scheduled_at': 1}, False, ''),
+            ({**item, 'status': '업로드 중'}, None, False, ''),
+            ({**item, 'status': 'V2 준비 중'}, None, False, ''),
+            ({**item, 'published_urls': {'tistory': 'https://example.com'}}, None, False, ''),
+            (item, None, False, item['id']), (item, None, 'false', ''),
+        ]:
+            before = copy.deepcopy(changed)
+            with self.assertRaises(ValueError):
+                v2.edited_review_publish(changed, expected or before, enabled, active_id=active)
+            self.assertEqual(changed, before)
+
+    def test_review_save_is_persistent_isolated_and_failure_restores_switch_source(self):
+        items = v2.make_items([{'keyword': '검토할 글'}, {'keyword': '다른 작업'}], self.config, [])[0]
+        before = copy.deepcopy(items)
+        app = SimpleNamespace(automation_queue=items, wordpress_settings=self.base, active_automation_upload_item_id='',
+            _find_automation_queue_item=lambda _id: items[0], _refresh_automation_queue=Mock())
+        def save():
+            self.base.automation_queue = list(items)
+            main.AppStateStore.save(self.base, save_secrets=False)
+        app._save_automation_queue = save
+        with patch.object(main, 'STATE_FILE', self.root / 'state.json'), patch.object(main, 'append_runtime_log'):
+            save()
+            self.assertTrue(main.KeywordApp._set_automation_queue_review(app, items[0]['id'], before[0], False))
+            saved = json.loads((self.root / 'state.json').read_text(encoding='utf-8'))['automation_queue']
+        self.assertFalse(saved[0]['v2_config']['review_publish'])
+        self.assertEqual(saved[1], before[1])
+        self.assertTrue(V2Store(self.root / 'Tistory V2').preferences()['review_publish'])
+        committed = copy.deepcopy(items)
+        app._save_automation_queue = Mock(side_effect=OSError('disk full'))
+        with patch.object(main.messagebox, 'showerror'):
+            self.assertFalse(main.KeywordApp._set_automation_queue_review(app, items[0]['id'], committed[0], True))
+            self.assertEqual(items, committed)
+            self.assertEqual(self.base.automation_queue, committed)
+            self.assertIsNone(app._automation_queue_render_signature)
+            app._automation_keyword_editing_ids = {items[0]['id']}
+            app._save_automation_queue.reset_mock()
+            self.assertFalse(main.KeywordApp._set_automation_queue_review(app, items[0]['id'], committed[0], True))
+            app._save_automation_queue.assert_not_called()
+
     def test_waiting_keyword_edit_invalidates_old_content_but_preserves_schedule_and_options(self):
         item = v2.make_items([{'keyword': '마그네슘', 'wiki_keyword': 'Mg'}], self.config, [])[0][0]
         item.update(title='완성 제목', article_html=BODY, reference_text='old facts', source_urls={'old': 'https://example.com'},

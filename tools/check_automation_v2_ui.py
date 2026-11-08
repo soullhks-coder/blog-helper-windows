@@ -126,6 +126,59 @@ def main():
             selector.menu.set('second.example')
             selector.changed('second.example')
             shot('queue')
+            other_before = copy.deepcopy(second)
+            app.automation_review_switches[first['id']].toggle()
+            settle()
+            assert not first['v2_config']['review_publish']
+            assert v2.execution_settings(first['v2_config'], app.wordpress_settings, api).tistory_auto_publish
+            app.automation_review_switches[first['id']].toggle()
+            settle()
+            assert first['v2_config']['review_publish']
+            assert second == other_before
+            assert V2Store(Path(directory) / 'Tistory V2').preferences() == manual_before
+            # Real calendar, quick choices and time menus, with no typed date.
+            from datetime import date, datetime
+            from modal_backdrop import modal_dimmer
+            before_time = copy.deepcopy(second)
+            app.automation_schedule_buttons[second['id']].invoke()
+            settle()
+            calendar = app.automation_schedule_dialog
+            assert second['id'] in app._automation_keyword_editing_ids and modal_dimmer(app).active
+            for label, minutes in (('10분 뒤', 10), ('30분 뒤', 30), ('1시간 뒤', 60), ('등록 간격 뒤', app._automation_publish_interval_minutes())):
+                calendar.quick_buttons[label].invoke()
+                delta = (calendar.selected_datetime() - datetime.now()).total_seconds()
+                assert minutes * 60 - 65 <= delta <= minutes * 60 + 1
+            calendar.month = date(2028, 2, 1)
+            calendar.render_calendar()
+            assert 29 in calendar.day_buttons
+            calendar.day_buttons[29].invoke()
+            calendar.hour_menu.set('17시')
+            calendar.minute_menu.set('35분')
+            calendar.update_preview()
+            shot('calendar')
+            assert calendar.save_button.winfo_ismapped()
+            assert calendar.save_button.winfo_rooty() + calendar.save_button.winfo_height() <= calendar.winfo_rooty() + calendar.winfo_height()
+            assert calendar.error.winfo_rooty() + calendar.error.winfo_height() < calendar.save_button.winfo_rooty()
+            calendar.cancel_button.invoke()
+            assert second == before_time and not modal_dimmer(app).active
+            app.automation_schedule_buttons[second['id']].invoke()
+            calendar = app.automation_schedule_dialog
+            calendar.quick_buttons['30분 뒤'].invoke()
+            chosen = calendar.selected_datetime().timestamp()
+            with patch.object(app, '_save_automation_queue_schedule', side_effect=OSError('저장 공간 확인 필요')):
+                calendar.save_button.invoke()
+                assert calendar.winfo_exists() and '저장 공간' in calendar.error.cget('text')
+                assert second == before_time
+            calendar.save_button.invoke()
+            settle()
+            assert second['scheduled_at'] == chosen and second['status'] == before_time['status']
+            assert not app._automation_keyword_editing_ids and not modal_dimmer(app).active
+            app.automation_schedule_buttons[second['id']].invoke()
+            app._switch_page('home')
+            settle()
+            assert app.automation_schedule_dialog is None and not modal_dimmer(app).active
+            app._switch_page('automation')
+            settle()
             # Two bordered inputs in one modal; while open, this item is held
             # out of the scheduler without changing its stored reservation.
             from modal_backdrop import modal_dimmer
@@ -256,7 +309,7 @@ def main():
             app.geometry('1120x850')
             settle()
             shot('compact')
-            print(f'PASS {args.theme}: multi-keyword/wiki queue, keyword editing/cancel/duplicate/scheduler hold/navigation dim restore, fixed account, direct mode, real article/slides, native handoff, pause')
+            print(f'PASS {args.theme}: per-job review ON/OFF, calendar/quick times/save/cancel/error/scheduler hold/navigation dim restore, multi-keyword/wiki queue, fixed account, direct mode, real article/slides, native handoff, pause')
         finally:
             app.destroy()
 

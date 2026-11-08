@@ -39246,6 +39246,7 @@ class KeywordApp(ctk.CTk):
                 str(item.get("title") or ""),
                 str(item.get("keyword") or ""),
                 str(item.get("wiki_keyword") or ""),
+                bool((item.get("v2_config") or {}).get("review_publish")),
                 str(item.get("status") or ""),
                 str(item.get("scheduled_at") or ""),
                 tuple(item.get("target_platforms") or []),
@@ -39261,6 +39262,8 @@ class KeywordApp(ctk.CTk):
             self._finish_theme_paint()
             return
         self._automation_queue_render_signature = render_signature
+        self.automation_review_switches = {}
+        self.automation_schedule_buttons = {}
         for child in self.automation_list.winfo_children():
             child.destroy()
 
@@ -39314,7 +39317,7 @@ class KeywordApp(ctk.CTk):
                 checkbox_height=22,
                 fg_color="#3468e8",
                 hover_color="#2d5cd0",
-            ).grid(row=0, column=0, rowspan=4, padx=(18, 0), pady=20, sticky="nw")
+            ).grid(row=0, column=0, rowspan=5, padx=(18, 0), pady=20, sticky="nw")
 
             title_label = ctk.CTkLabel(
                 card,
@@ -39379,7 +39382,7 @@ class KeywordApp(ctk.CTk):
                 detail_text += (f" · {config['profile']['blog_url'] or config['profile']['write_url']}"
                                 f" · 프롬프트: {config['prompt']['name']} · 썸네일 {config['thumbnail_index'] + 1}"
                                 f" · 위키: {item.get('wiki_keyword') or keyword}"
-                                + (" · 검토 발행" if config.get("review_publish") else ""))
+                                + (" · 검토 발행 ON" if config.get("review_publish") else " · 검토 발행 OFF"))
             if thumbnail_path:
                 detail_text += f"  ·  썸네일: {thumbnail_path}"
             else:
@@ -39410,16 +39413,20 @@ class KeywordApp(ctk.CTk):
                 text_color="#dce6f3",
                 font=ctk.CTkFont(size=13, weight="bold"),
             ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-            schedule_entry = InputEntry(
+            from automation_schedule import can_edit_schedule
+            schedule_button = ctk.CTkButton(
                 schedule_row,
+                text=f"{scheduled_text}  ▾",
                 height=34,
                 corner_radius=10,
-                fg_color="#111826",
-                border_color="#314761",
+                fg_color=palette["button"], text_color=palette["text"],
+                hover_color=palette["button_hover"],
+                state="normal" if can_edit_schedule(item, self.active_automation_upload_item_id) else "disabled",
                 font=ctk.CTkFont(size=13, weight="bold"),
+                command=lambda target_id=item_id: self._edit_automation_queue_schedule(target_id),
             )
-            schedule_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
-            schedule_entry.insert(0, scheduled_text if scheduled_text != "미정" else "")
+            schedule_button.grid(row=0, column=1, padx=(0, 8), sticky="ew")
+            self.automation_schedule_buttons[item_id] = schedule_button
             ctk.CTkButton(
                 schedule_row,
                 text="시간변경",
@@ -39429,11 +39436,30 @@ class KeywordApp(ctk.CTk):
                 fg_color="#314761",
                 hover_color="#3f5c7f",
                 font=ctk.CTkFont(size=12, weight="bold"),
-                command=lambda target_id=item_id, entry=schedule_entry: self._update_automation_item_schedule(
-                    target_id,
-                    entry.get(),
-                ),
+                state="normal" if can_edit_schedule(item, self.active_automation_upload_item_id) else "disabled",
+                command=lambda target_id=item_id: self._edit_automation_queue_schedule(target_id),
             ).grid(row=0, column=2, sticky="e")
+            if item.get("v2_config"):
+                review_row = ctk.CTkFrame(card, fg_color="transparent")
+                review_row.grid(row=4, column=1, columnspan=2, padx=16, pady=(0, 16), sticky="ew")
+                review_row.grid_columnconfigure(1, weight=1)
+                enabled = bool(item["v2_config"].get("review_publish"))
+                variable = tk.BooleanVar(value=enabled)
+                switch = ctk.CTkSwitch(review_row, text=f"검토 발행 {'ON' if enabled else 'OFF'}",
+                    variable=variable, onvalue=True, offvalue=False, switch_width=38, switch_height=22,
+                    progress_color="#19a957", text_color=palette["text"],
+                    state="normal" if can_edit(item, self.active_automation_upload_item_id) else "disabled",
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                    command=lambda target_id=item_id, expected=copy.deepcopy(item), value=variable:
+                        self._set_automation_queue_review(target_id, expected, bool(value.get())))
+                switch.grid(row=0, column=0, padx=(0, 12), sticky="w")
+                self.automation_review_switches[item_id] = switch
+                hint = ctk.CTkLabel(review_row,
+                    text="ON: 본문·태그 입력 후 직접 발행  ·  OFF: 기존 발행 설정 사용",
+                    text_color=palette["muted"], font=ctk.CTkFont(size=12), anchor="w", justify="left")
+                hint.grid(row=0, column=1, sticky="ew")
+                hint.bind("<Configure>", lambda _event, widget=hint: widget.configure(
+                    wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
         self._finish_theme_paint()
 
     def _configure_public_data_table_columns(self, frame) -> None:
@@ -49397,9 +49423,10 @@ class KeywordApp(ctk.CTk):
         return True
 
     def _switch_page(self, page_name: str) -> None:
-        editor = self.__dict__.get("automation_keyword_dialog")
-        if editor is not None and page_name != "automation":
-            editor.close()
+        for name in ("automation_keyword_dialog", "automation_schedule_dialog"):
+            editor = self.__dict__.get(name)
+            if editor is not None and page_name != "automation":
+                editor.close()
         if page_name != getattr(self, "current_page", None):
             help_dialog = self.__dict__.get("writing_help_dialog")
             if help_dialog is not None:
@@ -53931,6 +53958,8 @@ class KeywordApp(ctk.CTk):
         grace_seconds = 90
         changed = False
         for item in list(self.automation_queue):
+            if str(item.get("id") or "") in getattr(self, "_automation_keyword_editing_ids", set()):
+                continue
             if item.get("v2_config"):
                 continue  # Run overdue V2 jobs in order; never unpause a failed job.
             if str(item.get("status") or "") in ("업로드 완료", "업로드 중"):
@@ -53989,7 +54018,7 @@ class KeywordApp(ctk.CTk):
     def _edit_automation_queue_keywords(self, item_id: str) -> None:
         from automation_v2 import can_edit
         from automation_keyword_editor import AutomationKeywordEditor
-        dialog = self.__dict__.get("automation_keyword_dialog")
+        dialog = self.__dict__.get("automation_keyword_dialog") or self.__dict__.get("automation_schedule_dialog")
         if dialog is not None and dialog.winfo_exists():
             dialog.lift()
             return
@@ -53998,6 +54027,34 @@ class KeywordApp(ctk.CTk):
             messagebox.showinfo("수정 불가", "대기 중인 V2 작업만 수정할 수 있습니다.")
             return
         AutomationKeywordEditor(self, item)
+
+    def _set_automation_queue_review(self, item_id: str, expected: dict, enabled: bool) -> bool:
+        from automation_v2 import edited_review_publish
+        item, previous = self._find_automation_queue_item(item_id), None
+        try:
+            if getattr(self.wordpress_settings, "_state_read_error", ""):
+                raise ValueError("설정 파일을 복구한 뒤 검토 발행을 변경해 주세요.")
+            if item_id in getattr(self, "_automation_keyword_editing_ids", set()):
+                raise ValueError("편집창을 닫은 뒤 검토 발행을 변경해 주세요.")
+            updated = edited_review_publish(item, expected, enabled, active_id=self.active_automation_upload_item_id)
+            if updated == item:
+                return True
+            previous = copy.deepcopy(item)
+            item.clear()
+            item.update(updated)
+            self._save_automation_queue()
+        except Exception as exc:
+            if previous is not None:
+                item.clear()
+                item.update(previous)
+                self.wordpress_settings.automation_queue = list(self.automation_queue)
+            self._automation_queue_render_signature = None
+            self._refresh_automation_queue()
+            messagebox.showerror("검토 발행 변경 실패", str(exc), parent=self)
+            return False
+        append_runtime_log("AUTOMATION V2", f"검토 발행 변경: id={item_id}, enabled={enabled}")
+        self._refresh_automation_queue()
+        return True
 
     def _save_automation_queue_keywords(self, item_id: str, expected: dict, keyword: str, wiki_keyword: str) -> None:
         from automation_v2 import edited_keywords
@@ -54909,20 +54966,38 @@ class KeywordApp(ctk.CTk):
     def _update_automation_publish_countdown(self) -> None:
         self._automation_publish_scheduler_tick()
 
-    def _update_automation_item_schedule(self, item_id: str, value: str) -> None:
+    def _edit_automation_queue_schedule(self, item_id: str) -> None:
+        from automation_schedule import can_edit_schedule
+        from automation_schedule_editor import AutomationScheduleEditor
+        dialog = self.__dict__.get("automation_schedule_dialog") or self.__dict__.get("automation_keyword_dialog")
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
         item = self._find_automation_queue_item(item_id)
-        if not item:
-            messagebox.showwarning("시간변경 실패", "대기열 작업을 찾지 못했습니다.")
+        if not can_edit_schedule(item, self.active_automation_upload_item_id):
+            messagebox.showinfo("시간변경 불가", "대기 중인 작업만 예약시간을 변경할 수 있습니다.", parent=self)
             return
+        AutomationScheduleEditor(self, item)
+
+    def _save_automation_queue_schedule(self, item_id: str, expected: dict, scheduled_at: float) -> None:
+        from automation_schedule import edited_schedule
+        if getattr(self.wordpress_settings, "_state_read_error", ""):
+            raise ValueError("설정 파일을 복구한 뒤 예약시간을 변경해 주세요.")
+        item = self._find_automation_queue_item(item_id)
+        updated = edited_schedule(item, expected, scheduled_at, active_id=self.active_automation_upload_item_id)
+        if updated == item:
+            return
+        previous = copy.deepcopy(item)
+        item.clear()
+        item.update(updated)
         try:
-            scheduled_at = self._parse_automation_schedule_time(value)
-        except ValueError as exc:
-            messagebox.showerror("시간 형식 오류", str(exc))
-            return
-        item["scheduled_at"] = scheduled_at
-        if item.get("status") not in {"업로드 중", "V2 준비 중", "V2 확인 필요"}:
-            item["status"] = "대기 중"
-        self._save_automation_queue()
+            self._save_automation_queue()
+        except Exception:
+            item.clear()
+            item.update(previous)
+            self.wordpress_settings.automation_queue = list(self.automation_queue)
+            raise
+        append_runtime_log("AUTOMATION", f"예약시간 변경: id={item_id}, scheduled_at={scheduled_at}")
         self._refresh_automation_queue()
         if hasattr(self, "automation_status_label"):
             self.automation_status_label.configure(

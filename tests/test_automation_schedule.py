@@ -5,10 +5,72 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import main
-from automation_schedule import restart_schedule
+from automation_schedule import restart_schedule, edited_schedule
 
 
 class RestartScheduleTests(unittest.TestCase):
+    def test_manual_schedule_changes_only_time_including_paused_jobs(self):
+        for item in (self.jobs()[1], self.jobs()[2]):
+            before = copy.deepcopy(item)
+            result = edited_schedule(item, before, 2000000, now=1000000)
+            self.assertEqual(result, {**before, 'scheduled_at': 2000000})
+            self.assertEqual(item, before)
+
+    def test_manual_schedule_rejects_past_invalid_stale_running_and_published_jobs(self):
+        item = self.jobs()[1]
+        for value in (1000000, 999999, float('nan'), float('inf'), None, 'invalid'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                edited_schedule(item, copy.deepcopy(item), value, now=1000000)
+        for patch_value in ({'status': '업로드 중'}, {'status': 'V2 준비 중'}, {'status': '업로드 완료'},
+                            {'published_urls': {'tistory': 'https://example.com'}}):
+            changed = {**item, **patch_value}
+            with self.assertRaises(ValueError):
+                edited_schedule(changed, copy.deepcopy(changed), 2000000, now=1000000)
+        with self.assertRaises(ValueError):
+            edited_schedule(item, {**item, 'keyword': 'stale'}, 2000000, now=1000000)
+        with self.assertRaises(ValueError):
+            edited_schedule(item, copy.deepcopy(item), 2000000, now=1000000, active_id=item['id'])
+
+    def test_manual_save_failure_rolls_back_and_read_only_state_blocks_saving(self):
+        app = self.app()
+        item = app.automation_queue[1]
+        before = copy.deepcopy(item)
+        app._find_automation_queue_item = lambda _id: item
+        app.active_automation_upload_item_id = ''
+        app._save_automation_queue.side_effect = OSError('disk full')
+        with patch('automation_schedule.time.time', return_value=1000000), self.assertRaisesRegex(OSError, 'disk full'):
+            main.KeywordApp._save_automation_queue_schedule(app, item['id'], before, 2000000)
+        self.assertEqual(item, before)
+        self.assertEqual(app.wordpress_settings.automation_queue, app.automation_queue)
+        app.wordpress_settings._state_read_error = 'corrupt'
+        app._save_automation_queue.reset_mock()
+        with self.assertRaisesRegex(ValueError, '복구'):
+            main.KeywordApp._save_automation_queue_schedule(app, item['id'], before, 2000000)
+        app._save_automation_queue.assert_not_called()
+
+    def test_calendar_month_navigation_handles_new_year_and_leap_year(self):
+        from datetime import date
+        from automation_schedule_editor import AutomationScheduleEditor
+        editor = SimpleNamespace(month=date(2027, 12, 1), render_calendar=Mock())
+        AutomationScheduleEditor.move_month(editor, 1)
+        self.assertEqual(editor.month, date(2028, 1, 1))
+        AutomationScheduleEditor.move_month(editor, 1)
+        editor.select_day = lambda day: AutomationScheduleEditor.select_day(editor, day)
+        editor.select_day(29)
+        self.assertEqual(editor.selected_date, date(2028, 2, 29))
+        AutomationScheduleEditor.move_month(editor, -2)
+        self.assertEqual(editor.month, date(2027, 12, 1))
+
+    def test_open_calendar_holds_overdue_normal_job_without_automatic_rescheduling(self):
+        app = self.app()
+        app.automation_queue = [app.automation_queue[1]]
+        app._automation_keyword_editing_ids = {'first'}
+        app._next_automation_schedule_timestamp = Mock(side_effect=AssertionError('Held job must stay unchanged'))
+        with patch.object(main.time, 'time', return_value=1000000):
+            self.assertFalse(main.KeywordApp._reschedule_expired_automation_items(app))
+        self.assertEqual(app.automation_queue[0]['scheduled_at'], 1)
+        app._save_automation_queue.assert_not_called()
+
     def jobs(self):
         return [
             {'id':'later', 'keyword':'나중', 'status':'V2 대기 중', 'v2_config':{'profile': 'fixed'}, 'scheduled_at':9000000},

@@ -89,6 +89,14 @@ def main():
                 selector.menu.cget('command')('second.example')
                 app.automation_publish_interval_menu.set('300분')
                 app._save_automation_settings()
+                # These edits use the real settings store; launch 2 must read
+                # the saved review mode, then rebase the edited reservation.
+                with patch.object(api.time, 'time', return_value=anchor):
+                    app._save_automation_queue_schedule('normal-first', copy.deepcopy(items['normal-first']), anchor + 600)
+                app._set_automation_queue_review('v2-later', copy.deepcopy(items['v2-later']), True)
+                before = copy.deepcopy(app.automation_queue)
+            assert items['v2-later']['v2_config']['review_publish']
+            assert not items['paused']['v2_config'].get('review_publish')
             app._switch_page('automation')
             app._switch_page('home')
             app._switch_page('automation')
@@ -98,7 +106,8 @@ def main():
             assert saved['automation_queue'] == before
             assert saved['automation_publish_interval_minutes'] == 300
             assert saved['automation_v2_profile'] == '티스토리 2'
-            print(f'PASS {args.theme} launch {args.phase}: saved V2 blog independent of manual account, {minutes}min from launch, ordered normal/V2 jobs, saved times, paused jobs protected, no reset on navigation')
+            assert next(row for row in saved['automation_queue'] if row['id'] == 'v2-later')['v2_config']['review_publish']
+            print(f'PASS {args.theme} launch {args.phase}: saved job review and calendar reservation, saved V2 blog independent of manual account, {minutes}min from launch, paused jobs protected, no reset on navigation')
         finally:
             app.destroy()
 

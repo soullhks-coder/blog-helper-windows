@@ -144,6 +144,21 @@ def can_edit(item, active_id=""):
                 and not item.get("published_url") and not item.get("published_urls"))
 
 
+def edited_review_publish(item, expected, enabled, *, active_id=""):
+    """Change one waiting job's review mode without regenerating its content."""
+    if not can_edit(item, active_id):
+        raise ValueError("대기 중인 V2 작업만 검토 발행을 변경할 수 있습니다.")
+    if item != expected:
+        raise ValueError("대기열 정보가 변경되었습니다. 최신 항목에서 다시 변경해 주세요.")
+    if not isinstance(enabled, bool):
+        raise ValueError("검토 발행은 ON 또는 OFF로 선택해 주세요.")
+    result = copy.deepcopy(item)
+    if bool(item["v2_config"].get("review_publish")) != enabled:
+        result["v2_config"]["review_publish"] = enabled
+        result["review_publish_revision"] = int(item.get("review_publish_revision", 0)) + 1
+    return result
+
+
 def edited_keywords(item, expected, keyword, wiki_keyword, existing, *, active_id=""):
     """Validate before changing anything; leave manager rows and other jobs alone."""
     if not can_edit(item, active_id):
