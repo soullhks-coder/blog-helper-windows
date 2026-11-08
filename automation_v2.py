@@ -28,22 +28,32 @@ def targets(values):
     return [TARGET] if TARGET in values else values
 
 
+def selected_profile(settings, values):
+    """An explicit automation choice takes priority over the manual V2 screen."""
+    wanted = str(getattr(settings, "automation_v2_profile", "") or "").strip()
+    if wanted:
+        return wanted  # A removed choice must fail validation, never retarget.
+    wanted = values.get("profile_selections", {}).get("tistory")
+    wanted = wanted or (values.get("profile") if values.get("platform", "tistory") == "tistory" else None)
+    return wanted or settings.tistory_active_profile
+
+
 def snapshot(app, api):
     """Capture only public job options. API credentials always stay in settings."""
     if getattr(app.wordpress_settings, "_state_read_error", ""):
         raise ValueError("설정 파일을 복구한 뒤 V2 대기열을 등록해 주세요.")
     values = V2Store(api.DATA_DIR / "Tistory V2").preferences()
     profiles = api.normalize_tistory_profiles(app.wordpress_settings.tistory_profiles)
-    wanted = values.get("profile_selections", {}).get("tistory")
-    wanted = wanted or (values.get("profile") if values.get("platform", "tistory") == "tistory" else None)
-    wanted = wanted or app.wordpress_settings.tistory_active_profile
+    wanted = selected_profile(app.wordpress_settings, values)
     profile = next((p for p in profiles if p["name"] == wanted), None)
     if not profile or not api.build_tistory_write_url(profile["blog_url"], profile["write_url"]):
-        raise ValueError("티스토리 V2 메뉴에서 사용할 티스토리 블로그를 먼저 선택해 주세요.")
+        raise ValueError("블로그자동화의 'V2 발행 블로그'에서 연결된 티스토리 블로그를 선택해 주세요.")
     identity = "tistory:" + profile["name"]
     remembered = values.get("blog_preferences", {}).get(identity,
                     values.get("blog_preferences", {}).get(profile["name"], {}))
-    active_tistory = values.get("platform", "tistory") == "tistory"
+    manual_profile = (values.get("profile") or values.get("profile_selections", {}).get("tistory")
+                      or app.wordpress_settings.tistory_active_profile)
+    active_tistory = values.get("platform", "tistory") == "tistory" and wanted == manual_profile
     prompt_id = values.get("prompt_id") if active_tistory else remembered.get("prompt_id")
     prompts = [p for p in app._prompt_sets() if p.get("platform") == "tistory"]
     prompt = next((p for p in prompts if p.get("id") == prompt_id), None)

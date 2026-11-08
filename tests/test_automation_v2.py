@@ -95,9 +95,14 @@ class AutomationV2Tests(unittest.TestCase):
         items = v2.make_items([{'keyword': '마그네슘', 'wiki_keyword': 'Mg'}], self.config, [])[0]
         self.base.automation_queue = items
         self.base.automation_target_platforms = ['tistory_v2']
+        self.base.automation_v2_profile = '티스토리 2'
         with patch.object(main, 'STATE_FILE', self.root / 'state.json'):
             main.AppStateStore.save(self.base, save_secrets=False)
             saved = json.loads((self.root / 'state.json').read_text(encoding='utf-8'))
+            with patch.object(main.KeychainStore, 'load_secret', return_value=''), \
+                 patch.object(main.PromptFileStore, 'load_into', side_effect=lambda value: value):
+                restored = main.AppStateStore.load()
+        self.assertEqual(restored.automation_v2_profile, '티스토리 2')
         self.assertEqual(saved['automation_queue'], items)
         self.assertEqual(saved['automation_target_platforms'], ['tistory_v2'])
         self.app.automation_queue = []
@@ -107,6 +112,58 @@ class AutomationV2Tests(unittest.TestCase):
             main.KeywordApp._enqueue_managed_v2_keywords(self.app, [{'keyword': '마그네슘'}], config=self.config)
         self.assertEqual(self.app.automation_queue, [])
         self.assertEqual(self.base.automation_queue, [])
+
+    def test_explicit_automation_blog_uses_its_own_v2_design_without_changing_manual_choice(self):
+        self.base.automation_v2_profile = '티스토리 1'
+        alternate = {"id": "first-prompt", "platform": "tistory", "name": "첫 블로그용",
+                     "title_prompt": "첫 제목", "article_prompt": "첫 본문"}
+        self.app._prompt_sets = lambda: [alternate, {**alternate, 'id': 't-prompt'}]
+        preferences = {**self.preferences, 'blog_preferences': {
+            'tistory:티스토리 1': {'prompt_id': 'first-prompt', 'thumbnail': 4}}}
+        store = V2Store(self.root / 'Tistory V2')
+        store.save_preferences(preferences)
+        original = store.preferences()
+        before = copy.deepcopy(self.base)
+        config = v2.snapshot(self.app, self.api)
+        self.assertEqual(config['profile']['name'], '티스토리 1')
+        self.assertEqual(config['prompt']['id'], 'first-prompt')
+        self.assertEqual(config['thumbnail_index'], 4)
+        queued = v2.make_items([{'keyword': '첫 블로그 글'}], config, [])[0][0]
+        self.base.automation_v2_profile = '티스토리 2'
+        self.assertEqual(v2.snapshot(self.app, self.api)['profile']['name'], '티스토리 2')
+        self.assertEqual(v2.execution_settings(queued['v2_config'], self.base, self.api).tistory_blog_url,
+                         'https://first.example')
+        self.base.automation_v2_profile = before.automation_v2_profile
+        self.assertEqual(self.base, before)
+        self.assertEqual(store.preferences(), original)
+
+    def test_explicit_blog_without_saved_design_uses_defaults_and_missing_blog_never_falls_back(self):
+        self.base.automation_v2_profile = '티스토리 1'
+        first_prompt = {"id": "default-prompt", "platform": "tistory", "name": "기본",
+                        "title_prompt": "제목", "article_prompt": "본문"}
+        self.app._prompt_sets = lambda: [first_prompt, {**first_prompt, 'id': 't-prompt'}]
+        config = v2.snapshot(self.app, self.api)
+        self.assertEqual(config['prompt']['id'], 'default-prompt')
+        self.assertEqual(config['thumbnail_index'], self.base.thumbnail_default_preset)
+        self.base.automation_v2_profile = '티스토리 3'  # Empty slot, despite a valid manual V2 choice.
+        with self.assertRaisesRegex(ValueError, 'V2 발행 블로그'):
+            v2.snapshot(self.app, self.api)
+
+    def test_selector_save_failure_and_read_only_settings_revert_choice(self):
+        from automation_v2_selector import AutomationV2BlogSelector
+        selector = SimpleNamespace(app=self.app, api=self.api, choices={'첫 블로그': '티스토리 1'}, refresh=Mock())
+        selector.api.AppStateStore = SimpleNamespace(save=Mock(side_effect=OSError('disk full')))
+        self.base.automation_v2_profile = '티스토리 2'
+        with patch('automation_v2_selector.messagebox.showerror') as error:
+            AutomationV2BlogSelector.changed(selector, '첫 블로그')
+            error.assert_called_once()
+        self.assertEqual(self.base.automation_v2_profile, '티스토리 2')
+        self.base._state_read_error = 'corrupt'
+        selector.api.AppStateStore.save.reset_mock()
+        with patch('automation_v2_selector.messagebox.showerror'):
+            AutomationV2BlogSelector.changed(selector, '첫 블로그')
+        selector.api.AppStateStore.save.assert_not_called()
+        self.assertEqual(self.base.automation_v2_profile, '티스토리 2')
 
     def test_blogspot_header_cannot_redirect_tistory_queue_account_or_prompt(self):
         prefs = {**self.preferences, 'platform': 'blogspot', 'profile': '블로그스팟 1', 'prompt_id': 'blogspot-prompt',

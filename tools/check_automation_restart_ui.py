@@ -46,7 +46,10 @@ def main():
                   'prompt': {'name': 'Fixture'}, 'thumbnail_index': 0}
         if args.phase == 1:
             settings = api.WordPressSettings(app_theme='화이트테마' if args.theme == 'light' else '블랙테마',
-                automation_publish_interval_minutes=120, automation_queue=[
+                automation_v2_profile='티스토리 1', tistory_profiles=api.normalize_tistory_profiles([
+                    {'blog_url': 'https://first.example', 'write_url': 'https://first.tistory.com/manage/newpost/'},
+                    {'blog_url': 'https://second.example', 'write_url': 'https://second.tistory.com/manage/newpost/'},
+                ]), automation_publish_interval_minutes=120, automation_queue=[
                     {'id':'v2-later', 'keyword':'두 번째', 'v2_config':config, 'status':'V2 대기 중', 'scheduled_at':1900000000},
                     {'id':'normal-first', 'keyword':'첫 번째', 'article_html':'<p>Fixture article</p>', 'status':'대기 중', 'scheduled_at':1},
                     {'id':'paused', 'keyword':'확인 필요', 'v2_config':config, 'status':'V2 확인 필요', 'scheduled_at':1900000200},
@@ -75,10 +78,15 @@ def main():
             with patch.object(api.time, 'time', return_value=anchor):
                 assert app._next_automation_schedule_timestamp() == anchor + minutes * 180
             assert app.automation_publish_interval_menu.get() == f'{minutes}분'
+            selector = app.automation_v2_blog_selector
+            assert selector.menu.get() == ('first.example' if args.phase == 1 else 'second.example')
+            assert app.wordpress_settings.tistory_active_profile == '티스토리 1'
             options = app.automation_publish_interval_menu.cget('values')
             assert all(f'{value}분' in options for value in (120, 180, 240, 300))
             before = copy.deepcopy(app.automation_queue)
             if args.phase == 1:
+                selector.menu.set('second.example')
+                selector.menu.cget('command')('second.example')
                 app.automation_publish_interval_menu.set('300분')
                 app._save_automation_settings()
             app._switch_page('automation')
@@ -89,7 +97,8 @@ def main():
             saved = json.loads((args.data / 'app_state.json').read_text(encoding='utf-8'))
             assert saved['automation_queue'] == before
             assert saved['automation_publish_interval_minutes'] == 300
-            print(f'PASS {args.theme} launch {args.phase}: {minutes}min from launch, ordered normal/V2 jobs, saved times, paused jobs protected, no reset on navigation')
+            assert saved['automation_v2_profile'] == '티스토리 2'
+            print(f'PASS {args.theme} launch {args.phase}: saved V2 blog independent of manual account, {minutes}min from launch, ordered normal/V2 jobs, saved times, paused jobs protected, no reset on navigation')
         finally:
             app.destroy()
 

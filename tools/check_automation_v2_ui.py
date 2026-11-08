@@ -76,6 +76,18 @@ def main():
         try:
             app._switch_page('automation')
             settle()
+            selector = app.automation_v2_blog_selector
+            assert selector.menu.get() == 'second.example'
+            assert set(selector.choices.values()) == {'티스토리 1', '티스토리 2'}
+            manual_before = V2Store(Path(directory) / 'Tistory V2').preferences()
+            selector.menu.set('first.example')
+            selector.menu.cget('command')('first.example')
+            assert app.wordpress_settings.automation_v2_profile == '티스토리 1'
+            assert v2.snapshot(app, api)['profile']['name'] == '티스토리 1'
+            assert V2Store(Path(directory) / 'Tistory V2').preferences() == manual_before
+            assert app._read_wordpress_settings().automation_v2_profile == '티스토리 1'
+            selector.menu.set('second.example')
+            selector.changed('second.example')
             app.automation_target_platform_vars['tistory_v2'].set(True)
             app._on_automation_target_changed('tistory_v2')
             assert app._automation_target_platforms() == ['tistory_v2']
@@ -107,6 +119,12 @@ def main():
             assert second['scheduled_at'] > first['scheduled_at']
             assert panel.store.counts()['pending'] == 2
             assert app.wordpress_settings.target_platforms == settings.target_platforms
+            selector.menu.set('first.example')
+            selector.changed('first.example')
+            assert first['v2_config']['profile']['name'] == '티스토리 2'
+            assert v2.snapshot(app, api)['profile']['name'] == '티스토리 1'
+            selector.menu.set('second.example')
+            selector.changed('second.example')
             shot('queue')
             # Two bordered inputs in one modal; while open, this item is held
             # out of the scheduler without changing its stored reservation.

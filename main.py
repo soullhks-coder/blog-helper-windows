@@ -3708,6 +3708,7 @@ class WordPressSettings:
     automation_sources: list[str] = field(default_factory=lambda: ["signal", "newneek"])
     automation_publish_interval_minutes: int = 10
     automation_target_platforms: list[str] = field(default_factory=lambda: ["wordpress"])
+    automation_v2_profile: str = ""
     window_geometry: str = "970x680"
     app_theme: str = "블랙테마"
     app_font: str = SYSTEM_FONT
@@ -4693,6 +4694,7 @@ class AppStateStore:
             automation_sources=payload.get("automation_sources", ["signal", "newneek"]),
             automation_publish_interval_minutes=payload.get("automation_publish_interval_minutes", 10),
             automation_target_platforms=payload.get("automation_target_platforms", payload.get("target_platforms", ["wordpress"])),
+            automation_v2_profile=str(payload.get("automation_v2_profile") or "").strip(),
             window_geometry=payload.get("window_geometry", "970x680"),
             app_theme=payload.get("app_theme", "블랙테마"),
             app_font=normalize_app_font(payload.get("app_font", SYSTEM_FONT)),
@@ -39181,10 +39183,13 @@ class KeywordApp(ctk.CTk):
                 font=ctk.CTkFont(size=14, weight="bold"),
             ).grid(row=0, column=column, padx=(0, 16), pady=14, sticky="w")
 
+        from automation_v2_selector import AutomationV2BlogSelector
+        self.automation_v2_blog_selector = AutomationV2BlogSelector(target_card, self, sys.modules[__name__])
+        self.automation_v2_blog_selector.grid(row=1, column=0, columnspan=6, padx=16, pady=(0, 10), sticky="ew")
         ctk.CTkLabel(
-            target_card, text="티스토리 V2는 단독 실행 · V2 메뉴의 티스토리 블로그·프롬프트·썸네일로 10장/콜라주 5개를 발행합니다.",
+            target_card, text="V2는 단독 실행 · 선택한 블로그의 V2 프롬프트·썸네일로 10장/콜라주 5개를 발행합니다. 기존 대기 작업의 블로그는 유지됩니다.",
             text_color="#9aa7bb", font=ctk.CTkFont(size=12), anchor="w", wraplength=760,
-        ).grid(row=1, column=0, columnspan=6, padx=16, pady=(0, 12), sticky="ew")
+        ).grid(row=2, column=0, columnspan=6, padx=16, pady=(0, 12), sticky="ew")
 
         self.automation_list = ctk.CTkScrollableFrame(
             self.automation_page,
@@ -49463,6 +49468,9 @@ class KeywordApp(ctk.CTk):
             self.writing_control_canvas.configure(background=self._theme_palette()["card"])
             self.after(80, self._refresh_writing_control_canvas)
         if page_name == "automation":
+            selector = self.__dict__.get("automation_v2_blog_selector")
+            if selector is not None:
+                selector.refresh()
             if self._is_windows_dark_theme():
                 # Make navigation visible before rebuilding a potentially long
                 # queue. This keeps the Windows UI responsive at display scale.
@@ -51279,6 +51287,7 @@ class KeywordApp(ctk.CTk):
             automation_sources=[source for source, var in self.automation_source_vars.items() if var.get()],
             automation_publish_interval_minutes=self._automation_publish_interval_minutes(),
             automation_target_platforms=self._automation_target_platforms(),
+            automation_v2_profile=self.wordpress_settings.automation_v2_profile,
             window_geometry=self.wordpress_settings.window_geometry,
             app_theme=self.theme_menu.get() if hasattr(self, "theme_menu") else self.wordpress_settings.app_theme,
             app_font=normalize_app_font(self.font_menu.get() if hasattr(self, "font_menu") else self.wordpress_settings.app_font),
