@@ -77,6 +77,9 @@ class QueueViewTests(unittest.TestCase):
         self.assertEqual(events.qsize(), 9)
         self.assertFalse(app._in_result_queue_poll)
         self.assertEqual(app.after.call_args.args[0], 60)
+        main.KeywordApp._poll_queue(app)
+        self.assertEqual(handled, [{'id':i} for i in range(10)])
+        self.assertTrue(events.empty())
 
 
 if __name__ == '__main__': unittest.main()

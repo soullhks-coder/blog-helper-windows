@@ -46,7 +46,16 @@ def main() -> None:
                 modal_backdrop, "ModalDimmer",
                 lambda root: real_dimmer(root, platform_name="win32"),
             ))
-        poll_result_queue = app_module.KeywordApp._poll_queue
+        poll_queue_slice = app_module.KeywordApp._poll_queue
+        def poll_result_queue(app):
+            # Production schedules another slice after yielding for UI input.
+            # This fixture mocks that timer, so explicitly drain bounded slices
+            # before asserting delivery, cancellation and unrelated events.
+            for _ in range(100):
+                if app.result_queue.empty():
+                    return
+                poll_queue_slice(app)
+            raise AssertionError('Result queue did not drain after bounded UI slices')
 
         settings = app_module.WordPressSettings(
             app_theme="블랙테마" if args.theme == "dark" else "화이트테마",

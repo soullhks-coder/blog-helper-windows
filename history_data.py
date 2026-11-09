@@ -10,7 +10,7 @@ from __future__ import annotations
 
 BLOG_HELPER_HISTORY: tuple[dict[str, object], ...] = (
     {
-        "date": "2026-11-09", "version": "v1.3.24", "category": "시간 재조정·UI 성능",
+        "date": "2026-11-09", "version": "v1.3.25", "category": "시간 재조정·UI 성능",
         "title": "현재 시각 기준 시간 재조정과 대량 대기열 화면 최적화",
         "request": "대기열 위에 첫 작업은 현재 시각+5분, 이후 등록 간격으로 시간 재조정하는 버튼과 Windows 성능 최적화 요청",
         "changes": (
