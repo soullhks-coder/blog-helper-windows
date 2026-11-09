@@ -114,6 +114,7 @@ jobs:
           python -m unittest discover -s tests -p test_keyword_wiki.py -q
           python -m unittest discover -s tests -p test_automation_v2.py -q
           python -m unittest discover -s tests -p test_automation_schedule.py -q
+          python -m unittest discover -s tests -p test_automation_queue_view.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
           $chromeCandidates = @(
             "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
@@ -137,6 +138,7 @@ jobs:
           python tools/check_keyword_library_ui.py
           python tools/check_automation_v2_ui.py
           python tools/check_automation_restart_ui.py
+          python tools/check_automation_performance.py
           python tools/check_windows_modal_ui.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
@@ -266,6 +268,7 @@ jobs:
           python -m unittest discover -s tests -p test_keyword_wiki.py -q
           python -m unittest discover -s tests -p test_automation_v2.py -q
           python -m unittest discover -s tests -p test_automation_schedule.py -q
+          python -m unittest discover -s tests -p test_automation_queue_view.py -q
           python -c "import customtkinter, certifi, keyring, pillow_heif, playwright, tkinterdnd2, yt_dlp; from PIL import Image; pillow_heif.register_heif_opener(); print('dependency import passed')"
 
       - name: Check writing UI in dark and light themes
@@ -275,6 +278,7 @@ jobs:
           python tools/check_keyword_library_ui.py
           python tools/check_automation_v2_ui.py
           python tools/check_automation_restart_ui.py
+          python tools/check_automation_performance.py
           python tools/check_app_fonts_ui.py
           python tools/check_input_surfaces_ui.py
           python tools/check_macos_ime_ui.py

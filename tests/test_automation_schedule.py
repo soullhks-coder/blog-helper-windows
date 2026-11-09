@@ -9,6 +9,53 @@ from automation_schedule import restart_schedule, edited_schedule
 
 
 class RestartScheduleTests(unittest.TestCase):
+    def test_manual_rebase_starts_in_five_minutes_then_uses_interval_and_preserves_content(self):
+        jobs = self.jobs()
+        before = copy.deepcopy(jobs)
+        for minutes in (3, 10, 120, 300):
+            with self.subTest(minutes=minutes):
+                result, count = restart_schedule(jobs, 1000000, minutes, first_delay_minutes=5)
+                self.assertEqual(count, 2)
+                self.assertEqual(result[1]['scheduled_at'], 1000300)
+                self.assertEqual(result[0]['scheduled_at'], 1000300 + minutes * 60)
+                self.assertEqual(result[2:], before[2:])
+                for old, new in zip(jobs, result):
+                    self.assertEqual({k:v for k,v in new.items() if k != 'scheduled_at'},
+                                     {k:v for k,v in old.items() if k != 'scheduled_at'})
+        again, _ = restart_schedule(result, 2000000, 120, first_delay_minutes=5)
+        self.assertEqual(again[1]['scheduled_at'], 2000300)
+        self.assertEqual(jobs, before)
+
+    def test_manual_rebase_excludes_active_editing_and_partially_published_jobs(self):
+        jobs = self.jobs()
+        jobs += [{'id':'partial', 'status':'대기 중', 'article_html':'partial article', 'scheduled_at':10,
+                  'published_urls':{'wordpress':'https://example.com'}}]
+        result, count = restart_schedule(jobs, 1000000, 120, first_delay_minutes=5, exclude_ids={'first'})
+        self.assertEqual(count, 1)
+        self.assertEqual(result[0]['scheduled_at'], 1000300)
+        self.assertEqual(result[1:], jobs[1:])
+
+    def test_rebase_button_saves_atomically_and_preserves_queue_on_failure_or_read_only(self):
+        app = self.app()
+        app.active_automation_upload_item_id = ''
+        app._format_automation_schedule_time = str
+        with patch.object(main.time, 'time', return_value=1000000), patch.object(main, 'append_runtime_log'):
+            main.KeywordApp._reschedule_automation_queue_now(app)
+        self.assertEqual(app.automation_queue[1]['scheduled_at'], 1000300)
+        self.assertEqual(app.automation_queue[0]['scheduled_at'], 1007500)
+        self.assertEqual(app._automation_queue_page, 0)
+        self.assertFalse(app._automation_startup_schedule_error)
+        committed = copy.deepcopy(app.automation_queue)
+        app._save_automation_queue.side_effect = OSError('disk full')
+        with patch.object(main.messagebox, 'showerror'), patch.object(main.time, 'time', return_value=2000000):
+            main.KeywordApp._reschedule_automation_queue_now(app)
+            self.assertEqual(app.automation_queue, committed)
+            app.wordpress_settings._state_read_error = 'corrupt'
+            app._save_automation_queue.reset_mock()
+            main.KeywordApp._reschedule_automation_queue_now(app)
+            app._save_automation_queue.assert_not_called()
+        self.assertEqual(app.automation_queue, committed)
+
     def test_manual_schedule_changes_only_time_including_paused_jobs(self):
         for item in (self.jobs()[1], self.jobs()[2]):
             before = copy.deepcopy(item)

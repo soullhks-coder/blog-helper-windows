@@ -27712,10 +27712,13 @@ class KeywordApp(ctk.CTk):
         self._cardnews_slider_preview_job = None
         self._theme_paint_refresh_job = None
         self._theme_paint_last_run = 0.0
+        self._theme_paint_in_progress = False
         self._theme_painted_widgets = weakref.WeakSet()
         self._theme_restart_pending = False
         self._automation_queue_render_signature = None
         self._automation_queue_refresh_job = None
+        self._automation_queue_page = 0
+        self._in_result_queue_poll = False
         self._last_remote_queue_snapshot_signature = None
         self._thumbnail_background_cache = None
         self._cardnews_background_cache = None
@@ -29035,14 +29038,6 @@ class KeywordApp(ctk.CTk):
                 (ctk.CTkButton, ctk.CTkOptionMenu, ctk.CTkCheckBox, ctk.CTkRadioButton),
             ):
                 try:
-                    if isinstance(child, ctk.CTkButton):
-                        radius = child.cget("corner_radius")
-                        if isinstance(radius, (int, float)) and radius < 18:
-                            child.configure(corner_radius=18)
-                    elif isinstance(child, ctk.CTkOptionMenu):
-                        radius = child.cget("corner_radius")
-                        if isinstance(radius, (int, float)) and radius < 18:
-                            child.configure(corner_radius=18)
                     fg_current = configure_values.get("fg_color", child.cget("fg_color"))
                     if self._color_matches(
                         fg_current,
@@ -29056,7 +29051,7 @@ class KeywordApp(ctk.CTk):
                             "#c5d6ef",
                         },
                     ):
-                        child.configure(text_color=palette["text"])
+                        configure_changed(child, text_color=palette["text"])
                 except Exception:
                     pass
             self._apply_white_widget_polish(child, palette)
@@ -29077,25 +29072,25 @@ class KeywordApp(ctk.CTk):
             parent_canvas = getattr(child, "_parent_canvas", None)
             if parent_canvas is not None:
                 try:
-                    parent_canvas.configure(bg=canvas_color, highlightthickness=0)
+                    configure_changed(parent_canvas, bg=canvas_color, highlightthickness=0)
                 except Exception:
                     pass
             parent_frame = getattr(child, "_parent_frame", None)
             if parent_frame is not None:
                 try:
-                    parent_frame.configure(fg_color=canvas_color, bg_color=canvas_color)
+                    configure_changed(parent_frame, fg_color=canvas_color, bg_color=canvas_color)
                 except Exception:
                     pass
             scrollable_frame = getattr(child, "_scrollable_frame", None)
             if scrollable_frame is not None:
                 try:
-                    scrollable_frame.configure(fg_color=canvas_color, bg_color=canvas_color)
+                    configure_changed(scrollable_frame, fg_color=canvas_color, bg_color=canvas_color)
                 except Exception:
                     pass
             scrollbar = getattr(child, "_scrollbar", None)
             if scrollbar is not None:
                 try:
-                    scrollbar.configure(fg_color=palette["shell"], button_color=palette["divider"], button_hover_color=palette["muted"])
+                    configure_changed(scrollbar, fg_color=palette["shell"], button_color=palette["divider"], button_hover_color=palette["muted"])
                 except Exception:
                     pass
             if isinstance(child, tk.Text):
@@ -29131,6 +29126,8 @@ class KeywordApp(ctk.CTk):
         self._finish_theme_paint(force=True)
 
     def _finish_theme_paint(self, force: bool = False) -> None:
+        if getattr(self, "_theme_paint_in_progress", False):
+            return
         if not hasattr(self, "shell_frame"):
             return
         if getattr(self, "_modal_dimmer", None) is not None and self._modal_dimmer.active:
@@ -29158,6 +29155,7 @@ class KeywordApp(ctk.CTk):
             self._theme_paint_refresh_job = None
         self._theme_paint_last_run = now
         palette = self._theme_palette()
+        self._theme_paint_in_progress = True
         try:
             configure_changed(self, fg_color=palette["shell"])
             configure_changed(self.shell_frame, fg_color=palette["shell"])
@@ -29205,6 +29203,8 @@ class KeywordApp(ctk.CTk):
                 )
         except Exception:
             pass
+        finally:
+            self._theme_paint_in_progress = False
 
     def _paint_scrollable_background(self, scroll_frame, color: str) -> None:
         try:
@@ -39191,19 +39191,52 @@ class KeywordApp(ctk.CTk):
             text_color="#9aa7bb", font=ctk.CTkFont(size=12), anchor="w", wraplength=760,
         ).grid(row=2, column=0, columnspan=6, padx=16, pady=(0, 12), sticky="ew")
 
+        queue_area = ctk.CTkFrame(self.automation_page, fg_color="transparent")
+        queue_area.grid(row=2, column=0, padx=28, pady=(0, 26), sticky="nsew")
+        queue_area.grid_columnconfigure(0, weight=1)
+        queue_area.grid_rowconfigure(1, weight=1)
+        queue_toolbar = ctk.CTkFrame(queue_area, fg_color="transparent")
+        queue_toolbar.grid(row=0, column=0, pady=(0, 8), sticky="ew")
+        queue_toolbar.grid_columnconfigure(1, weight=1)
+        palette = self._theme_palette()
+        self.automation_reschedule_button = ctk.CTkButton(queue_toolbar, text="시간 재조정", width=116,
+            height=32, corner_radius=12, fg_color="#3468e8", hover_color="#2d5cd0",
+            font=ctk.CTkFont(size=13, weight="bold"), command=self._reschedule_automation_queue_now)
+        self.automation_reschedule_button.grid(row=0, column=0, padx=(0, 10), sticky="w")
+        ctk.CTkLabel(queue_toolbar, text="첫 대기 작업 5분 뒤", font=ctk.CTkFont(size=12),
+                     text_color=self._theme_palette()["muted"]).grid(row=0, column=1, sticky="w")
+        self.automation_queue_range_label = ctk.CTkLabel(queue_toolbar, text="0개", font=ctk.CTkFont(size=12))
+        self.automation_queue_range_label.grid(row=0, column=2, padx=(6, 8))
+        self.automation_queue_previous_button = ctk.CTkButton(queue_toolbar, text="이전", width=48, height=30,
+            fg_color=palette["button"], text_color=palette["text"], hover_color=palette["button_hover"],
+            command=lambda: self._change_automation_queue_page(self._automation_queue_page - 1))
+        self.automation_queue_previous_button.grid(row=0, column=3, padx=(0, 5))
+        self.automation_queue_page_menu = InputOptionMenu(queue_toolbar, values=["1 / 1"], width=80, height=30,
+            fg_color=palette["button"], button_color=palette["button"], text_color=palette["text"],
+            dropdown_fg_color=palette["panel"], dropdown_text_color=palette["text"],
+            button_hover_color=palette["button_hover"], dropdown_hover_color=palette["hover"],
+            command=lambda value: self._change_automation_queue_page(int(value.split(" / ")[0]) - 1))
+        self.automation_queue_page_menu.grid(row=0, column=4, padx=(0, 5))
+        self.automation_queue_next_button = ctk.CTkButton(queue_toolbar, text="다음", width=48, height=30,
+            fg_color=palette["button"], text_color=palette["text"], hover_color=palette["button_hover"],
+            command=lambda: self._change_automation_queue_page(self._automation_queue_page + 1))
+        self.automation_queue_next_button.grid(row=0, column=5)
         self.automation_list = ctk.CTkScrollableFrame(
-            self.automation_page,
+            queue_area,
             fg_color="#111826",
             corner_radius=24,
             border_width=1,
             border_color="#273a54",
         )
-        self.automation_list.grid(row=2, column=0, padx=28, pady=(0, 26), sticky="nsew")
+        self.automation_list.grid(row=1, column=0, sticky="nsew")
         self.automation_list.grid_columnconfigure(0, weight=1)
         self._refresh_automation_queue()
 
     def _refresh_automation_queue(self) -> None:
         if not hasattr(self, "automation_list"):
+            return
+        if getattr(self, "_in_result_queue_poll", False):
+            self._schedule_automation_queue_refresh()
             return
         palette = self._theme_palette()
         self._ensure_automation_queue_schedules()
@@ -39229,7 +39262,7 @@ class KeywordApp(ctk.CTk):
             if item_id in queue_ids
         }
         if hasattr(self, "automation_count_label"):
-            self.automation_count_label.configure(text=f"대기열 {len(queue_items)}개")
+            configure_changed(self.automation_count_label, text=f"대기열 {len(queue_items)}개")
         if hasattr(self, "automation_select_all_var"):
             all_selected = bool(queue_items) and all(
                 (
@@ -39238,7 +39271,25 @@ class KeywordApp(ctk.CTk):
                 )
                 for item in queue_items
             )
-            self.automation_select_all_var.set(all_selected)
+            if self.automation_select_all_var.get() != all_selected:
+                self.automation_select_all_var.set(all_selected)
+
+        # Keep saved work/counts current without building hidden Tk cards at
+        # launch or while another menu receives a batch of worker events.
+        if getattr(self, "current_page", "home") != "automation":
+            self._automation_queue_render_signature = None
+            return
+        from automation_queue_view import page_window
+        visible_items, page, pages, start = page_window(queue_items, getattr(self, "_automation_queue_page", 0))
+        self._automation_queue_page = page
+        choices = [f"{index + 1} / {pages}" for index in range(pages)]
+        if self.automation_queue_page_menu.cget("values") != choices:
+            self.automation_queue_page_menu.configure(values=choices)
+        self.automation_queue_page_menu.set(choices[page])
+        configure_changed(self.automation_queue_previous_button, state="normal" if page else "disabled")
+        configure_changed(self.automation_queue_next_button, state="normal" if page + 1 < pages else "disabled")
+        configure_changed(self.automation_queue_range_label,
+            text=f"{start + 1}–{start + len(visible_items)} / {len(queue_items)}" if queue_items else "0개")
 
         render_signature = tuple(
             (
@@ -39253,13 +39304,12 @@ class KeywordApp(ctk.CTk):
                 str(item.get("thumbnail_path") or ""),
                 len(item.get("cardnews_image_paths") or item.get("cardnews_paths") or []),
             )
-            for item in queue_items
+            for item in visible_items
         )
         if (
             render_signature == self._automation_queue_render_signature
             and self.automation_list.winfo_children()
         ):
-            self._finish_theme_paint()
             return
         self._automation_queue_render_signature = render_signature
         self.automation_review_switches = {}
@@ -39288,7 +39338,7 @@ class KeywordApp(ctk.CTk):
             self._finish_theme_paint()
             return
 
-        for row, item in enumerate(reversed(queue_items)):
+        for row, item in enumerate(visible_items):
             card = ctk.CTkFrame(self.automation_list, fg_color="#1d2635", corner_radius=18)
             card.grid(row=row, column=0, padx=18, pady=(18 if row == 0 else 0, 12), sticky="ew")
             card.grid_columnconfigure(0, weight=0)
@@ -39329,7 +39379,7 @@ class KeywordApp(ctk.CTk):
                 wraplength=760,
             )
             title_label.grid(row=0, column=1, padx=16, pady=(18, 6), sticky="ew")
-            title_label.bind("<Configure>", lambda _event, widget=title_label: widget.configure(
+            title_label.bind("<Configure>", lambda _event, widget=title_label: configure_changed(widget,
                 wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
 
             action_row = ctk.CTkFrame(card, fg_color="transparent")
@@ -39374,7 +39424,7 @@ class KeywordApp(ctk.CTk):
                 justify="left",
             )
             status_label.grid(row=1, column=1, columnspan=2, padx=16, sticky="ew")
-            status_label.bind("<Configure>", lambda _event, widget=status_label: widget.configure(
+            status_label.bind("<Configure>", lambda _event, widget=status_label: configure_changed(widget,
                 wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
             detail_text = f"담은 시간: {created_at}"
             if item.get("v2_config"):
@@ -39401,7 +39451,7 @@ class KeywordApp(ctk.CTk):
                 wraplength=760,
             )
             detail_label.grid(row=2, column=1, columnspan=2, padx=16, pady=(6, 18), sticky="ew")
-            detail_label.bind("<Configure>", lambda _event, widget=detail_label: widget.configure(
+            detail_label.bind("<Configure>", lambda _event, widget=detail_label: configure_changed(widget,
                 wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
 
             schedule_row = ctk.CTkFrame(card, fg_color="transparent")
@@ -39458,9 +39508,14 @@ class KeywordApp(ctk.CTk):
                     text="ON: 본문·태그 입력 후 직접 발행  ·  OFF: 기존 발행 설정 사용",
                     text_color=palette["muted"], font=ctk.CTkFont(size=12), anchor="w", justify="left")
                 hint.grid(row=0, column=1, sticky="ew")
-                hint.bind("<Configure>", lambda _event, widget=hint: widget.configure(
+                hint.bind("<Configure>", lambda _event, widget=hint: configure_changed(widget,
                     wraplength=max(100, int(widget.winfo_width() / widget._get_widget_scaling()) - 8)))
         self._finish_theme_paint()
+
+    def _change_automation_queue_page(self, page: int) -> None:
+        self._automation_queue_page = page
+        self._refresh_automation_queue()
+        self.automation_list._parent_canvas.yview_moveto(0)
 
     def _configure_public_data_table_columns(self, frame) -> None:
         # Fixed minimum widths on every column made the white-theme table overflow
@@ -49503,8 +49558,11 @@ class KeywordApp(ctk.CTk):
                 # queue. This keeps the Windows UI responsive at display scale.
                 self._schedule_automation_queue_refresh()
             else:
+                previous_signature = self._automation_queue_render_signature
                 self._refresh_automation_queue()
-                if sys.platform == "darwin" and self.wordpress_settings.app_theme == "블랙테마":
+                if (sys.platform == "darwin" and self.wordpress_settings.app_theme == "블랙테마"
+                        and previous_signature is not None and previous_signature == self._automation_queue_render_signature
+                        and not getattr(self, "_in_result_queue_poll", False)):
                     self.after_idle(self._redraw_automation_surfaces)
         if page_name == "keywords" and self.keyword_library_panel is not None:
             self.keyword_library_panel.destination_changed()
@@ -49653,10 +49711,7 @@ class KeywordApp(ctk.CTk):
     def _schedule_automation_queue_refresh(self, delay_ms: int = 60) -> None:
         refresh_job = getattr(self, "_automation_queue_refresh_job", None)
         if refresh_job is not None:
-            try:
-                self.after_cancel(refresh_job)
-            except Exception:
-                pass
+            return  # One pending redraw covers a burst without postponing it.
         self._automation_queue_refresh_job = self.after(
             max(1, int(delay_ms)),
             self._run_scheduled_automation_queue_refresh,
@@ -53900,6 +53955,39 @@ class KeywordApp(ctk.CTk):
                 text=f"시작 기준 예약시간을 저장하지 못해 자동등록을 보류했습니다: {exc}", text_color="#ff6b6b")
             append_runtime_log("AUTOMATION", f"재실행 예약시간 저장 실패 - 발행 보류: {exc}")
 
+    def _reschedule_automation_queue_now(self) -> None:
+        from automation_schedule import restart_schedule
+        previous = self.automation_queue
+        try:
+            if getattr(self.wordpress_settings, "_state_read_error", ""):
+                raise ValueError("설정 파일을 복구한 뒤 시간을 재조정해 주세요.")
+            interval = self._automation_publish_interval_minutes()
+            anchor = time.time()
+            excluded = set(getattr(self, "_automation_keyword_editing_ids", set()))
+            excluded.add(str(self.active_automation_upload_item_id or ""))
+            updated, count = restart_schedule(previous, anchor, interval,
+                                               first_delay_minutes=5, exclude_ids=excluded)
+            if not count:
+                self.automation_status_label.configure(text="재조정할 대기 작업이 없습니다. 실행·확인 필요·편집 중 작업은 유지합니다.",
+                                                       text_color="#ffcc66")
+                return
+            self.automation_queue = updated
+            self._save_automation_queue()
+        except Exception as exc:
+            self.automation_queue = previous
+            self.wordpress_settings.automation_queue = list(previous)
+            messagebox.showerror("시간 재조정 실패", str(exc), parent=self)
+            return
+        self._automation_startup_schedule_applied = True
+        self._automation_startup_schedule_error = ""
+        self._automation_queue_page = 0
+        self._refresh_automation_queue()
+        first = self._format_automation_schedule_time(anchor + 300)
+        self.automation_status_label.configure(
+            text=f"대기 {count}개 재조정 완료 · 첫 작업 {first} (5분 뒤), 이후 {interval}분 간격 · 실행·확인 필요·편집 중 작업 유지",
+            text_color="#48d980")
+        append_runtime_log("AUTOMATION", f"시간 재조정: count={count}, anchor={anchor}, first_delay=300, interval={interval}")
+
     def _automation_publish_interval_minutes(self) -> int:
         if not hasattr(self, "automation_publish_interval_menu"):
             return self.wordpress_settings.automation_publish_interval_minutes
@@ -55453,8 +55541,10 @@ class KeywordApp(ctk.CTk):
     def _poll_queue(self) -> None:
         processed_events = 0
         current_event_type = ""
+        deadline = time.monotonic() + 0.012
+        self._in_result_queue_poll = True
         try:
-            while processed_events < 24:
+            while processed_events < 24 and (not processed_events or time.monotonic() < deadline):
                 event = self.result_queue.get_nowait()
                 processed_events += 1
                 event = active_writing_event(event, self.__dict__.get("_writing_run_queue"))
@@ -56882,6 +56972,7 @@ class KeywordApp(ctk.CTk):
                     ),
                 )
         finally:
+            self._in_result_queue_poll = False
             if not self.result_queue.empty():
                 next_delay = 60
             elif processed_events:

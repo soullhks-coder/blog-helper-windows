@@ -94,6 +94,11 @@ def main():
                 with patch.object(api.time, 'time', return_value=anchor):
                     app._save_automation_queue_schedule('normal-first', copy.deepcopy(items['normal-first']), anchor + 600)
                 app._set_automation_queue_review('v2-later', copy.deepcopy(items['v2-later']), True)
+                with patch.object(api.time, 'time', return_value=anchor):
+                    app._reschedule_automation_queue_now()
+                items = {item['id']:item for item in app.automation_queue}
+                assert items['normal-first']['scheduled_at'] == anchor + 300
+                assert items['v2-later']['scheduled_at'] == anchor + 300 + 300*60
                 before = copy.deepcopy(app.automation_queue)
             assert items['v2-later']['v2_config']['review_publish']
             assert not items['paused']['v2_config'].get('review_publish')
@@ -107,7 +112,7 @@ def main():
             assert saved['automation_publish_interval_minutes'] == 300
             assert saved['automation_v2_profile'] == '티스토리 2'
             assert next(row for row in saved['automation_queue'] if row['id'] == 'v2-later')['v2_config']['review_publish']
-            print(f'PASS {args.theme} launch {args.phase}: saved job review and calendar reservation, saved V2 blog independent of manual account, {minutes}min from launch, paused jobs protected, no reset on navigation')
+            print(f'PASS {args.theme} launch {args.phase}: saved +5min manual reset, job review/calendar/V2 blog, {minutes}min launch rebase, paused jobs protected, no reset on navigation')
         finally:
             app.destroy()
 
